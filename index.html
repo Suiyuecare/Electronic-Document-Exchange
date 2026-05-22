@@ -1,0 +1,2219 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>歲悅電子公文交換系統</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="login-screen app" id="loginScreen">
+      <section class="login-left">
+        <div>
+          <div class="login-mark">
+            <div class="login-brand">文</div>
+            <div>
+              <div class="login-brand-name">歲悅長照集團</div>
+              <div class="login-brand-sub">Suiyuecare eDoc Exchange</div>
+            </div>
+          </div>
+          <h1 class="login-title">電子公文交換系統</h1>
+          <div class="login-points">
+            <div class="login-point">獨立內部模組，不併入官網 CMS</div>
+            <div class="login-point">串接機關層公文收發模組 jAgent</div>
+            <div class="login-point">集中收文、發文、交換查詢、稽核紀錄</div>
+            <div class="login-point">依角色控管總收發、承辦、資訊與稽核權限</div>
+          </div>
+        </div>
+        <div class="login-footnote">NDC Archives · jAgent Gateway · Official Document Exchange</div>
+      </section>
+
+      <section class="login-right">
+        <form class="login-card" id="loginForm">
+          <p class="eyebrow">System Login</p>
+          <h2>登入電子公文交換</h2>
+          <label>
+            電子郵件
+            <input id="loginEmail" type="email" value="edoc@suiyuecare.com" autocomplete="username" />
+          </label>
+          <label>
+            密碼
+            <input id="loginPassword" type="password" value="demo1234" autocomplete="current-password" />
+          </label>
+          <label>
+            資料環境
+            <select id="loginEnvironment">
+              <option>測試資料</option>
+              <option>正式資料</option>
+            </select>
+          </label>
+          <p class="login-hint">目前為原型模式，點擊登入即可進入工作台；正式版需接 Supabase Auth / Google Workspace 與憑證登入。</p>
+          <button class="primary-button" type="submit">登入系統</button>
+          <button class="secondary-button" id="demoLoginBtn" type="button">使用總收發測試帳號</button>
+        </form>
+      </section>
+    </div>
+
+    <div class="app-shell app hidden" id="appShell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">文</div>
+          <div>
+            <p class="eyebrow">Suiyuecare eDoc</p>
+            <h1>電子公文交換</h1>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="電子公文交換功能">
+          <button class="nav-item active" data-target="dashboard">總覽</button>
+          <button class="nav-item" data-target="inbound">收文管理</button>
+          <button class="nav-item" data-target="dispatch">發文管理</button>
+          <button class="nav-item" data-target="compose">建立公文</button>
+          <button class="nav-item" data-target="format">文書格式</button>
+          <button class="nav-item" data-target="workflow">流程控管</button>
+          <button class="nav-item" data-target="seals">印鑑管理</button>
+          <button class="nav-item" data-target="tracking">稽催追蹤</button>
+          <button class="nav-item" data-target="exchange">jAgent 介接</button>
+          <button class="nav-item" data-target="archive">歸檔保存</button>
+          <button class="nav-item" data-target="security">資安控管</button>
+          <button class="nav-item" data-target="fileSecurity">檔案資安</button>
+          <button class="nav-item" data-target="accounts">帳號權限</button>
+          <button class="nav-item" data-target="reports">報表統計</button>
+          <button class="nav-item" data-target="notifications">通知中心</button>
+          <button class="nav-item" data-target="jobs">背景任務</button>
+          <button class="nav-item" data-target="database">後端資料庫</button>
+          <button class="nav-item" data-target="ops">維運中心</button>
+          <button class="nav-item" data-target="features">功能總表</button>
+          <button class="nav-item" data-target="settings">系統設定</button>
+        </nav>
+
+        <section class="profile-card">
+          <p class="eyebrow">目前角色</p>
+          <select id="roleSelect" aria-label="切換角色">
+            <option selected>總收發人員</option>
+            <option>承辦人</option>
+            <option>文書主管</option>
+            <option>資訊管理員</option>
+            <option>稽核人員</option>
+          </select>
+          <div class="role-note" id="roleNote">可登入 jAgent、執行收文、發文交換、查詢交換結果與處理異常。</div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">機關層公文收發模組 jAgent 介接作業台</p>
+            <h2 id="pageTitle">交換總覽</h2>
+          </div>
+          <div class="quick-actions">
+            <button class="icon-button" id="pullInboundBtn" title="立即收文">↧</button>
+            <button class="primary-button" id="sendQueueBtn">送出待發文</button>
+            <button class="secondary-button" id="logoutBtn" type="button">登出</button>
+          </div>
+        </header>
+
+        <section class="view active" id="dashboard">
+          <div class="metrics-grid">
+            <article class="metric-card">
+              <span>今日待收</span>
+              <strong>12</strong>
+              <small>含 3 筆待登錄、2 筆待分派</small>
+            </article>
+            <article class="metric-card">
+              <span>待發文</span>
+              <strong>5</strong>
+              <small>清稿完成後送 jAgent</small>
+            </article>
+            <article class="metric-card">
+              <span>交換成功率</span>
+              <strong>99.2%</strong>
+              <small>近 30 日交換紀錄</small>
+            </article>
+            <article class="metric-card">
+              <span>Token 狀態</span>
+              <strong>6h 18m</strong>
+              <small>憑證登入後有效時間</small>
+            </article>
+          </div>
+
+          <div class="content-grid">
+            <section class="panel span-7">
+              <div class="panel-heading">
+                <h3>交換佇列</h3>
+                <button class="text-button" data-target="exchange">查看中心</button>
+              </div>
+              <div class="pipeline">
+                <div><strong>待清稿</strong><span>4</span></div>
+                <div><strong>待送出</strong><span>5</span></div>
+                <div><strong>等待確認</strong><span>8</span></div>
+                <div><strong>交換完成</strong><span>126</span></div>
+                <div><strong>異常待處理</strong><span>2</span></div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>交換號</th>
+                      <th>方向</th>
+                      <th>機關</th>
+                      <th>主旨</th>
+                      <th>狀態</th>
+                    </tr>
+                  </thead>
+                  <tbody id="queueRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel span-5">
+              <div class="panel-heading">
+                <h3>法規檢核</h3>
+                <span class="status-pill">NDC / Archives</span>
+              </div>
+              <div class="check-list" id="complianceChecks"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="inbound">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Receive</p>
+              <h3>收文管理</h3>
+            </div>
+            <div class="segmented" role="group" aria-label="收文篩選">
+              <button class="segment active" data-inbound-filter="all">全部</button>
+              <button class="segment" data-inbound-filter="待登錄">待登錄</button>
+              <button class="segment" data-inbound-filter="待分派">待分派</button>
+              <button class="segment" data-inbound-filter="已收文">已收文</button>
+              <button class="segment" data-inbound-filter="異常待處理">異常</button>
+            </div>
+          </div>
+
+          <div class="inbound-toolbar panel">
+            <button class="primary-button" id="pullJagentBtn" type="button">拉取 jAgent 來文</button>
+            <button class="secondary-button" id="registerInboundBtn" type="button">登錄所選</button>
+            <button class="secondary-button" id="assignInboundBtn" type="button">分派所選</button>
+            <button class="secondary-button" id="misdeliveryBtn" type="button">誤送通知</button>
+            <button class="secondary-button" id="missingNoticeBtn" type="button">漏送處理</button>
+            <button class="secondary-button" id="exportInboundBtn" type="button">匯出清單</button>
+            <label class="toolbar-search">搜尋<input id="inboundSearch" type="search" placeholder="機關、主旨、收文號" /></label>
+          </div>
+
+          <div class="inbound-layout">
+            <section class="panel inbound-list-panel">
+              <div class="panel-heading">
+                <h3>來文清單</h3>
+                <span class="status-pill" id="inboundCount">0 筆</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>收文號</th>
+                      <th>來文機關</th>
+                      <th>文別</th>
+                      <th>主旨</th>
+                      <th>狀態</th>
+                      <th>承辦</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="inboundRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel inbound-detail-panel">
+              <div class="panel-heading">
+                <h3>收文內容</h3>
+                <span class="status-pill" id="selectedInboundStatus">未選取</span>
+              </div>
+              <div id="inboundDetail"></div>
+            </aside>
+          </div>
+
+          <div class="inbound-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>登錄表單</h3>
+                <button class="text-button" id="saveRegisterDraftBtn" type="button">暫存</button>
+              </div>
+              <form class="compact-form" id="registerForm">
+                <label>收文日期<input id="registerDate" type="date" value="2026-05-22" /></label>
+                <label>承辦單位<select id="registerDept"><option>總管理處</option><option>居家照顧課</option><option>日間照顧課</option><option>教育品管課</option></select></label>
+                <label>保存年限<select id="retentionYears"><option>10 年</option><option>15 年</option><option>永久保存</option></select></label>
+                <label>登錄備註<textarea id="registerNote" rows="3">已由 jAgent 拉取電子來文，待確認附件完整性。</textarea></label>
+                <button class="primary-button" type="submit">完成收文登錄</button>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>分派承辦</h3>
+                <span class="status-pill">角色權限</span>
+              </div>
+              <form class="compact-form" id="assignForm">
+                <label>承辦人<select id="assignOwner"><option>王督導</option><option>陳經理</option><option>林主任</option><option>李品管</option></select></label>
+                <label>處理期限<input id="assignDueDate" type="date" value="2026-05-29" /></label>
+                <label>分派意見<textarea id="assignNote" rows="3">請依來文主旨辦理，並於期限前回覆處理進度。</textarea></label>
+                <button class="primary-button" type="submit">確認分派</button>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>異常處理</h3>
+                <span class="status-pill">誤送 / 漏送</span>
+              </div>
+              <form class="compact-form" id="exceptionForm">
+                <label>異常類型<select id="exceptionType"><option>誤送</option><option>漏送</option><option>附件缺漏</option><option>格式錯誤</option></select></label>
+                <label>通知對象<input id="exceptionTarget" value="原發文機關文書窗口" /></label>
+                <label>處理說明<textarea id="exceptionNote" rows="3">請確認交換紀錄與附件清冊，並回覆補送或撤回處理。</textarea></label>
+                <button class="primary-button" type="submit">建立異常通知</button>
+              </form>
+            </section>
+          </div>
+
+          <div class="panel inbound-audit-panel">
+            <div class="panel-heading">
+              <h3>收文操作紀錄</h3>
+              <button class="text-button" id="clearInboundLogBtn" type="button">清除畫面紀錄</button>
+            </div>
+            <div class="timeline" id="inboundAuditLog"></div>
+          </div>
+        </section>
+
+        <section class="view" id="dispatch">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Dispatch</p>
+              <h3>發文管理</h3>
+            </div>
+            <div class="segmented" role="group" aria-label="發文篩選">
+              <button class="segment active" data-dispatch-filter="all">全部</button>
+              <button class="segment" data-dispatch-filter="草稿">草稿</button>
+              <button class="segment" data-dispatch-filter="待清稿">待清稿</button>
+              <button class="segment" data-dispatch-filter="已封裝">已封裝</button>
+              <button class="segment" data-dispatch-filter="等待確認">等待確認</button>
+              <button class="segment" data-dispatch-filter="交換完成">完成</button>
+              <button class="segment" data-dispatch-filter="交換失敗">失敗</button>
+            </div>
+          </div>
+
+          <div class="dispatch-toolbar panel">
+            <button class="primary-button" data-target="compose" type="button">建立新發文</button>
+            <button class="secondary-button" id="validateDispatchBtn" type="button">清稿檢核</button>
+            <button class="secondary-button" id="packageDispatchBtn" type="button">附件封裝</button>
+            <button class="secondary-button" id="sendDispatchBtn" type="button">送交 jAgent</button>
+            <button class="secondary-button" id="queryDispatchBtn" type="button">查詢狀態</button>
+            <button class="secondary-button" id="resendDispatchBtn" type="button">重送</button>
+            <button class="secondary-button" id="exportDispatchBtn" type="button">匯出發文清單</button>
+            <label class="toolbar-search">搜尋<input id="dispatchSearch" type="search" placeholder="文號、機關、主旨" /></label>
+          </div>
+
+          <div class="dispatch-layout">
+            <section class="panel dispatch-list-panel">
+              <div class="panel-heading">
+                <h3>發文清單</h3>
+                <span class="status-pill" id="dispatchCount">0 筆</span>
+              </div>
+              <div class="dispatch-board" id="dispatchBoard"></div>
+            </section>
+
+            <aside class="panel dispatch-detail-panel">
+              <div class="panel-heading">
+                <h3>發文內容</h3>
+                <span class="status-pill" id="selectedDispatchStatus">未選取</span>
+              </div>
+              <div id="dispatchDetail"></div>
+            </aside>
+          </div>
+
+          <div class="dispatch-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>清稿檢核</h3>
+                <span class="status-pill">文書格式</span>
+              </div>
+              <div class="check-list" id="dispatchPrecheckPanel"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>附件封裝</h3>
+                <button class="text-button" id="previewPackageBtn" type="button">預覽封包</button>
+              </div>
+              <div class="package-panel" id="packagePanel"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>發文操作紀錄</h3>
+                <button class="text-button" id="clearDispatchLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="dispatchAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="compose">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Compose</p>
+              <h3>建立電子公文</h3>
+            </div>
+            <span class="status-pill">發文前清稿檢核</span>
+          </div>
+
+          <div class="compose-layout">
+            <form class="form-panel" id="composeForm">
+              <div class="inline-fields">
+                <label>
+                  文別
+                  <select id="docType">
+                    <option>函</option>
+                    <option>開會通知單</option>
+                    <option>書函</option>
+                    <option>公告</option>
+                  </select>
+                </label>
+                <label>
+                  速別
+                  <select id="priority">
+                    <option>普通件</option>
+                    <option>速件</option>
+                    <option>最速件</option>
+                  </select>
+                </label>
+              </div>
+              <label>
+                發文字號
+                <input id="dispatchNo" value="歲悅字第1140522007號" />
+              </label>
+              <label>
+                受文者
+                <input id="recipient" value="臺北市政府社會局" />
+              </label>
+              <label>
+                主旨
+                <input id="subject" value="檢送本公司日間照顧中心設立許可補正資料，請查照。" />
+              </label>
+              <label>
+                說明
+                <textarea id="bodyText" rows="7">依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。</textarea>
+              </label>
+              <label>
+                附件
+                <input id="attachments" type="file" multiple />
+              </label>
+              <div class="form-actions">
+                <button class="secondary-button" id="saveDispatchDraftBtn" type="button">儲存草稿</button>
+                <button class="secondary-button" id="previewDraftBtn" type="button">預覽函稿</button>
+                <button class="primary-button" type="submit">清稿並加入發文佇列</button>
+              </div>
+            </form>
+
+            <aside class="panel flow-panel">
+              <h3>送出前檢核</h3>
+              <ol class="precheck-list" id="precheckList"></ol>
+              <div class="summary-box">
+                <span>交換格式</span>
+                <strong>標準封裝資料 + 附件 + 交換事件</strong>
+              </div>
+              <div class="summary-box">
+                <span>後端動作</span>
+                <strong>validate → jAgent send → status sync</strong>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" id="format">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Document Format</p>
+              <h3>文書格式</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="formatValidateBtn" type="button">格式檢核</button>
+              <button class="secondary-button" id="formatApplyBtn" type="button">帶入建立公文</button>
+            </div>
+          </div>
+
+          <div class="format-layout">
+            <section class="form-panel">
+              <div class="panel-heading">
+                <h3>公文欄位</h3>
+                <button class="text-button" id="formatGenerateNoBtn" type="button">產生文號</button>
+              </div>
+              <div class="inline-fields">
+                <label>文號<input id="formatDocNo" value="歲悅字第1140522007號" /></label>
+                <label>文別<select id="formatDocType"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option><option>令</option></select></label>
+              </div>
+              <div class="inline-fields">
+                <label>速別<select id="formatPriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
+                <label>密等<select id="formatSecurity"><option>普通</option><option>密</option><option>機密</option><option>極機密</option></select></label>
+              </div>
+              <label>機關代碼<input id="formatAgencyCode" value="A63000000J" /></label>
+              <label>受文者<input id="formatRecipient" value="臺北市政府社會局" /></label>
+              <label>主旨<textarea id="formatSubject" rows="3">檢送本公司日間照顧中心設立許可補正資料，請查照。</textarea></label>
+              <div class="form-actions">
+                <button class="secondary-button" id="formatLookupAgencyBtn" type="button">查詢機關代碼</button>
+                <button class="secondary-button" id="formatSaveTemplateBtn" type="button">儲存格式範本</button>
+                <button class="secondary-button" id="formatExportBtn" type="button">匯出格式 JSON</button>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>格式檢核結果</h3>
+                <span class="status-pill" id="formatStatus">待檢核</span>
+              </div>
+              <div class="check-list" id="formatCheckList"></div>
+            </aside>
+          </div>
+
+          <div class="format-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>附件清冊</h3>
+                <button class="text-button" id="formatAddAttachmentBtn" type="button">新增附件</button>
+              </div>
+              <form class="compact-form" id="formatAttachmentForm">
+                <label>附件名稱<input id="formatAttachmentName" value="設立許可補正資料.pdf" /></label>
+                <label>頁數<input id="formatAttachmentPages" type="number" min="1" value="12" /></label>
+                <label>檔案格式<select id="formatAttachmentType"><option>PDF</option><option>XML</option><option>XLSX</option><option>DOCX</option><option>ZIP</option></select></label>
+              </form>
+              <div class="format-attachment-list" id="formatAttachmentList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>機關代碼查詢</h3>
+                <button class="text-button" id="formatClearAgencyBtn" type="button">清除結果</button>
+              </div>
+              <form class="compact-form" id="formatAgencyForm">
+                <label>機關名稱或代碼<input id="formatAgencyQuery" value="臺北市政府社會局" /></label>
+                <button class="primary-button" type="submit">查詢</button>
+              </form>
+              <div class="address-results" id="formatAgencyResults"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>格式操作紀錄</h3>
+                <button class="text-button" id="formatClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="formatAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="workflow">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Workflow Control</p>
+              <h3>流程控管</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="workflowApproveBtn" type="button">授權所選</button>
+              <button class="secondary-button" id="workflowRejectBtn" type="button">退回所選</button>
+            </div>
+          </div>
+
+          <div class="workflow-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>角色權限</h3>
+                <span class="status-pill" id="workflowRoleStatus">總收發人員</span>
+              </div>
+              <label>目前角色<select id="workflowRoleSelect"><option>總收發人員</option><option>承辦人</option><option>文書主管</option><option>資訊管理員</option><option>稽核人員</option></select></label>
+              <div class="permission-grid" id="permissionGrid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>角色說明</h3>
+                <button class="text-button" id="workflowSyncRoleBtn" type="button">同步到側欄角色</button>
+              </div>
+              <div class="doc-detail" id="workflowRoleDetail"></div>
+            </section>
+          </div>
+
+          <div class="workflow-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>待辦佇列</h3>
+                <span class="status-pill" id="workflowTaskCount">0 件</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>案件</th>
+                      <th>類型</th>
+                      <th>目前節點</th>
+                      <th>負責角色</th>
+                      <th>狀態</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="workflowTaskRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>流程節點</h3>
+                <button class="text-button" id="workflowAssignBtn" type="button">指派給目前角色</button>
+              </div>
+              <div class="workflow-step-list" id="workflowStepList"></div>
+            </section>
+          </div>
+
+          <div class="workflow-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>權限測試</h3>
+                <span class="status-pill">RBAC</span>
+              </div>
+              <form class="compact-form" id="permissionTestForm">
+                <label>測試動作<select id="permissionAction"><option value="pull_inbound">拉取收文</option><option value="register_inbound">收文登錄</option><option value="assign_case">分派案件</option><option value="send_dispatch">送交 jAgent</option><option value="manage_jagent">管理 jAgent</option><option value="view_audit">查看稽核</option></select></label>
+                <button class="primary-button" type="submit">檢查權限</button>
+              </form>
+              <div class="summary-box"><span>檢查結果</span><strong id="permissionTestResult">尚未檢查</strong></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>流程操作紀錄</h3>
+                <button class="text-button" id="workflowClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="workflowAuditLog"></div>
+            </section>
+          </div>
+
+          <div class="workflow-engine-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>流程範本設定</h3>
+                <button class="text-button" id="workflowTemplateApplyBtn" type="button">套用範本</button>
+              </div>
+              <form class="compact-form" id="workflowTemplateForm">
+                <label>流程範本<select id="workflowTemplateSelect"><option value="standard">一般發文簽核</option><option value="urgent">速件發文簽核</option><option value="confidential">密件發文簽核</option><option value="procurement">採購/金額簽核</option></select></label>
+                <label>適用文別<select id="workflowTemplateDocType"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option></select></label>
+                <label>簽核條件金額<input id="workflowAmountInput" type="number" value="0" /></label>
+              </form>
+              <div class="workflow-step-list" id="workflowTemplateSteps"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>條件式簽核</h3>
+                <button class="text-button" id="workflowEvaluateBtn" type="button">評估條件</button>
+              </div>
+              <form class="compact-form" id="workflowConditionForm">
+                <label>密等<select id="workflowConditionSecurity"><option>普通</option><option>密</option><option>機密</option><option>極機密</option></select></label>
+                <label>速別<select id="workflowConditionPriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
+                <label>機關別<input id="workflowConditionAgency" value="臺北市政府社會局" /></label>
+              </form>
+              <div class="archive-grid" id="workflowConditionGrid"></div>
+            </section>
+          </div>
+
+          <div class="workflow-engine-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>代理人機制</h3>
+                <button class="text-button" id="workflowProxyAddBtn" type="button">新增代理</button>
+              </div>
+              <form class="compact-form" id="workflowProxyForm">
+                <label>原簽核角色<select id="workflowProxyFrom"><option>文書主管</option><option>總收發人員</option><option>資訊管理員</option><option>稽核人員</option></select></label>
+                <label>代理角色<select id="workflowProxyTo"><option>總收發人員</option><option>文書主管</option><option>資訊管理員</option><option>稽核人員</option></select></label>
+                <label>代理原因<input id="workflowProxyReason" value="主管請假代理" /></label>
+              </form>
+              <div class="address-results" id="workflowProxyList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>進階簽核動作</h3>
+                <span class="status-pill">Action</span>
+              </div>
+              <form class="compact-form" id="workflowActionForm">
+                <label>簽核動作<select id="workflowActionSelect"><option value="return">退回</option><option value="withdraw">抽回</option><option value="addSign">加簽</option><option value="countersign">會辦</option><option value="reassign">改派</option></select></label>
+                <label>目標角色<select id="workflowActionTarget"><option>承辦人</option><option>文書主管</option><option>資訊管理員</option><option>稽核人員</option></select></label>
+                <label>簽核意見<textarea id="workflowComment" rows="3">請補充附件清冊與用印理由。</textarea></label>
+                <button class="primary-button" type="submit">執行簽核動作</button>
+              </form>
+            </section>
+          </div>
+
+          <section class="panel workflow-log-panel">
+            <div class="panel-heading">
+              <h3>簽核時間戳與不可否認紀錄</h3>
+              <button class="text-button" id="workflowExportProofBtn" type="button">匯出簽核證明</button>
+            </div>
+            <div class="timeline" id="workflowProofLog"></div>
+          </section>
+        </section>
+
+        <section class="view" id="seals">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Seal Approval</p>
+              <h3>印鑑管理</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="sealApproveBtn" type="button">核准並自動押章</button>
+              <button class="secondary-button" id="sealSubmitBtn" type="button">送簽核</button>
+              <button class="secondary-button" id="sealGeneratePdfBtn" type="button">產生套版 PDF</button>
+              <button class="secondary-button" id="sealStampPdfBtn" type="button">押章 PDF</button>
+              <button class="secondary-button" id="sealExportBtn" type="button">匯出用印紀錄</button>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric-card">
+              <span>啟用印鑑</span>
+              <strong id="activeSealCount">0</strong>
+              <small>公司章、負責人章、騎縫章</small>
+            </article>
+            <article class="metric-card">
+              <span>待簽核</span>
+              <strong id="pendingSealCount">0</strong>
+              <small>通過後自動押章</small>
+            </article>
+            <article class="metric-card">
+              <span>已押章</span>
+              <strong id="stampedDocCount">0</strong>
+              <small>保留章戳序號與時間戳</small>
+            </article>
+            <article class="metric-card">
+              <span>用印軌跡</span>
+              <strong id="sealAuditCount">0</strong>
+              <small>不可否認操作紀錄</small>
+            </article>
+          </div>
+
+          <div class="seal-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>印鑑清冊</h3>
+                <span class="status-pill" id="sealCount">0 枚</span>
+              </div>
+              <div class="address-results" id="sealRegistry"></div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>印鑑與用印規則</h3>
+                <span class="status-pill" id="selectedSealStatus">未選取</span>
+              </div>
+              <div id="sealDetail"></div>
+            </aside>
+          </div>
+
+          <div class="seal-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>簽核佇列</h3>
+                <span class="status-pill" id="sealRequestCount">0 件</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>公文</th>
+                      <th>印鑑</th>
+                      <th>簽核節點</th>
+                      <th>狀態</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sealRequestRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>新增印鑑</h3>
+                <button class="text-button" id="sealAddBtn" type="button">新增</button>
+              </div>
+              <form class="compact-form" id="sealForm">
+                <label>印鑑名稱<input id="sealNameInput" value="歲悅長照公司章" /></label>
+                <label>印鑑類型<select id="sealTypeInput"><option>公司章</option><option>負責人章</option><option>契約章</option><option>騎縫章</option></select></label>
+                <label>保管角色<select id="sealOwnerInput"><option>文書主管</option><option>總收發人員</option><option>資訊管理員</option></select></label>
+                <label>適用文別<select id="sealDocTypeInput"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option></select></label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>用印操作紀錄</h3>
+                <button class="text-button" id="sealClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="sealAuditLog"></div>
+            </section>
+          </div>
+
+          <div class="pdf-stamp-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>PDF 套版與章戳座標</h3>
+                <button class="text-button" id="sealVerifyHashBtn" type="button">驗證雜湊</button>
+              </div>
+              <form class="compact-form" id="sealPdfForm">
+                <label>套版<select id="pdfTemplateSelect"><option>歲悅正式函</option><option>開會通知單</option><option>補正資料函</option></select></label>
+                <div class="inline-fields">
+                  <label>公司章 X<input id="companySealX" type="number" value="420" /></label>
+                  <label>公司章 Y<input id="companySealY" type="number" value="130" /></label>
+                </div>
+                <div class="inline-fields">
+                  <label>負責人章 X<input id="ownerSealX" type="number" value="470" /></label>
+                  <label>負責人章 Y<input id="ownerSealY" type="number" value="130" /></label>
+                </div>
+                <label><input id="enablePageSeal" type="checkbox" checked /> 多頁文件套用騎縫章</label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>PDF 版本留存</h3>
+                <span class="status-pill" id="pdfVersionStatus">尚未產生</span>
+              </div>
+              <div class="archive-grid" id="pdfVersionGrid"></div>
+              <div class="detail-actions">
+                <button class="secondary-button" id="downloadBeforePdfBtn" type="button">下載押章前</button>
+                <button class="primary-button" id="downloadAfterPdfBtn" type="button">下載押章後</button>
+                <button class="secondary-button" id="sealApplicationBtn" type="button">產生用印申請單</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="tracking">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Follow-up Control</p>
+              <h3>稽催追蹤</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="nextDayCheckBtn" type="button">翌日查核</button>
+              <button class="secondary-button" id="sendOverdueBtn" type="button">逾期提醒</button>
+              <button class="secondary-button" id="confirmUnreceivedBtn" type="button">未收確認</button>
+              <button class="secondary-button" id="returnCorrectionBtn" type="button">退回補正</button>
+            </div>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>翌日待查</span>
+              <strong id="nextDayCount">0</strong>
+              <small>發文後隔日需查交換結果</small>
+            </article>
+            <article class="metric-card">
+              <span>逾期提醒</span>
+              <strong id="overdueCount">0</strong>
+              <small>已超過處理期限</small>
+            </article>
+            <article class="metric-card">
+              <span>未收確認</span>
+              <strong id="unreceivedCount">0</strong>
+              <small>送出後尚未被收文方確認</small>
+            </article>
+            <article class="metric-card">
+              <span>退回補正</span>
+              <strong id="returnedCount">0</strong>
+              <small>需承辦修正文稿或附件</small>
+            </article>
+          </div>
+
+          <div class="tracking-toolbar panel">
+            <div class="segmented" role="group" aria-label="稽催篩選">
+              <button class="segment active" data-tracking-filter="all">全部</button>
+              <button class="segment" data-tracking-filter="翌日查核">翌日查核</button>
+              <button class="segment" data-tracking-filter="逾期提醒">逾期提醒</button>
+              <button class="segment" data-tracking-filter="未收確認">未收確認</button>
+              <button class="segment" data-tracking-filter="退回補正">退回補正</button>
+              <button class="segment" data-tracking-filter="已完成">已完成</button>
+            </div>
+            <label class="toolbar-search">搜尋<input id="trackingSearch" type="search" placeholder="案件、機關、承辦人" /></label>
+          </div>
+
+          <div class="tracking-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>稽催案件</h3>
+                <span class="status-pill" id="trackingCount">0 件</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>案件</th>
+                      <th>機關</th>
+                      <th>類型</th>
+                      <th>期限</th>
+                      <th>承辦</th>
+                      <th>狀態</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="trackingRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>案件追蹤內容</h3>
+                <span class="status-pill" id="selectedTrackingStatus">未選取</span>
+              </div>
+              <div id="trackingDetail"></div>
+            </aside>
+          </div>
+
+          <div class="tracking-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>提醒設定</h3>
+                <button class="text-button" id="scheduleReminderBtn" type="button">排程提醒</button>
+              </div>
+              <form class="compact-form" id="trackingReminderForm">
+                <label>通知對象<select id="trackingNotifyTarget"><option>承辦人</option><option>文書主管</option><option>總收發人員</option><option>資訊管理員</option></select></label>
+                <label>提醒方式<select id="trackingNotifyMethod"><option>系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
+                <label>提醒內容<textarea id="trackingMessage" rows="3">請於期限前完成交換結果確認與補正處理。</textarea></label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>退回補正</h3>
+                <span class="status-pill">Correction</span>
+              </div>
+              <form class="compact-form" id="correctionForm">
+                <label>補正原因<select id="correctionReason"><option>附件缺漏</option><option>文號格式錯誤</option><option>受文者機關代碼錯誤</option><option>主旨或說明需修正</option></select></label>
+                <label>補正期限<input id="correctionDueDate" type="date" value="2026-05-29" /></label>
+                <label>補正說明<textarea id="correctionNote" rows="3">請承辦人修正後重新送文書主管清稿。</textarea></label>
+                <button class="primary-button" type="submit">建立退回補正</button>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>稽催操作紀錄</h3>
+                <button class="text-button" id="trackingClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="trackingAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="exchange">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">jAgent Gateway</p>
+              <h3>jAgent 介接</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="loginJagentBtn">憑證登入 jAgent</button>
+              <button class="secondary-button" id="logoutJagentBtn" type="button">登出 jAgent</button>
+            </div>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>憑證狀態</span>
+              <strong id="certificateStatus">未登入</strong>
+              <small id="certificateNote">請插入憑證卡並登入</small>
+            </article>
+            <article class="metric-card">
+              <span>Token</span>
+              <strong id="tokenStatus">尚未建立</strong>
+              <small id="tokenExpires">有效期限：-</small>
+            </article>
+            <article class="metric-card">
+              <span>交換中心</span>
+              <strong id="centerStatus">未連線</strong>
+              <small id="centerLatency">延遲：-</small>
+            </article>
+            <article class="metric-card">
+              <span>地址簿</span>
+              <strong id="addressBookStatus">待查詢</strong>
+              <small id="addressBookCount">0 筆結果</small>
+            </article>
+          </div>
+
+          <div class="exchange-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>憑證與 Token 管理</h3>
+                <span class="status-pill" id="tokenMode">測試模式</span>
+              </div>
+              <div class="jagent-actions">
+                <button class="primary-button" id="certLoginBtn" type="button">憑證登入</button>
+                <button class="secondary-button" id="refreshTokenBtn" type="button">刷新 Token</button>
+                <button class="secondary-button" id="validateTokenBtn" type="button">驗證 Token</button>
+                <button class="secondary-button" id="revokeTokenBtn" type="button">撤銷 Token</button>
+              </div>
+              <div class="service-grid" id="serviceGrid"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>交換中心連線</h3>
+                <span class="status-pill">Connection</span>
+              </div>
+              <form class="compact-form" id="centerForm">
+                <label>交換中心 URL<input id="exchangeCenterUrl" value="https://jagent.example.gov.tw/api" /></label>
+                <label>所屬交換中心<select id="exchangeCenterName"><option>G2B2C 統合交換中心</option><option>北區交換中心</option><option>測試交換中心</option></select></label>
+                <div class="form-actions">
+                  <button class="primary-button" id="connectCenterBtn" type="button">連線測試</button>
+                  <button class="secondary-button" id="syncCenterBtn" type="button">同步服務狀態</button>
+                  <button class="secondary-button" id="disconnectCenterBtn" type="button">中斷連線</button>
+                </div>
+              </form>
+            </section>
+          </div>
+
+          <div class="exchange-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>地址簿查詢</h3>
+                <button class="text-button" id="clearAddressResultsBtn" type="button">清除結果</button>
+              </div>
+              <form class="compact-form" id="addressSearchForm">
+                <label>機關名稱或代碼<input id="addressQuery" value="臺北市政府社會局" /></label>
+                <button class="primary-button" type="submit">查詢地址簿</button>
+              </form>
+              <div class="address-results" id="addressResults"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>交換事件</h3>
+                <button class="text-button" id="retryFailedBtn">重送異常</button>
+              </div>
+              <div class="timeline" id="exchangeTimeline"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="archive">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Archive</p>
+              <h3>歸檔保存</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="archiveSealBtn" type="button">封存選取</button>
+              <button class="secondary-button" id="archiveVerifyBtn" type="button">驗證雜湊</button>
+              <button class="secondary-button" id="archiveExportBtn" type="button">匯出保存包</button>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric-card">
+              <span>原文保存</span>
+              <strong id="archiveOriginalCount">0</strong>
+              <small>PDF / XML / 交換封包</small>
+            </article>
+            <article class="metric-card">
+              <span>附件保存</span>
+              <strong id="archiveAttachmentCount">0</strong>
+              <small>附件清冊與版本</small>
+            </article>
+            <article class="metric-card">
+              <span>交換事件</span>
+              <strong id="archiveExchangeCount">0</strong>
+              <small>送出、回覆、確認、重送</small>
+            </article>
+            <article class="metric-card">
+              <span>雜湊通過</span>
+              <strong id="archiveHashCount">0</strong>
+              <small>SHA-256 完整性檢核</small>
+            </article>
+          </div>
+
+          <div class="archive-toolbar panel">
+            <div class="segmented" role="group" aria-label="歸檔篩選">
+              <button class="segment active" data-archive-filter="all">全部</button>
+              <button class="segment" data-archive-filter="待封存">待封存</button>
+              <button class="segment" data-archive-filter="已封存">已封存</button>
+              <button class="segment" data-archive-filter="雜湊通過">雜湊通過</button>
+              <button class="segment" data-archive-filter="需複核">需複核</button>
+            </div>
+            <label class="toolbar-search">搜尋<input id="archiveSearch" type="search" placeholder="文號、機關、主旨、雜湊" /></label>
+          </div>
+
+          <div class="archive-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>保存台帳</h3>
+                <span class="status-pill" id="archiveRecordCount">0 件</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>文號</th>
+                      <th>機關</th>
+                      <th>主旨</th>
+                      <th>保存內容</th>
+                      <th>雜湊</th>
+                      <th>狀態</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="archiveRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>保存明細</h3>
+                <span class="status-pill" id="selectedArchiveStatus">未選取</span>
+              </div>
+              <div id="archiveDetail"></div>
+            </aside>
+          </div>
+
+          <div class="archive-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>保存項目</h3>
+                <button class="text-button" id="archiveOpenOriginalBtn" type="button">檢視原文</button>
+              </div>
+              <div class="archive-grid" id="archiveGrid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>操作軌跡</h3>
+                <span class="status-pill">不可覆寫</span>
+              </div>
+              <div class="timeline" id="auditTimeline"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>歸檔操作紀錄</h3>
+                <button class="text-button" id="archiveClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="archiveAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="security">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Security</p>
+              <h3>資安控管</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="securityCertBtn" type="button">憑證卡登入</button>
+              <button class="secondary-button" id="securityTokenExpireBtn" type="button">模擬 Token 過期</button>
+              <button class="secondary-button" id="securityExportProofBtn" type="button">匯出不可否認紀錄</button>
+            </div>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>憑證卡</span>
+              <strong id="securityCertStatus">未驗證</strong>
+              <small id="securityCertNote">等待讀卡與 PIN 驗證</small>
+            </article>
+            <article class="metric-card">
+              <span>RBAC</span>
+              <strong id="securityRbacStatus">啟用</strong>
+              <small id="securityRbacNote">依角色控管功能權限</small>
+            </article>
+            <article class="metric-card">
+              <span>IP / 裝置</span>
+              <strong id="securityDeviceStatus">受控</strong>
+              <small id="securityDeviceNote">白名單與裝置指紋</small>
+            </article>
+            <article class="metric-card">
+              <span>Token</span>
+              <strong id="securityTokenStatus">有效</strong>
+              <small id="securityTokenNote">剩餘時間依 jAgent Session</small>
+            </article>
+          </div>
+
+          <div class="security-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>憑證卡與 Token</h3>
+                <span class="status-pill" id="securitySessionStatus">Session Ready</span>
+              </div>
+              <form class="compact-form" id="securityCertForm">
+                <label>憑證卡序號<input id="securityCertSerial" value="SYC-EDOC-2026-0001" /></label>
+                <label>持卡人<select id="securityCertOwner"><option>總收發人員</option><option>文書主管</option><option>資訊管理員</option></select></label>
+                <label>Token 有效時間<select id="securityTokenTtl"><option value="480">8 小時</option><option value="240">4 小時</option><option value="60">1 小時</option></select></label>
+                <div class="form-actions">
+                  <button class="primary-button" type="submit">驗證憑證</button>
+                  <button class="secondary-button" id="securityRefreshTokenBtn" type="button">刷新 Token</button>
+                  <button class="secondary-button" id="securityRevokeTokenBtn" type="button">撤銷 Token</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>RBAC 權限測試</h3>
+                <span class="status-pill">Role Based</span>
+              </div>
+              <form class="compact-form" id="securityRbacForm">
+                <label>角色<select id="securityRoleSelect"><option>總收發人員</option><option>承辦人</option><option>文書主管</option><option>資訊管理員</option><option>稽核人員</option></select></label>
+                <label>功能權限<select id="securityActionSelect"><option value="send_dispatch">送交 jAgent</option><option value="manage_token">管理 Token</option><option value="manage_roles">管理角色</option><option value="view_audit">查看稽核</option><option value="verify_hash">驗證雜湊</option></select></label>
+                <button class="primary-button" type="submit">檢查權限</button>
+              </form>
+              <div class="permission-grid" id="securityPermissionGrid"></div>
+            </section>
+          </div>
+
+          <div class="security-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>IP / 裝置限制</h3>
+                <button class="text-button" id="securityAddDeviceBtn" type="button">新增裝置</button>
+              </div>
+              <form class="compact-form" id="securityDeviceForm">
+                <label>允許 IP<input id="securityIpInput" value="203.0.113.18" /></label>
+                <label>裝置名稱<input id="securityDeviceName" value="總收發辦公室 Mac" /></label>
+                <label>裝置指紋<input id="securityFingerprint" value="FP-SYC-EDOC-A1F9" /></label>
+              </form>
+              <div class="address-results" id="securityDeviceList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>不可否認性</h3>
+                <button class="text-button" id="securitySignActionBtn" type="button">簽章目前操作</button>
+              </div>
+              <div class="archive-grid" id="securityProofGrid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>資安操作紀錄</h3>
+                <button class="text-button" id="securityClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="securityAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="fileSecurity">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">File Security</p>
+              <h3>檔案與資安控管</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="fileScanBtn" type="button">防毒掃描</button>
+              <button class="secondary-button" id="fileMaskBtn" type="button">敏感遮罩</button>
+              <button class="secondary-button" id="fileWatermarkBtn" type="button">浮水印下載</button>
+              <button class="secondary-button" id="fileBackupBtn" type="button">建立備份</button>
+            </div>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>附件防毒</span>
+              <strong id="fileScanStatus">待掃描</strong>
+              <small id="fileScanNote">尚有檔案需檢查</small>
+            </article>
+            <article class="metric-card">
+              <span>大小限制</span>
+              <strong id="fileSizeStatus">50 MB</strong>
+              <small id="fileSizeNote">單檔上限</small>
+            </article>
+            <article class="metric-card">
+              <span>密件隔離</span>
+              <strong id="fileConfidentialStatus">啟用</strong>
+              <small id="fileConfidentialNote">限授權角色存取</small>
+            </article>
+            <article class="metric-card">
+              <span>備份還原</span>
+              <strong id="fileBackupStatus">0</strong>
+              <small id="fileBackupNote">可還原快照</small>
+            </article>
+          </div>
+
+          <div class="file-security-toolbar panel">
+            <div class="segmented" role="group" aria-label="檔案狀態篩選">
+              <button class="segment active" data-file-filter="all">全部</button>
+              <button class="segment" data-file-filter="待掃描">待掃描</button>
+              <button class="segment" data-file-filter="已通過">已通過</button>
+              <button class="segment" data-file-filter="已隔離">已隔離</button>
+              <button class="segment" data-file-filter="密件">密件</button>
+              <button class="segment" data-file-filter="超限">超限</button>
+            </div>
+            <label class="toolbar-search">搜尋<input id="fileSecuritySearch" type="search" placeholder="檔名、公文、機關、雜湊" /></label>
+          </div>
+
+          <div class="file-security-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>附件資安台帳</h3>
+                <span class="status-pill" id="fileSecurityCount">0 筆</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>檔案</th>
+                      <th>公文 / 機關</th>
+                      <th>大小</th>
+                      <th>掃描</th>
+                      <th>密等</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fileSecurityRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>檔案詳情</h3>
+                <span class="status-pill" id="selectedFileStatus">未選取</span>
+              </div>
+              <div id="fileSecurityDetail"></div>
+            </aside>
+          </div>
+
+          <div class="file-security-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>檔案政策</h3>
+                <button class="text-button" id="filePolicySaveBtn" type="button">儲存政策</button>
+              </div>
+              <form class="compact-form" id="fileSecurityPolicyForm">
+                <label>單檔大小上限 MB<input id="fileMaxSize" type="number" value="50" /></label>
+                <label>允許副檔名<input id="fileAllowedTypes" value="pdf,xml,xlsx,docx,p7m" /></label>
+                <label>敏感資料遮罩<select id="fileMaskPolicy"><option>身分證 / 電話 / Email</option><option>身分證 / 電話 / Email / 地址</option><option>全部個資欄位</option></select></label>
+                <label>密件可存取角色<input id="fileConfidentialRoles" value="文書主管,資訊管理員,稽核人員" /></label>
+                <label>下載浮水印<input id="fileWatermarkText" value="歲悅長照｜電子公文交換｜限授權使用" /></label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>備份與還原</h3>
+                <button class="text-button" id="fileRestoreBtn" type="button">還原最新備份</button>
+              </div>
+              <div class="archive-grid" id="fileBackupGrid"></div>
+              <div class="address-results" id="fileBackupList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>檔案存取紀錄</h3>
+                <button class="text-button" id="fileClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="fileAccessLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="accounts">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Identity & Access</p>
+              <h3>帳號登入與權限</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="accountInviteBtn" type="button">建立使用者</button>
+              <button class="secondary-button" id="accountSyncBtn" type="button">同步角色</button>
+              <button class="secondary-button" id="accountExportBtn" type="button">匯出權限報表</button>
+            </div>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>使用者帳號</span>
+              <strong id="accountUserCount">0</strong>
+              <small id="accountUserNote">已啟用帳號</small>
+            </article>
+            <article class="metric-card">
+              <span>MFA 覆蓋率</span>
+              <strong id="accountMfaCount">0%</strong>
+              <small id="accountMfaNote">高權限必須啟用</small>
+            </article>
+            <article class="metric-card">
+              <span>SSO</span>
+              <strong id="accountSsoStatus">未連線</strong>
+              <small id="accountSsoNote">Google Workspace / Microsoft Entra</small>
+            </article>
+            <article class="metric-card">
+              <span>裝置與 IP</span>
+              <strong id="accountDeviceCount">0</strong>
+              <small id="accountDeviceNote">登入裝置與限制規則</small>
+            </article>
+          </div>
+
+          <div class="account-toolbar panel">
+            <div class="segmented" role="group" aria-label="帳號篩選">
+              <button class="segment active" data-account-filter="all">全部</button>
+              <button class="segment" data-account-filter="啟用">啟用</button>
+              <button class="segment" data-account-filter="停用">停用</button>
+              <button class="segment" data-account-filter="MFA">MFA</button>
+              <button class="segment" data-account-filter="SSO">SSO</button>
+              <button class="segment" data-account-filter="本機">本機</button>
+            </div>
+            <label class="toolbar-search">搜尋<input id="accountSearch" type="search" placeholder="姓名、Email、單位、角色" /></label>
+          </div>
+
+          <div class="account-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>使用者帳號</h3>
+                <span class="status-pill" id="accountListCount">0 筆</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>使用者</th>
+                      <th>單位 / 職稱</th>
+                      <th>角色</th>
+                      <th>登入方式</th>
+                      <th>狀態</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="accountRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>帳號詳情</h3>
+                <span class="status-pill" id="selectedAccountStatus">未選取</span>
+              </div>
+              <div id="accountDetail"></div>
+            </aside>
+          </div>
+
+          <div class="account-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>新增 / 編輯使用者</h3>
+                <span class="status-pill">RBAC</span>
+              </div>
+              <form class="compact-form" id="accountForm">
+                <label>姓名<input id="accountName" value="許品管" /></label>
+                <label>Email<input id="accountEmail" type="email" value="quality@suiyuecare.com" /></label>
+                <label>單位<input id="accountUnit" value="教育品管課" /></label>
+                <label>職稱<input id="accountTitleInput" value="品管專員" /></label>
+                <label>角色<select id="accountRoleSelect"><option>總收發人員</option><option>承辦人</option><option>文書主管</option><option>資訊管理員</option><option>稽核人員</option></select></label>
+                <label>登入方式<select id="accountProvider"><option>Google Workspace</option><option>Microsoft Entra</option><option>本機帳號</option></select></label>
+                <label>MFA<select id="accountMfa"><option>已啟用</option><option>待設定</option><option>強制重設</option></select></label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>SSO / MFA</h3>
+                <button class="text-button" id="mfaEnforceBtn" type="button">強制全員 MFA</button>
+              </div>
+              <form class="compact-form" id="ssoForm">
+                <label>SSO 提供者<select id="ssoProvider"><option>Google Workspace</option><option>Microsoft Entra</option></select></label>
+                <label>網域 / Tenant<input id="ssoDomain" value="suiyuecare.com" /></label>
+                <div class="form-actions">
+                  <button class="primary-button" id="ssoConnectBtn" type="button">連線 SSO</button>
+                  <button class="secondary-button" id="ssoTestBtn" type="button">測試登入</button>
+                </div>
+              </form>
+              <div class="archive-grid" id="ssoStatusGrid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>IP 限制</h3>
+                <button class="text-button" id="accountAddIpBtn" type="button">新增限制</button>
+              </div>
+              <form class="compact-form" id="accountIpForm">
+                <label>允許 IP / CIDR<input id="accountIpInput" value="203.0.113.0/24" /></label>
+                <label>用途<input id="accountIpPurpose" value="歲悅辦公室與 VPN" /></label>
+              </form>
+              <div class="address-results" id="accountIpList"></div>
+            </section>
+          </div>
+
+          <div class="account-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>登入紀錄</h3>
+                <span class="status-pill" id="accountLoginCount">0 筆</span>
+              </div>
+              <div class="timeline" id="loginLogList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>裝置紀錄</h3>
+                <span class="status-pill" id="accountDeviceLogCount">0 台</span>
+              </div>
+              <div class="address-results" id="deviceLogList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>帳號操作紀錄</h3>
+                <button class="text-button" id="accountClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="accountAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="reports">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Reports</p>
+              <h3>報表統計</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="reportsRecalcBtn" type="button">重新統計</button>
+              <button class="secondary-button" id="reportsExportBtn" type="button">匯出報表</button>
+              <button class="secondary-button" id="reportsPrintBtn" type="button">列印月報</button>
+            </div>
+          </div>
+
+          <div class="report-filter panel">
+            <label>統計期間<select id="reportPeriod"><option>今日</option><option selected>近 7 日</option><option>近 30 日</option><option>本年度</option></select></label>
+            <label>統計單位<select id="reportUnit"><option>全部單位</option><option>總管理處</option><option>居家照顧課</option><option>社區據點課</option></select></label>
+            <label>機關範圍<input id="reportAgencyQuery" value="全部機關" /></label>
+            <button class="primary-button" id="reportsApplyFilterBtn" type="button">套用篩選</button>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric-card">
+              <span>收發量</span>
+              <strong id="reportVolume">0</strong>
+              <small id="reportVolumeNote">收文 0 / 發文 0</small>
+            </article>
+            <article class="metric-card">
+              <span>成功率</span>
+              <strong id="reportSuccessRate">0%</strong>
+              <small id="reportSuccessNote">交換完成 / 總交換件</small>
+            </article>
+            <article class="metric-card">
+              <span>異常類型</span>
+              <strong id="reportExceptionCount">0</strong>
+              <small id="reportExceptionNote">失敗、誤送、漏送、需複核</small>
+            </article>
+            <article class="metric-card">
+              <span>逾期件</span>
+              <strong id="reportOverdueCount">0</strong>
+              <small id="reportOverdueNote">待處理與稽催逾期</small>
+            </article>
+          </div>
+
+          <div class="report-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>收發量趨勢</h3>
+                <span class="status-pill" id="reportTrendStatus">近 7 日</span>
+              </div>
+              <div class="report-chart" id="reportVolumeChart"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>成功率與異常</h3>
+                <span class="status-pill" id="reportQualityStatus">Quality</span>
+              </div>
+              <div class="report-chart compact" id="reportQualityChart"></div>
+            </section>
+          </div>
+
+          <div class="report-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>異常類型</h3>
+                <span class="status-pill">Exception</span>
+              </div>
+              <div class="address-results" id="reportExceptionList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>承辦量</h3>
+                <span class="status-pill">Owner</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>承辦</th>
+                      <th>收文</th>
+                      <th>發文</th>
+                      <th>待辦</th>
+                      <th>逾期</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reportOwnerRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>逾期件</h3>
+                <button class="text-button" id="reportsCreateReminderBtn" type="button">建立稽催</button>
+              </div>
+              <div class="address-results" id="reportOverdueList"></div>
+            </section>
+          </div>
+
+          <section class="panel report-log-panel">
+            <div class="panel-heading">
+              <h3>報表操作紀錄</h3>
+              <button class="text-button" id="reportsClearLogBtn" type="button">清除畫面紀錄</button>
+            </div>
+            <div class="timeline" id="reportsAuditLog"></div>
+          </section>
+        </section>
+
+        <section class="view" id="notifications">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Notifications</p>
+              <h3>通知中心</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="notificationSyncBtn" type="button">同步通知</button>
+              <button class="secondary-button" id="notificationReadBtn" type="button">標記已讀</button>
+              <button class="secondary-button" id="notificationDispatchBtn" type="button">派送通知</button>
+              <button class="secondary-button" id="notificationImmediateAlertBtn" type="button">即時警示</button>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric-card">
+              <span>收文通知</span>
+              <strong id="noticeInboundCount">0</strong>
+              <small>新來文、待登錄、待分派</small>
+            </article>
+            <article class="metric-card">
+              <span>待清稿</span>
+              <strong id="noticeDraftCount">0</strong>
+              <small>函稿待清稿與封裝</small>
+            </article>
+            <article class="metric-card">
+              <span>交換失敗</span>
+              <strong id="noticeFailedCount">0</strong>
+              <small>jAgent 失敗與重送</small>
+            </article>
+            <article class="metric-card">
+              <span>Token / 逾期</span>
+              <strong id="noticeRiskCount">0</strong>
+              <small>Token 到期、逾期查核</small>
+            </article>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>Email Gateway</span>
+              <strong id="notificationEmailStatus">未測試</strong>
+              <small id="notificationEmailNote">SMTP / API 派送</small>
+            </article>
+            <article class="metric-card">
+              <span>Line 工作群組</span>
+              <strong id="notificationLineStatus">未測試</strong>
+              <small id="notificationLineNote">Webhook 推播</small>
+            </article>
+            <article class="metric-card">
+              <span>站內通知</span>
+              <strong id="notificationInboxStatus">啟用</strong>
+              <small id="notificationInboxNote">系統內即時訊息</small>
+            </article>
+            <article class="metric-card">
+              <span>排程通知</span>
+              <strong id="notificationScheduleStatus">0</strong>
+              <small id="notificationScheduleNote">逾期與 Token 規則</small>
+            </article>
+          </div>
+
+          <div class="notification-toolbar panel">
+            <div class="segmented" role="group" aria-label="通知篩選">
+              <button class="segment active" data-notification-filter="all">全部</button>
+              <button class="segment" data-notification-filter="收文">收文</button>
+              <button class="segment" data-notification-filter="待清稿">待清稿</button>
+              <button class="segment" data-notification-filter="交換失敗">交換失敗</button>
+              <button class="segment" data-notification-filter="Token 到期">Token 到期</button>
+              <button class="segment" data-notification-filter="逾期查核">逾期查核</button>
+              <button class="segment" data-notification-filter="未讀">未讀</button>
+            </div>
+            <label class="toolbar-search">搜尋<input id="notificationSearch" type="search" placeholder="通知、文號、機關、對象" /></label>
+          </div>
+
+          <div class="notification-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>通知佇列</h3>
+                <span class="status-pill" id="notificationCount">0 則</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>通知</th>
+                      <th>類型</th>
+                      <th>對象</th>
+                      <th>通道</th>
+                      <th>狀態</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="notificationRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>通知內容</h3>
+                <span class="status-pill" id="selectedNotificationStatus">未選取</span>
+              </div>
+              <div id="notificationDetail"></div>
+            </aside>
+          </div>
+
+          <div class="notification-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>新增通知</h3>
+                <button class="text-button" id="notificationAddBtn" type="button">新增</button>
+              </div>
+              <form class="compact-form" id="notificationForm">
+                <label>通知類型<select id="notificationType"><option>收文</option><option>待清稿</option><option>交換失敗</option><option>Token 到期</option><option>逾期查核</option></select></label>
+                <label>通知對象<select id="notificationTarget"><option>總收發人員</option><option>文書主管</option><option>承辦人</option><option>資訊管理員</option></select></label>
+                <label>通知通道<select id="notificationChannel"><option>系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
+                <label>通知內容<textarea id="notificationBody" rows="3">請確認電子公文交換待辦事項。</textarea></label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>派送通道</h3>
+                <button class="text-button" id="notificationTestChannelsBtn" type="button">測試通道</button>
+              </div>
+              <form class="compact-form" id="notificationGatewayForm">
+                <label>Email API URL<input id="notificationEmailApi" value="https://mail.suiyuecare.com/send" /></label>
+                <label>Line Webhook<input id="notificationLineWebhook" value="https://line.example.com/webhook/suiyuecare-edoc" /></label>
+                <label>站內通知保留<select id="notificationInboxRetention"><option>90 天</option><option>180 天</option><option>永久保存</option></select></label>
+                <div class="form-actions">
+                  <button class="primary-button" id="notificationSaveGatewayBtn" type="button">儲存通道</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>提醒規則</h3>
+                <button class="text-button" id="notificationApplyRulesBtn" type="button">套用規則</button>
+              </div>
+              <form class="compact-form" id="notificationScheduleForm">
+                <label>逾期排程<select id="notificationOverdueSchedule"><option>每日 09:00</option><option>每 4 小時</option><option>每小時</option></select></label>
+                <label>Token 到期提醒<select id="notificationTokenSchedule"><option>到期前 30 分鐘</option><option>到期前 60 分鐘</option><option>到期前 2 小時</option></select></label>
+                <label>交換失敗警示<select id="notificationFailureChannel"><option>Email + Line + 系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
+              </form>
+              <div class="archive-grid" id="notificationRuleGrid"></div>
+            </section>
+          </div>
+
+          <div class="notification-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>通知操作紀錄</h3>
+                <button class="text-button" id="notificationClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="notificationAuditLog"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>實際派送紀錄</h3>
+                <button class="text-button" id="notificationRetryFailedBtn" type="button">重送失敗</button>
+              </div>
+              <div class="timeline" id="notificationDeliveryLog"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>站內通知</h3>
+                <button class="text-button" id="notificationInboxPushBtn" type="button">推送站內</button>
+              </div>
+              <div class="address-results" id="notificationInboxList"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="jobs">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Scheduler</p>
+              <h3>排程與背景任務</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="jobRunDueBtn" type="button">執行到期任務</button>
+              <button class="secondary-button" id="jobRunAllBtn" type="button">全部立即執行</button>
+              <button class="secondary-button" id="jobPauseAllBtn" type="button">全部暫停</button>
+              <button class="secondary-button" id="jobExportBtn" type="button">匯出排程紀錄</button>
+            </div>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>啟用任務</span>
+              <strong id="jobActiveCount">0</strong>
+              <small id="jobActiveNote">背景排程</small>
+            </article>
+            <article class="metric-card">
+              <span>今日執行</span>
+              <strong id="jobRunCount">0</strong>
+              <small id="jobRunNote">成功 / 失敗</small>
+            </article>
+            <article class="metric-card">
+              <span>下次執行</span>
+              <strong id="jobNextRun">-</strong>
+              <small id="jobNextRunNote">最近任務</small>
+            </article>
+            <article class="metric-card">
+              <span>任務健康</span>
+              <strong id="jobHealthStatus">Ready</strong>
+              <small id="jobHealthNote">Worker 狀態</small>
+            </article>
+          </div>
+
+          <div class="job-toolbar panel">
+            <div class="segmented" role="group" aria-label="背景任務篩選">
+              <button class="segment active" data-job-filter="all">全部</button>
+              <button class="segment" data-job-filter="啟用">啟用</button>
+              <button class="segment" data-job-filter="暫停">暫停</button>
+              <button class="segment" data-job-filter="成功">成功</button>
+              <button class="segment" data-job-filter="失敗">失敗</button>
+            </div>
+            <label class="toolbar-search">搜尋<input id="jobSearch" type="search" placeholder="任務、週期、結果" /></label>
+          </div>
+
+          <div class="job-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>背景任務列表</h3>
+                <span class="status-pill" id="jobCount">0 個</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>任務</th>
+                      <th>週期</th>
+                      <th>下次執行</th>
+                      <th>狀態</th>
+                      <th>結果</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="jobRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>任務詳情</h3>
+                <span class="status-pill" id="selectedJobStatus">未選取</span>
+              </div>
+              <div id="jobDetail"></div>
+            </aside>
+          </div>
+
+          <div class="job-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>新增 / 調整排程</h3>
+                <button class="text-button" id="jobAddBtn" type="button">新增任務</button>
+              </div>
+              <form class="compact-form" id="jobForm">
+                <label>任務名稱<input id="jobNameInput" value="自訂交換狀態同步" /></label>
+                <label>任務類型<select id="jobTypeInput"><option value="exchangeSync">交換狀態同步</option><option value="pullInbound">每日收文拉取</option><option value="nextDayCheck">發文翌日查核</option><option value="tokenCheck">Token 到期檢查</option><option value="overdueReminder">逾期稽催</option><option value="archiveSeal">歸檔封存</option><option value="reportGenerate">報表產生</option></select></label>
+                <label>排程週期<select id="jobScheduleInput"><option>每 15 分鐘</option><option>每小時</option><option>每日 08:30</option><option>每日 09:00</option><option>每日 18:00</option></select></label>
+                <label>通知對象<select id="jobNotifyInput"><option>資訊管理員</option><option>總收發人員</option><option>文書主管</option><option>稽核人員</option></select></label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Worker 控制</h3>
+                <button class="text-button" id="jobHealthBtn" type="button">健康檢查</button>
+              </div>
+              <div class="archive-grid" id="jobWorkerGrid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>背景任務紀錄</h3>
+                <button class="text-button" id="jobClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="jobAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="database">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Database</p>
+              <h3>後端資料庫</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="databaseSyncBtn" type="button">同步資料庫</button>
+              <button class="secondary-button" id="backendHealthBtn" type="button">後端健康</button>
+              <button class="secondary-button" id="backendPullInboundBtn" type="button">後端收文</button>
+              <button class="secondary-button" id="backendBackupBtn" type="button">後端備份</button>
+              <button class="secondary-button" id="databaseExportBtn" type="button">匯出資料表</button>
+              <button class="secondary-button" id="databaseMigrateBtn" type="button">產生 Migration</button>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric-card">
+              <span>公文主檔</span>
+              <strong id="dbDocCount">0</strong>
+              <small>收文、發文、公文狀態</small>
+            </article>
+            <article class="metric-card">
+              <span>受文者</span>
+              <strong id="dbRecipientCount">0</strong>
+              <small>機關名稱、代碼、交換中心</small>
+            </article>
+            <article class="metric-card">
+              <span>附件</span>
+              <strong id="dbAttachmentCount">0</strong>
+              <small>清冊、版本、雜湊</small>
+            </article>
+            <article class="metric-card">
+              <span>交換 / Audit</span>
+              <strong id="dbEventCount">0</strong>
+              <small>任務、事件、操作軌跡</small>
+            </article>
+          </div>
+
+          <div class="database-toolbar panel">
+            <div class="segmented" role="group" aria-label="資料表切換">
+              <button class="segment active" data-db-table="documents">公文主檔</button>
+              <button class="segment" data-db-table="recipients">受文者</button>
+              <button class="segment" data-db-table="attachments">附件</button>
+              <button class="segment" data-db-table="exchangeTasks">交換任務</button>
+              <button class="segment" data-db-table="exchangeEvents">交換事件</button>
+              <button class="segment" data-db-table="auditLogs">audit log</button>
+            </div>
+            <label class="toolbar-search">搜尋<input id="databaseSearch" type="search" placeholder="文號、機關、任務、事件、操作" /></label>
+          </div>
+
+          <div class="database-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3 id="databaseTableTitle">公文主檔</h3>
+                <span class="status-pill" id="databaseCount">0 筆</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead id="databaseHead"></thead>
+                  <tbody id="databaseRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>資料明細</h3>
+                <span class="status-pill" id="selectedDatabaseStatus">未選取</span>
+              </div>
+              <div id="databaseDetail"></div>
+            </aside>
+          </div>
+
+          <div class="database-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>新增資料</h3>
+                <button class="text-button" id="databaseAddBtn" type="button">新增</button>
+              </div>
+              <form class="compact-form" id="databaseForm">
+                <label>資料表<select id="databaseInsertTable"><option value="documents">公文主檔</option><option value="recipients">受文者</option><option value="attachments">附件</option><option value="exchangeTasks">交換任務</option><option value="exchangeEvents">交換事件</option><option value="auditLogs">audit log</option></select></label>
+                <label>主鍵 / 編號<input id="databaseInsertId" value="DOC-MANUAL-001" /></label>
+                <label>名稱 / 摘要<input id="databaseInsertTitle" value="手動新增資料" /></label>
+                <label>狀態<select id="databaseInsertStatus"><option>有效</option><option>待同步</option><option>交換完成</option><option>待處理</option><option>封存</option></select></label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Schema 與關聯</h3>
+                <span class="status-pill">Relational</span>
+              </div>
+              <div class="archive-grid" id="databaseSchemaGrid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>資料庫操作紀錄</h3>
+                <button class="text-button" id="databaseClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="databaseAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="features">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Feature Scope</p>
+              <h3>完整功能總表</h3>
+            </div>
+            <span class="status-pill">一次列出</span>
+          </div>
+          <div class="feature-grid" id="featureGrid"></div>
+        </section>
+
+        <section class="view" id="ops">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Operations</p>
+              <h3>管理者維運中心</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="opsHealthBtn" type="button">健康檢查</button>
+              <button class="secondary-button" id="opsExportAuditBtn" type="button">匯出操作紀錄</button>
+              <button class="secondary-button" id="opsBackupBtn" type="button">資料備份</button>
+              <button class="secondary-button" id="opsSwitchEnvBtn" type="button">切換環境</button>
+            </div>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>jAgent 健康</span>
+              <strong id="opsHealthStatus">未檢查</strong>
+              <small id="opsHealthNote">憑證、Token、交換中心</small>
+            </article>
+            <article class="metric-card">
+              <span>API Log</span>
+              <strong id="opsApiLogCount">0</strong>
+              <small id="opsApiLogNote">可查詢請求與回應</small>
+            </article>
+            <article class="metric-card">
+              <span>參數版本</span>
+              <strong id="opsConfigVersion">v1</strong>
+              <small id="opsConfigNote">系統參數版控</small>
+            </article>
+            <article class="metric-card">
+              <span>營運環境</span>
+              <strong id="opsEnvironmentStatus">測試環境</strong>
+              <small id="opsEnvironmentNote">可切換正式環境</small>
+            </article>
+          </div>
+
+          <div class="ops-toolbar panel">
+            <div class="segmented" role="group" aria-label="API log 篩選">
+              <button class="segment active" data-ops-log-filter="all">全部</button>
+              <button class="segment" data-ops-log-filter="200">成功</button>
+              <button class="segment" data-ops-log-filter="4xx">4xx</button>
+              <button class="segment" data-ops-log-filter="5xx">5xx</button>
+              <button class="segment" data-ops-log-filter="jAgent">jAgent</button>
+            </div>
+            <label class="toolbar-search">查詢 Log<input id="opsLogSearch" type="search" placeholder="API、文號、錯誤碼、訊息" /></label>
+          </div>
+
+          <div class="ops-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>API log 查詢</h3>
+                <span class="status-pill" id="opsLogCount">0 筆</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>時間</th>
+                      <th>服務</th>
+                      <th>API</th>
+                      <th>狀態</th>
+                      <th>耗時</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="opsApiLogRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>錯誤碼查詢</h3>
+                <button class="text-button" id="opsLookupErrorBtn" type="button">查詢</button>
+              </div>
+              <form class="compact-form" id="opsErrorForm">
+                <label>錯誤碼<input id="opsErrorCodeInput" value="JAGENT-401" /></label>
+              </form>
+              <div id="opsErrorDetail"></div>
+            </aside>
+          </div>
+
+          <div class="ops-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>系統參數版控</h3>
+                <button class="text-button" id="opsCommitConfigBtn" type="button">建立版本</button>
+              </div>
+              <form class="compact-form" id="opsConfigForm">
+                <label>版本說明<input id="opsConfigNoteInput" value="調整正式交換 API 與憑證政策" /></label>
+                <label>環境<select id="opsEnvSelect"><option>測試環境</option><option>正式環境</option></select></label>
+              </form>
+              <div class="address-results" id="opsConfigList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>資料備份</h3>
+                <button class="text-button" id="opsRestoreBackupBtn" type="button">還原最新</button>
+              </div>
+              <div class="archive-grid" id="opsBackupGrid"></div>
+              <div class="address-results" id="opsBackupList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>維運操作紀錄</h3>
+                <button class="text-button" id="opsClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="opsAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="settings">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Admin</p>
+              <h3>系統設定</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="saveSettingsBtn" type="button">儲存設定</button>
+              <button class="secondary-button" id="settingsTestApiBtn" type="button">測試 API</button>
+              <button class="secondary-button" id="settingsBackupBtn" type="button">匯出設定</button>
+            </div>
+          </div>
+
+          <div class="jagent-status-strip">
+            <article class="metric-card">
+              <span>機關代碼</span>
+              <strong id="settingsAgencyStatus">待檢核</strong>
+              <small id="settingsAgencyNote">尚未驗證機關代碼</small>
+            </article>
+            <article class="metric-card">
+              <span>交換中心</span>
+              <strong id="settingsCenterStatus">未測試</strong>
+              <small id="settingsCenterNote">等待連線測試</small>
+            </article>
+            <article class="metric-card">
+              <span>防火牆</span>
+              <strong id="settingsFirewallStatus">受控</strong>
+              <small id="settingsFirewallNote">0 條規則</small>
+            </article>
+            <article class="metric-card">
+              <span>角色</span>
+              <strong id="settingsRoleStatus">已載入</strong>
+              <small id="settingsRoleNote">RBAC 權限矩陣</small>
+            </article>
+          </div>
+
+          <div class="settings-grid">
+            <section class="form-panel">
+              <h3>機關與交換中心</h3>
+              <label>機關名稱<input id="settingsAgencyName" value="歲悅長照股份有限公司" /></label>
+              <label>機關代碼<input id="settingsAgencyCode" value="A00000000" /></label>
+              <label>所屬交換中心<select id="settingsCenterName"><option>G2B2C 統合交換中心</option><option>北區交換中心</option><option>測試交換中心</option></select></label>
+              <label>jAgent API URL<input id="settingsApiUrl" value="https://jagent.example.gov.tw/api" /></label>
+              <div class="form-actions">
+                <button class="primary-button" id="settingsValidateAgencyBtn" type="button">檢核機關代碼</button>
+                <button class="secondary-button" id="settingsSyncCenterBtn" type="button">同步交換中心</button>
+              </div>
+            </section>
+
+            <section class="form-panel">
+              <h3>API 與憑證</h3>
+              <label>API 模式<select id="settingsApiMode"><option>測試環境</option><option>正式環境</option></select></label>
+              <label>API Timeout<select id="settingsApiTimeout"><option>30 秒</option><option>60 秒</option><option>120 秒</option></select></label>
+              <label>憑證序號<input id="settingsCertSerial" value="SYC-EDOC-2026-0001" /></label>
+              <label>憑證檢核<select id="settingsCertPolicy"><option>必須使用憑證卡</option><option>測試環境允許模擬憑證</option></select></label>
+              <div class="form-actions">
+                <button class="primary-button" id="settingsVerifyCertBtn" type="button">驗證憑證</button>
+                <button class="secondary-button" id="settingsRotateCertBtn" type="button">更換憑證</button>
+              </div>
+            </section>
+          </div>
+
+          <div class="settings-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>防火牆規則</h3>
+                <button class="text-button" id="settingsAddFirewallBtn" type="button">新增規則</button>
+              </div>
+              <form class="compact-form" id="settingsFirewallForm">
+                <label>允許 IP / CIDR<input id="settingsFirewallIp" value="203.0.113.0/24" /></label>
+                <label>用途<input id="settingsFirewallPurpose" value="歲悅辦公室固定 IP" /></label>
+              </form>
+              <div class="address-results" id="settingsFirewallList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>角色設定</h3>
+                <button class="text-button" id="settingsAddRoleBtn" type="button">新增角色</button>
+              </div>
+              <form class="compact-form" id="settingsRoleForm">
+                <label>角色名稱<input id="settingsRoleName" value="稽核助理" /></label>
+                <label>角色說明<input id="settingsRoleNoteInput" value="可查看交換紀錄與報表，不可送交 jAgent" /></label>
+                <label>預設權限<select id="settingsRolePermission"><option value="view_audit">查看稽核</option><option value="export_audit">匯出稽核</option><option value="verify_hash">驗證雜湊</option><option value="query_status">查詢狀態</option></select></label>
+              </form>
+              <div class="permission-grid" id="settingsRoleGrid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>設定操作紀錄</h3>
+                <button class="text-button" id="settingsClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="settingsAuditLog"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
