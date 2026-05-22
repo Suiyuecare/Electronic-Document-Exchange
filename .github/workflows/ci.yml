@@ -1,0 +1,44 @@
+name: eDoc CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    name: Validate backend and frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Compile Python backend
+        run: python -m py_compile backend.py api/index.py
+
+      - name: Check frontend JavaScript
+        run: node --check app.js
+
+      - name: Initialize SQLite schema
+        run: python backend.py --init-only
+
+      - name: Smoke test API
+        run: |
+          python backend.py --host 127.0.0.1 --port 5174 &
+          SERVER_PID=$!
+          sleep 2
+          curl --fail http://127.0.0.1:5174/api/health
+          curl --fail http://127.0.0.1:5174/api/dashboard
+          curl --fail http://127.0.0.1:5174/api/documents
+          kill $SERVER_PID
