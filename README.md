@@ -34,6 +34,24 @@ python3 backend.py --host 127.0.0.1 --port 5174
 - `POST /api/actions/pull-inbound`
 - `POST /api/actions/backup`
 
+## GitHub / Vercel / Supabase 串接
+
+本專案已初始化 Git，並補齊三平台部署檔：
+
+- GitHub：本地 Git repo 已建立；目前 GitHub App 尚未安裝到任何 repo，且本機沒有 `gh` CLI，因此尚無遠端 origin。
+- Vercel：`vercel.json` 與 `api/index.py` 已建立，可部署靜態前端與 Python API。
+- Supabase：`supabase/migrations/202605220001_edoc_core.sql` 與 `supabase/seed.sql` 已建立；後端在 `SUPABASE_URL` 與 `SUPABASE_SERVICE_ROLE_KEY` 存在時會自動改走 Supabase REST API。
+
+Vercel 需要設定的環境變數：
+
+```bash
+EDOC_DB_MODE=supabase
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<server-only-service-role-key>
+```
+
+Supabase 專案建議建立獨立的 `Suiyuecare eDoc` project，不要混用 Finance / Website / HR 的正式資料庫。
+
 ## 需要的完整功能
 
 1. 收文管理：jAgent 拉取來文、收文登錄、條碼/收文號、附件檢視、承辦分派、誤送漏送通知。
