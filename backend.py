@@ -45,10 +45,16 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
 USE_SUPABASE = os.getenv("EDOC_DB_MODE", "").lower() == "supabase" or bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 EDOC_STORAGE_PROVIDER = os.getenv("EDOC_STORAGE_PROVIDER", "local").lower()
 EDOC_STORAGE_BUCKET = os.getenv("EDOC_STORAGE_BUCKET", "edoc-private")
+EDOC_OBJECT_STORAGE_URL = os.getenv("EDOC_OBJECT_STORAGE_URL", (f"{SUPABASE_URL}/storage/v1" if SUPABASE_URL else "")).rstrip("/")
+EDOC_STORAGE_ACCESS_MODE = os.getenv("EDOC_STORAGE_ACCESS_MODE", "server-signed-url")
 EDOC_SIGNED_URL_TTL_SECONDS = int(os.getenv("EDOC_SIGNED_URL_TTL_SECONDS", "300"))
 EDOC_FILE_ENCRYPTION_KEY = os.getenv("EDOC_FILE_ENCRYPTION_KEY", os.getenv("APP_SECRET", "dev-edoc-file-key"))
 EDOC_FILE_ENCRYPTION_ENABLED = os.getenv("EDOC_FILE_ENCRYPTION_ENABLED", "true").lower() != "false"
 EDOC_SCAN_ENGINE = os.getenv("EDOC_SCAN_ENGINE", "ClamAV-compatible")
+EDOC_AV_PROVIDER = os.getenv("EDOC_AV_PROVIDER", EDOC_SCAN_ENGINE)
+EDOC_AV_ENDPOINT = os.getenv("EDOC_AV_ENDPOINT", "")
+EDOC_MAX_FILE_SIZE_MB = int(os.getenv("EDOC_MAX_FILE_SIZE_MB", "100"))
+EDOC_ALLOWED_MIME_TYPES = os.getenv("EDOC_ALLOWED_MIME_TYPES", "application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream")
 EDOC_PUBLIC_BASE_URL = os.getenv("EDOC_PUBLIC_BASE_URL", os.getenv("PRODUCTION_BASE_URL", "")).rstrip("/")
 MONITORING_WEBHOOK_URL = os.getenv("MONITORING_WEBHOOK_URL", "")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -780,6 +786,17 @@ def production_readiness() -> Dict[str, Any]:
         "LINE_CREDENTIAL_EXPIRES_AT",
         "APP_SECRET",
         "INBOX_SIGNING_KEY_EXPIRES_AT",
+        "EDOC_STORAGE_PROVIDER",
+        "EDOC_STORAGE_BUCKET",
+        "EDOC_OBJECT_STORAGE_URL",
+        "EDOC_STORAGE_ACCESS_MODE",
+        "EDOC_FILE_ENCRYPTION_KEY",
+        "EDOC_SCAN_ENGINE",
+        "EDOC_AV_PROVIDER",
+        "EDOC_AV_ENDPOINT",
+        "EDOC_AV_API_KEY",
+        "EDOC_MAX_FILE_SIZE_MB",
+        "EDOC_ALLOWED_MIME_TYPES",
         "EDOC_SIGNING_SECRET",
         "EDOC_SIGNATURE_PROVIDER",
         "EDOC_HSM_PROVIDER",
@@ -797,12 +814,11 @@ def production_readiness() -> Dict[str, Any]:
         warnings.append("只設定 SUPABASE_ANON_KEY 不足以執行 server-side migration / REST 管理操作。")
     if env_present("SMTP_HOST") and not env_present("SMTP_USERNAME"):
         warnings.append("SMTP_HOST 已設定但 SMTP_USERNAME 未設定，若郵件服務要求驗證將派送失敗。")
-    if is_production() and EDOC_STORAGE_PROVIDER != "supabase":
-        blockers.append("production 必須使用 Supabase Storage 或正式物件儲存；不可依賴本機 storage。")
-    if is_production() and not env_present("EDOC_FILE_ENCRYPTION_KEY"):
-        blockers.append("production 必須設定 EDOC_FILE_ENCRYPTION_KEY 供檔案加密使用。")
-    if is_production() and not env_present("EDOC_SCAN_ENGINE"):
-        warnings.append("未設定正式防毒掃描引擎，將使用 ClamAV-compatible 預設值。")
+    storage_service = storage_service_status()
+    if storage_service["productionBlocked"]:
+        blockers.append(f"production 必須接正式物件儲存與防毒服務；缺少：{', '.join(storage_service['missing'])}。")
+    elif not storage_service["ready"]:
+        warnings.append(f"正式檔案儲存與防毒服務尚未完整：{', '.join(storage_service['missing'])}。")
     if not env_present("MONITORING_WEBHOOK_URL"):
         warnings.append("未設定 MONITORING_WEBHOOK_URL，監控告警將只留在系統內，不會推送到外部值班通道。")
     if not env_present("SENTRY_DSN"):
@@ -829,7 +845,7 @@ def production_readiness() -> Dict[str, Any]:
             "cronSecret": env_present("CRON_SECRET"),
             "smtp": env_present("SMTP_HOST") and env_present("SMTP_FROM"),
             "line": env_present("LINE_WEBHOOK_URL"),
-            "storage": EDOC_STORAGE_PROVIDER,
+            "storage": storage_service,
             "encryption": EDOC_FILE_ENCRYPTION_ENABLED and env_present("EDOC_FILE_ENCRYPTION_KEY"),
             "scanner": EDOC_SCAN_ENGINE,
             "publicBaseUrl": EDOC_PUBLIC_BASE_URL,
@@ -865,9 +881,13 @@ def deployment_report() -> Dict[str, Any]:
         "storage": {
             "provider": EDOC_STORAGE_PROVIDER,
             "bucket": EDOC_STORAGE_BUCKET,
+            "objectEndpoint": EDOC_OBJECT_STORAGE_URL or "未設定",
+            "accessMode": EDOC_STORAGE_ACCESS_MODE,
             "signedUrlTtlSeconds": EDOC_SIGNED_URL_TTL_SECONDS,
             "encryptionEnabled": EDOC_FILE_ENCRYPTION_ENABLED,
             "scanner": EDOC_SCAN_ENGINE,
+            "avProvider": EDOC_AV_PROVIDER,
+            "maxFileSizeMb": EDOC_MAX_FILE_SIZE_MB,
         },
         "revision": deployment_revision(),
         "branch": os.getenv("VERCEL_GIT_COMMIT_REF") or os.getenv("GITHUB_REF_NAME") or "local",
@@ -920,6 +940,45 @@ def signing_service_status() -> Dict[str, Any]:
         "mode": "formal" if ready else "simulation-or-incomplete",
         "missing": missing,
         "services": services,
+        "productionBlocked": is_production() and not ready,
+    }
+
+
+def storage_service_status() -> Dict[str, Any]:
+    services = {
+        "provider": {"configured": EDOC_STORAGE_PROVIDER in {"supabase", "s3", "gcs", "azure"}, "value": EDOC_STORAGE_PROVIDER or "未設定"},
+        "bucket": {"configured": bool(EDOC_STORAGE_BUCKET), "value": EDOC_STORAGE_BUCKET or "未設定"},
+        "objectEndpoint": {"configured": bool(EDOC_OBJECT_STORAGE_URL), "value": EDOC_OBJECT_STORAGE_URL or "未設定"},
+        "accessMode": {"configured": EDOC_STORAGE_ACCESS_MODE == "server-signed-url", "value": EDOC_STORAGE_ACCESS_MODE},
+        "encryption": {"configured": EDOC_FILE_ENCRYPTION_ENABLED and env_present("EDOC_FILE_ENCRYPTION_KEY"), "value": "已啟用" if EDOC_FILE_ENCRYPTION_ENABLED else "未啟用", "keyId": file_key_id() if env_present("EDOC_FILE_ENCRYPTION_KEY") else "未設定"},
+        "scanner": {"configured": env_present("EDOC_SCAN_ENGINE"), "value": EDOC_SCAN_ENGINE or "未設定"},
+        "avProvider": {"configured": env_present("EDOC_AV_PROVIDER"), "value": EDOC_AV_PROVIDER or "未設定"},
+        "avEndpoint": {"configured": env_present("EDOC_AV_ENDPOINT"), "value": EDOC_AV_ENDPOINT or "未設定"},
+        "avCredential": {"configured": env_present("EDOC_AV_API_KEY") or EDOC_AV_ENDPOINT.startswith(("tcp://", "clamd://")), "value": "已設定" if env_present("EDOC_AV_API_KEY") else ("內網連線" if EDOC_AV_ENDPOINT.startswith(("tcp://", "clamd://")) else "未設定")},
+        "signedUrlTtl": {"configured": 0 < EDOC_SIGNED_URL_TTL_SECONDS <= 900, "value": EDOC_SIGNED_URL_TTL_SECONDS},
+        "maxFileSize": {"configured": EDOC_MAX_FILE_SIZE_MB > 0, "value": EDOC_MAX_FILE_SIZE_MB},
+        "allowedMimeTypes": {"configured": bool(EDOC_ALLOWED_MIME_TYPES.strip()), "value": EDOC_ALLOWED_MIME_TYPES},
+    }
+    missing = [key for key, item in services.items() if not item["configured"]]
+    ready = not missing
+    return {
+        "ready": ready,
+        "mode": "formal-object-storage-av" if ready else "local-or-incomplete",
+        "missing": missing,
+        "services": services,
+        "policy": {
+            "provider": EDOC_STORAGE_PROVIDER,
+            "bucket": EDOC_STORAGE_BUCKET,
+            "objectEndpoint": EDOC_OBJECT_STORAGE_URL or "未設定",
+            "accessMode": EDOC_STORAGE_ACCESS_MODE,
+            "signedUrlTtlSeconds": EDOC_SIGNED_URL_TTL_SECONDS,
+            "maxFileSizeMb": EDOC_MAX_FILE_SIZE_MB,
+            "allowedMimeTypes": [item.strip() for item in EDOC_ALLOWED_MIME_TYPES.split(",") if item.strip()],
+            "encryptionEnabled": EDOC_FILE_ENCRYPTION_ENABLED,
+            "scanEngine": EDOC_SCAN_ENGINE,
+            "avProvider": EDOC_AV_PROVIDER,
+            "avEndpoint": EDOC_AV_ENDPOINT or "未設定",
+        },
         "productionBlocked": is_production() and not ready,
     }
 
@@ -2185,6 +2244,9 @@ def scan_bytes_for_threats(data: bytes, file_name: str) -> Tuple[str, str]:
 
 
 def scan_file_object(conn: sqlite3.Connection, file_id: str, actor: str = "AV Worker") -> Dict[str, Any]:
+    storage_service = storage_service_status()
+    if storage_service["productionBlocked"]:
+        return {"ok": False, "error": "formal_storage_av_not_ready", "missing": storage_service["missing"], "service": storage_service}
     row = conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_id,)).fetchone()
     if not row:
         return {"ok": False, "error": "file_not_found"}
@@ -2217,12 +2279,22 @@ def scan_file_object(conn: sqlite3.Connection, file_id: str, actor: str = "AV Wo
 
 
 def upload_file_object(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    storage_service = storage_service_status()
+    if storage_service["productionBlocked"]:
+        return {"ok": False, "error": "formal_storage_av_not_ready", "missing": storage_service["missing"], "service": storage_service}
     content = payload.get("content_base64") or payload.get("content") or ""
     if payload.get("content_base64"):
         import base64
         data = base64.b64decode(content)
     else:
         data = str(content).encode("utf-8")
+    max_bytes = EDOC_MAX_FILE_SIZE_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        return {"ok": False, "error": "file_too_large", "max_mb": EDOC_MAX_FILE_SIZE_MB, "size_bytes": len(data)}
+    mime_type = payload.get("mime_type") or "application/octet-stream"
+    allowed_mime_types = {item.strip().lower() for item in EDOC_ALLOWED_MIME_TYPES.split(",") if item.strip()}
+    if allowed_mime_types and mime_type.lower() not in allowed_mime_types:
+        return {"ok": False, "error": "mime_type_not_allowed", "mime_type": mime_type, "allowed": sorted(allowed_mime_types)}
     document_id = payload.get("document_id") or "DOC-UPLOAD-MANUAL"
     if not conn.execute("SELECT 1 FROM documents WHERE id = ?", (document_id,)).fetchone():
         ts = now()
@@ -2240,7 +2312,7 @@ def upload_file_object(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dic
     purpose = payload.get("purpose") or "attachment"
     actor = payload.get("actor") or "API"
     file_row = store_file_object(conn, document_id, file_name, data, purpose, payload.get("version_label") or "v1", actor)
-    conn.execute("UPDATE file_objects SET mime_type = ? WHERE id = ?", (payload.get("mime_type") or "application/octet-stream", file_row["id"]))
+    conn.execute("UPDATE file_objects SET mime_type = ? WHERE id = ?", (mime_type, file_row["id"]))
     scan = scan_file_object(conn, file_row["id"], actor)
     signed = create_file_signed_url(conn, file_row["id"], actor, int(payload.get("ttl_seconds") or EDOC_SIGNED_URL_TTL_SECONDS))
     conn.commit()
@@ -2248,19 +2320,23 @@ def upload_file_object(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dic
 
 
 def storage_health(conn: sqlite3.Connection) -> Dict[str, Any]:
+    service = storage_service_status()
     total = conn.execute("SELECT COUNT(*) AS count FROM file_objects").fetchone()["count"]
     encrypted = conn.execute("SELECT COUNT(*) AS count FROM file_objects WHERE encryption_status = '已加密'").fetchone()["count"]
     pending = conn.execute("SELECT COUNT(*) AS count FROM file_objects WHERE scan_status = '待掃描'").fetchone()["count"]
     quarantined = conn.execute("SELECT COUNT(*) AS count FROM file_objects WHERE scan_status = '已隔離'").fetchone()["count"]
     tokens = conn.execute("SELECT COUNT(*) AS count FROM file_download_tokens WHERE revoked_at IS NULL AND expires_at > ?", (now(),)).fetchone()["count"]
     return {
+        "ready": service["ready"],
         "provider": EDOC_STORAGE_PROVIDER,
         "bucket": EDOC_STORAGE_BUCKET,
+        "service": service,
         "signedUrlTtlSeconds": EDOC_SIGNED_URL_TTL_SECONDS,
         "encryption": {"enabled": EDOC_FILE_ENCRYPTION_ENABLED, "keyId": file_key_id(), "encryptedFiles": encrypted, "totalFiles": total},
-        "scanner": {"engine": EDOC_SCAN_ENGINE, "pending": pending, "quarantined": quarantined},
+        "scanner": {"engine": EDOC_SCAN_ENGINE, "avProvider": EDOC_AV_PROVIDER, "endpoint": EDOC_AV_ENDPOINT or "未設定", "pending": pending, "quarantined": quarantined},
         "activeDownloadTokens": tokens,
-        "mode": "local-encrypted-storage" if EDOC_STORAGE_PROVIDER == "local" else "supabase-storage",
+        "policy": service["policy"],
+        "mode": service["mode"] if service["ready"] else ("local-encrypted-storage" if EDOC_STORAGE_PROVIDER == "local" else "supabase-storage-incomplete"),
     }
 
 
@@ -3153,11 +3229,16 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
         append_alert(alerts, "critical", "SIGNING-SERVICE-INCOMPLETE", f"正式簽章服務尚未設定：{', '.join(signing_service['missing'])}", "設定 HSM/KMS、信任根憑證、TSA、OCSP、CRL 與 EDOC_SIGNING_SECRET 後重新部署。")
     elif not signing_service["ready"]:
         append_alert(alerts, "warning", "SIGNING-SERVICE-SIMULATION", f"簽章服務仍為模擬或不完整：{', '.join(signing_service['missing'])}", "正式上線前完成外部簽章服務接入。")
+    storage_service = storage_service_status()
+    if storage_service["productionBlocked"]:
+        append_alert(alerts, "critical", "STORAGE-SERVICE-INCOMPLETE", f"正式檔案儲存與防毒尚未設定：{', '.join(storage_service['missing'])}", "設定 Supabase Storage private bucket、檔案加密、短效 URL、正式 AV endpoint/API key 後重新部署。")
+    elif not storage_service["ready"]:
+        append_alert(alerts, "warning", "STORAGE-SERVICE-SIMULATION", f"檔案儲存或防毒服務仍為本機/不完整：{', '.join(storage_service['missing'])}", "正式上線前完成物件儲存與防毒引擎接入。")
 
     checks = {
         "database": {"status": "ok", "mode": "sqlite", "detail": str(DB_PATH)},
         "readiness": {"status": "ok" if readiness["ready"] else "needs_action", "missing": readiness["missing"], "blockers": readiness["blockers"]},
-        "storage": {"status": "ok" if EDOC_STORAGE_PROVIDER else "needs_action", "provider": EDOC_STORAGE_PROVIDER, "bucket": EDOC_STORAGE_BUCKET},
+        "storage": {"status": "ok" if storage_service["ready"] else "needs_action", **storage_service},
         "cron": {"status": "ok" if last_job_age is not None else "not_yet_run", "lastRun": last_job, "ageMinutes": last_job_age},
         "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials},
         "signing": {"status": "ok" if signing_service["ready"] else "needs_action", **signing_service},
@@ -3832,11 +3913,16 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
         append_alert(alerts, "critical", "SIGNING-SERVICE-INCOMPLETE", f"正式簽章服務尚未設定：{', '.join(signing_service['missing'])}", "設定 HSM/KMS、信任根憑證、TSA、OCSP、CRL 與 EDOC_SIGNING_SECRET 後重新部署。")
     elif not signing_service["ready"]:
         append_alert(alerts, "warning", "SIGNING-SERVICE-SIMULATION", f"簽章服務仍為模擬或不完整：{', '.join(signing_service['missing'])}", "正式上線前完成外部簽章服務接入。")
+    storage_service = storage_service_status()
+    if storage_service["productionBlocked"]:
+        append_alert(alerts, "critical", "STORAGE-SERVICE-INCOMPLETE", f"正式檔案儲存與防毒尚未設定：{', '.join(storage_service['missing'])}", "設定 Supabase Storage private bucket、檔案加密、短效 URL、正式 AV endpoint/API key 後重新部署。")
+    elif not storage_service["ready"]:
+        append_alert(alerts, "warning", "STORAGE-SERVICE-SIMULATION", f"檔案儲存或防毒服務仍為本機/不完整：{', '.join(storage_service['missing'])}", "正式上線前完成物件儲存與防毒引擎接入。")
 
     checks = {
         "database": {"status": "ok", "mode": "supabase", "detail": SUPABASE_URL},
         "readiness": {"status": "ok" if readiness["ready"] else "needs_action", "missing": readiness["missing"], "blockers": readiness["blockers"]},
-        "storage": {"status": "ok" if EDOC_STORAGE_PROVIDER == "supabase" else "needs_action", "provider": EDOC_STORAGE_PROVIDER, "bucket": EDOC_STORAGE_BUCKET},
+        "storage": {"status": "ok" if storage_service["ready"] else "needs_action", **storage_service},
         "cron": {"status": "ok" if last_job_age is not None else "not_yet_run", "lastRun": last_job, "ageMinutes": last_job_age},
         "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials},
         "signing": {"status": "ok" if signing_service["ready"] else "needs_action", **signing_service},
@@ -4162,13 +4248,32 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(snapshot, 201 if snapshot["ok"] or not is_production() else 503)
                     return
                 if method == "GET" and parts == ["files", "storage-health"]:
+                    service = storage_service_status()
+                    file_objects = supabase_list("file_objects", {"limit": ["1000"]})
+                    tokens = supabase_list("file_download_tokens", {"limit": ["1000"]})
                     self.send_json({
+                        "ready": service["ready"],
                         "provider": EDOC_STORAGE_PROVIDER,
                         "bucket": EDOC_STORAGE_BUCKET,
+                        "service": service,
                         "signedUrlTtlSeconds": EDOC_SIGNED_URL_TTL_SECONDS,
-                        "encryption": {"enabled": EDOC_FILE_ENCRYPTION_ENABLED, "keyId": file_key_id()},
-                        "scanner": {"engine": EDOC_SCAN_ENGINE, "mode": "supabase-metadata"},
-                        "mode": "supabase-storage",
+                        "encryption": {
+                            "enabled": EDOC_FILE_ENCRYPTION_ENABLED,
+                            "keyId": file_key_id() if env_present("EDOC_FILE_ENCRYPTION_KEY") else "未設定",
+                            "encryptedFiles": len([item for item in file_objects if item.get("encryption_status") == "已加密"]),
+                            "totalFiles": len(file_objects),
+                        },
+                        "scanner": {
+                            "engine": EDOC_SCAN_ENGINE,
+                            "avProvider": EDOC_AV_PROVIDER,
+                            "endpoint": EDOC_AV_ENDPOINT or "未設定",
+                            "pending": len([item for item in file_objects if item.get("scan_status") == "待掃描"]),
+                            "quarantined": len([item for item in file_objects if item.get("scan_status") == "已隔離"]),
+                            "mode": "supabase-metadata",
+                        },
+                        "activeDownloadTokens": len([item for item in tokens if not item.get("revoked_at") and (parse_time(item.get("expires_at", "")) or datetime.min) > datetime.now()]),
+                        "policy": service["policy"],
+                        "mode": service["mode"] if service["ready"] else "supabase-storage-incomplete",
                     })
                     return
                 if method == "GET" and parts == ["certificates", "health"]:
@@ -4543,7 +4648,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if method == "POST" and parts == ["files", "upload"]:
                     result = upload_file_object(conn, self.read_json())
-                    self.send_json(result, 201)
+                    self.send_json(result, 201 if not result.get("error") else 422)
                     return
                 if method == "POST" and len(parts) == 3 and parts[0] == "files" and parts[2] == "signed-url":
                     payload = self.read_json()

@@ -26,6 +26,19 @@ EDOC_PUBLIC_BASE_URL=https://edoc.suiyuecare.com
 EDOC_MONITORING_EXPECTED_CRON_MINUTES=1440
 SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
+EDOC_STORAGE_PROVIDER=supabase
+EDOC_STORAGE_BUCKET=edoc-private
+EDOC_OBJECT_STORAGE_URL=https://<project-ref>.supabase.co/storage/v1
+EDOC_STORAGE_ACCESS_MODE=server-signed-url
+EDOC_SIGNED_URL_TTL_SECONDS=300
+EDOC_FILE_ENCRYPTION_ENABLED=true
+EDOC_FILE_ENCRYPTION_KEY=...
+EDOC_SCAN_ENGINE=ClamAV-compatible
+EDOC_AV_PROVIDER=...
+EDOC_AV_ENDPOINT=...
+EDOC_AV_API_KEY=...
+EDOC_MAX_FILE_SIZE_MB=100
+EDOC_ALLOWED_MIME_TYPES=application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream
 CRON_SECRET=...
 SMTP_HOST=...
 SMTP_PORT=587
@@ -63,6 +76,19 @@ vercel env add EDOC_PUBLIC_BASE_URL production
 vercel env add EDOC_MONITORING_EXPECTED_CRON_MINUTES production
 vercel env add SUPABASE_URL production
 vercel env add SUPABASE_SERVICE_ROLE_KEY production --sensitive
+vercel env add EDOC_STORAGE_PROVIDER production
+vercel env add EDOC_STORAGE_BUCKET production
+vercel env add EDOC_OBJECT_STORAGE_URL production
+vercel env add EDOC_STORAGE_ACCESS_MODE production
+vercel env add EDOC_SIGNED_URL_TTL_SECONDS production
+vercel env add EDOC_FILE_ENCRYPTION_ENABLED production
+vercel env add EDOC_FILE_ENCRYPTION_KEY production --sensitive
+vercel env add EDOC_SCAN_ENGINE production
+vercel env add EDOC_AV_PROVIDER production
+vercel env add EDOC_AV_ENDPOINT production
+vercel env add EDOC_AV_API_KEY production --sensitive
+vercel env add EDOC_MAX_FILE_SIZE_MB production
+vercel env add EDOC_ALLOWED_MIME_TYPES production
 vercel env add CRON_SECRET production --sensitive
 vercel env add SMTP_HOST production
 vercel env add SMTP_PORT production
@@ -138,6 +164,7 @@ curl https://edoc.suiyuecare.com/api/healthz
 curl https://edoc.suiyuecare.com/api/production/readiness
 curl https://edoc.suiyuecare.com/api/production/deployment
 curl https://edoc.suiyuecare.com/api/production/monitoring
+curl https://edoc.suiyuecare.com/api/files/storage-health
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/run-due
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/monitoring
 ```
@@ -147,6 +174,7 @@ curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cro
 - `/api/healthz` 回傳 `ok: true`。
 - `/api/production/readiness` 在 production 回傳 `ready: true`。
 - `/api/production/deployment` 顯示 production、revision、branch、deployment URL、Supabase 與 Storage 設定。
+- `/api/files/storage-health` 顯示 `ready: true`，且 provider、bucket、object endpoint、加密、AV provider、AV endpoint、短效 URL 都已設定。
 - `/api/production/monitoring` 回傳 `status: healthy` 或只有可接受的 warning；critical 必須先處理。
 - `/api/cron/run-due` 回傳 `count` 與 `results`，且 Supabase `job_runs` 有新增紀錄。
 - `/api/cron/monitoring` 會寫入 audit log；若有 alert 且設定 `MONITORING_WEBHOOK_URL`，會推送外部值班通道。

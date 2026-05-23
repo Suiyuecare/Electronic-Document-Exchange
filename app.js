@@ -391,6 +391,18 @@ const fileSecurityPolicy = {
   scanEngine: "ClamAV-compatible",
   overLimitAction: "自動隔離"
 };
+let fileStorageServiceState = {
+  ready: false,
+  mode: "未檢查",
+  missing: ["尚未檢查"],
+  provider: "未檢查",
+  bucket: "未檢查",
+  signedUrlTtlSeconds: 300,
+  service: { services: {}, policy: {} },
+  scanner: { engine: "未檢查", avProvider: "未檢查", endpoint: "未檢查", pending: 0, quarantined: 0 },
+  encryption: { enabled: false, keyId: "未檢查", encryptedFiles: 0, totalFiles: 0 },
+  activeDownloadTokens: 0
+};
 
 const fileSecurityItems = archiveRecords.flatMap((record, recordIndex) => record.attachments.map((attachment, attachmentIndex) => {
   const sequence = recordIndex * 3 + attachmentIndex + 1;
@@ -2897,12 +2909,72 @@ function renderFileAccessLog() {
   `).join("");
 }
 
+function fileStorageServiceItems() {
+  const service = fileStorageServiceState.service?.services || {};
+  return [
+    ["物件儲存", service.provider?.value || fileStorageServiceState.provider, service.provider?.configured],
+    ["Private Bucket", service.bucket?.value || fileStorageServiceState.bucket, service.bucket?.configured],
+    ["短效 URL", `${service.signedUrlTtl?.value || fileStorageServiceState.signedUrlTtlSeconds} 秒`, service.signedUrlTtl?.configured],
+    ["檔案加密", service.encryption?.keyId || fileStorageServiceState.encryption?.keyId, service.encryption?.configured],
+    ["防毒引擎", service.scanner?.value || fileStorageServiceState.scanner?.engine, service.scanner?.configured],
+    ["AV 端點", service.avEndpoint?.value || fileStorageServiceState.scanner?.endpoint, service.avEndpoint?.configured],
+    ["AV 憑證", service.avCredential?.value || "未檢查", service.avCredential?.configured],
+    ["檔案上限", `${service.maxFileSize?.value || fileSecurityPolicy.maxSizeMb} MB`, service.maxFileSize?.configured]
+  ];
+}
+
+function renderFileStorageServiceHealth() {
+  const grid = document.querySelector("#fileStorageServiceGrid");
+  const detail = document.querySelector("#fileStorageServiceDetail");
+  if (!grid || !detail) return;
+  const missing = fileStorageServiceState.service?.missing || fileStorageServiceState.missing || [];
+  grid.innerHTML = [
+    ["正式狀態", fileStorageServiceState.ready ? "可上線" : "需補設定"],
+    ["Provider", fileStorageServiceState.provider || fileStorageServiceState.service?.policy?.provider || "未檢查"],
+    ["Bucket", fileStorageServiceState.bucket || fileStorageServiceState.service?.policy?.bucket || "未檢查"],
+    ["下載 Token", `${fileStorageServiceState.activeDownloadTokens || 0} 個有效`]
+  ].map(([label, value]) => `
+    <article class="archive-card">
+      <span>${label}</span>
+      <strong>${value}</strong>
+    </article>
+  `).join("");
+  detail.innerHTML = `
+    <article class="address-card">
+      <strong>${fileStorageServiceState.ready ? "正式儲存與防毒服務已就緒" : "正式儲存與防毒服務尚未完整"}</strong>
+      <p>${missing.length ? `缺少：${missing.join("、")}` : "可使用 private object storage、短效下載 URL、檔案加密與正式 AV 掃描。"}</p>
+      <small>模式：${fileStorageServiceState.mode || fileStorageServiceState.service?.mode || "未檢查"}</small>
+    </article>
+    ${fileStorageServiceItems().map(([label, value, ok]) => `
+      <article class="address-card">
+        <strong>${label}</strong>
+        <p>${value || "未設定"}</p>
+        <small>${ok ? "已設定" : "需補設定"}</small>
+      </article>
+    `).join("")}
+  `;
+}
+
 function renderFileSecurity() {
   renderFileSecuritySummary();
+  renderFileStorageServiceHealth();
   renderFileSecurityRows();
   renderFileSecurityDetail();
   renderFileBackupGrid();
   renderFileAccessLog();
+}
+
+async function loadFileStorageServiceHealth(showMessage = false) {
+  try {
+    const result = await backendRequest("/files/storage-health");
+    fileStorageServiceState = { ...fileStorageServiceState, ...result, missing: result.service?.missing || result.missing || [] };
+    renderFileStorageServiceHealth();
+    if (showMessage) showToast(fileStorageServiceState.ready ? "正式檔案儲存與防毒已就緒。" : "正式檔案儲存與防毒尚有缺項。");
+  } catch (error) {
+    fileStorageServiceState = { ...fileStorageServiceState, ready: false, mode: "檢查失敗", missing: [error.message] };
+    renderFileStorageServiceHealth();
+    if (showMessage) showToast(`檔案儲存檢查失敗：${error.message}`);
+  }
 }
 
 async function persistFileSecurityAction(action, selected) {
@@ -7573,6 +7645,7 @@ document.querySelector("#fileReleaseBtn").addEventListener("click", () => runFil
 document.querySelector("#fileBackupBtn").addEventListener("click", createFileSecurityBackup);
 document.querySelector("#fileRestoreBtn").addEventListener("click", restoreFileSecurityBackup);
 document.querySelector("#filePolicySaveBtn").addEventListener("click", saveFileSecurityPolicy);
+document.querySelector("#fileStorageHealthBtn").addEventListener("click", () => loadFileStorageServiceHealth(true));
 document.querySelector("#fileSecurityPolicyForm").addEventListener("submit", (event) => {
   event.preventDefault();
   saveFileSecurityPolicy();
@@ -7901,6 +7974,7 @@ renderSecurityPermissionGrid();
 renderSecurityDeviceList();
 renderSecurityAuditLog();
 renderFileSecurity();
+loadFileStorageServiceHealth();
 renderAccounts();
 renderReports();
 renderReportsAuditLog();

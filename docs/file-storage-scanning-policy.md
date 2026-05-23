@@ -27,9 +27,17 @@
 ```bash
 EDOC_STORAGE_PROVIDER=supabase
 EDOC_STORAGE_BUCKET=edoc-private
+EDOC_OBJECT_STORAGE_URL=https://<project-ref>.supabase.co/storage/v1
+EDOC_STORAGE_ACCESS_MODE=server-signed-url
 EDOC_SIGNED_URL_TTL_SECONDS=300
+EDOC_FILE_ENCRYPTION_ENABLED=true
 EDOC_FILE_ENCRYPTION_KEY=<production-secret>
 EDOC_SCAN_ENGINE=ClamAV-compatible
+EDOC_AV_PROVIDER=ClamAV daemon / ICAP / AV gateway
+EDOC_AV_ENDPOINT=tcp://clamav.internal:3310
+EDOC_AV_API_KEY=<av-service-key-if-required>
+EDOC_MAX_FILE_SIZE_MB=100
+EDOC_ALLOWED_MIME_TYPES=application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream
 ```
 
 ## 後端 API
@@ -43,6 +51,15 @@ EDOC_SCAN_ENGINE=ClamAV-compatible
 | `POST /api/files/{id}/scan` | 執行防毒掃描並建立 `virus_scan_jobs` |
 
 ## 防毒掃描
+
+正式環境必須設定獨立 AV 服務，不得只靠畫面或本機模擬檢查。`/api/files/storage-health` 會檢查：
+
+- `EDOC_AV_PROVIDER`
+- `EDOC_AV_ENDPOINT`
+- `EDOC_AV_API_KEY`，若採內網 `tcp://` / `clamd://` 可視為內網連線憑證
+- `EDOC_SCAN_ENGINE`
+
+Production 若未完整設定，`/api/production/readiness` 與 `/api/production/monitoring` 會回報 `STORAGE-SERVICE-INCOMPLETE`，`POST /api/files/upload` 與 `POST /api/files/{id}/scan` 也會回傳 `formal_storage_av_not_ready`，避免未掃描檔案進入交換。
 
 掃描結果：
 
