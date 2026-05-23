@@ -2,6 +2,10 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+.env.*
+!.env.example
+!.env.production.example
 .vercel/
 data/
 backups/
+storage/

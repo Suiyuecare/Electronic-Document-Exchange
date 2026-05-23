@@ -39,6 +39,8 @@ jobs:
           SERVER_PID=$!
           sleep 2
           curl --fail http://127.0.0.1:5174/api/health
+          curl --fail http://127.0.0.1:5174/api/production/readiness
+          curl --fail http://127.0.0.1:5174/api/cron/run-due
           curl --fail http://127.0.0.1:5174/api/dashboard
           curl --fail http://127.0.0.1:5174/api/documents
           kill $SERVER_PID

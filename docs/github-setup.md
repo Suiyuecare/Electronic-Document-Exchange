@@ -1,6 +1,6 @@
 # GitHub Setup
 
-This repository is prepared for GitHub, but the GitHub connector currently has no installed account/repository access in Codex.
+This repository is prepared for GitHub and Vercel production deployment.
 
 ## What Is Ready
 
@@ -13,23 +13,21 @@ This repository is prepared for GitHub, but the GitHub connector currently has n
 
 ## Create The Remote Repository
 
-After GitHub access is available, create a repository named:
+The production repository is:
 
 ```text
-seniorlifepr/module-edoc
+Suiyuecare/Electronic-Document-Exchange
 ```
 
-Then push:
+Remote URL:
 
 ```bash
-git remote add origin git@github.com:seniorlifepr/module-edoc.git
-git push -u origin main
+git remote add origin https://github.com/Suiyuecare/Electronic-Document-Exchange.git
 ```
 
-If using HTTPS:
+Push:
 
 ```bash
-git remote add origin https://github.com/seniorlifepr/module-edoc.git
 git push -u origin main
 ```
 
@@ -42,7 +40,7 @@ SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 VERCEL_TOKEN
 VERCEL_ORG_ID
-VERCEL_PROJECT_ID
+VERCEL_PROJECT_ID=prj_iNAxeAFkzDkrwkDFoeOZvJj78L7K
 ```
 
 Do not commit service role keys or Vercel tokens to the repository.

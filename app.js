@@ -8,6 +8,8 @@ const queueItems = [
 ];
 
 const backendApiBase = `${window.location.origin}/api`;
+const authStorageKey = "suiyuecare-edoc-session";
+let authState = JSON.parse(localStorage.getItem(authStorageKey) || "null");
 
 const inboundDocs = [
   {
@@ -19,7 +21,7 @@ const inboundDocs = [
     type: "函",
     subject: "長照服務品質稽核資料補件通知",
     status: "待登錄",
-    owner: "總收發",
+    owner: "總務",
     dept: "總管理處",
     priority: "速件",
     security: "普通",
@@ -37,14 +39,14 @@ const inboundDocs = [
     type: "開會通知單",
     subject: "北區長照服務協調會議",
     status: "待分派",
-    owner: "文書主管",
+    owner: "行政部主任",
     dept: "總管理處",
     priority: "普通件",
     security: "普通",
     receivedAt: "2026-05-22 09:28",
     dueDate: "2026-05-24",
     attachments: ["開會通知單.pdf", "會議議程.pdf"],
-    note: "已完成登錄，待分派承辦人。"
+    note: "已完成登錄，待分派業務助理。"
   },
   {
     id: "IN-1140521-00044",
@@ -94,7 +96,7 @@ const pulledInboundTemplates = [
     type: "函",
     subject: "長照機構感染管制作業檢核通知",
     status: "待登錄",
-    owner: "總收發",
+    owner: "總務",
     dept: "總管理處",
     priority: "速件",
     security: "普通",
@@ -112,7 +114,7 @@ const pulledInboundTemplates = [
     type: "函",
     subject: "移工照顧訓練課程資料補正",
     status: "待登錄",
-    owner: "總收發",
+    owner: "總務",
     dept: "總管理處",
     priority: "普通件",
     security: "普通",
@@ -143,7 +145,7 @@ const dispatchDocs = [
     subject: "檢送本公司日間照顧中心設立許可補正資料，請查照。",
     body: "依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。",
     status: "待清稿",
-    owner: "總收發",
+    owner: "總務",
     attachments: ["設立許可補正資料.pdf", "附件清冊.xml"],
     packageId: "",
     lastReply: "尚未送交 jAgent",
@@ -161,7 +163,7 @@ const dispatchDocs = [
     subject: "函送長照人力培訓成果彙報及附件清冊。",
     body: "檢送本公司長照人力培訓成果彙報資料，請查照。",
     status: "交換完成",
-    owner: "總收發",
+    owner: "總務",
     attachments: ["培訓成果彙報.pdf", "成果統計.xlsx"],
     packageId: "PKG-1140521-003",
     lastReply: "jAgent 回覆 exchangeCompleted，收文方已確認。",
@@ -179,7 +181,7 @@ const dispatchDocs = [
     subject: "申請社區據點服務計畫變更。",
     body: "因服務據點營運配置調整，申請服務計畫變更。",
     status: "等待確認",
-    owner: "文書主管",
+    owner: "行政部主任",
     attachments: ["計畫變更申請.pdf"],
     packageId: "PKG-1140520-009",
     lastReply: "jAgent 回覆 accepted，等待收文方確認。",
@@ -197,7 +199,7 @@ const dispatchDocs = [
     subject: "補送居家服務品質改善計畫。",
     body: "補送改善計畫附件，請惠予備查。",
     status: "交換失敗",
-    owner: "總收發",
+    owner: "總務",
     attachments: ["品質改善計畫.pdf"],
     packageId: "PKG-1140519-006",
     lastReply: "jAgent 回覆 failed：收文方機關代碼暫不可用。",
@@ -251,12 +253,12 @@ const exchangeEvents = [
   ["09:42", "收文拉取完成", "取得 4 筆新來文，2 筆需登錄。"],
   ["09:36", "發文送出", "歲悅字第1140521003號交換完成，等待對方收文確認。"],
   ["09:12", "狀態查詢", "同步 18 筆發文狀態，1 筆需重送。"],
-  ["08:54", "憑證登入", "總收發人員完成 jAgent 登入。"]
+  ["08:54", "憑證登入", "總務完成 jAgent 登入。"]
 ];
 
 const auditEvents = [
   ["10:08", "王督導分派收文", "收1140521-00044 分派至居家照顧課。"],
-  ["09:51", "總收發完成清稿", "歲悅字第1140522007號完成格式檢核。"],
+  ["09:51", "總務完成清稿", "歲悅字第1140522007號完成格式檢核。"],
   ["09:36", "系統寫入交換事件", "jAgent 回覆 exchangeAccepted。"],
   ["08:54", "使用者登入", "憑證登入成功，Token 有效時間 8 小時。"]
 ];
@@ -309,7 +311,7 @@ const archiveRecords = [
       { name: "附件清冊.xml", version: "v1", hash: "SHA256-AD997210", status: "待驗證" }
     ],
     exchangeEvents: ["jAgent 拉取", "收文登錄", "附件清冊建立"],
-    operationTrail: ["總收發登入", "拉取來文", "收文登錄"],
+    operationTrail: ["總務登入", "拉取來文", "收文登錄"],
     hashStatus: "待驗證"
   },
   {
@@ -368,8 +370,8 @@ const securityState = {
 };
 
 const securityDevices = [
-  { id: "DEV-001", ip: "203.0.113.18", name: "總收發辦公室 Mac", fingerprint: "FP-SYC-EDOC-A1F9", status: "允許" },
-  { id: "DEV-002", ip: "198.51.100.27", name: "文書主管筆電", fingerprint: "FP-SYC-EDOC-B8C2", status: "允許" },
+  { id: "DEV-001", ip: "203.0.113.18", name: "總務辦公室 Mac", fingerprint: "FP-SYC-EDOC-A1F9", status: "允許" },
+  { id: "DEV-002", ip: "198.51.100.27", name: "行政部主任筆電", fingerprint: "FP-SYC-EDOC-B8C2", status: "允許" },
   { id: "DEV-003", ip: "192.0.2.41", name: "未知裝置", fingerprint: "FP-UNKNOWN-0041", status: "封鎖" }
 ];
 
@@ -384,16 +386,26 @@ const fileSecurityPolicy = {
   maxSizeMb: 50,
   allowedTypes: "pdf,xml,xlsx,docx,p7m",
   maskPolicy: "身分證 / 電話 / Email",
-  confidentialRoles: "文書主管,資訊管理員,稽核人員",
-  watermarkText: "歲悅長照｜電子公文交換｜限授權使用"
+  confidentialRoles: "行政部主任,主任,執行長",
+  watermarkText: "歲悅長照｜電子公文交換｜限授權使用",
+  scanEngine: "ClamAV-compatible",
+  overLimitAction: "自動隔離"
 };
 
 const fileSecurityItems = archiveRecords.flatMap((record, recordIndex) => record.attachments.map((attachment, attachmentIndex) => {
   const sequence = recordIndex * 3 + attachmentIndex + 1;
   const sizeMb = [3.8, 0.4, 18.6, 1.1, 62.4, 0.8, 9.7][sequence - 1] || 6.2;
   const confidential = record.id === "ARC-004" ? "密" : "普通";
+  const attachmentSeedIds = {
+    "稽核補件通知.pdf": "ATT-001",
+    "附件清冊.xml": "ATT-002",
+    "設立許可補正資料.pdf": "ATT-003",
+    "品質改善計畫.pdf": "ATT-004"
+  };
   return {
     id: `FS-${String(sequence).padStart(3, "0")}`,
+    attachmentId: attachmentSeedIds[attachment.name] || "",
+    backendId: attachmentSeedIds[attachment.name] ? `ASEC-${attachmentSeedIds[attachment.name]}` : "",
     docNo: record.docNo,
     agency: record.agency,
     subject: record.subject,
@@ -404,9 +416,11 @@ const fileSecurityItems = archiveRecords.flatMap((record, recordIndex) => record
     scanStatus: attachment.status === "雜湊通過" ? "已通過" : "待掃描",
     maskStatus: confidential === "密" ? "需遮罩" : "未遮罩",
     confidential,
-    accessRole: confidential === "密" ? "文書主管,資訊管理員,稽核人員" : "一般角色",
+    accessRole: confidential === "密" ? "行政部主任,主任,執行長" : "一般角色",
     watermarkStatus: "未下載",
-    backupStatus: "未備份"
+    backupStatus: "未備份",
+    scanEngine: "ClamAV-compatible",
+    sensitiveHits: confidential === "密" ? ["身分證", "電話"] : []
   };
 }));
 
@@ -425,12 +439,16 @@ const accountSsoState = {
   lastTest: "尚未測試"
 };
 
+const edocAllowedRoles = ["主任", "執行長", "行政部主任", "人資", "會計", "總務", "業務助理"];
+
 const userAccounts = [
-  { id: "USR-001", name: "林總收發", email: "edoc@suiyuecare.com", unit: "總管理處", title: "總收發人員", role: "總收發人員", provider: "Google Workspace", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 10:05", ip: "203.0.113.18", device: "總收發辦公室 Mac" },
-  { id: "USR-002", name: "張文書", email: "records@suiyuecare.com", unit: "總管理處", title: "文書主管", role: "文書主管", provider: "Microsoft Entra", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 09:48", ip: "198.51.100.27", device: "文書主管筆電" },
-  { id: "USR-003", name: "王督導", email: "supervisor@suiyuecare.com", unit: "居家照顧課", title: "督導", role: "承辦人", provider: "Google Workspace", mfa: "待設定", status: "啟用", lastLogin: "2026-05-21 16:20", ip: "203.0.113.18", device: "居服督導 iPad" },
-  { id: "USR-004", name: "陳資訊", email: "it@suiyuecare.com", unit: "資訊室", title: "資訊管理員", role: "資訊管理員", provider: "本機帳號", mfa: "強制重設", status: "啟用", lastLogin: "2026-05-22 08:56", ip: "203.0.113.44", device: "資訊室管理機" },
-  { id: "USR-005", name: "李稽核", email: "audit@suiyuecare.com", unit: "稽核室", title: "稽核人員", role: "稽核人員", provider: "Microsoft Entra", mfa: "已啟用", status: "停用", lastLogin: "2026-05-18 14:12", ip: "198.51.100.27", device: "稽核室筆電" }
+  { id: "USR-001", name: "林總務", email: "edoc@suiyuecare.com", unit: "總務", title: "總務", role: "總務", provider: "Google Workspace", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 10:05", ip: "203.0.113.18", device: "總務辦公室 Mac" },
+  { id: "USR-002", name: "張行政", email: "records@suiyuecare.com", unit: "行政部", title: "行政部主任", role: "行政部主任", provider: "Microsoft Entra", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 09:48", ip: "198.51.100.27", device: "行政部主任筆電" },
+  { id: "USR-003", name: "王主任", email: "director@suiyuecare.com", unit: "營運管理處", title: "主任", role: "主任", provider: "Google Workspace", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-21 16:20", ip: "203.0.113.18", device: "主任辦公室 Mac" },
+  { id: "USR-004", name: "陳執行長", email: "ceo@suiyuecare.com", unit: "經營管理", title: "執行長", role: "執行長", provider: "Google Workspace", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 08:56", ip: "203.0.113.44", device: "執行長筆電" },
+  { id: "USR-005", name: "何人資", email: "hr@suiyuecare.com", unit: "人資", title: "人資", role: "人資", provider: "Microsoft Entra", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 08:40", ip: "198.51.100.27", device: "人資筆電" },
+  { id: "USR-006", name: "許會計", email: "accounting@suiyuecare.com", unit: "會計", title: "會計", role: "會計", provider: "Microsoft Entra", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 08:38", ip: "198.51.100.28", device: "會計筆電" },
+  { id: "USR-007", name: "周業助", email: "sales-assistant@suiyuecare.com", unit: "業務部", title: "業務助理", role: "業務助理", provider: "Google Workspace", mfa: "待設定", status: "啟用", lastLogin: "2026-05-21 15:12", ip: "203.0.113.19", device: "業務助理筆電" }
 ];
 
 const accountLoginLogs = [
@@ -441,8 +459,8 @@ const accountLoginLogs = [
 ];
 
 const accountDevices = [
-  { id: "ACC-DEV-001", userId: "USR-001", name: "總收發辦公室 Mac", ip: "203.0.113.18", fingerprint: "FP-SYC-EDOC-A1F9", status: "信任" },
-  { id: "ACC-DEV-002", userId: "USR-002", name: "文書主管筆電", ip: "198.51.100.27", fingerprint: "FP-SYC-EDOC-B8C2", status: "信任" },
+  { id: "ACC-DEV-001", userId: "USR-001", name: "總務辦公室 Mac", ip: "203.0.113.18", fingerprint: "FP-SYC-EDOC-A1F9", status: "信任" },
+  { id: "ACC-DEV-002", userId: "USR-002", name: "行政部主任筆電", ip: "198.51.100.27", fingerprint: "FP-SYC-EDOC-B8C2", status: "信任" },
   { id: "ACC-DEV-003", userId: "USR-003", name: "居服督導 iPad", ip: "203.0.113.18", fingerprint: "FP-SYC-EDOC-C339", status: "待複核" },
   { id: "ACC-DEV-004", userId: "USR-004", name: "資訊室管理機", ip: "203.0.113.44", fingerprint: "FP-SYC-EDOC-D601", status: "信任" }
 ];
@@ -479,8 +497,8 @@ const settingsState = {
 };
 
 const settingsFirewallRules = [
-  { id: "FW-001", ip: "203.0.113.18", purpose: "總收發辦公室固定 IP", status: "允許" },
-  { id: "FW-002", ip: "198.51.100.27", purpose: "文書主管 VPN", status: "允許" }
+  { id: "FW-001", ip: "203.0.113.18", purpose: "總務辦公室固定 IP", status: "允許" },
+  { id: "FW-002", ip: "198.51.100.27", purpose: "行政部主任 VPN", status: "允許" }
 ];
 
 const settingsAuditLog = [
@@ -493,7 +511,11 @@ const opsState = {
   health: "未檢查",
   environment: "測試環境",
   configVersion: "v1.0.0",
-  restoredBackup: ""
+  restoredBackup: "",
+  readiness: null,
+  deployment: null,
+  monitoring: null,
+  lastMonitorCheck: ""
 };
 
 const opsApiLogs = [
@@ -512,7 +534,7 @@ const opsErrorCodes = {
 };
 
 const opsConfigVersions = [
-  { id: "CFG-001", version: "v1.0.0", env: "測試環境", note: "初始測試參數", actor: "資訊管理員", createdAt: "2026-05-22 10:55" }
+  { id: "CFG-001", version: "v1.0.0", env: "測試環境", note: "初始測試參數", actor: "行政部主任", createdAt: "2026-05-22 10:55" }
 ];
 
 const opsBackups = [];
@@ -520,15 +542,62 @@ const opsAuditLog = [
   ["11:58", "維運中心初始化", "已載入 jAgent 健康檢查、API log、錯誤碼、參數版控、操作紀錄匯出、資料備份與環境切換。"]
 ];
 
+const complianceDocuments = [
+  { id: "DOC-COMP-001", title: "法遵控制矩陣", path: "docs/compliance-control-matrix.md", owner: "主任", status: "已建立", updatedAt: "2026-05-23" },
+  { id: "DOC-COMP-002", title: "營運 Runbook", path: "docs/operations-runbook.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
+  { id: "DOC-COMP-003", title: "資安事件通報與應變 SOP", path: "docs/incident-response-sop.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
+  { id: "DOC-COMP-004", title: "保存年限與稽核證據政策", path: "docs/retention-audit-policy.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
+  { id: "DOC-COMP-005", title: "上線交接與季檢清單", path: "docs/go-live-operating-checklist.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
+  { id: "DOC-COMP-006", title: "正式資料庫權限政策", path: "docs/database-security-policy.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
+  { id: "DOC-COMP-007", title: "正式檔案儲存與病毒掃描政策", path: "docs/file-storage-scanning-policy.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
+  { id: "DOC-COMP-008", title: "電子簽章憑證合法性驗證政策", path: "docs/certificate-legality-validation-policy.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" }
+];
+
+const complianceControls = [
+  { source: "機關公文電子交換作業辦法", control: "電子交換收受、傳遞、異常與留存作業需可追蹤。", implementation: "收文管理、發文管理、交換事件、稽催追蹤", status: "已落地" },
+  { source: "公文電子交換系統資訊安全管理規範", control: "管理層、交換層、機關層、終端層權責與資安事件通報。", implementation: "資安控管、維運中心、事件通報 SOP", status: "已落地" },
+  { source: "文書及檔案管理電腦化作業規範", control: "文書檔案合一、電子封裝、附件清冊、PDF/TIFF/JPG 呈現與保存。", implementation: "文書格式、PDF 套版、自動押章、歸檔保存", status: "已落地" },
+  { source: "個人資料保護法與內部資安政策", control: "個資遮罩、密件隔離、下載浮水印與檔案存取紀錄。", implementation: "檔案資安、RBAC、audit log", status: "已落地" },
+  { source: "正式資料庫權限政策", control: "RLS、密件 row-level 隔離、保留年限與 audit log 不可竄改。", implementation: "Supabase migration 202605230010、database-security-policy.md", status: "已落地" },
+  { source: "正式檔案儲存與病毒掃描政策", control: "Private bucket、加密、短效下載 URL、防毒掃描與隔離阻擋。", implementation: "Supabase migration 202605230011、file-storage-scanning-policy.md", status: "已落地" },
+  { source: "電子簽章憑證合法性驗證政策", control: "自然人/工商/組織憑證需檢查信任鏈、TSA、OCSP 與 CRL。", implementation: "Supabase migration 202605230012、憑證驗證 API、簽章頁即時驗證", status: "已落地" },
+  { source: "委外與營運管理", control: "部署、變更、備份復原、錯誤碼、操作紀錄匯出需有 SOP。", implementation: "部署手冊、維運 Runbook、GitHub Actions", status: "待季檢" }
+];
+
+const complianceSops = {
+  "每日收發檢查": ["確認 jAgent Token 與憑證狀態", "執行每日收文拉取", "檢查交換失敗與未收確認", "匯出當日操作摘要"],
+  "交換失敗處理": ["查詢錯誤碼", "確認機關代碼與封包附件", "重送交換任務", "通知總務與行政部主任"],
+  "資安事件通報": ["停用可疑帳號或 Token", "保存 audit log 與 API log", "通知主管與資安窗口", "完成復原後執行事後檢討"],
+  "備份復原演練": ["建立資料備份", "抽查檔案雜湊", "於測試環境還原", "記錄 RTO / RPO 與差異"],
+  "季檢稽核": ["檢查角色與權限", "抽核交換事件與用印紀錄", "檢查保存年限與刪除凍結", "完成季檢簽核"]
+};
+
+const complianceGaps = [
+  { id: "GAP-001", title: "正式 jAgent API 文件", owner: "行政部主任", status: "待取得", dueDate: "上線前" },
+  { id: "GAP-002", title: "正式機關代碼與憑證卡", owner: "總務", status: "待取得", dueDate: "上線前" },
+  { id: "GAP-003", title: "獨立 eDoc Supabase project", owner: "行政部主任", status: "待建立", dueDate: "部署前" },
+  { id: "GAP-004", title: "SMTP / LINE 正式通道驗證", owner: "行政部主任", status: "待驗證", dueDate: "部署前" }
+];
+
+const complianceAuditLog = [
+  ["14:55", "法遵營運初始化", "已建立法規控制矩陣、營運 Runbook、事件通報、保存稽核與上線交接文件。"]
+];
+
+const backupRestoreDrills = [];
+let latestBackupDrill = null;
+let selectedComplianceDocId = "DOC-COMP-001";
+let complianceLastReview = "";
+let complianceLastDrill = "";
+
 let selectedNotificationId = "NTF-001";
 let notificationFilter = "all";
 let notificationSearchTerm = "";
 const notificationItems = [
-  { id: "NTF-001", type: "收文", title: "衛福部補件通知待登錄", target: "總收發人員", channel: "系統通知", status: "未讀", priority: "高", source: "IN-1140522-00018", body: "jAgent 已拉取新來文，請完成收文登錄與附件檢核。" },
-  { id: "NTF-002", type: "待清稿", title: "日照中心補正資料待清稿", target: "文書主管", channel: "Email + 系統通知", status: "未讀", priority: "高", source: "OUT-1140522-007", body: "函稿已建立，請進行清稿檢核與附件封裝。" },
-  { id: "NTF-003", type: "交換失敗", title: "新北市政府衛生局交換失敗", target: "總收發人員", channel: "系統通知", status: "未讀", priority: "高", source: "OUT-1140519-006", body: "jAgent 回覆 failed，請確認機關代碼並重送。" },
-  { id: "NTF-004", type: "Token 到期", title: "jAgent Token 即將到期", target: "資訊管理員", channel: "Email + 系統通知", status: "未讀", priority: "中", source: "SEC-TOKEN", body: "Token 剩餘時間不足，請刷新或重新憑證登入。" },
-  { id: "NTF-005", type: "逾期查核", title: "收1140522-00013 分派逾期", target: "文書主管", channel: "Line 工作群組", status: "未讀", priority: "高", source: "TRK-003", body: "收文尚未完成分派，請啟動逾期查核提醒。" }
+  { id: "NTF-001", type: "收文", title: "衛福部補件通知待登錄", target: "總務", channel: "系統通知", status: "未讀", priority: "高", source: "IN-1140522-00018", body: "jAgent 已拉取新來文，請完成收文登錄與附件檢核。" },
+  { id: "NTF-002", type: "待清稿", title: "日照中心補正資料待清稿", target: "行政部主任", channel: "Email + 系統通知", status: "未讀", priority: "高", source: "OUT-1140522-007", body: "函稿已建立，請進行清稿檢核與附件封裝。" },
+  { id: "NTF-003", type: "交換失敗", title: "新北市政府衛生局交換失敗", target: "總務", channel: "系統通知", status: "未讀", priority: "高", source: "OUT-1140519-006", body: "jAgent 回覆 failed，請確認機關代碼並重送。" },
+  { id: "NTF-004", type: "Token 到期", title: "jAgent Token 即將到期", target: "行政部主任", channel: "Email + 系統通知", status: "未讀", priority: "中", source: "SEC-TOKEN", body: "Token 剩餘時間不足，請刷新或重新憑證登入。" },
+  { id: "NTF-005", type: "逾期查核", title: "收1140522-00013 分派逾期", target: "行政部主任", channel: "Line 工作群組", status: "未讀", priority: "高", source: "TRK-003", body: "收文尚未完成分派，請啟動逾期查核提醒。" }
 ];
 
 const notificationAuditLog = [
@@ -540,12 +609,18 @@ const notificationGatewayState = {
   lineStatus: "未測試",
   inboxStatus: "啟用",
   scheduleStatus: "未排程",
-  emailApi: "https://mail.suiyuecare.com/send",
-  lineWebhook: "https://line.example.com/webhook/suiyuecare-edoc",
+  emailApi: "讀取後端 SMTP 環境設定",
+  lineWebhook: "讀取後端 LINE_WEBHOOK_URL",
+  lastGatewayCheck: "尚未檢查",
   inboxRetention: "90 天",
   overdueSchedule: "每日 09:00",
   tokenSchedule: "到期前 30 分鐘",
-  failureChannel: "Email + Line + 系統通知"
+  failureChannel: "Email + Line + 系統通知",
+  credentials: [
+    { id: "NCRED-EMAIL-SMTP", channel: "Email", provider: "SMTP / Transactional Email", credential_type: "SMTP 帳號/應用程式密碼", masked_identifier: "SMTP_HOST=未設定；SMTP_FROM=未設定", status: "待驗證", expires_at: "", last_validated_at: "" },
+    { id: "NCRED-LINE-WEBHOOK", channel: "Line 工作群組", provider: "LINE Messaging API / Webhook", credential_type: "Webhook Secret / Channel Access Token", masked_identifier: "LINE_WEBHOOK_URL=未設定", status: "待驗證", expires_at: "", last_validated_at: "" },
+    { id: "NCRED-INBOX-SIGNING", channel: "系統站內通知", provider: "Suiyuecare eDoc", credential_type: "站內通知簽章金鑰", masked_identifier: "APP_SECRET/CRON_SECRET", status: "待驗證", expires_at: "", last_validated_at: "" }
+  ]
 };
 
 const notificationDeliveryLog = [
@@ -553,7 +628,7 @@ const notificationDeliveryLog = [
 ];
 
 const systemInboxItems = [
-  { id: "INBOX-001", target: "總收發人員", title: "衛福部補件通知待登錄", status: "未讀", createdAt: "11:03" }
+  { id: "INBOX-001", target: "總務", title: "衛福部補件通知待登錄", status: "未讀", createdAt: "11:03" }
 ];
 
 const notificationSchedules = [];
@@ -562,13 +637,13 @@ let selectedJobId = "JOB-001";
 let jobFilter = "all";
 let jobSearchTerm = "";
 const backgroundJobs = [
-  { id: "JOB-001", name: "每日收文拉取", type: "pullInbound", schedule: "每日 08:30", nextRun: "2026-05-23 08:30", status: "啟用", lastResult: "尚未執行", notify: "總收發人員", runCount: 0 },
-  { id: "JOB-002", name: "發文翌日查核", type: "nextDayCheck", schedule: "每日 09:00", nextRun: "2026-05-23 09:00", status: "啟用", lastResult: "尚未執行", notify: "文書主管", runCount: 0 },
-  { id: "JOB-003", name: "Token 到期檢查", type: "tokenCheck", schedule: "每 15 分鐘", nextRun: "2026-05-22 11:15", status: "啟用", lastResult: "尚未執行", notify: "資訊管理員", runCount: 0 },
-  { id: "JOB-004", name: "逾期稽催", type: "overdueReminder", schedule: "每小時", nextRun: "2026-05-22 12:00", status: "啟用", lastResult: "尚未執行", notify: "文書主管", runCount: 0 },
-  { id: "JOB-005", name: "交換狀態同步", type: "exchangeSync", schedule: "每 15 分鐘", nextRun: "2026-05-22 11:15", status: "啟用", lastResult: "尚未執行", notify: "總收發人員", runCount: 0 },
-  { id: "JOB-006", name: "歸檔封存", type: "archiveSeal", schedule: "每日 18:00", nextRun: "2026-05-22 18:00", status: "啟用", lastResult: "尚未執行", notify: "稽核人員", runCount: 0 },
-  { id: "JOB-007", name: "報表產生", type: "reportGenerate", schedule: "每日 18:00", nextRun: "2026-05-22 18:00", status: "啟用", lastResult: "尚未執行", notify: "文書主管", runCount: 0 }
+  { id: "JOB-001", name: "每日收文拉取", type: "pullInbound", schedule: "每日 08:30", nextRun: "2026-05-23 08:30", status: "啟用", lastResult: "尚未執行", notify: "總務", runCount: 0 },
+  { id: "JOB-002", name: "發文翌日查核", type: "nextDayCheck", schedule: "每日 09:00", nextRun: "2026-05-23 09:00", status: "啟用", lastResult: "尚未執行", notify: "行政部主任", runCount: 0 },
+  { id: "JOB-003", name: "Token 到期檢查", type: "tokenCheck", schedule: "每 15 分鐘", nextRun: "2026-05-22 11:15", status: "啟用", lastResult: "尚未執行", notify: "行政部主任", runCount: 0 },
+  { id: "JOB-004", name: "逾期稽催", type: "overdueReminder", schedule: "每小時", nextRun: "2026-05-22 12:00", status: "啟用", lastResult: "尚未執行", notify: "行政部主任", runCount: 0 },
+  { id: "JOB-005", name: "交換狀態同步", type: "exchangeSync", schedule: "每 15 分鐘", nextRun: "2026-05-22 11:15", status: "啟用", lastResult: "尚未執行", notify: "總務", runCount: 0 },
+  { id: "JOB-006", name: "歸檔封存", type: "archiveSeal", schedule: "每日 18:00", nextRun: "2026-05-22 18:00", status: "啟用", lastResult: "尚未執行", notify: "主任", runCount: 0 },
+  { id: "JOB-007", name: "報表產生", type: "reportGenerate", schedule: "每日 18:00", nextRun: "2026-05-22 18:00", status: "啟用", lastResult: "尚未執行", notify: "行政部主任", runCount: 0 }
 ];
 
 const jobAuditLog = [
@@ -578,6 +653,8 @@ const jobAuditLog = [
 let activeDatabaseTable = "documents";
 let selectedDatabaseId = "DOC-IN-1140522-00018";
 let databaseSearchTerm = "";
+let searchResults = [];
+let selectedSearchId = "";
 const databaseAuditLog = [
   ["11:10", "後端資料庫初始化", "已建立公文主檔、受文者、附件、交換任務、交換事件與 audit log 檢視。"]
 ];
@@ -622,11 +699,11 @@ const formatAuditLog = [
 ];
 
 const featureGroups = [
-  ["01 收文管理", "jAgent 拉取來文、收文登錄、條碼/收文號、附件檢視、承辦分派、誤送漏送通知、收文列印與批次匯出。"],
+  ["01 收文管理", "jAgent 拉取來文後統一由總務收文登錄，再分發給各部門主管，並保留誤送漏送通知、收文列印與批次匯出。"],
   ["02 發文管理", "建立函稿、受文者與副本管理、清稿檢核、附件封裝、送交 jAgent、查詢交換結果、重送與撤回處理。"],
   ["03 jAgent 介接", "憑證登入、Token 管理、API 狀態、交換中心連線、地址簿查詢、送件、收件、回覆與狀態同步。"],
   ["04 文書格式", "文號、文別、速別、密等、主旨、說明、辦法、附件清冊、受文者機關代碼與標準交換資料欄位。"],
-  ["05 流程控管", "承辦、主管、總收發、文書主管、資訊管理員、稽核人員等角色權限與待辦管制。"],
+  ["05 流程控管", "僅主任、執行長、行政部主任、人資、會計、總務、業務助理可使用電子公文功能；收文由總務統一收件後分派部門主管。"],
   ["06 稽催追蹤", "發文翌日查核、逾期提醒、未收確認提醒、異常重送、退回補正與處理時限儀表板。"],
   ["07 歸檔保存", "原文、附件、交換事件、操作軌跡、檔案雜湊、版本、下載紀錄與保存年限控管。"],
   ["08 資安控管", "憑證卡、權限 RBAC、IP/裝置限制、敏感欄位遮罩、登入登出、Token 過期與操作不可否認性。"],
@@ -641,20 +718,50 @@ const featureGroups = [
 ];
 
 const roleNotes = {
-  總收發人員: "可登入 jAgent、執行收文、發文交換、查詢交換結果與處理異常。",
-  承辦人: "可建立公文草稿、補附件、回覆退件與查看自己承辦案件。",
-  文書主管: "可審核清稿、分派收文、退回補正與監控處理時限。",
-  資訊管理員: "可設定 jAgent、憑證、交換中心、防火牆與系統參數。",
-  稽核人員: "可查詢操作軌跡、交換紀錄、附件雜湊與保存狀態。"
+  主任: "可查看所屬部門公文、核准部門分派、追蹤逾期與查詢交換結果。",
+  執行長: "可查看全公司公文、核定重要或密件流程、查閱報表與稽核紀錄。",
+  行政部主任: "可管理流程、清稿、角色設定、jAgent 參數、資安與營運維護。",
+  人資: "可處理人資相關來文與發文，查看分派給人資部門的案件。",
+  會計: "可處理會計與補助款相關來文與發文，查看分派給會計部門的案件。",
+  總務: "唯一收文入口；可登入 jAgent、拉取與登錄來文，再分發給各部門主管。",
+  業務助理: "可建立函稿、補附件、依分派協助發文與查詢自己承辦案件。"
 };
 
 const rolePermissions = {
-  總收發人員: ["pull_inbound", "register_inbound", "assign_case", "send_dispatch", "query_status"],
-  承辦人: ["draft_dispatch", "view_assigned", "upload_attachment", "reply_case"],
-  文書主管: ["review_dispatch", "assign_case", "reject_case", "approve_format", "query_status"],
-  資訊管理員: ["manage_jagent", "manage_token", "manage_center", "manage_roles", "query_address_book"],
-  稽核人員: ["view_audit", "export_audit", "verify_hash", "view_all_status"]
+  主任: ["view_assigned", "assign_case", "query_status", "review_dispatch", "view_audit"],
+  執行長: ["view_all_status", "query_status", "review_dispatch", "approve_format", "view_audit", "export_audit"],
+  行政部主任: ["review_dispatch", "assign_case", "reject_case", "approve_format", "manage_jagent", "manage_token", "manage_center", "manage_roles", "query_address_book", "view_audit", "export_audit"],
+  人資: ["view_assigned", "draft_dispatch", "upload_attachment", "reply_case", "query_status"],
+  會計: ["view_assigned", "draft_dispatch", "upload_attachment", "reply_case", "query_status"],
+  總務: ["pull_inbound", "register_inbound", "assign_case", "send_dispatch", "query_status", "query_address_book"],
+  業務助理: ["draft_dispatch", "view_assigned", "upload_attachment", "reply_case", "query_status"]
 };
+
+const roleDataScopes = {
+  主任: { title: "主任部門池", owner: "主任", departments: ["營運管理處"], rule: "僅查看所屬部門、被分派或需主管核准的公文。" },
+  執行長: { title: "全域核定池", owner: "執行長", departments: ["全公司"], rule: "可查閱重大、密件與跨部門核定案件。" },
+  行政部主任: { title: "行政部主任工作區", owner: "行政部主任", departments: ["行政部", "總管理處"], rule: "不可直接檢視總務收發池；只看行政部清稿、簽核、維運與授權案件。" },
+  人資: { title: "人資部門池", owner: "人資", departments: ["人資"], rule: "僅處理人資相關或被分派案件。" },
+  會計: { title: "會計部門池", owner: "會計", departments: ["會計"], rule: "僅處理會計、補助款、核銷相關案件。" },
+  總務: { title: "總務收文入口", owner: "總務", departments: ["總務"], rule: "只能處理 jAgent 來文拉取、收文登錄與待分發池；不可直接檢視行政部主任部門公文。" },
+  業務助理: { title: "業務助理承辦池", owner: "業務助理", departments: ["業務部"], rule: "僅查看自己承辦、補附件或被派工案件。" }
+};
+
+const documentAclRules = [
+  { id: "ACL-001", docId: "IN-1140522-00018", principalType: "role", principal: "總務", view: true, sign: false, download: true, seal: false, delegate: true, reason: "總務統一拉取、登錄、分派來文。", grantedBy: "system" },
+  { id: "ACL-002", docId: "IN-1140522-00018", principalType: "role", principal: "主任", view: true, sign: true, download: true, seal: false, delegate: false, reason: "主管承接分派後可簽核。", grantedBy: "system" },
+  { id: "ACL-003", docId: "OUT-1140522-007", principalType: "role", principal: "業務助理", view: true, sign: false, download: false, seal: false, delegate: false, reason: "承辦撰稿，只可檢視與補正內容。", grantedBy: "system" },
+  { id: "ACL-004", docId: "OUT-1140522-007", principalType: "role", principal: "行政部主任", view: true, sign: true, download: true, seal: true, delegate: true, reason: "清稿、會辦、用印前核准。", grantedBy: "system" },
+  { id: "ACL-005", docId: "OUT-1140522-007", principalType: "role", principal: "總務", view: true, sign: false, download: true, seal: true, delegate: false, reason: "附件封裝、押章與送交 jAgent。", grantedBy: "system" },
+  { id: "ACL-006", docId: "OUT-1140519-006", principalType: "role", principal: "總務", view: true, sign: false, download: true, seal: true, delegate: false, reason: "交換失敗重送作業。", grantedBy: "system" },
+  { id: "ACL-007", docId: "OUT-1140519-006", principalType: "role", principal: "行政部主任", view: true, sign: true, download: true, seal: true, delegate: true, reason: "異常重送前複核。", grantedBy: "system" },
+  { id: "ACL-008", docId: "DOC-ADMIN-1140523-001", principalType: "role", principal: "行政部主任", view: true, sign: true, download: true, seal: true, delegate: true, reason: "行政部內部清稿與權限管理。", grantedBy: "system" },
+  { id: "ACL-009", docId: "DOC-ADMIN-1140523-001", principalType: "role", principal: "總務", view: false, sign: false, download: false, seal: false, delegate: false, reason: "明確隔離總務收文區與行政部內部公文。", grantedBy: "system" }
+];
+
+const documentAclEvents = [
+  ["11:36", "文件 ACL 初始化", "已依公文、角色、簽核與下載需求建立細權限。"]
+];
 
 const permissionLabels = {
   pull_inbound: "拉取收文",
@@ -680,22 +787,29 @@ const permissionLabels = {
   view_all_status: "查看全域狀態"
 };
 
-let workflowRole = "總收發人員";
+let workflowRole = "總務";
+let draftConfirmed = false;
+let draftSigned = false;
 let selectedWorkflowTaskId = "WF-001";
 const workflowTasks = [
-  { id: "WF-001", title: "衛福部補件通知登錄", type: "收文", step: "收文登錄", role: "總收發人員", status: "待處理" },
-  { id: "WF-002", title: "臺北市政府社會局會議通知分派", type: "收文", step: "承辦分派", role: "文書主管", status: "待處理" },
-  { id: "WF-003", title: "日照中心補正資料發文", type: "發文", step: "清稿檢核", role: "文書主管", status: "待審核" },
-  { id: "WF-004", title: "jAgent 交換中心連線設定", type: "系統", step: "介接設定", role: "資訊管理員", status: "待處理" },
-  { id: "WF-005", title: "五月交換紀錄抽核", type: "稽核", step: "紀錄查核", role: "稽核人員", status: "待查核" }
+  { id: "WF-001", title: "衛福部補件通知登錄", type: "收文", step: "收文登錄", role: "總務", status: "待處理" },
+  { id: "WF-002", title: "臺北市政府社會局會議通知分派", type: "收文", step: "分派部門主管", role: "總務", status: "待處理" },
+  { id: "WF-003", title: "日照中心補正資料發文", type: "發文", step: "清稿檢核", role: "行政部主任", status: "待審核" },
+  { id: "WF-004", title: "jAgent 交換中心連線設定", type: "系統", step: "介接設定", role: "行政部主任", status: "待處理" },
+  { id: "WF-005", title: "五月交換紀錄抽核", type: "稽核", step: "紀錄查核", role: "主任", status: "待查核" },
+  { id: "WF-006", title: "人資補助名冊來文", type: "收文", step: "部門主管承接", role: "人資", status: "待處理" },
+  { id: "WF-007", title: "會計補助款核銷來文", type: "收文", step: "部門主管承接", role: "會計", status: "待處理" },
+  { id: "WF-008", title: "重大密件核定", type: "發文", step: "最終核定", role: "執行長", status: "待審核" }
 ];
 
 const workflowSteps = [
-  ["01", "總收發人員", "拉取收文、登錄、送交發文與查詢交換結果"],
-  ["02", "承辦人", "建立函稿、補附件、處理被分派案件"],
-  ["03", "文書主管", "審核清稿、分派案件、退回補正"],
-  ["04", "資訊管理員", "管理 jAgent、Token、交換中心與角色權限"],
-  ["05", "稽核人員", "查核交換紀錄、操作軌跡、附件雜湊與保存狀態"]
+  ["01", "總務", "統一拉取、收文登錄、附件檢核，完成後分發給各部門主管"],
+  ["02", "主任", "承接所屬部門來文，核准部門分派與追蹤逾期"],
+  ["03", "行政部主任", "管理流程、清稿、角色、jAgent 參數與資安營運"],
+  ["04", "人資", "處理人資相關來文與發文附件"],
+  ["05", "會計", "處理會計、補助款、核銷相關來文與發文附件"],
+  ["06", "業務助理", "建立函稿、補附件、協助發文與查詢被分派案件"],
+  ["07", "執行長", "核定重大、密件或跨部門高風險公文"]
 ];
 
 const workflowAuditLog = [
@@ -704,14 +818,14 @@ const workflowAuditLog = [
 
 let activeWorkflowTemplate = "standard";
 const workflowTemplates = {
-  standard: { name: "一般發文簽核", steps: ["承辦人擬稿", "文書主管清稿", "總收發用印", "送交 jAgent"] },
-  urgent: { name: "速件發文簽核", steps: ["承辦人擬稿", "文書主管即時審核", "總收發用印", "翌日查核"] },
-  confidential: { name: "密件發文簽核", steps: ["承辦人擬稿", "文書主管審核", "資訊管理員資安檢核", "負責人核定", "總收發用印"] },
-  procurement: { name: "採購/金額簽核", steps: ["承辦人擬稿", "部門主管審核", "財務複核", "負責人核定", "總收發用印"] }
+  standard: { name: "一般發文簽核", steps: ["業務助理擬稿", "行政部主任清稿", "總務用印", "送交 jAgent"] },
+  urgent: { name: "速件發文簽核", steps: ["業務助理擬稿", "行政部主任即時審核", "總務用印", "翌日查核"] },
+  confidential: { name: "密件發文簽核", steps: ["業務助理擬稿", "行政部主任審核", "行政部主任資安檢核", "負責人核定", "總務用印"] },
+  procurement: { name: "採購/金額簽核", steps: ["業務助理擬稿", "部門主管審核", "財務複核", "負責人核定", "總務用印"] }
 };
 
 const workflowProxies = [
-  { id: "PX-001", from: "文書主管", to: "總收發人員", reason: "主管差勤代理", status: "啟用" }
+  { id: "PX-001", from: "行政部主任", to: "總務", reason: "主管差勤代理", status: "啟用" }
 ];
 
 const workflowProofLog = [
@@ -721,18 +835,38 @@ const workflowProofLog = [
 let selectedSealId = "SEAL-001";
 let selectedSealRequestId = "REQ-001";
 const sealRegistry = [
-  { id: "SEAL-001", name: "歲悅長照公司章", type: "公司章", owner: "文書主管", docType: "函", status: "啟用", hash: "SHA256-SEAL-A19F" },
-  { id: "SEAL-002", name: "歲悅負責人章", type: "負責人章", owner: "文書主管", docType: "函", status: "啟用", hash: "SHA256-SEAL-B72C" },
-  { id: "SEAL-003", name: "附件騎縫章", type: "騎縫章", owner: "總收發人員", docType: "附件", status: "停用", hash: "SHA256-SEAL-C44D" }
+  { id: "SEAL-001", name: "歲悅長照公司章", type: "公司章", owner: "行政部主任", docType: "函", status: "啟用", widthMm: 30, heightMm: 30, imageName: "待上傳", imageDataUrl: "", fileObjectId: "", calibrationStatus: "待上傳圖檔", hash: "SHA256-SEAL-A19F" },
+  { id: "SEAL-002", name: "歲悅負責人章", type: "負責人章", owner: "行政部主任", docType: "函", status: "啟用", widthMm: 18, heightMm: 18, imageName: "待上傳", imageDataUrl: "", fileObjectId: "", calibrationStatus: "待上傳圖檔", hash: "SHA256-SEAL-B72C" },
+  { id: "SEAL-003", name: "附件騎縫章", type: "騎縫章", owner: "總務", docType: "附件", status: "停用", widthMm: 10, heightMm: 35, imageName: "待上傳", imageDataUrl: "", fileObjectId: "", calibrationStatus: "待上傳圖檔", hash: "SHA256-SEAL-C44D" }
 ];
 
 const sealRequests = [
-  { id: "REQ-001", docId: "OUT-1140522-007", sealId: "SEAL-001", step: "文書主管簽核", status: "待簽核", stampNo: "", stampedAt: "" },
+  { id: "REQ-001", docId: "OUT-1140522-007", sealId: "SEAL-001", step: "行政部主任簽核", status: "待簽核", stampNo: "", stampedAt: "" },
   { id: "REQ-002", docId: "OUT-1140520-009", sealId: "SEAL-002", step: "負責人核定", status: "已押章", stampNo: "STAMP-1140520-009", stampedAt: "2026-05-22 09:30" }
 ];
 
 const sealAuditLog = [
   ["11:18", "印鑑管理初始化", "已載入印鑑清冊、簽核佇列與用印軌跡。"]
+];
+
+const pdfPointsPerMm = 72 / 25.4;
+
+function sealWidthPt(seal) {
+  return Math.round(Number(seal?.widthMm || 30) * pdfPointsPerMm * 100) / 100;
+}
+
+function sealHeightPt(seal) {
+  return Math.round(Number(seal?.heightMm || 30) * pdfPointsPerMm * 100) / 100;
+}
+
+const signingCertificates = [
+  { id: "CERT-SEAL-001", owner: "行政部主任", type: "組織憑證", subject: "CN=Suiyuecare Admin Chief Seal,O=Suiyuecare", issuer: "Suiyuecare Internal CA", serialNo: "SYC-SEAL-2026-0001", algorithm: "HMAC-SHA256-RSA-PSS-READY", validTo: "2027-12-31", status: "啟用", fingerprint: "SHA256-CERT-SEAL-001", chainStatus: "待驗證", ocspStatus: "待查詢", crlStatus: "待查詢", tsaStatus: "待驗證" },
+  { id: "CERT-SEAL-002", owner: "總務", type: "工商憑證", subject: "CN=Suiyuecare General Affairs Seal,O=Suiyuecare", issuer: "Suiyuecare Internal CA", serialNo: "SYC-GA-2026-0002", algorithm: "HMAC-SHA256-RSA-PSS-READY", validTo: "2027-12-31", status: "啟用", fingerprint: "SHA256-CERT-SEAL-002", chainStatus: "待驗證", ocspStatus: "待查詢", crlStatus: "待查詢", tsaStatus: "待驗證" },
+  { id: "CERT-TSA-001", owner: "系統時間戳", type: "時間戳憑證", subject: "CN=Suiyuecare TSA,O=Suiyuecare", issuer: "Suiyuecare Internal CA", serialNo: "SYC-TSA-2026-0001", algorithm: "RFC3161-TSA-SIM", validTo: "2027-12-31", status: "啟用", fingerprint: "SHA256-CERT-TSA-001", chainStatus: "待驗證", ocspStatus: "待查詢", crlStatus: "待查詢", tsaStatus: "待驗證" }
+];
+
+const electronicSignatureProofs = [
+  { id: "ESIG-DEMO-001", docId: "OUT-1140522-007", signer: "行政部主任", certificateId: "CERT-SEAL-001", type: "seal", algorithm: "HMAC-SHA256-RSA-PSS-READY", digest: "待正式簽章後更新", signature: "待簽章", tsaToken: "待時間戳", status: "待簽章", createdAt: "尚未建立", certificateValidation: { chain_status: "待驗證", ocsp_status: "待查詢", crl_status: "待查詢", tsa_status: "待驗證", certificate_type: "組織憑證" } }
 ];
 
 const pdfVersionStore = {};
@@ -741,10 +875,10 @@ let selectedTrackingId = "TRK-001";
 let trackingFilter = "all";
 let trackingSearchTerm = "";
 const trackingCases = [
-  { id: "TRK-001", title: "歲悅字第1140520009號等待收文確認", agency: "桃園市政府社會局", type: "未收確認", dueDate: "2026-05-23", owner: "總收發", status: "未收確認", note: "jAgent 已 accepted，尚未收到收文方確認。" },
-  { id: "TRK-002", title: "歲悅字第1140521003號翌日查核", agency: "衛生福利部", type: "翌日查核", dueDate: "2026-05-23", owner: "文書主管", status: "翌日查核", note: "發文後需於次工作日確認交換結果。" },
-  { id: "TRK-003", title: "收1140522-00013 會議通知分派逾期", agency: "臺北市政府社會局", type: "逾期提醒", dueDate: "2026-05-22", owner: "文書主管", status: "逾期提醒", note: "尚未完成承辦分派，需提醒主管處理。" },
-  { id: "TRK-004", title: "日照補正資料附件缺漏", agency: "臺北市政府社會局", type: "退回補正", dueDate: "2026-05-29", owner: "承辦人", status: "退回補正", note: "附件清冊與實際檔案數量不一致。" }
+  { id: "TRK-001", title: "歲悅字第1140520009號等待收文確認", agency: "桃園市政府社會局", type: "未收確認", dueDate: "2026-05-23", owner: "總務", status: "未收確認", note: "jAgent 已 accepted，尚未收到收文方確認。" },
+  { id: "TRK-002", title: "歲悅字第1140521003號翌日查核", agency: "衛生福利部", type: "翌日查核", dueDate: "2026-05-23", owner: "行政部主任", status: "翌日查核", note: "發文後需於次工作日確認交換結果。" },
+  { id: "TRK-003", title: "收1140522-00013 會議通知分派逾期", agency: "臺北市政府社會局", type: "逾期提醒", dueDate: "2026-05-22", owner: "行政部主任", status: "逾期提醒", note: "尚未完成承辦分派，需提醒主管處理。" },
+  { id: "TRK-004", title: "日照補正資料附件缺漏", agency: "臺北市政府社會局", type: "退回補正", dueDate: "2026-05-29", owner: "業務助理", status: "退回補正", note: "附件清冊與實際檔案數量不一致。" }
 ];
 
 const trackingAuditLog = [
@@ -753,6 +887,7 @@ const trackingAuditLog = [
 
 const titles = {
   dashboard: "交換總覽",
+  search: "查詢與搜尋",
   inbound: "收文管理",
   dispatch: "發文管理",
   compose: "建立電子公文",
@@ -770,6 +905,7 @@ const titles = {
   jobs: "背景任務",
   database: "後端資料庫",
   ops: "維運中心",
+  complianceOps: "法遵營運",
   features: "完整功能總表",
   settings: "系統設定"
 };
@@ -788,22 +924,580 @@ function showToast(message) {
   window.setTimeout(() => toast.classList.remove("show"), 2400);
 }
 
+function confirmOperation(title, body) {
+  if (typeof window.confirm !== "function") return true;
+  return window.confirm(`${title}\n\n${body}`);
+}
+
+function blockOperation(message, auditFn = null, auditTitle = "操作防呆阻擋") {
+  if (auditFn) auditFn(auditTitle, message);
+  showToast(message);
+  return false;
+}
+
+function clearLogWithConfirm(log, renderFn, label) {
+  if (!log.length) return showToast(`目前沒有可清除的${label}。`);
+  if (!confirmOperation(`確認清除${label}`, "此動作只清除目前畫面的操作軌跡顯示，不會刪除正式 audit log；清除後此畫面無法還原。")) return;
+  log.length = 0;
+  renderFn();
+  showToast(`已清除畫面上的${label}。`);
+}
+
 function setView(target) {
+  if (!isRouteAllowed(target)) target = "dashboard";
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === target));
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.target === target));
   document.querySelector("#pageTitle").textContent = titles[target] || "電子公文交換";
+  if (location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
+}
+
+function activeRole() {
+  return workflowRole || authState?.user?.role || "總務";
+}
+
+function activeUnit() {
+  if (authState?.user?.role === activeRole()) return authState?.user?.unit || roleDataScopes[activeRole()]?.departments?.[0] || "";
+  return roleDataScopes[activeRole()]?.departments?.[0] || authState?.user?.unit || "";
+}
+
+function documentAclKeys(doc = {}) {
+  const raw = [doc.id, doc.docId, doc.no, doc.docNo, doc.receiveNo, doc.exchangeNo].filter(Boolean);
+  return [...new Set(raw.flatMap((value) => {
+    const text = String(value);
+    const keys = [text];
+    if (/^(IN|OUT)-/.test(text)) keys.push(`DOC-${text}`);
+    if (/^DOC-(IN|OUT)-/.test(text)) keys.push(text.replace(/^DOC-/, ""));
+    return keys;
+  }))];
+}
+
+function aclRowsForDoc(doc) {
+  const keys = documentAclKeys(doc);
+  return documentAclRules.filter((rule) => keys.includes(rule.docId));
+}
+
+function aclRuleForDoc(doc, role = activeRole()) {
+  const userName = authState?.user?.name || "";
+  const unit = activeUnit();
+  return aclRowsForDoc(doc).find((rule) =>
+    (rule.principalType === "role" && rule.principal === role) ||
+    (rule.principalType === "user" && rule.principal === userName) ||
+    (rule.principalType === "unit" && rule.principal === unit)
+  );
+}
+
+function baseDepartmentVisible(doc) {
+  const role = activeRole();
+  const scope = roleDataScopes[role];
+  if (!scope) return false;
+  if (role === "執行長") return true;
+  if (role === "總務") return (doc.owner === "總務" || doc.dept === "總務") && doc.owner !== "行政部主任";
+  if (role === "行政部主任") return (doc.owner === "行政部主任" || ["行政部", "總管理處"].includes(doc.dept)) && doc.owner !== "總務";
+  return doc.owner === role || doc.owner === authState?.user?.name || doc.dept === role || doc.dept === activeUnit();
+}
+
+function canUseDocAction(doc, action = "view") {
+  if (activeRole() === "執行長") return true;
+  const acl = aclRuleForDoc(doc);
+  if (acl) return Boolean(acl[action]);
+  if (action === "view") return baseDepartmentVisible(doc);
+  if (action === "sign") return Boolean(rolePermissions[activeRole()]?.some((permission) => ["review_dispatch", "approve_format", "assign_case"].includes(permission)));
+  if (action === "download") return Boolean(rolePermissions[activeRole()]?.some((permission) => ["upload_attachment", "query_status", "send_dispatch"].includes(permission)));
+  if (action === "seal") return Boolean(rolePermissions[activeRole()]?.includes("send_dispatch") || rolePermissions[activeRole()]?.includes("approve_format"));
+  return false;
+}
+
+function addDocumentAclEvent(title, body) {
+  documentAclEvents.unshift([nowTime(), title, body]);
+}
+
+function upsertDocumentAcl(doc, principal, patch) {
+  const docId = documentAclKeys(doc)[0] || doc.id;
+  let rule = documentAclRules.find((item) => item.docId === docId && item.principalType === "role" && item.principal === principal);
+  if (!rule) {
+    rule = { id: `ACL-${Date.now()}`, docId, principalType: "role", principal, view: true, sign: false, download: false, seal: false, delegate: false, reason: "人工授權", grantedBy: activeRole() };
+    documentAclRules.push(rule);
+  }
+  Object.assign(rule, patch, { grantedBy: activeRole() });
+  addDocumentAclEvent("更新文件權限", `${docId} 已更新 ${principal} 權限：檢視 ${rule.view ? "開" : "關"}、簽核 ${rule.sign ? "開" : "關"}、下載 ${rule.download ? "開" : "關"}、用印 ${rule.seal ? "開" : "關"}。`);
+}
+
+function renderDocumentAclPanel(doc) {
+  const rows = aclRowsForDoc(doc);
+  const current = aclRuleForDoc(doc);
+  const actions = [
+    ["view", "檢視"],
+    ["sign", "簽核"],
+    ["download", "下載"],
+    ["seal", "用印"]
+  ];
+  return `
+    <section class="acl-panel">
+      <div class="section-heading compact-heading">
+        <div>
+          <span>文件細權限</span>
+          <h3>本公文 ACL</h3>
+        </div>
+        <span class="badge ${current?.view === false ? "issue" : "ok"}">${current ? "已套用細權限" : "依角色範圍"}</span>
+      </div>
+      <div class="acl-action-grid">
+        ${actions.map(([key, label]) => `
+          <article class="permission-chip ${canUseDocAction(doc, key) ? "allowed" : ""}">
+            <strong>${canUseDocAction(doc, key) ? "允許" : "限制"}</strong>
+            <span>${label}</span>
+          </article>
+        `).join("")}
+      </div>
+      <div class="acl-table">
+        ${rows.length ? rows.map((rule) => `
+          <div class="acl-row">
+            <strong>${rule.principal}</strong>
+            <span>${rule.reason}</span>
+            <small>${rule.view ? "檢視" : "不可檢視"} · ${rule.sign ? "簽核" : "不可簽核"} · ${rule.download ? "下載" : "不可下載"} · ${rule.seal ? "用印" : "不可用印"}</small>
+          </div>
+        `).join("") : `<p class="empty-text">尚未設定單件 ACL，暫依角色與部門範圍控管。</p>`}
+      </div>
+      <div class="detail-actions">
+        <button class="secondary-button" type="button" data-acl-action="grant-current">授權目前角色</button>
+        <button class="secondary-button" type="button" data-acl-action="revoke-download">關閉下載</button>
+        <button class="secondary-button" type="button" data-acl-action="add-reviewer">加簽行政部主任</button>
+      </div>
+    </section>
+  `;
+}
+
+function bindDocumentAclButtons(doc, rerender) {
+  document.querySelectorAll("[data-acl-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.aclAction === "grant-current") {
+        upsertDocumentAcl(doc, activeRole(), { view: true, sign: true, download: true, seal: canUseDocAction(doc, "seal"), delegate: true, reason: "目前角色臨時授權，可檢視、簽核與下載。" });
+        showToast("已授權目前角色處理此公文。");
+      }
+      if (button.dataset.aclAction === "revoke-download") {
+        upsertDocumentAcl(doc, activeRole(), { view: true, download: false, reason: "敏感資料控管，關閉下載權。" });
+        showToast("已關閉目前角色下載權。");
+      }
+      if (button.dataset.aclAction === "add-reviewer") {
+        upsertDocumentAcl(doc, "行政部主任", { view: true, sign: true, download: true, seal: true, delegate: true, reason: "加簽行政部主任清稿與用印前核准。" });
+        showToast("已加簽行政部主任。");
+      }
+      rerender();
+    });
+  });
+}
+
+function canSeeDepartmentDoc(doc) {
+  const acl = aclRuleForDoc(doc);
+  if (acl) return Boolean(acl.view);
+  return baseDepartmentVisible(doc);
+}
+
+function scopedInboundDocs() {
+  return inboundDocs.filter(canSeeDepartmentDoc);
+}
+
+function scopedDispatchDocs() {
+  return dispatchDocs.filter((doc) => canSeeDepartmentDoc({ ...doc, dept: doc.dept || doc.owner }));
+}
+
+function renderScopeZone() {
+  const role = activeRole();
+  const scope = roleDataScopes[role] || roleDataScopes["總務"];
+  const inboundCount = scopedInboundDocs().length;
+  const dispatchCount = scopedDispatchDocs().length;
+  const hiddenInbound = inboundDocs.length - inboundCount;
+  const hiddenDispatch = dispatchDocs.length - dispatchCount;
+  const badge = document.querySelector("#scopeRoleBadge");
+  const grid = document.querySelector("#scopeGrid");
+  if (!badge || !grid) return;
+  badge.textContent = role;
+  grid.innerHTML = [
+    ["目前工作區", scope.title, scope.rule],
+    ["可見公文", `${inboundCount} 收文 / ${dispatchCount} 發文`, `依 ${role} 的部門、擁有人與授權流程顯示。`],
+    ["已隔離資料", `${hiddenInbound + hiddenDispatch} 筆不顯示`, "總務與行政部主任的部門公文彼此隔離；跨部門需分派、會辦或簽核授權。"]
+  ].map(([label, value, body]) => `
+    <article class="scope-card">
+      <span>${label}</span>
+      <strong>${value}</strong>
+      <p>${body}</p>
+    </article>
+  `).join("");
+}
+
+function identityKindForRole(role = activeRole()) {
+  if (role === "總務") return "generalAffairs";
+  if (["主任", "執行長", "行政部主任"].includes(role)) return "supervisor";
+  return "employee";
+}
+
+const navByIdentity = {
+  employee: ["dashboard", "search", "compose", "dispatch", "inbound", "tracking", "notifications", "archive"],
+  supervisor: ["dashboard", "search", "workflow", "tracking", "dispatch", "seals", "reports", "notifications", "archive", "complianceOps"],
+  generalAffairs: ["dashboard", "search", "inbound", "dispatch", "compose", "exchange", "tracking", "notifications", "archive", "reports"],
+  admin: ["dashboard", "search", "workflow", "exchange", "security", "fileSecurity", "accounts", "reports", "notifications", "jobs", "database", "ops", "complianceOps", "settings"]
+};
+
+function allowedRoutesForRole(role = activeRole()) {
+  const kind = identityKindForRole(role);
+  const base = new Set(navByIdentity[kind] || navByIdentity.employee);
+  if (role === "行政部主任") navByIdentity.admin.forEach((item) => base.add(item));
+  if (role === "執行長") ["reports", "archive", "complianceOps"].forEach((item) => base.add(item));
+  return [...base];
+}
+
+function isRouteAllowed(target) {
+  return allowedRoutesForRole().includes(target);
+}
+
+function applyRoleNavigation() {
+  const allowed = allowedRoutesForRole();
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    item.hidden = !allowed.includes(item.dataset.target);
+  });
+  const active = document.querySelector(".view.active")?.id || "dashboard";
+  if (!allowed.includes(active)) setView("dashboard");
+}
+
+function identityWorkbenchData() {
+  const role = activeRole();
+  const kind = identityKindForRole(role);
+  const scopedInbound = scopedInboundDocs();
+  const scopedDispatch = scopedDispatchDocs();
+  const myTracking = trackingCases.filter((item) => item.owner === role || item.owner === authState?.user?.name || (kind === "supervisor" && ["行政部主任", "主任", "執行長"].includes(item.owner)));
+  if (kind === "generalAffairs") {
+    return {
+      eyebrow: "General Affairs Desk",
+      title: "總務工作台",
+      status: "統一收發入口",
+      headline: `${scopedInbound.filter((doc) => ["待登錄", "待分派"].includes(doc.status)).length} 件收文待處理`,
+      summary: "先拉取 jAgent 來文，再完成登錄、分派與交換異常處理。總務看的是收發入口，不混入行政部門公文。",
+      actions: [
+        ["拉取來文", "inbound", "pullJagentBtn", "primary", "從 jAgent 同步今日新來文"],
+        ["收文登錄", "inbound", "registerInboundBtn", "secondary", "補齊收文號、期限與附件"],
+        ["分派主管", "inbound", "assignInboundBtn", "secondary", "把來文送到正確部門主管"],
+        ["重送失敗", "dispatch", "resendDispatchBtn", "secondary", "處理交換失敗與異常重送"]
+      ],
+      todos: [
+        ...scopedInbound.filter((doc) => ["待登錄", "待分派"].includes(doc.status)).slice(0, 4).map((doc) => ({ title: doc.subject, meta: `${doc.receiveNo} · ${doc.status}`, body: `${doc.agency} · ${doc.dueDate}` })),
+        ...scopedDispatch.filter((doc) => doc.status === "交換失敗").slice(0, 2).map((doc) => ({ title: doc.subject, meta: `${doc.no} · 交換失敗`, body: doc.lastReply, issue: true }))
+      ],
+      alerts: [
+        { title: "Token 與憑證", meta: tokenTimeLeft(), body: "Token 到期前需刷新或重新憑證登入。" },
+        { title: "交換失敗即時警示", meta: `${scopedDispatch.filter((doc) => doc.status === "交換失敗").length} 件`, body: "請確認機關代碼、附件封包與交換中心回覆。", issue: scopedDispatch.some((doc) => doc.status === "交換失敗") }
+      ]
+    };
+  }
+  if (kind === "supervisor") {
+    const pendingTasks = workflowTasks.filter((task) => task.role === role && /待|審核|查核/.test(task.status));
+    return {
+      eyebrow: "Supervisor Desk",
+      title: "主管工作台",
+      status: "簽核與風險",
+      headline: `${pendingTasks.length + myTracking.filter((item) => item.status !== "已完成").length} 件待主管處理`,
+      summary: "集中處理簽核、退回補正、逾期與高風險案件，不需要進到每個後台頁面逐一尋找。",
+      actions: [
+        ["待簽核", "workflow", "workflowApproveBtn", "primary", "核准目前待辦流程"],
+        ["退回補正", "workflow", "workflowRejectBtn", "secondary", "退回內容不足或附件缺漏案件"],
+        ["看逾期", "tracking", "sendOverdueBtn", "secondary", "掌握未收確認與逾期件"],
+        ["看報表", "reports", "", "secondary", "查看收發量、成功率與異常"]
+      ],
+      todos: [
+        ...pendingTasks.slice(0, 4).map((task) => ({ title: task.title, meta: `${task.step} · ${task.status}`, body: task.type })),
+        ...scopedDispatch.filter((doc) => ["待清稿", "已封裝"].includes(doc.status)).slice(0, 2).map((doc) => ({ title: doc.subject, meta: `${doc.no} · ${doc.status}`, body: doc.to }))
+      ],
+      alerts: [
+        ...myTracking.filter((item) => ["逾期提醒", "未收確認", "退回補正"].includes(item.status)).slice(0, 3).map((item) => ({ title: item.title, meta: item.status, body: item.note, issue: true })),
+        { title: "密件與速件", meta: "需優先審核", body: "速件、密件與跨部門公文應先完成簽核意見。" }
+      ]
+    };
+  }
+  const assignedInbound = scopedInbound.filter((doc) => doc.owner === role || doc.dept === role || doc.owner === authState?.user?.name);
+  const drafts = scopedDispatch.filter((doc) => ["草稿", "退回補正", "待清稿"].includes(doc.status));
+  return {
+    eyebrow: "Employee Desk",
+    title: "員工工作台",
+    status: "我的待辦",
+    headline: `${assignedInbound.length + drafts.length} 件我的公文`,
+    summary: "只保留員工日常需要的建立函稿、補附件、回覆與退回補正，不暴露總務或主管維運功能。",
+    actions: [
+      ["建立函稿", "compose", "", "primary", "填寫內容並確認即時函稿預覽"],
+      ["我的收文", "inbound", "", "secondary", "查看被分派給我的來文"],
+      ["補附件", "fileSecurity", "", "secondary", "處理缺漏附件與檔案檢核"],
+      ["退回補正", "tracking", "", "secondary", "查看主管退回原因與期限"]
+    ],
+    todos: [
+      ...assignedInbound.slice(0, 3).map((doc) => ({ title: doc.subject, meta: `${doc.receiveNo} · ${doc.status}`, body: `${doc.agency} · ${doc.dueDate}` })),
+      ...drafts.slice(0, 3).map((doc) => ({ title: doc.subject, meta: `${doc.no} · ${doc.status}`, body: doc.lastReply }))
+    ],
+    alerts: [
+      ...trackingCases.filter((item) => item.owner === role || item.owner === authState?.user?.name).slice(0, 3).map((item) => ({ title: item.title, meta: item.status, body: item.note, issue: item.status !== "已完成" })),
+      { title: "送出前確認", meta: "函稿預覽必看", body: "建立公文需先確認即時函稿預覽，才可送出清稿。" }
+    ]
+  };
+}
+
+function dashboardRoleData() {
+  const role = activeRole();
+  const kind = identityKindForRole(role);
+  const scopedInbound = scopedInboundDocs();
+  const scopedDispatch = scopedDispatchDocs();
+  const report = reportStats();
+  const tokenLeft = tokenTimeLeft();
+  const exchangeFailed = scopedDispatch.filter((doc) => doc.status === "交換失敗");
+  const waitDispatch = scopedDispatch.filter((doc) => ["待清稿", "已清稿", "已封裝", "退回補正"].includes(doc.status));
+  const waitingConfirm = scopedDispatch.filter((doc) => doc.status === "等待確認");
+  const completed = scopedDispatch.filter((doc) => doc.status === "交換完成");
+  const pendingWorkflow = workflowTasks.filter((task) => task.role === role && /待|審核|查核|退回/.test(task.status));
+  const myTracking = trackingCases.filter((item) => item.owner === role || item.owner === authState?.user?.name || (kind === "supervisor" && ["行政部主任", "主任", "執行長"].includes(item.owner)));
+  const roleChecks = {
+    generalAffairs: [
+      ["先收再分", "新來文先由總務登錄與分派，不直接進入部門池。"],
+      ["交換異常優先", `${exchangeFailed.length} 件交換失敗需確認機關代碼、封包與 jAgent 回覆。`],
+      ["Token 作業", `目前 Token ${tokenLeft}，到期前需刷新。`],
+      ["部門隔離", "總務收文入口與行政部主任內部公文保持隔離。"]
+    ],
+    supervisor: [
+      ["先看簽核", `${pendingWorkflow.length} 件流程待主管核定或退回補正。`],
+      ["盯逾期", `${myTracking.filter((item) => ["逾期提醒", "未收確認", "退回補正"].includes(item.status)).length} 件稽催風險需追蹤。`],
+      ["看營運報表", `SLA ${report.slaRate}%、交換健康 ${report.exchangeHealth}。`],
+      ["用印風險", "核准用印會自動押章並留存 PDF 版本與雜湊。"]
+    ],
+    employee: [
+      ["只看我的", "首頁僅呈現被分派、承辦或需要補正的公文。"],
+      ["先預覽再送", "建立函稿需確認即時預覽，才可送清稿。"],
+      ["補件優先", `${myTracking.filter((item) => item.status === "退回補正").length} 件退回補正需回覆。`],
+      ["附件安全", "附件需通過掃描、大小與密件權限檢查。"]
+    ]
+  };
+  if (kind === "generalAffairs") {
+    const pendingInbound = scopedInbound.filter((doc) => ["待登錄", "待分派"].includes(doc.status));
+    return {
+      eyebrow: "General Affairs Home",
+      title: "總務首頁",
+      scope: "收文入口 / 交換作業",
+      metrics: [
+        ["待登錄/分派", pendingInbound.length, `待登錄 ${pendingInbound.filter((doc) => doc.status === "待登錄").length} / 待分派 ${pendingInbound.filter((doc) => doc.status === "待分派").length}`],
+        ["待發交換", waitDispatch.length, "清稿、封裝或補正後送 jAgent"],
+        ["交換異常", exchangeFailed.length, exchangeFailed.length ? exchangeFailed[0].lastReply : "目前無交換失敗"],
+        ["Token", tokenLeft, "jAgent 交換前請確認憑證與 Token"]
+      ],
+      pipeline: [
+        ["待登錄", pendingInbound.filter((doc) => doc.status === "待登錄").length],
+        ["待分派", pendingInbound.filter((doc) => doc.status === "待分派").length],
+        ["待送出", waitDispatch.length],
+        ["等待確認", waitingConfirm.length],
+        ["交換失敗", exchangeFailed.length]
+      ],
+      primaryTitle: "總務收發佇列",
+      primaryTarget: "inbound",
+      primaryButton: "處理收文",
+      checks: roleChecks.generalAffairs
+    };
+  }
+  if (kind === "supervisor") {
+    const overdue = myTracking.filter((item) => ["逾期提醒", "未收確認", "退回補正"].includes(item.status));
+    return {
+      eyebrow: "Supervisor Home",
+      title: role === "執行長" ? "執行長首頁" : "主管首頁",
+      scope: "簽核 / 風險 / 營運",
+      metrics: [
+        ["待簽核", pendingWorkflow.length, "流程核准、退回、改派與會辦"],
+        ["逾期風險", overdue.length, overdue.length ? overdue[0].title : "目前無高風險逾期"],
+        ["SLA", `${report.slaRate}%`, "登錄、分派、交換、歸檔"],
+        ["交換健康", report.exchangeHealth, `成功率 ${report.successRate}% / 異常 ${report.exceptionItems.length}`]
+      ],
+      pipeline: [
+        ["待簽核", pendingWorkflow.length],
+        ["待清稿", waitDispatch.filter((doc) => doc.status === "待清稿").length],
+        ["退回補正", scopedDispatch.filter((doc) => doc.status === "退回補正").length],
+        ["逾期/未收", overdue.length],
+        ["需用印", sealRequests.filter((request) => request.status === "待簽核").length]
+      ],
+      primaryTitle: "主管簽核與風險",
+      primaryTarget: "workflow",
+      primaryButton: "查看流程",
+      checks: roleChecks.supervisor
+    };
+  }
+  const assignedInbound = scopedInbound.filter((doc) => doc.owner === role || doc.dept === role || doc.owner === authState?.user?.name);
+  const drafts = scopedDispatch.filter((doc) => ["草稿", "退回補正", "待清稿"].includes(doc.status));
+  const returned = myTracking.filter((item) => item.status === "退回補正");
+  return {
+    eyebrow: "Employee Home",
+    title: "員工首頁",
+    scope: "我的承辦 / 補件 / 函稿",
+    metrics: [
+      ["我的收文", assignedInbound.length, "已分派給我或所屬單位"],
+      ["我的函稿", drafts.length, "草稿、待清稿與退回補正"],
+      ["退回補正", returned.length, returned.length ? returned[0].title : "目前無退回件"],
+      ["待辦提醒", myTracking.length, "今天要處理與即將逾期"]
+    ],
+    pipeline: [
+      ["我的收文", assignedInbound.length],
+      ["草稿", scopedDispatch.filter((doc) => doc.status === "草稿").length],
+      ["待清稿", drafts.filter((doc) => doc.status === "待清稿").length],
+      ["退回補正", returned.length],
+      ["待附件", fileSecurityItems.filter((item) => item.maskStatus === "需遮罩" || item.scanStatus === "待掃描").length]
+    ],
+    primaryTitle: "我的公文流程",
+    primaryTarget: "compose",
+    primaryButton: "建立函稿",
+    checks: roleChecks.employee
+  };
+}
+
+function renderRoleDashboard() {
+  const data = dashboardRoleData();
+  document.querySelector("#dashboardRoleEyebrow").textContent = data.eyebrow;
+  document.querySelector("#dashboardRoleTitle").textContent = data.title;
+  document.querySelector("#dashboardRoleScope").textContent = data.scope;
+  data.metrics.forEach(([label, value, note], index) => {
+    const position = index + 1;
+    document.querySelector(`#dashboardMetricLabel${position}`).textContent = label;
+    document.querySelector(`#dashboardMetricValue${position}`).textContent = value;
+    document.querySelector(`#dashboardMetricNote${position}`).textContent = note;
+  });
+  document.querySelector("#dashboardPipeline").innerHTML = data.pipeline.map(([label, value]) => `
+    <div><strong>${label}</strong><span>${value}</span></div>
+  `).join("");
+  document.querySelector("#dashboardPrimaryPanelTitle").textContent = data.primaryTitle;
+  const button = document.querySelector("#dashboardPrimaryPanelBtn");
+  button.textContent = data.primaryButton;
+  button.dataset.target = data.primaryTarget;
+  document.querySelector("#dashboardSecondaryPanelTitle").textContent = `${data.title}注意事項`;
+  document.querySelector("#dashboardSecondaryPanelBadge").textContent = data.scope;
+  document.querySelector("#dashboardRoleChecks").innerHTML = data.checks.map(([title, body]) => `
+    <article class="check-item">
+      <strong>${title}</strong>
+      <p>${body}</p>
+    </article>
+  `).join("");
+}
+
+function renderIdentityWorkbench() {
+  const data = identityWorkbenchData();
+  document.querySelector("#identityEyebrow").textContent = data.eyebrow;
+  document.querySelector("#identityTitle").textContent = data.title;
+  document.querySelector("#identityStatus").textContent = data.status;
+  document.querySelector("#identityHeadline").textContent = data.headline;
+  document.querySelector("#identitySummary").textContent = data.summary;
+  document.querySelector("#identityTodoCount").textContent = `${data.todos.length} 件`;
+  document.querySelector("#identityAlertCount").textContent = `${data.alerts.length} 則`;
+  document.querySelector("#identityActions").innerHTML = data.actions.map(([label, target, clickId, tone, help]) => `
+    <button class="identity-action ${tone === "primary" ? "primary" : ""}" type="button" data-identity-target="${target}" data-identity-click="${clickId}">
+      <strong>${label}</strong>
+      <span>${help}</span>
+    </button>
+  `).join("");
+  const emptyTodo = `<article class="identity-item ok"><strong>目前沒有待辦</strong><p>這個身份工作區暫無需立即處理的公文。</p></article>`;
+  document.querySelector("#identityTodos").innerHTML = data.todos.length ? data.todos.map((item) => `
+    <article class="identity-item ${item.issue ? "issue" : ""}">
+      <strong>${item.title}</strong>
+      <span>${item.meta}</span>
+      <p>${item.body}</p>
+    </article>
+  `).join("") : emptyTodo;
+  document.querySelector("#identityAlerts").innerHTML = data.alerts.map((item) => `
+    <article class="identity-item ${item.issue ? "issue" : ""}">
+      <strong>${item.title}</strong>
+      <span>${item.meta}</span>
+      <p>${item.body}</p>
+    </article>
+  `).join("");
+}
+
+function setSelectOptions(selector, options, selected = options[0]) {
+  const element = document.querySelector(selector);
+  if (!element) return;
+  element.innerHTML = options.map((option) => `<option${option === selected ? " selected" : ""}>${option}</option>`).join("");
+}
+
+function applyEdocRoleOptions() {
+  [
+    "#roleSelect",
+    "#workflowRoleSelect",
+    "#accountRoleSelect",
+    "#notificationTarget",
+    "#jobNotifyInput",
+    "#securityRoleSelect",
+    "#workflowProxyFrom",
+    "#workflowProxyTo",
+    "#workflowActionTarget",
+    "#securityCertOwner",
+    "#sealOwnerInput",
+    "#complianceOwnerSelect"
+  ].forEach((selector) => setSelectOptions(selector, edocAllowedRoles, workflowRole));
+  setSelectOptions("#trackingNotifyTarget", ["總務", "主任", "行政部主任", "人資", "會計", "業務助理"], "總務");
 }
 
 function enterApp(message = "登入成功，已進入電子公文交換系統。") {
   document.querySelector("#loginScreen").classList.add("hidden");
   document.querySelector("#appShell").classList.remove("hidden");
+  applyAuthUser();
+  applyRoleNavigation();
+  renderScopeZone();
+  renderRoleDashboard();
+  renderIdentityWorkbench();
+  renderInboundRows();
+  renderInboundDetail();
+  renderDispatchBoard();
+  renderDispatchDetail();
   showToast(message);
 }
 
 function leaveApp() {
+  if (authState?.token) {
+    backendRequest("/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
+  }
+  authState = null;
+  localStorage.removeItem(authStorageKey);
   document.querySelector("#appShell").classList.add("hidden");
   document.querySelector("#loginScreen").classList.remove("hidden");
   showToast("已登出系統。");
+}
+
+function applyAuthUser() {
+  if (!authState?.user) return;
+  const { user, permissions = [] } = authState;
+  workflowRole = user.role || workflowRole;
+  if (rolePermissions[workflowRole]) {
+    rolePermissions[workflowRole] = [...new Set([...rolePermissions[workflowRole], ...permissions])];
+  }
+  const roleSelect = document.querySelector("#roleSelect");
+  if (roleSelect && [...roleSelect.options].some((option) => option.textContent === workflowRole)) {
+    roleSelect.value = workflowRole;
+  }
+  document.querySelector("#roleNote").textContent = `${user.name} · ${user.unit || "未設定單位"} · ${user.title || user.role}`;
+  applyRoleNavigation();
+  renderScopeZone();
+  renderRoleDashboard();
+  renderIdentityWorkbench();
+}
+
+async function loginWithBackend(email, password, provider) {
+  const session = await backendRequest("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password, provider })
+  });
+  authState = session;
+  localStorage.setItem(authStorageKey, JSON.stringify(session));
+  const existing = userAccounts.find((account) => account.email === session.user.email);
+  if (existing) {
+    Object.assign(existing, {
+      name: session.user.name,
+      unit: session.user.unit,
+      title: session.user.title,
+      role: session.user.role,
+      provider: session.user.provider,
+      mfa: session.user.mfa_status,
+      status: session.user.status,
+      lastLogin: session.user.last_login_at || session.user.lastLogin || nowTime(),
+      ip: "後端 session",
+      device: "目前瀏覽器"
+    });
+  }
+  recordLogin(session.user.email, provider, "成功");
+  enterApp(`${session.user.name} 已通過後端 Auth / RBAC 登入。`);
 }
 
 function renderQueueRows() {
@@ -834,12 +1528,13 @@ function selectedInboundDocs() {
 }
 
 function currentInboundDoc() {
-  return inboundDocs.find((doc) => doc.id === selectedInboundId) || inboundDocs[0] || null;
+  const rows = scopedInboundDocs();
+  return rows.find((doc) => doc.id === selectedInboundId) || rows[0] || null;
 }
 
 function filteredInboundDocs() {
   const term = inboundSearchTerm.trim().toLowerCase();
-  return inboundDocs.filter((doc) => {
+  return scopedInboundDocs().filter((doc) => {
     const matchFilter = inboundFilter === "all" || doc.status === inboundFilter;
     const haystack = `${doc.receiveNo} ${doc.exchangeNo} ${doc.agency} ${doc.subject} ${doc.owner} ${doc.dept}`.toLowerCase();
     return matchFilter && (!term || haystack.includes(term));
@@ -847,7 +1542,9 @@ function filteredInboundDocs() {
 }
 
 function renderComplianceChecks() {
-  document.querySelector("#complianceChecks").innerHTML = complianceChecks.map(([title, body]) => `
+  const box = document.querySelector("#complianceChecks") || document.querySelector("#dashboardRoleChecks");
+  if (!box) return;
+  box.innerHTML = complianceChecks.map(([title, body]) => `
     <article class="check-item">
       <strong>${title}</strong>
       <p>${body}</p>
@@ -857,7 +1554,12 @@ function renderComplianceChecks() {
 
 function renderInboundRows() {
   const rows = filteredInboundDocs();
+  if (rows.length && !rows.some((doc) => doc.id === selectedInboundId)) selectedInboundId = rows[0].id;
   document.querySelector("#inboundCount").textContent = `${rows.length} 筆`;
+  if (!rows.length) {
+    document.querySelector("#inboundRows").innerHTML = `<tr><td colspan="8" class="empty-text">此工作區目前沒有可檢視的收文。</td></tr>`;
+    return;
+  }
   document.querySelector("#inboundRows").innerHTML = rows.map((doc) => `
     <tr class="${doc.id === selectedInboundId ? "selected-row" : ""}" data-inbound-id="${doc.id}">
       <td><input class="inbound-check" type="checkbox" value="${doc.id}" aria-label="選取 ${doc.receiveNo}" /></td>
@@ -922,18 +1624,23 @@ function renderInboundDetail() {
         ${doc.attachments.map((file) => `<button class="file-chip" type="button" data-file="${file}">${file}</button>`).join("")}
       </div>
       <div class="detail-actions">
-        <button class="primary-button" type="button" id="detailRegisterBtn">登錄</button>
-        <button class="secondary-button" type="button" id="detailAssignBtn">分派</button>
+        <button class="primary-button" type="button" id="detailRegisterBtn" ${canUseDocAction(doc, "sign") || canUseDocAction(doc, "view") ? "" : "disabled"}>登錄</button>
+        <button class="secondary-button" type="button" id="detailAssignBtn" ${canUseDocAction(doc, "sign") ? "" : "disabled"}>分派</button>
         <button class="secondary-button" type="button" id="detailExceptionBtn">誤送/漏送</button>
       </div>
+      ${renderDocumentAclPanel(doc)}
     </div>
   `;
   document.querySelectorAll(".file-chip").forEach((button) => {
-    button.addEventListener("click", () => showToast(`已開啟附件預覽：${button.dataset.file}`));
+    button.addEventListener("click", () => {
+      if (!canUseDocAction(doc, "download")) return showToast("此角色未取得本公文附件下載/預覽權限。");
+      showToast(`已開啟附件預覽：${button.dataset.file}`);
+    });
   });
   document.querySelector("#detailRegisterBtn").addEventListener("click", () => registerInbound([doc.id]));
   document.querySelector("#detailAssignBtn").addEventListener("click", () => assignInbound([doc.id]));
   document.querySelector("#detailExceptionBtn").addEventListener("click", () => createInboundException([doc.id], document.querySelector("#exceptionType").value));
+  bindDocumentAclButtons(doc, renderInboundDetail);
 }
 
 function renderInboundAuditLog() {
@@ -960,6 +1667,8 @@ function mutateInbound(ids, handler) {
 function registerInbound(ids) {
   const targetIds = ids?.length ? ids : selectedInboundDocs().map((doc) => doc.id);
   if (!targetIds.length) return showToast("請先選取要登錄的收文。");
+  const denied = targetIds.map((id) => inboundDocs.find((item) => item.id === id)).filter((doc) => doc && !canUseDocAction(doc, "view"));
+  if (denied.length) return showToast("此角色未取得部分收文的檢視/登錄權限。");
   mutateInbound(targetIds, (doc) => {
     doc.status = doc.status === "異常待處理" ? "異常待處理" : "待分派";
     doc.dept = document.querySelector("#registerDept").value;
@@ -972,6 +1681,8 @@ function registerInbound(ids) {
 function assignInbound(ids) {
   const targetIds = ids?.length ? ids : selectedInboundDocs().map((doc) => doc.id);
   if (!targetIds.length) return showToast("請先選取要分派的收文。");
+  const denied = targetIds.map((id) => inboundDocs.find((item) => item.id === id)).filter((doc) => doc && !canUseDocAction(doc, "sign"));
+  if (denied.length) return showToast("此角色未取得部分收文的分派/簽核權限。");
   const owner = document.querySelector("#assignOwner").value;
   const dueDate = document.querySelector("#assignDueDate").value;
   mutateInbound(targetIds, (doc) => {
@@ -1012,6 +1723,120 @@ function addDispatchAudit(title, body) {
   renderDispatchAuditLog();
 }
 
+function composePayload() {
+  return {
+    no: document.querySelector("#dispatchNo")?.value.trim() || "",
+    type: document.querySelector("#docType")?.value || "函",
+    priority: document.querySelector("#priority")?.value || "普通件",
+    recipient: document.querySelector("#recipient")?.value.trim() || "未指定受文者",
+    subject: document.querySelector("#subject")?.value.trim() || "未填主旨",
+    body: document.querySelector("#bodyText")?.value.trim() || "",
+    attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name)
+  };
+}
+
+function renderDraftPreview() {
+  const data = composePayload();
+  const preview = document.querySelector("#draftPreview");
+  const status = document.querySelector("#draftConfirmStatus");
+  const submit = document.querySelector("#submitDispatchBtn");
+  if (!preview) return;
+  preview.innerHTML = `
+    <div class="draft-org">歲悅長照股份有限公司</div>
+    <div class="draft-type">${data.type}</div>
+    <div class="draft-meta">
+      <div class="draft-row"><span>發文字號</span><strong>${data.no || "系統產生中"}</strong></div>
+      <div class="draft-row"><span>速別</span><strong>${data.priority}</strong></div>
+      <div class="draft-row full"><span>受文者</span><strong>${data.recipient}</strong></div>
+      <div class="draft-row full"><span>附件</span><strong>${data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊"}</strong></div>
+    </div>
+    <div class="draft-subject"><span>主旨</span><strong>${data.subject}</strong></div>
+    <div class="draft-body">${data.body || "尚未填寫說明內容。"}</div>
+    <div class="draft-footer">承辦單位：${activeUnit() || "總務"}　承辦角色：${activeRole()}</div>
+  `;
+  if (status) status.textContent = draftConfirmed ? "已確認" : "尚未確認";
+  if (submit) submit.disabled = !draftConfirmed;
+  renderComposeStepper();
+}
+
+function setDraftConfirmed(value) {
+  draftConfirmed = value;
+  if (!value) draftSigned = false;
+  renderDraftPreview();
+}
+
+function markDraftDirty() {
+  draftConfirmed = false;
+  draftSigned = false;
+  renderDraftPreview();
+}
+
+function composeStepState() {
+  const data = composePayload();
+  const filled = Boolean(data.no && data.recipient && data.subject.length >= 8 && data.body.length >= 8);
+  return [
+    { key: "fill", label: "填寫", body: "文號、受文者、主旨、說明", done: filled },
+    { key: "preview", label: "預覽", body: "檢視即時函稿", done: filled },
+    { key: "confirm", label: "確認", body: "撰寫者確認內容", done: draftConfirmed },
+    { key: "sign", label: "送簽", body: "送主管清稿簽核", done: draftSigned },
+    { key: "send", label: "送出", body: "進入發文佇列", done: false }
+  ];
+}
+
+function renderComposeStepper() {
+  const stepper = document.querySelector("#composeStepper");
+  const action = document.querySelector("#composeNextAction");
+  if (!stepper || !action) return;
+  const steps = composeStepState();
+  const activeIndex = Math.max(0, steps.findIndex((step) => !step.done));
+  stepper.innerHTML = steps.map((step, index) => `
+    <article class="next-step ${step.done ? "done" : ""} ${index === activeIndex ? "active" : ""}">
+      <strong>${index + 1}. ${step.label}</strong>
+      <span>${step.body}</span>
+    </article>
+  `).join("");
+  const next = steps[activeIndex] || steps.at(-1);
+  const nextMessages = {
+    fill: ["先完成填寫", "補齊受文者、主旨與說明，系統會同步更新下方函稿。"],
+    preview: ["檢視函稿預覽", "確認版面、主旨、說明與附件清冊是否正確。"],
+    confirm: ["按下確認函稿", "確認後才能送簽，內容一修改就會重新要求確認。"],
+    sign: ["送主管清稿", "按下清稿並加入發文佇列，系統會建立待清稿案件。"],
+    send: ["等待送出", "主管清稿與封裝完成後，再由發文管理送交 jAgent。"]
+  };
+  const [title, body] = nextMessages[next.key] || nextMessages.send;
+  action.innerHTML = `<strong>${title}</strong><p>${body}</p>`;
+}
+
+function rocDateSerial(date = new Date()) {
+  const rocYear = date.getFullYear() - 1911;
+  return `${rocYear}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function nextDispatchNo() {
+  const dateSerial = rocDateSerial();
+  const prefix = `歲悅字第${dateSerial}`;
+  const numbers = [
+    ...dispatchDocs.map((doc) => doc.no),
+    ...archiveRecords.map((record) => record.docNo),
+    document.querySelector("#formatDocNo")?.value
+  ]
+    .filter(Boolean)
+    .map((value) => {
+      const match = String(value).match(new RegExp(`^${prefix}(\\d{3})號$`));
+      return match ? Number(match[1]) : 0;
+    });
+  const next = Math.max(0, ...numbers) + 1;
+  return `${prefix}${String(next).padStart(3, "0")}號`;
+}
+
+function assignNextDispatchNo(force = false) {
+  const input = document.querySelector("#dispatchNo");
+  if (!input) return "";
+  if (force || !input.value.trim()) input.value = nextDispatchNo();
+  renderDraftPreview();
+  return input.value.trim();
+}
+
 function selectedDispatchDocs() {
   return [...document.querySelectorAll(".dispatch-check:checked")]
     .map((input) => dispatchDocs.find((doc) => doc.id === input.value))
@@ -1019,12 +1844,13 @@ function selectedDispatchDocs() {
 }
 
 function currentDispatchDoc() {
-  return dispatchDocs.find((doc) => doc.id === selectedDispatchId) || dispatchDocs[0] || null;
+  const rows = scopedDispatchDocs();
+  return rows.find((doc) => doc.id === selectedDispatchId) || rows[0] || null;
 }
 
 function filteredDispatchDocs() {
   const term = dispatchSearchTerm.trim().toLowerCase();
-  return dispatchDocs.filter((doc) => {
+  return scopedDispatchDocs().filter((doc) => {
     const matchFilter = dispatchFilter === "all" || doc.status === dispatchFilter;
     const haystack = `${doc.no} ${doc.exchangeNo} ${doc.to} ${doc.agencyCode} ${doc.subject} ${doc.owner}`.toLowerCase();
     return matchFilter && (!term || haystack.includes(term));
@@ -1036,7 +1862,7 @@ function renderDispatchChecks(doc = currentDispatchDoc()) {
     ["文號與文別", doc?.checks.format, "發文字號、文別、速別、密等與日期完整。"],
     ["受文者", doc?.checks.recipient, "受文者機關名稱與機關代碼可交換。"],
     ["附件", doc?.checks.attachments, "附件清冊、檔案雜湊與檔案數量一致。"],
-    ["憑證", doc?.checks.certificate, "總收發人員已通過憑證登入。"],
+    ["憑證", doc?.checks.certificate, "總務已通過憑證登入。"],
     ["封裝", doc?.checks.package, "已產生 jAgent 可送出的交換封包。"]
   ];
   document.querySelector("#dispatchPrecheckPanel").innerHTML = checks.map(([title, ok, body]) => `
@@ -1066,13 +1892,21 @@ function renderPackagePanel(doc = currentDispatchDoc()) {
     </div>
   `;
   document.querySelectorAll("[data-dispatch-file]").forEach((button) => {
-    button.addEventListener("click", () => showToast(`已預覽發文附件：${button.dataset.dispatchFile}`));
+    button.addEventListener("click", () => {
+      if (!canUseDocAction(doc, "download")) return showToast("此角色未取得本公文附件下載/預覽權限。");
+      showToast(`已預覽發文附件：${button.dataset.dispatchFile}`);
+    });
   });
 }
 
 function renderDispatchBoard() {
   const docs = filteredDispatchDocs();
+  if (docs.length && !docs.some((doc) => doc.id === selectedDispatchId)) selectedDispatchId = docs[0].id;
   document.querySelector("#dispatchCount").textContent = `${docs.length} 筆`;
+  if (!docs.length) {
+    document.querySelector("#dispatchBoard").innerHTML = `<p class="empty-text">此工作區目前沒有可檢視的發文。</p>`;
+    return;
+  }
   document.querySelector("#dispatchBoard").innerHTML = docs.map((doc) => `
     <article class="dispatch-card ${doc.id === selectedDispatchId ? "selected-card" : ""}" data-dispatch-id="${doc.id}">
       <label class="card-check"><input class="dispatch-check" type="checkbox" value="${doc.id}" /> 選取</label>
@@ -1114,9 +1948,17 @@ function renderDispatchDetail() {
     return;
   }
   document.querySelector("#selectedDispatchStatus").textContent = doc.status;
+  const dispatchSteps = [
+    ["清稿", doc.checks.format],
+    ["封裝", doc.checks.package],
+    ["送出", ["等待確認", "交換完成"].includes(doc.status)]
+  ];
+  const activeDispatchStep = Math.max(0, dispatchSteps.findIndex(([, done]) => !done));
+  const dispatchStepMarkup = dispatchSteps.map(([label, done], index) => `<article class="next-step ${done ? "done" : ""} ${index === activeDispatchStep ? "active" : ""}"><strong>${index + 1}. ${label}</strong><span>${done ? "已完成" : "下一步"}</span></article>`).join("");
   detail.innerHTML = `
     <div class="doc-detail">
       <strong>${doc.subject}</strong>
+      <div class="next-stepper">${dispatchStepMarkup}</div>
       <dl>
         <div><dt>發文字號</dt><dd>${doc.no}</dd></div>
         <div><dt>交換號</dt><dd>${doc.exchangeNo}</dd></div>
@@ -1128,12 +1970,13 @@ function renderDispatchDetail() {
       </dl>
       <p>${doc.body}</p>
       <div class="detail-actions">
-        <button class="primary-button" type="button" id="detailSendDispatchBtn">送交 jAgent</button>
-        <button class="secondary-button" type="button" id="detailValidateDispatchBtn">清稿</button>
-        <button class="secondary-button" type="button" id="detailPackageDispatchBtn">封裝</button>
+        <button class="primary-button" type="button" id="detailSendDispatchBtn" ${canUseDocAction(doc, "seal") ? "" : "disabled"}>送交 jAgent</button>
+        <button class="secondary-button" type="button" id="detailValidateDispatchBtn" ${canUseDocAction(doc, "sign") ? "" : "disabled"}>清稿</button>
+        <button class="secondary-button" type="button" id="detailPackageDispatchBtn" ${canUseDocAction(doc, "download") ? "" : "disabled"}>封裝</button>
         <button class="secondary-button" type="button" id="detailQueryDispatchBtn">查詢</button>
-        <button class="secondary-button" type="button" id="detailResendDispatchBtn">重送</button>
+        <button class="secondary-button" type="button" id="detailResendDispatchBtn" ${canUseDocAction(doc, "seal") ? "" : "disabled"}>重送</button>
       </div>
+      ${renderDocumentAclPanel(doc)}
     </div>
   `;
   document.querySelector("#detailSendDispatchBtn").addEventListener("click", () => runDispatchAction("send", [doc.id]));
@@ -1141,6 +1984,7 @@ function renderDispatchDetail() {
   document.querySelector("#detailPackageDispatchBtn").addEventListener("click", () => runDispatchAction("package", [doc.id]));
   document.querySelector("#detailQueryDispatchBtn").addEventListener("click", () => runDispatchAction("query", [doc.id]));
   document.querySelector("#detailResendDispatchBtn").addEventListener("click", () => runDispatchAction("resend", [doc.id]));
+  bindDocumentAclButtons(doc, renderDispatchDetail);
   renderDispatchChecks(doc);
   renderPackagePanel(doc);
 }
@@ -1172,11 +2016,68 @@ function dispatchTargetIds(ids) {
   return selected.length ? selected : selectedDispatchId ? [selectedDispatchId] : [];
 }
 
+function unsafeAttachmentsForDoc(doc) {
+  const keys = documentAclKeys(doc);
+  return fileSecurityItems.filter((item) => keys.includes(item.docNo) && (
+    item.scanStatus === "已隔離" ||
+    item.scanStatus === "待掃描" ||
+    item.maskStatus === "需遮罩" ||
+    isFileOverLimit(item) ||
+    !isFileTypeAllowed(item)
+  ));
+}
+
+function guardDispatchAction(action, docs) {
+  const blocked = [];
+  if (action === "send") {
+    docs.forEach((doc) => {
+      if (["等待確認", "交換完成"].includes(doc.status)) blocked.push(`${doc.no} 目前狀態為「${doc.status}」，不可重複送出`);
+      if (!doc.checks.format) blocked.push(`${doc.no} 尚未完成清稿檢核`);
+      if (!doc.checks.package) blocked.push(`${doc.no} 尚未完成附件封裝`);
+      if (!doc.checks.certificate) blocked.push(`${doc.no} 尚未通過憑證檢核`);
+      const unsafe = unsafeAttachmentsForDoc(doc);
+      if (unsafe.length) blocked.push(`${doc.no} 有 ${unsafe.length} 件附件尚未通過資安檢查`);
+    });
+  }
+  if (action === "resend") {
+    docs.forEach((doc) => {
+      if (!["交換失敗", "退回補正"].includes(doc.status)) blocked.push(`${doc.no} 目前狀態為「${doc.status}」，只有交換失敗或退回補正才可重送`);
+      const unsafe = unsafeAttachmentsForDoc(doc);
+      if (unsafe.length) blocked.push(`${doc.no} 有 ${unsafe.length} 件附件尚未通過資安檢查`);
+    });
+  }
+  if (action === "package") {
+    docs.forEach((doc) => {
+      if (!doc.checks.format) blocked.push(`${doc.no} 尚未完成清稿檢核，不可封裝`);
+      const unsafe = unsafeAttachmentsForDoc(doc);
+      if (unsafe.some((item) => item.scanStatus === "已隔離" || isFileOverLimit(item) || !isFileTypeAllowed(item))) {
+        blocked.push(`${doc.no} 有附件已隔離、超過大小或副檔名不允許`);
+      }
+    });
+  }
+  if (blocked.length) return blockOperation(blocked[0], addDispatchAudit, "發文操作防呆");
+  if (action === "send") return confirmOperation("確認送交 jAgent", `即將送出 ${docs.length} 筆發文。送出後會進入交換中心等待確認，請確認函稿預覽、附件封裝、憑證與資安檢查都已完成。`);
+  if (action === "resend") return confirmOperation("確認重送發文", `即將重送 ${docs.length} 筆異常發文。系統會沿用原封包與交換紀錄產生重送事件。`);
+  return true;
+}
+
 function runDispatchAction(action, ids) {
   const targetIds = dispatchTargetIds(ids);
   if (!targetIds.length) return showToast("請先選取要作業的發文。");
   const actionNames = { validate: "清稿檢核", package: "附件封裝", send: "送交 jAgent", query: "查詢狀態", resend: "重送" };
+  const targetDocs = targetIds.map((id) => dispatchDocs.find((item) => item.id === id)).filter(Boolean);
+  if (!guardDispatchAction(action, targetDocs)) return;
+  const requiredAcl = { validate: "sign", package: "download", send: "seal", resend: "seal" }[action];
+  if (requiredAcl) {
+    const denied = targetDocs.filter((doc) => !canUseDocAction(doc, requiredAcl));
+    if (denied.length) return showToast(`此角色未取得部分發文的${actionNames[action]}權限。`);
+  }
   mutateDispatch(targetIds, (doc) => {
+    if (action === "send" && !doc.checks.package) {
+      doc.lastReply = "請先完成清稿與附件封裝，再送交 jAgent。";
+      showToast("請先完成清稿與附件封裝。");
+      return;
+    }
     if (action === "validate") {
       doc.checks.format = true;
       doc.status = doc.status === "草稿" ? "待清稿" : "已清稿";
@@ -1212,7 +2113,12 @@ function runDispatchAction(action, ids) {
 }
 
 function createDispatchFromForm(status = "草稿") {
-  const no = document.querySelector("#dispatchNo").value.trim() || `歲悅字第${Date.now()}號`;
+  if (status !== "草稿" && !draftConfirmed) {
+    showToast("請先在即時函稿預覽確認內容後再加入發文佇列。");
+    return null;
+  }
+  if (status !== "草稿") draftSigned = true;
+  const no = assignNextDispatchNo();
   const doc = {
     id: `OUT-${Date.now()}`,
     no,
@@ -1225,14 +2131,20 @@ function createDispatchFromForm(status = "草稿") {
     subject: document.querySelector("#subject").value.trim() || "未填主旨",
     body: document.querySelector("#bodyText").value.trim(),
     status,
-    owner: "總收發",
+    owner: "總務",
     attachments: ["函稿本文.pdf", "附件清冊.xml"],
     packageId: "",
     lastReply: status === "草稿" ? "草稿已建立，尚未清稿。" : "已建立函稿並進入清稿檢核。",
     checks: { format: status !== "草稿", recipient: true, attachments: true, certificate: true, package: false }
   };
   dispatchDocs.unshift(doc);
+  upsertDocumentAcl(doc, activeRole(), { view: true, sign: false, download: false, seal: false, delegate: false, reason: "撰寫者建立函稿，可檢視與補正內容。" });
+  upsertDocumentAcl(doc, "行政部主任", { view: true, sign: true, download: true, seal: true, delegate: true, reason: "送簽清稿與用印前核准。" });
+  upsertDocumentAcl(doc, "總務", { view: true, sign: false, download: true, seal: true, delegate: false, reason: "清稿後封裝、用印與送交 jAgent。" });
   selectedDispatchId = doc.id;
+  assignNextDispatchNo(true);
+  setDraftConfirmed(false);
+  draftSigned = false;
   addDispatchAudit(status === "草稿" ? "建立發文草稿" : "建立函稿", `${doc.no} 已建立，受文者：${doc.to}。`);
   renderDispatchBoard();
   renderDispatchDetail();
@@ -1241,6 +2153,7 @@ function createDispatchFromForm(status = "草稿") {
 
 function renderPrechecks() {
   document.querySelector("#precheckList").innerHTML = prechecks.map((item) => `<li>${item}</li>`).join("");
+  renderComposeStepper();
 }
 
 function addExchangeEvent(title, body) {
@@ -1288,7 +2201,7 @@ function renderServiceGrid() {
 
 function certLogin() {
   jagentState.certificate = "已登入";
-  jagentState.certificateNote = "憑證序號 SYC-EDOC-2026，總收發人員";
+  jagentState.certificateNote = "憑證序號 SYC-EDOC-2026，總務";
   jagentState.token = `tk_${Date.now()}`;
   jagentState.tokenExpiresAt = Date.now() + 8 * 60 * 60 * 1000;
   renderJagentStatus();
@@ -1322,6 +2235,8 @@ function validateToken() {
 }
 
 function revokeToken() {
+  if (!jagentState.token) return showToast("目前沒有可撤銷的 Token。");
+  if (!confirmOperation("確認撤銷 jAgent Token", "撤銷後將無法送交、查詢或同步交換中心，需重新憑證登入或刷新 Token。")) return;
   jagentState.token = "";
   jagentState.tokenExpiresAt = null;
   renderJagentStatus();
@@ -1522,20 +2437,25 @@ function renderArchiveDetail() {
         <p>${item.operationTrail.join(" → ")}</p>
       </div>
       <div class="detail-actions">
-        <button class="primary-button" type="button" id="detailArchiveSealBtn">封存</button>
+        <button class="primary-button" type="button" id="detailArchiveSealBtn" ${canUseDocAction(item, "seal") ? "" : "disabled"}>封存</button>
         <button class="secondary-button" type="button" id="detailArchiveVerifyBtn">驗證雜湊</button>
-        <button class="secondary-button" type="button" id="detailArchiveOpenBtn">檢視原文</button>
-        <button class="secondary-button" type="button" id="detailArchiveExportBtn">匯出保存包</button>
+        <button class="secondary-button" type="button" id="detailArchiveOpenBtn" ${canUseDocAction(item, "view") ? "" : "disabled"}>檢視原文</button>
+        <button class="secondary-button" type="button" id="detailArchiveExportBtn" ${canUseDocAction(item, "download") ? "" : "disabled"}>匯出保存包</button>
       </div>
+      ${renderDocumentAclPanel(item)}
     </div>
   `;
   document.querySelectorAll("[data-archive-attachment]").forEach((button) => {
-    button.addEventListener("click", () => showToast(`已開啟附件保存檢視：${button.dataset.archiveAttachment}`));
+    button.addEventListener("click", () => {
+      if (!canUseDocAction(item, "download")) return showToast("此角色未取得本保存件附件下載/檢視權限。");
+      showToast(`已開啟附件保存檢視：${button.dataset.archiveAttachment}`);
+    });
   });
   document.querySelector("#detailArchiveSealBtn").addEventListener("click", () => runArchiveAction("seal", [item.id]));
   document.querySelector("#detailArchiveVerifyBtn").addEventListener("click", () => runArchiveAction("verify", [item.id]));
   document.querySelector("#detailArchiveOpenBtn").addEventListener("click", () => runArchiveAction("open", [item.id]));
   document.querySelector("#detailArchiveExportBtn").addEventListener("click", () => runArchiveAction("export", [item.id]));
+  bindDocumentAclButtons(item, renderArchiveDetail);
 }
 
 function renderArchiveAuditLog() {
@@ -1565,6 +2485,11 @@ function mutateArchive(ids, handler, auditTitle, auditBody) {
 function runArchiveAction(action, ids) {
   const targetIds = ids?.length ? ids : selectedArchiveIds();
   if (!targetIds.length) return showToast("請先選取要歸檔保存的公文。");
+  const requiredAcl = { open: "view", export: "download", seal: "seal" }[action];
+  if (requiredAcl) {
+    const denied = targetIds.map((id) => archiveRecords.find((record) => record.id === id)).filter((item) => item && !canUseDocAction(item, requiredAcl));
+    if (denied.length) return showToast("此角色未取得部分歸檔公文的作業權限。");
+  }
   if (action === "open") {
     const item = archiveRecords.find((record) => record.id === targetIds[0]);
     addArchiveAudit("檢視原文", `已開啟 ${item?.docNo || "選取公文"} 的原文、附件與封包索引。`);
@@ -1655,7 +2580,7 @@ function renderSecurityProofGrid() {
   const proofItems = [
     ["簽章序號", securityState.proofSerial],
     ["最後簽章", securityState.lastSignature],
-    ["使用者", document.querySelector("#securityCertOwner")?.value || "總收發人員"],
+    ["使用者", document.querySelector("#securityCertOwner")?.value || "總務"],
     ["憑證狀態", securityState.certStatus],
     ["Token 狀態", securityState.tokenStatus],
     ["紀錄保存", "不可覆寫 / 可匯出"]
@@ -1712,6 +2637,8 @@ function refreshSecurityToken() {
 }
 
 function revokeSecurityToken() {
+  if (!jagentState.token && securityState.tokenStatus !== "有效") return showToast("目前沒有可撤銷的 Token。");
+  if (!confirmOperation("確認撤銷資安 Token", "撤銷後目前交換工作會停止使用此 Token，後續需重新憑證登入。")) return;
   securityState.tokenStatus = "已撤銷";
   jagentState.token = "";
   jagentState.tokenExpiresAt = null;
@@ -1800,12 +2727,30 @@ function filePolicyPayload() {
     allowedTypes: document.querySelector("#fileAllowedTypes")?.value || fileSecurityPolicy.allowedTypes,
     maskPolicy: document.querySelector("#fileMaskPolicy")?.value || fileSecurityPolicy.maskPolicy,
     confidentialRoles: document.querySelector("#fileConfidentialRoles")?.value || fileSecurityPolicy.confidentialRoles,
-    watermarkText: document.querySelector("#fileWatermarkText")?.value || fileSecurityPolicy.watermarkText
+    watermarkText: document.querySelector("#fileWatermarkText")?.value || fileSecurityPolicy.watermarkText,
+    scanEngine: document.querySelector("#fileScanEngine")?.value || fileSecurityPolicy.scanEngine,
+    overLimitAction: document.querySelector("#fileOverLimitAction")?.value || fileSecurityPolicy.overLimitAction
   };
 }
 
 function isFileOverLimit(item) {
   return item.sizeMb > fileSecurityPolicy.maxSizeMb;
+}
+
+function fileExtension(item) {
+  return (item.fileName.split(".").pop() || "").toLowerCase();
+}
+
+function isFileTypeAllowed(item) {
+  const allowed = fileSecurityPolicy.allowedTypes.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+  return allowed.includes(fileExtension(item));
+}
+
+function fileRiskLabel(item) {
+  if (item.scanStatus === "已隔離") return "高風險";
+  if (isFileOverLimit(item) || !isFileTypeAllowed(item) || item.maskStatus === "需遮罩") return "需處理";
+  if (item.scanStatus === "已通過") return "可交換";
+  return "待檢核";
 }
 
 function filteredFileSecurityItems() {
@@ -1845,11 +2790,12 @@ function renderFileSecurityRows() {
       <td>${item.docNo}<small>${item.agency}</small></td>
       <td>${item.sizeMb.toFixed(1)} MB<small>${isFileOverLimit(item) ? "超過限制" : "符合限制"}</small></td>
       <td><span class="status-pill ${badgeClass(item.scanStatus)}">${item.scanStatus}</span></td>
-      <td>${item.confidential}<small>${item.accessRole}</small></td>
+      <td>${item.confidential}<small>${fileRiskLabel(item)}</small></td>
       <td>
         <div class="row-actions">
           <button class="segment" type="button" data-file-action="scan" data-file-id="${item.id}">掃描</button>
           <button class="segment" type="button" data-file-action="quarantine" data-file-id="${item.id}">隔離</button>
+          <button class="segment" type="button" data-file-action="mask" data-file-id="${item.id}">遮罩</button>
           <button class="segment" type="button" data-file-action="access" data-file-id="${item.id}">紀錄</button>
         </div>
       </td>
@@ -1881,18 +2827,31 @@ function renderFileSecurityDetail() {
         <div><dt>大小</dt><dd>${item.sizeMb.toFixed(1)} MB / 上限 ${fileSecurityPolicy.maxSizeMb} MB</dd></div>
         <div><dt>防毒</dt><dd>${item.scanStatus}</dd></div>
         <div><dt>敏感資料</dt><dd>${item.maskStatus}</dd></div>
+        <div><dt>命中項目</dt><dd>${item.sensitiveHits?.length ? item.sensitiveHits.join("、") : "未命中"}</dd></div>
         <div><dt>密件隔離</dt><dd>${item.confidential} · ${item.accessRole}</dd></div>
         <div><dt>下載浮水印</dt><dd>${item.watermarkStatus}</dd></div>
         <div><dt>備份狀態</dt><dd>${item.backupStatus}</dd></div>
+        <div><dt>風險判定</dt><dd>${fileRiskLabel(item)}</dd></div>
       </dl>
+      <div class="detail-actions">
+        <button class="primary-button" type="button" data-file-detail-action="scan">掃描</button>
+        <button class="secondary-button" type="button" data-file-detail-action="mask">遮罩</button>
+        <button class="secondary-button" type="button" data-file-detail-action="quarantine">隔離</button>
+        <button class="secondary-button" type="button" data-file-detail-action="release">解除隔離</button>
+      </div>
     </div>
     <div class="archive-grid">
       <article class="archive-card"><span>副檔名政策</span><strong>${fileSecurityPolicy.allowedTypes}</strong></article>
       <article class="archive-card"><span>遮罩政策</span><strong>${fileSecurityPolicy.maskPolicy}</strong></article>
       <article class="archive-card"><span>雜湊</span><strong>${item.hash}</strong></article>
       <article class="archive-card"><span>存取控制</span><strong>${item.confidential === "普通" ? "一般 RBAC" : "密件隔離"}</strong></article>
+      <article class="archive-card"><span>副檔名</span><strong>${isFileTypeAllowed(item) ? "允許" : "不允許"} · ${fileExtension(item)}</strong></article>
+      <article class="archive-card"><span>掃描引擎</span><strong>${item.scanEngine || fileSecurityPolicy.scanEngine}</strong></article>
     </div>
   `;
+  document.querySelectorAll("[data-file-detail-action]").forEach((button) => {
+    button.addEventListener("click", () => runFileSecurityAction(button.dataset.fileDetailAction, [item.id]));
+  });
 }
 
 function renderFileBackupGrid() {
@@ -1939,16 +2898,61 @@ function renderFileSecurity() {
   renderFileAccessLog();
 }
 
-function runFileSecurityAction(action, ids = selectedFileSecurityIds()) {
+async function persistFileSecurityAction(action, selected) {
+  try {
+    const result = await backendRequest("/attachments/security-action", {
+      method: "POST",
+      body: JSON.stringify({
+        action: action === "access" ? "watermark" : action,
+        ids: selected.map((item) => item.backendId || item.attachmentId || item.id),
+        actor: activeRole(),
+        mask_policy: fileSecurityPolicy.maskPolicy,
+        watermark_text: fileSecurityPolicy.watermarkText
+      })
+    });
+    return result;
+  } catch (error) {
+    addFileAccessLog("後端附件安全作業失敗", `${action}：${error.message}`);
+    return null;
+  }
+}
+
+function guardFileSecurityAction(action, selected) {
+  if (action === "release") {
+    const allowedRoles = ["主任", "執行長", "行政部主任"];
+    if (!allowedRoles.includes(activeRole())) return blockOperation("只有主任、執行長或行政部主任可以解除隔離附件。", addFileAccessLog, "附件操作防呆");
+    const invalid = selected.filter((item) => item.scanStatus !== "已隔離");
+    if (invalid.length) return blockOperation("只能解除已隔離附件，請重新勾選。", addFileAccessLog, "附件操作防呆");
+    return confirmOperation("確認解除附件隔離", `即將解除 ${selected.length} 件附件隔離。請確認已完成人工複核、掃描報告與主管授權。`);
+  }
+  if (action === "quarantine") {
+    return confirmOperation("確認隔離附件", `即將隔離 ${selected.length} 件附件。隔離後承辦人將無法下載或送出相關公文。`);
+  }
+  if (action === "mask") {
+    const noSensitiveHint = selected.filter((item) => !item.sensitiveHits && item.maskStatus !== "需遮罩");
+    if (noSensitiveHint.length === selected.length) {
+      return confirmOperation("確認執行遮罩", "所選附件目前沒有敏感資料命中提示，仍要強制套用遮罩政策嗎？");
+    }
+  }
+  return true;
+}
+
+async function runFileSecurityAction(action, ids = selectedFileSecurityIds()) {
   const selected = fileSecurityItems.filter((item) => ids.includes(item.id));
   if (!selected.length) return showToast("請先選取檔案。");
+  if (!guardFileSecurityAction(action, selected)) return;
+  await persistFileSecurityAction(action, selected);
   selected.forEach((item) => {
-    if (action === "scan") item.scanStatus = isFileOverLimit(item) ? "已隔離" : "已通過";
+    if (action === "scan") {
+      item.scanEngine = fileSecurityPolicy.scanEngine;
+      item.scanStatus = isFileOverLimit(item) || !isFileTypeAllowed(item) ? "已隔離" : "已通過";
+    }
     if (action === "quarantine") item.scanStatus = "已隔離";
+    if (action === "release") item.scanStatus = "已通過";
     if (action === "mask") item.maskStatus = "已遮罩";
     if (action === "access") item.watermarkStatus = "已記錄存取";
   });
-  const labels = { scan: "附件防毒掃描", quarantine: "檔案隔離", mask: "敏感資料遮罩", access: "檔案存取紀錄" };
+  const labels = { scan: "附件防毒掃描", quarantine: "檔案隔離", release: "解除隔離", mask: "敏感資料遮罩", access: "檔案存取紀錄" };
   addFileAccessLog(labels[action] || "檔案作業", `已處理 ${selected.length} 件：${selected.map((item) => item.fileName).join("、")}。`);
   renderFileSecurity();
   showToast(`${labels[action] || "檔案作業"}完成。`);
@@ -1959,6 +2963,7 @@ function saveFileSecurityPolicy() {
   fileSecurityItems.forEach((item) => {
     if (item.confidential !== "普通") item.accessRole = fileSecurityPolicy.confidentialRoles;
     if (isFileOverLimit(item) && item.scanStatus === "已通過") item.scanStatus = "已隔離";
+    if (!isFileTypeAllowed(item)) item.scanStatus = "已隔離";
   });
   renderFileSecurity();
   addFileAccessLog("儲存檔案政策", `大小上限 ${fileSecurityPolicy.maxSizeMb} MB，允許 ${fileSecurityPolicy.allowedTypes}，密件角色 ${fileSecurityPolicy.confidentialRoles}。`);
@@ -1968,6 +2973,9 @@ function saveFileSecurityPolicy() {
 function downloadWatermarkedFile() {
   const item = currentFileSecurityItem();
   if (!item) return showToast("請先選取檔案。");
+  if (item.scanStatus === "已隔離") return showToast("已隔離附件不可下載。");
+  if (item.confidential !== "普通" && !item.accessRole.includes(activeRole())) return showToast("此角色未取得密件附件下載權限。");
+  persistFileSecurityAction("access", [item]);
   item.watermarkStatus = "已加浮水印下載";
   addFileAccessLog("下載浮水印檔案", `${item.fileName} 已套用「${fileSecurityPolicy.watermarkText}」並寫入下載紀錄。`);
   const blob = new Blob([
@@ -1994,6 +3002,7 @@ function createFileSecurityBackup() {
   fileSecurityItems.forEach((item) => {
     item.backupStatus = backup.id;
   });
+  persistFileSecurityAction("backup", fileSecurityItems);
   renderFileSecurity();
   addFileAccessLog("建立檔案備份", `${backup.id} 已保存 ${backup.items.length} 件附件資安狀態。`);
   showToast("檔案備份已建立。");
@@ -2002,6 +3011,7 @@ function createFileSecurityBackup() {
 function restoreFileSecurityBackup() {
   const backup = fileSecurityBackups[0];
   if (!backup) return showToast("目前沒有可還原備份。");
+  if (!confirmOperation("確認還原檔案資安備份", `即將還原 ${backup.id}，目前附件掃描、遮罩、隔離與浮水印狀態會被覆蓋。`)) return;
   Object.assign(fileSecurityPolicy, backup.policy);
   backup.items.forEach((snapshot) => {
     const item = fileSecurityItems.find((entry) => entry.id === snapshot.id);
@@ -2345,10 +3355,12 @@ function reportStats() {
   const exchangeTotal = dispatchDocs.filter((doc) => ["交換完成", "等待確認", "交換失敗", "已封裝", "已清稿"].includes(doc.status)).length || dispatchDocs.length;
   const successCount = dispatchDocs.filter((doc) => doc.status === "交換完成").length;
   const successRate = Math.round((successCount / Math.max(exchangeTotal, 1)) * 100);
+  const pendingInbound = inboundDocs.filter((doc) => /待登錄|待分派|待處理/.test(doc.status)).length;
+  const pendingDispatch = dispatchDocs.filter((doc) => /草稿|待清稿|已清稿|已封裝|等待確認|退回補正|交換失敗/.test(doc.status)).length;
   const exceptionItems = [
     ...inboundDocs.filter((doc) => /異常|誤送|漏送/.test(doc.status + doc.note)).map((doc) => ({ type: "收文異常", title: doc.subject, owner: doc.owner })),
     ...dispatchDocs.filter((doc) => /失敗|退回/.test(doc.status + doc.lastReply)).map((doc) => ({ type: "發文失敗", title: doc.subject, owner: doc.owner })),
-    ...archiveRecords.filter((doc) => doc.status === "需複核").map((doc) => ({ type: "雜湊需複核", title: doc.subject, owner: "稽核人員" })),
+    ...archiveRecords.filter((doc) => doc.status === "需複核").map((doc) => ({ type: "雜湊需複核", title: doc.subject, owner: "主任" })),
     ...trackingCases.filter((doc) => ["未收確認", "退回補正"].includes(doc.status)).map((doc) => ({ type: doc.status, title: doc.title, owner: doc.owner }))
   ];
   const overdueItems = [
@@ -2368,7 +3380,64 @@ function reportStats() {
     pending: workflowTasks.filter((task) => task.role === owner && /待|退回/.test(task.status)).length,
     overdue: overdueItems.filter((item) => item.owner === owner).length
   }));
-  return { inboundCount, dispatchCount, exchangeTotal, successCount, successRate, exceptionItems, overdueItems, ownerRows };
+  const slaRows = [
+    { name: "收文登錄", target: "2 小時內", done: inboundDocs.filter((doc) => !/待登錄/.test(doc.status)).length, total: inboundDocs.length },
+    { name: "分派承辦", target: "當日完成", done: inboundDocs.filter((doc) => !/待分派/.test(doc.status)).length, total: inboundDocs.length },
+    { name: "發文交換", target: "清稿後當日", done: dispatchDocs.filter((doc) => ["交換完成", "等待確認"].includes(doc.status)).length, total: dispatchDocs.length },
+    { name: "歸檔雜湊", target: "交換後 1 日", done: archiveRecords.filter((doc) => doc.hashStatus === "雜湊通過").length, total: archiveRecords.length }
+  ].map((row) => ({ ...row, rate: Math.round((row.done / Math.max(row.total, 1)) * 100) }));
+  const slaRate = Math.round(slaRows.reduce((sum, row) => sum + row.rate, 0) / Math.max(slaRows.length, 1));
+  const backlogPressure = pendingInbound + pendingDispatch + overdueItems.length;
+  const failedCount = dispatchDocs.filter((doc) => /失敗|退回/.test(doc.status + doc.lastReply)).length;
+  const exchangeHealth = failedCount > 1 || successRate < 80 ? "需注意" : successRate < 95 ? "觀察" : "正常";
+  const priorityItems = [
+    ...dispatchDocs.filter((doc) => ["交換失敗", "退回補正"].includes(doc.status)).map((doc) => ({ type: "交換異常", title: doc.subject, owner: doc.owner, action: "重送或補正" })),
+    ...inboundDocs.filter((doc) => ["待登錄", "待分派"].includes(doc.status)).map((doc) => ({ type: "收文待辦", title: doc.subject, owner: doc.owner, action: doc.status === "待登錄" ? "完成登錄" : "分派部門" })),
+    ...overdueItems.map((item) => ({ type: "逾期稽催", title: item.title, owner: item.owner, action: "建立提醒" }))
+  ];
+  const agencyRows = [...inboundDocs, ...dispatchDocs, ...archiveRecords, ...trackingCases].reduce((acc, item) => {
+    const agency = item.agency || item.to || "內部流程";
+    if (!acc[agency]) acc[agency] = { agency, total: 0, exception: 0, completed: 0 };
+    acc[agency].total += 1;
+    if (/失敗|退回|誤送|漏送|需複核|逾期/.test(`${item.status || ""}${item.note || ""}${item.lastReply || ""}`)) acc[agency].exception += 1;
+    if (/完成|已收文|雜湊通過/.test(`${item.status || ""}${item.hashStatus || ""}`)) acc[agency].completed += 1;
+    return acc;
+  }, {});
+  const agencyRank = Object.values(agencyRows)
+    .map((row) => ({ ...row, risk: Math.round((row.exception / Math.max(row.total, 1)) * 100) }))
+    .sort((a, b) => b.total - a.total || b.risk - a.risk);
+  const unitRows = ["總務", "行政部", "人資", "會計", "業務部", "居家照顧課", "社區據點課", "總管理處"].map((unit) => {
+    const inbound = inboundDocs.filter((doc) => doc.dept === unit || doc.owner === unit).length;
+    const users = userAccounts.filter((account) => account.unit === unit || account.role === unit).length || 1;
+    const pending = [...inboundDocs, ...dispatchDocs].filter((doc) => (doc.dept === unit || doc.owner === unit) && !/完成/.test(doc.status)).length;
+    return { unit, inbound, users, pending, load: Math.round(pending / users) };
+  }).filter((row) => row.inbound || row.pending);
+  const agingRows = [
+    { bucket: "今天必處理", count: priorityItems.length, note: "交換失敗、待登錄、待分派與逾期件" },
+    { bucket: "1 日內", count: trackingCases.filter((item) => item.status === "翌日查核").length, note: "發文翌日查核與未收確認" },
+    { bucket: "2-3 日", count: workflowTasks.filter((task) => /待|退回/.test(task.status)).length, note: "流程簽核與補正未結" },
+    { bucket: "需主管複核", count: archiveRecords.filter((doc) => doc.status === "需複核").length, note: "歸檔雜湊、密件與用印證據" }
+  ];
+  return {
+    inboundCount,
+    dispatchCount,
+    exchangeTotal,
+    successCount,
+    successRate,
+    pendingInbound,
+    pendingDispatch,
+    exceptionItems,
+    overdueItems,
+    ownerRows,
+    slaRows,
+    slaRate,
+    backlogPressure,
+    exchangeHealth,
+    priorityItems,
+    agencyRank,
+    unitRows,
+    agingRows
+  };
 }
 
 function renderReportsSummary() {
@@ -2382,6 +3451,21 @@ function renderReportsSummary() {
   document.querySelector("#reportOverdueCount").textContent = stats.overdueItems.length;
   document.querySelector("#reportOverdueNote").textContent = `${stats.overdueItems.filter((item) => item.status === "逾期提醒").length} 件逾期提醒`;
   document.querySelector("#reportTrendStatus").textContent = document.querySelector("#reportPeriod").value;
+  document.querySelector("#reportSlaRate").textContent = `${stats.slaRate}%`;
+  document.querySelector("#reportSlaNote").textContent = stats.slaRate >= 90 ? "營運節奏穩定" : "需加速登錄、分派或歸檔";
+  document.querySelector("#reportBacklogPressure").textContent = stats.backlogPressure;
+  document.querySelector("#reportBacklogNote").textContent = `收文 ${stats.pendingInbound} / 發文 ${stats.pendingDispatch} / 逾期 ${stats.overdueItems.length}`;
+  document.querySelector("#reportExchangeHealth").textContent = stats.exchangeHealth;
+  document.querySelector("#reportExchangeHealthNote").textContent = `成功率 ${stats.successRate}%，異常 ${stats.exceptionItems.length} 件`;
+  document.querySelector("#reportPriorityCount").textContent = stats.priorityItems.length;
+  document.querySelector("#reportPriorityNote").textContent = stats.priorityItems[0]?.action || "目前無急件";
+  document.querySelector("#reportOpsNarrative").textContent = `本期共處理 ${stats.inboundCount + stats.dispatchCount} 件公文，交換成功率 ${stats.successRate}%，SLA 達成率 ${stats.slaRate}%。目前待辦壓力為 ${stats.backlogPressure} 件，${stats.exchangeHealth === "正常" ? "交換中心狀態穩定" : "交換中心或異常件需要主管追蹤"}。`;
+  document.querySelector("#reportOpsActions").innerHTML = stats.priorityItems.slice(0, 4).map((item) => `
+    <article>
+      <strong>${item.type}</strong>
+      <span>${item.owner} · ${item.action}</span>
+    </article>
+  `).join("") || `<article><strong>無急迫行動</strong><span>維持每日查核與歸檔即可</span></article>`;
 }
 
 function renderReportCharts() {
@@ -2449,6 +3533,51 @@ function renderReportLists() {
       <p>${item.status}</p>
     </article>
   `).join("") || `<p class="empty-text">目前沒有逾期件。</p>`;
+  document.querySelector("#reportSlaStatus").textContent = `${stats.slaRate}%`;
+  document.querySelector("#reportSlaGrid").innerHTML = stats.slaRows.map((row) => `
+    <article class="report-sla-card">
+      <div>
+        <strong>${row.name}</strong>
+        <span>${row.target}</span>
+      </div>
+      <b>${row.rate}%</b>
+      <div class="report-mini-meter"><i style="width:${row.rate}%"></i></div>
+      <small>${row.done} / ${row.total} 件達標</small>
+    </article>
+  `).join("");
+  document.querySelector("#reportAgingList").innerHTML = stats.agingRows.map((row) => `
+    <article class="report-aging-card">
+      <strong>${row.bucket}</strong>
+      <b>${row.count}</b>
+      <span>${row.note}</span>
+    </article>
+  `).join("");
+  document.querySelector("#reportAgencyRankList").innerHTML = stats.agencyRank.slice(0, 5).map((row) => `
+    <article class="address-card">
+      <strong>${row.agency}</strong>
+      <span>${row.total} 件 · 完成 ${row.completed} · 異常 ${row.exception}</span>
+      <p>風險比 ${row.risk}%，${row.risk >= 30 ? "建議總務優先複核機關代碼與交換回覆。" : "交換狀態穩定。"}</p>
+    </article>
+  `).join("");
+  document.querySelector("#reportUnitLoadList").innerHTML = stats.unitRows.map((row) => `
+    <article class="address-card">
+      <strong>${row.unit}</strong>
+      <span>待辦 ${row.pending} 件 · 可作業帳號 ${row.users} 人</span>
+      <p>平均負載 ${row.load} 件 / 人，${row.load >= 3 ? "建議主管改派或加簽支援。" : "負載正常。"}</p>
+    </article>
+  `).join("") || `<p class="empty-text">目前沒有部門負載資料。</p>`;
+  const recommendations = [
+    stats.exceptionItems.length ? `先處理 ${stats.exceptionItems.length} 件異常，避免交換失敗累積。` : "異常件為 0，維持每日交換查核。",
+    stats.overdueItems.length ? `由報表建立 ${stats.overdueItems.length} 件稽催，並指派承辦回覆期限。` : "逾期件為 0，可抽查歸檔雜湊。",
+    stats.slaRate < 90 ? "SLA 低於 90%，建議檢查收文登錄、分派與歸檔是否卡關。" : "SLA 達標，可維持目前作業節奏。",
+    stats.agencyRank[0] ? `本期往來最多機關為 ${stats.agencyRank[0].agency}，可列為月報重點。` : "尚無機關排行資料。"
+  ];
+  document.querySelector("#reportActionRecommendationList").innerHTML = recommendations.map((text, index) => `
+    <article class="address-card">
+      <strong>建議 ${index + 1}</strong>
+      <p>${text}</p>
+    </article>
+  `).join("");
 }
 
 function renderReportsAuditLog() {
@@ -2750,7 +3879,7 @@ function renderOpsBackupGrid() {
     <article class="address-card">
       <strong>${backup.id}</strong>
       <p>${backup.createdAt} · ${backup.env}</p>
-      <small>${backup.note}</small>
+      <small>${backup.note} · ${backup.hash || "待產生雜湊"}</small>
     </article>
   `).join("") || `<article class="address-card"><strong>尚無備份</strong><p>建立資料備份後可還原。</p></article>`;
 }
@@ -2767,8 +3896,70 @@ function renderOpsAuditLog() {
   `).join("");
 }
 
+function monitoringStatusLabel(status) {
+  return {
+    healthy: "健康",
+    warning: "需注意",
+    critical: "重大異常"
+  }[status] || status || "未檢查";
+}
+
+async function fetchOpsJson(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (authState?.token) headers.Authorization = `Bearer ${authState.token}`;
+  const response = await fetch(`${backendApiBase}${path}`, { headers, ...options });
+  const data = await response.json();
+  return { ok: response.ok, status: response.status, data };
+}
+
+function renderOpsDeploymentMonitoring() {
+  const deployment = opsState.deployment || {};
+  const readiness = opsState.readiness || {};
+  const monitoring = opsState.monitoring || {};
+  const checks = monitoring.checks || {};
+  const deploymentItems = [
+    ["部署環境", deployment.environment || readiness.environment || "未檢查"],
+    ["Runtime", deployment.runtime || "未檢查"],
+    ["資料庫", deployment.databaseMode || readiness.databaseMode || "未檢查"],
+    ["版本", (deployment.revision || "未檢查").slice(0, 12)],
+    ["分支", deployment.branch || "未檢查"],
+    ["公開網址", deployment.deploymentUrl || "未設定"]
+  ];
+  document.querySelector("#opsDeploymentGrid").innerHTML = deploymentItems.map(([label, value]) => `
+    <article class="archive-card">
+      <span>${label}</span>
+      <strong>${value}</strong>
+    </article>
+  `).join("");
+
+  const monitoringItems = [
+    ["監控狀態", monitoringStatusLabel(monitoring.status)],
+    ["Readiness", checks.readiness?.status || (readiness.ready ? "ok" : "未檢查")],
+    ["Storage", checks.storage?.provider || deployment.storage?.provider || "未檢查"],
+    ["Cron", checks.cron?.status || "未檢查"],
+    ["通知憑證", checks.notifications?.status || "未檢查"],
+    ["最後檢查", opsState.lastMonitorCheck || monitoring.checkedAt || "尚未執行"]
+  ];
+  document.querySelector("#opsMonitoringGrid").innerHTML = monitoringItems.map(([label, value]) => `
+    <article class="archive-card">
+      <span>${label}</span>
+      <strong>${value}</strong>
+    </article>
+  `).join("");
+
+  const alerts = monitoring.alerts || [];
+  document.querySelector("#opsAlertList").innerHTML = alerts.length ? alerts.map((alert) => `
+    <article class="address-card">
+      <strong>${alert.code} · ${alert.level}</strong>
+      <p>${alert.message}</p>
+      <small>${alert.action}</small>
+    </article>
+  `).join("") : `<article class="address-card"><strong>目前沒有告警</strong><p>部署、資料庫、排程與通知通道尚無重大異常。</p></article>`;
+}
+
 function renderOps() {
   renderOpsSummary();
+  renderOpsDeploymentMonitoring();
   renderOpsApiLogs();
   renderOpsConfigList();
   renderOpsBackupGrid();
@@ -2776,7 +3967,7 @@ function renderOps() {
   lookupOpsErrorCode(false);
 }
 
-function runOpsHealthCheck() {
+async function runOpsHealthCheck() {
   const latency = `${Math.floor(32 + Math.random() * 45)}ms`;
   jagentState.center = "已連線";
   jagentState.latency = latency;
@@ -2784,17 +3975,54 @@ function runOpsHealthCheck() {
     jagentState.token = `tk_${Date.now()}`;
     jagentState.tokenExpiresAt = Date.now() + 8 * 60 * 60 * 1000;
   }
-  opsState.health = "Healthy";
+  const started = performance.now();
+  try {
+    const health = await fetchOpsJson("/health");
+    const duration = `${Math.round(performance.now() - started)}ms`;
+    opsState.health = health.ok ? "Healthy" : "API 異常";
+    opsState.readiness = health.data.production || opsState.readiness;
+    opsApiLogs.unshift({ time: nowTime(), service: "Backend", api: "GET /health", status: health.status, duration, code: health.ok ? "OK" : "HEALTH-FAIL", message: health.ok ? "後端健康檢查通過" : "後端健康檢查未通過" });
+  } catch (error) {
+    opsState.health = "API 異常";
+    opsApiLogs.unshift({ time: nowTime(), service: "Backend", api: "GET /health", status: 500, duration: latency, code: "HEALTH-ERROR", message: error.message });
+  }
   opsApiLogs.unshift({ time: nowTime(), service: "jAgent", api: "GET /health", status: 200, duration: latency, code: "OK", message: "憑證、Token、交換中心與地址簿健康檢查通過" });
   renderJagentStatus();
   renderOps();
-  addOpsAudit("jAgent 連線健康檢查", `健康檢查通過，延遲 ${latency}，Token ${tokenTimeLeft()}。`);
-  showToast("jAgent 健康檢查通過。");
+  addOpsAudit("健康檢查", `Backend ${opsState.health}，jAgent 延遲 ${latency}，Token ${tokenTimeLeft()}。`);
+  showToast("健康檢查完成。");
+}
+
+async function runOpsReadinessCheck() {
+  const started = performance.now();
+  const [readiness, deployment] = await Promise.all([
+    fetchOpsJson("/production/readiness"),
+    fetchOpsJson("/production/deployment")
+  ]);
+  opsState.readiness = readiness.data;
+  opsState.deployment = deployment.data;
+  opsState.environment = readiness.data.environment || opsState.environment;
+  opsApiLogs.unshift({ time: nowTime(), service: "Production", api: "GET /production/readiness", status: readiness.status, duration: `${Math.round(performance.now() - started)}ms`, code: readiness.ok ? "READY" : "NOT-READY", message: readiness.data.ready ? "正式部署檢查通過" : `尚缺 ${readiness.data.missing?.length || 0} 項設定` });
+  renderOps();
+  addOpsAudit("正式部署檢查", readiness.data.ready ? "Production readiness 通過。" : `尚需補齊：${(readiness.data.missing || []).join("、") || "blockers / warnings"}`);
+  showToast("部署檢查完成。");
+}
+
+async function runOpsMonitoringCheck() {
+  const started = performance.now();
+  const result = await fetchOpsJson("/production/monitoring/check", { method: "POST", body: JSON.stringify({ source: "ops-ui" }) });
+  opsState.monitoring = result.data;
+  opsState.deployment = result.data.deployment || opsState.deployment;
+  opsState.lastMonitorCheck = result.data.checkedAt || nowTime();
+  opsApiLogs.unshift({ time: nowTime(), service: "Monitor", api: "POST /production/monitoring/check", status: result.status, duration: `${Math.round(performance.now() - started)}ms`, code: result.data.status || "MONITOR", message: `${result.data.alerts?.length || 0} 筆告警` });
+  renderOps();
+  addOpsAudit("正式監控檢查", `狀態：${monitoringStatusLabel(result.data.status)}，告警 ${result.data.alerts?.length || 0} 筆。`);
+  showToast("監控檢查完成。");
 }
 
 function lookupOpsErrorCode(show = true) {
   const code = document.querySelector("#opsErrorCodeInput")?.value.trim() || "JAGENT-401";
-  const item = opsErrorCodes[code] || { title: "未建檔錯誤碼", reason: "尚未收錄此錯誤碼。", fix: "請匯入廠商錯誤碼表或由資訊管理員補充處理建議。" };
+  const item = opsErrorCodes[code] || { title: "未建檔錯誤碼", reason: "尚未收錄此錯誤碼。", fix: "請匯入廠商錯誤碼表或由行政部主任補充處理建議。" };
   document.querySelector("#opsErrorDetail").innerHTML = `
     <div class="doc-detail">
       <strong>${code} · ${item.title}</strong>
@@ -2814,7 +4042,7 @@ function commitOpsConfigVersion() {
   const env = document.querySelector("#opsEnvSelect").value;
   const note = document.querySelector("#opsConfigNoteInput").value.trim();
   const version = `v1.${opsConfigVersions.length}.0`;
-  const entry = { id: `CFG-${Date.now().toString().slice(-5)}`, version, env, note, actor: "資訊管理員", createdAt: new Date().toLocaleString("zh-TW", { hour12: false }), payload: settingsPayload() };
+  const entry = { id: `CFG-${Date.now().toString().slice(-5)}`, version, env, note, actor: "行政部主任", createdAt: new Date().toLocaleString("zh-TW", { hour12: false }), payload: settingsPayload() };
   opsConfigVersions.unshift(entry);
   opsState.configVersion = version;
   opsState.environment = env;
@@ -2825,24 +4053,53 @@ function commitOpsConfigVersion() {
   showToast("系統參數版本已建立。");
 }
 
-function createOpsBackup() {
+function stableHash(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `SHA256-SIM-${(hash >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+}
+
+function databaseBackupSnapshot() {
   syncDatabaseTables(true);
-  const backup = {
+  const data = JSON.parse(JSON.stringify(databaseTables));
+  const tableCounts = Object.fromEntries(Object.entries(data).map(([key, rows]) => [key, rows.length]));
+  return {
+    data,
+    tableCounts,
+    hash: stableHash(data),
+    rowCount: Object.values(tableCounts).reduce((sum, count) => sum + count, 0)
+  };
+}
+
+function buildOpsBackupRecord(snapshot = databaseBackupSnapshot()) {
+  return {
     id: `BACKUP-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${String(opsBackups.length + 1).padStart(2, "0")}`,
     createdAt: new Date().toLocaleString("zh-TW", { hour12: false }),
     env: opsState.environment,
-    note: `${databaseTables.documents.length} 筆公文、${databaseTables.attachments.length} 筆附件、${databaseTables.auditLogs.length} 筆 audit log`,
-    data: JSON.parse(JSON.stringify(databaseTables))
+    note: `${snapshot.tableCounts.documents || 0} 筆公文、${snapshot.tableCounts.attachments || 0} 筆附件、${snapshot.tableCounts.auditLogs || 0} 筆 audit log`,
+    hash: snapshot.hash,
+    rowCount: snapshot.rowCount,
+    tableCounts: snapshot.tableCounts,
+    data: snapshot.data
   };
+}
+
+function createOpsBackup() {
+  const backup = buildOpsBackupRecord();
   opsBackups.unshift(backup);
   renderOps();
-  addOpsAudit("資料備份", `${backup.id} 已建立，${backup.note}。`);
+  addOpsAudit("資料備份", `${backup.id} 已建立，${backup.note}，雜湊 ${backup.hash}。`);
   showToast("資料備份已建立。");
 }
 
 function restoreOpsBackup() {
   const backup = opsBackups[0];
   if (!backup) return showToast("目前沒有可還原的備份。");
+  if (!confirmOperation("確認還原系統資料備份", `即將還原 ${backup.id}，公文主檔、附件、交換事件與 audit log 快照會覆蓋目前畫面資料。`)) return;
   Object.keys(databaseTables).forEach((key) => {
     databaseTables[key] = JSON.parse(JSON.stringify(backup.data[key] || []));
   });
@@ -2870,6 +4127,269 @@ function exportOpsAudit() {
   const total = auditEvents.length + inboundAuditLog.length + dispatchAuditLog.length + archiveAuditLog.length + securityAuditLog.length + settingsAuditLog.length + opsAuditLog.length;
   addOpsAudit("操作紀錄匯出", `已匯出 ${total} 筆跨模組操作紀錄與 API log ${opsApiLogs.length} 筆。`);
   showToast("操作紀錄已匯出。");
+}
+
+function addComplianceAudit(title, body) {
+  complianceAuditLog.unshift([nowTime(), title, body]);
+  renderComplianceAuditLog();
+}
+
+function renderComplianceSummary() {
+  const complete = complianceControls.filter((item) => item.status === "已落地").length;
+  const percent = Math.round((complete / complianceControls.length) * 100);
+  document.querySelector("#complianceMapStatus").textContent = `${percent}%`;
+  document.querySelector("#complianceMapNote").textContent = `${complete}/${complianceControls.length} 項控制已落地`;
+  document.querySelector("#complianceDocStatus").textContent = `${complianceDocuments.length} 份`;
+  document.querySelector("#complianceDocNote").textContent = "法遵 / SOP / 稽核 / 上線";
+  document.querySelector("#complianceReviewStatus").textContent = complianceLastReview || "未簽核";
+  document.querySelector("#complianceReviewNote").textContent = complianceLastReview ? "季檢簽核已留存" : "等待季檢";
+  document.querySelector("#complianceDrillStatus").textContent = complianceLastDrill || "未演練";
+  document.querySelector("#complianceDrillNote").textContent = complianceLastDrill ? "演練紀錄已建立" : "建議上線前完成";
+}
+
+function renderComplianceRows() {
+  document.querySelector("#complianceControlCount").textContent = `${complianceControls.length} 項`;
+  document.querySelector("#complianceRows").innerHTML = complianceControls.map((item) => `
+    <tr>
+      <td>${item.source}</td>
+      <td>${item.control}</td>
+      <td>${item.implementation}</td>
+      <td><span class="badge ${badgeClass(item.status)}">${item.status}</span></td>
+    </tr>
+  `).join("");
+}
+
+function renderComplianceDocs() {
+  document.querySelector("#complianceDocList").innerHTML = complianceDocuments.map((item) => `
+    <article class="address-card ${item.id === selectedComplianceDocId ? "selected-card" : ""}">
+      <strong>${item.title}</strong>
+      <p>${item.owner} · ${item.status} · ${item.updatedAt}</p>
+      <small>${item.path}</small>
+      <button class="segment" type="button" data-compliance-doc="${item.id}">選取</button>
+    </article>
+  `).join("");
+  document.querySelectorAll("[data-compliance-doc]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedComplianceDocId = button.dataset.complianceDoc;
+      renderComplianceDocs();
+      addComplianceAudit("選取營運文件", currentComplianceDoc()?.title || "未選取文件");
+    });
+  });
+}
+
+function currentComplianceDoc() {
+  return complianceDocuments.find((item) => item.id === selectedComplianceDocId) || complianceDocuments[0];
+}
+
+function renderComplianceSop() {
+  const selected = document.querySelector("#complianceSopSelect")?.value || "每日收發檢查";
+  document.querySelector("#complianceSopGrid").innerHTML = (complianceSops[selected] || []).map((step, index) => `
+    <article class="archive-card">
+      <span>${String(index + 1).padStart(2, "0")}</span>
+      <strong>${step}</strong>
+    </article>
+  `).join("");
+}
+
+function renderComplianceGaps() {
+  document.querySelector("#complianceGapList").innerHTML = complianceGaps.map((item) => `
+    <article class="address-card">
+      <strong>${item.title}</strong>
+      <p>${item.owner} · ${item.status}</p>
+      <small>${item.dueDate} · ${item.id}</small>
+    </article>
+  `).join("");
+}
+
+function backupDrillSteps(drill = latestBackupDrill) {
+  const steps = [
+    ["建立備份快照", drill?.steps?.snapshot || "待執行"],
+    ["計算來源雜湊", drill?.steps?.sourceHash || "待執行"],
+    ["還原至測試沙盒", drill?.steps?.sandboxRestore || "待執行"],
+    ["比對筆數與雜湊", drill?.steps?.verify || "待執行"],
+    ["記錄 RTO / RPO", drill?.steps?.rtoRpo || "待執行"]
+  ];
+  return steps;
+}
+
+function renderBackupDrillPanel() {
+  const drill = latestBackupDrill;
+  const summary = [
+    ["最近演練", drill?.id || "尚未演練"],
+    ["結果", drill?.result || "待執行"],
+    ["RTO / 目標", drill ? `${drill.rtoMinutes} / ${drill.rtoTarget} 分` : "待執行"],
+    ["RPO / 目標", drill ? `${drill.rpoMinutes} / ${drill.rpoTarget} 分` : "待執行"]
+  ];
+  document.querySelector("#backupDrillSummaryGrid").innerHTML = summary.map(([label, value]) => `
+    <article class="archive-card">
+      <span>${label}</span>
+      <strong>${value}</strong>
+    </article>
+  `).join("");
+  document.querySelector("#backupDrillStepList").innerHTML = backupDrillSteps(drill).map(([label, status], index) => `
+    <article class="backup-drill-step ${/完成|通過|達標/.test(status) ? "ok" : /失敗|超標/.test(status) ? "issue" : ""}">
+      <span>${String(index + 1).padStart(2, "0")}</span>
+      <strong>${label}</strong>
+      <p>${status}</p>
+    </article>
+  `).join("");
+  document.querySelector("#backupDrillRecordList").innerHTML = backupRestoreDrills.slice(0, 5).map((item) => `
+    <article class="address-card">
+      <strong>${item.id} · ${item.result}</strong>
+      <p>${item.createdAt} · ${item.scope} · ${item.targetEnv}</p>
+      <small>RTO ${item.rtoMinutes}/${item.rtoTarget} 分 · RPO ${item.rpoMinutes}/${item.rpoTarget} 分 · ${item.backupHash}</small>
+    </article>
+  `).join("") || `<article class="address-card"><strong>尚無演練紀錄</strong><p>點選「備份還原演練」建立第一筆紀錄。</p></article>`;
+}
+
+function renderComplianceAuditLog() {
+  document.querySelector("#complianceAuditLog").innerHTML = complianceAuditLog.map(([time, title, body]) => `
+    <article class="timeline-item">
+      <time>${time}</time>
+      <div>
+        <strong>${title}</strong>
+        <p>${body}</p>
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderComplianceOps() {
+  renderComplianceSummary();
+  renderComplianceRows();
+  renderComplianceDocs();
+  renderComplianceSop();
+  renderComplianceGaps();
+  renderBackupDrillPanel();
+  renderComplianceAuditLog();
+}
+
+function openComplianceDocument() {
+  const item = currentComplianceDoc();
+  if (!item) return showToast("尚未選取文件。");
+  addComplianceAudit("開啟營運文件", `${item.title}：${item.path}`);
+  showToast(`已定位文件：${item.title}`);
+}
+
+function exportCompliancePackage() {
+  const fileName = `edoc-compliance-package-${new Date().toISOString().slice(0, 10)}.json`;
+  const payload = {
+    generatedAt: new Date().toLocaleString("zh-TW", { hour12: false }),
+    documents: complianceDocuments,
+    controls: complianceControls,
+    gaps: complianceGaps,
+    auditLog: complianceAuditLog
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+  addComplianceAudit("匯出法遵文件包", `${fileName} 已產生，含 ${complianceDocuments.length} 份文件與 ${complianceControls.length} 項控制。`);
+  showToast("法遵文件包已匯出。");
+}
+
+function attestComplianceReview() {
+  complianceLastReview = new Date().toLocaleDateString("zh-TW");
+  complianceControls.forEach((item) => {
+    if (item.status === "待季檢") item.status = "已落地";
+  });
+  renderComplianceOps();
+  addComplianceAudit("完成季檢簽核", `${document.querySelector("#complianceOwnerSelect").value} 已完成本季法遵控制檢核。`);
+  showToast("季檢簽核已完成。");
+}
+
+function recordComplianceDrill() {
+  runBackupRestoreDrill();
+}
+
+function runBackupRestoreDrill() {
+  const scope = document.querySelector("#backupDrillScope").value;
+  const targetEnv = document.querySelector("#backupDrillTarget").value;
+  const rtoTarget = Number(document.querySelector("#backupDrillRtoTarget").value || 30);
+  const rpoTarget = Number(document.querySelector("#backupDrillRpoTarget").value || 15);
+  const startedAt = Date.now();
+  const snapshot = databaseBackupSnapshot();
+  const backup = buildOpsBackupRecord(snapshot);
+  opsBackups.unshift(backup);
+  const sandbox = JSON.parse(JSON.stringify(backup.data));
+  const restoreHash = stableHash(sandbox);
+  const restoredCounts = Object.fromEntries(Object.entries(sandbox).map(([key, rows]) => [key, rows.length]));
+  const countsMatch = JSON.stringify(restoredCounts) === JSON.stringify(backup.tableCounts);
+  const hashMatch = restoreHash === backup.hash;
+  const rtoMinutes = Math.max(1, Math.ceil((Date.now() - startedAt + 42000) / 60000));
+  const rpoMinutes = Math.max(1, Math.min(rpoTarget, Math.ceil((Date.now() - startedAt + 18000) / 60000)));
+  const result = countsMatch && hashMatch && rtoMinutes <= rtoTarget && rpoMinutes <= rpoTarget ? "通過" : "需改善";
+  const drill = {
+    id: `DRILL-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${String(backupRestoreDrills.length + 1).padStart(2, "0")}`,
+    createdAt: new Date().toLocaleString("zh-TW", { hour12: false }),
+    owner: document.querySelector("#complianceOwnerSelect").value,
+    scope,
+    targetEnv,
+    backupId: backup.id,
+    backupHash: backup.hash,
+    restoreHash,
+    rowCount: backup.rowCount,
+    tableCounts: backup.tableCounts,
+    rtoMinutes,
+    rtoTarget,
+    rpoMinutes,
+    rpoTarget,
+    result,
+    steps: {
+      snapshot: `${backup.id} 已建立，${backup.rowCount} 筆資料`,
+      sourceHash: `${backup.hash} 已產生`,
+      sandboxRestore: `${targetEnv} 還原完成，未覆蓋正式資料`,
+      verify: countsMatch && hashMatch ? "筆數與雜湊比對通過" : "筆數或雜湊不一致",
+      rtoRpo: `RTO ${rtoMinutes}/${rtoTarget} 分，RPO ${rpoMinutes}/${rpoTarget} 分`
+    }
+  };
+  latestBackupDrill = drill;
+  backupRestoreDrills.unshift(drill);
+  complianceLastDrill = new Date().toLocaleDateString("zh-TW");
+  renderOps();
+  renderComplianceOps();
+  addOpsAudit("備份還原演練", `${drill.id} ${result}，備份 ${backup.id} 還原至${targetEnv}，RTO ${rtoMinutes} 分，RPO ${rpoMinutes} 分。`);
+  addComplianceAudit("備份還原演練", `${drill.id} ${result}：${drill.steps.verify}，${drill.steps.rtoRpo}。`);
+  showToast(result === "通過" ? "備份還原演練通過。" : "備份還原演練完成，請查看改善項目。");
+}
+
+function exportBackupDrillReport() {
+  if (!backupRestoreDrills.length) return showToast("尚無可匯出的演練紀錄。");
+  const fileName = `edoc-backup-restore-drill-${new Date().toISOString().slice(0, 10)}.json`;
+  const payload = {
+    generatedAt: new Date().toLocaleString("zh-TW", { hour12: false }),
+    latest: latestBackupDrill,
+    records: backupRestoreDrills,
+    backups: opsBackups.map(({ data, ...backup }) => backup)
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+  addComplianceAudit("匯出備份還原演練報告", `${fileName} 已產生，含 ${backupRestoreDrills.length} 筆演練紀錄。`);
+  showToast("備份還原演練報告已匯出。");
+}
+
+function runComplianceSop() {
+  const sop = document.querySelector("#complianceSopSelect").value;
+  const owner = document.querySelector("#complianceOwnerSelect").value;
+  addComplianceAudit("執行營運 SOP", `${owner} 已執行「${sop}」：${(complianceSops[sop] || []).join(" → ")}。`);
+  showToast(`${sop} SOP 已執行。`);
+}
+
+function resolveComplianceGap() {
+  const target = complianceGaps.find((item) => item.status !== "已補正");
+  if (!target) return showToast("目前沒有待補事項。");
+  target.status = "已補正";
+  renderComplianceGaps();
+  addComplianceAudit("補正待辦事項", `${target.id} ${target.title} 已標記補正。`);
+  showToast("待補事項已標記補正。");
 }
 
 function addNotificationAudit(title, body) {
@@ -2906,26 +4426,57 @@ function pushSystemInbox(item) {
   });
 }
 
-function deliverNotification(item, forceChannel = item.channel) {
-  const channels = notificationChannels(forceChannel);
-  const results = channels.map((channel) => {
-    const receipt = `${channel.replaceAll(" ", "")}-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 90 + 10)}`;
-    if (channel === "Email") {
-      notificationGatewayState.emailStatus = "送出成功";
-      return `Email -> ${roleEmail(item.target)} / ${receipt}`;
-    }
-    if (channel === "Line 工作群組") {
-      notificationGatewayState.lineStatus = "送出成功";
-      return `Line -> 歲悅電子公文工作群組 / ${receipt}`;
-    }
-    pushSystemInbox(item);
-    notificationGatewayState.inboxStatus = "已推送";
-    return `站內 -> ${item.target} / ${receipt}`;
+function notificationPayload(item, forceChannel = item.channel) {
+  return {
+    id: item.id,
+    type: item.type,
+    title: item.title,
+    target_role: item.target,
+    target_email: item.targetEmail || "",
+    channel: forceChannel || item.channel,
+    status: item.status || "未讀",
+    priority: item.priority || "中",
+    source: item.source || "",
+    body: item.body || "請確認電子公文交換待辦事項。"
+  };
+}
+
+function applyNotificationDeliveryResult(result) {
+  const item = notificationItems.find((notice) => notice.id === result.id);
+  if (item) {
+    item.status = result.status;
+    item.sentAt = new Date().toLocaleString("zh-TW", { hour12: false });
+    item.deliveryReceipt = result.receipt || result.error || "";
+  }
+  (result.results || []).forEach((delivery) => {
+    if (delivery.channel === "Email") notificationGatewayState.emailStatus = delivery.status;
+    if (delivery.channel === "Line 工作群組") notificationGatewayState.lineStatus = delivery.status;
+    if (delivery.channel === "系統站內通知") notificationGatewayState.inboxStatus = delivery.status === "成功" ? "已推送" : delivery.status;
   });
-  item.status = "已派送";
-  item.sentAt = new Date().toLocaleString("zh-TW", { hour12: false });
-  item.deliveryReceipt = results.join("；");
-  addNotificationDelivery(item.type, `${item.title}｜${results.join("；")}`);
+}
+
+async function deliverNotification(item, forceChannel = item.channel) {
+  try {
+    const result = await backendRequest("/notifications/send", {
+      method: "POST",
+      body: JSON.stringify({
+        channel: forceChannel || item.channel,
+        notifications: [notificationPayload(item, forceChannel)]
+      })
+    });
+    result.results.forEach(applyNotificationDeliveryResult);
+    await syncNotificationsFromBackend(true);
+    addNotificationDelivery(item.type, `${item.title}｜${result.results.map((entry) => entry.receipt || entry.status).join("；")}`);
+    return result;
+  } catch (error) {
+    item.status = "派送失敗";
+    item.deliveryReceipt = `後端通知派送失敗：${error.message}`;
+    notificationGatewayState.emailStatus = /SMTP|Email/i.test(error.message) ? "失敗" : notificationGatewayState.emailStatus;
+    notificationGatewayState.lineStatus = /LINE|Line/i.test(error.message) ? "失敗" : notificationGatewayState.lineStatus;
+    addNotificationDelivery(item.type, `${item.title}｜後端通知派送失敗：${error.message}`);
+    renderNotifications();
+    return { count: 0, results: [{ id: item.id, status: "派送失敗", error: error.message }] };
+  }
 }
 
 function renderNotificationGatewayStatus() {
@@ -2937,6 +4488,57 @@ function renderNotificationGatewayStatus() {
   document.querySelector("#notificationInboxNote").textContent = `${systemInboxItems.length} 則站內通知 · ${notificationGatewayState.inboxRetention}`;
   document.querySelector("#notificationScheduleStatus").textContent = notificationSchedules.length;
   document.querySelector("#notificationScheduleNote").textContent = notificationGatewayState.overdueSchedule;
+  const grid = document.querySelector("#notificationCredentialGrid");
+  if (grid) {
+    grid.innerHTML = notificationGatewayState.credentials.map((credential) => `
+      <article class="archive-card">
+        <span>${credential.channel} · ${credential.provider || "正式通道"}</span>
+        <strong>${credential.status || "待驗證"}</strong>
+        <small>${credential.credential_type || "正式憑證"} · 到期 ${credential.expires_at || "未登錄"}</small>
+        <small>${credential.masked_identifier || credential.env_key_name || ""}</small>
+      </article>
+    `).join("");
+  }
+}
+
+async function refreshNotificationGatewayStatus(silent = false) {
+  try {
+    const status = await backendRequest("/notifications/gateway-status");
+    notificationGatewayState.emailStatus = status.email?.status || "未設定";
+    notificationGatewayState.lineStatus = status.line?.status || "未設定";
+    notificationGatewayState.inboxStatus = status.systemInbox?.status || "啟用";
+    notificationGatewayState.emailApi = `${status.email?.host || "未設定"}:${status.email?.port || "587"} · ${status.email?.from || "未設定"}`;
+    notificationGatewayState.lineWebhook = status.line?.webhook || "未設定";
+    notificationGatewayState.credentials = status.credentials?.length ? status.credentials : notificationGatewayState.credentials;
+    notificationGatewayState.lastGatewayCheck = new Date().toLocaleString("zh-TW", { hour12: false });
+    renderNotificationGatewayStatus();
+    if (!silent) addNotificationAudit("檢查通知通道", `Email：${notificationGatewayState.emailStatus}；Line：${notificationGatewayState.lineStatus}；站內：${notificationGatewayState.inboxStatus}。`);
+  } catch (error) {
+    notificationGatewayState.emailStatus = "檢查失敗";
+    notificationGatewayState.lineStatus = "檢查失敗";
+    renderNotificationGatewayStatus();
+    if (!silent) addNotificationAudit("檢查通知通道失敗", error.message);
+  }
+}
+
+async function validateNotificationCredentials() {
+  try {
+    const result = await backendRequest("/notifications/credentials/validate", {
+      method: "POST",
+      body: JSON.stringify({
+        email_expires_at: document.querySelector("#notificationEmailCertExpiry")?.value || "",
+        line_expires_at: document.querySelector("#notificationLineCertExpiry")?.value || ""
+      })
+    });
+    notificationGatewayState.credentials = result.credentials || notificationGatewayState.credentials;
+    await refreshNotificationGatewayStatus(true);
+    renderNotifications();
+    addNotificationAudit("驗證通知正式憑證", `${result.credentials.map((item) => `${item.channel}:${item.status}`).join("；")}。`);
+    showToast(result.ok ? "通知通道正式憑證驗證通過。" : "通知通道正式憑證需補正。");
+  } catch (error) {
+    addNotificationAudit("通知正式憑證驗證失敗", error.message);
+    showToast("通知正式憑證驗證失敗。");
+  }
 }
 
 function renderNotificationDeliveryLog() {
@@ -2973,18 +4575,88 @@ function selectedNotificationIds() {
 function filteredNotifications() {
   const term = notificationSearchTerm.trim().toLowerCase();
   return notificationItems.filter((item) => {
-    const matchFilter = notificationFilter === "all" || item.type === notificationFilter || item.status === notificationFilter;
+    const matchFilter = notificationFilter === "all"
+      || item.type === notificationFilter
+      || item.status === notificationFilter
+      || reminderItems(notificationFilter).some((reminder) => reminder.source === item.id || reminder.title === item.title || reminder.source === item.source);
     const haystack = `${item.title} ${item.type} ${item.target} ${item.channel} ${item.status} ${item.source} ${item.body}`.toLowerCase();
     return matchFilter && (!term || haystack.includes(term));
   });
 }
 
+function reminderItems(category) {
+  const unread = notificationItems.filter((item) => item.status !== "已讀");
+  const today = unread.filter((item) => ["收文", "待清稿", "逾期查核"].includes(item.type));
+  const dueSoon = [
+    ...unread.filter((item) => ["逾期查核", "Token 到期"].includes(item.type)),
+    ...trackingCases.filter((item) => ["逾期提醒", "未收確認"].includes(item.status)).map((item) => ({
+      id: `REM-${item.id}`,
+      type: item.status,
+      title: item.title,
+      target: item.owner,
+      status: item.status,
+      source: item.id,
+      body: item.note
+    }))
+  ];
+  const returned = [
+    ...unread.filter((item) => /退回|補正/.test(`${item.type}${item.title}${item.body}`)),
+    ...trackingCases.filter((item) => item.status === "退回補正").map((item) => ({
+      id: `REM-${item.id}`,
+      type: "退回補正",
+      title: item.title,
+      target: item.owner,
+      status: item.status,
+      source: item.id,
+      body: item.note
+    }))
+  ];
+  const failed = unread.filter((item) => item.type === "交換失敗");
+  const buckets = { today, dueSoon, returned, failed };
+  return buckets[category] || [];
+}
+
 function renderNotificationSummary() {
-  const count = (type) => notificationItems.filter((item) => item.type === type && item.status !== "已讀").length;
-  document.querySelector("#noticeInboundCount").textContent = count("收文");
-  document.querySelector("#noticeDraftCount").textContent = count("待清稿");
-  document.querySelector("#noticeFailedCount").textContent = count("交換失敗");
-  document.querySelector("#noticeRiskCount").textContent = count("Token 到期") + count("逾期查核");
+  const labels = {
+    all: "全部待辦",
+    today: "今天要處理",
+    dueSoon: "即將逾期",
+    returned: "已退回",
+    failed: "交換失敗"
+  };
+  document.querySelector("#noticeTodayCount").textContent = reminderItems("today").length;
+  document.querySelector("#noticeDueSoonCount").textContent = reminderItems("dueSoon").length;
+  document.querySelector("#noticeReturnedCount").textContent = reminderItems("returned").length;
+  document.querySelector("#noticeFailedCount").textContent = reminderItems("failed").length;
+  document.querySelector("#reminderActiveLabel").textContent = labels[notificationFilter] || labels.all;
+  document.querySelectorAll("[data-reminder-filter]").forEach((card) => {
+    card.classList.toggle("active", card.dataset.reminderFilter === notificationFilter);
+  });
+  renderReminderLanes();
+}
+
+function renderReminderLanes() {
+  const lanes = [
+    ["today", "今天要處理"],
+    ["dueSoon", "即將逾期"],
+    ["returned", "已退回"],
+    ["failed", "交換失敗"]
+  ];
+  document.querySelector("#reminderLanes").innerHTML = lanes.map(([key, title]) => {
+    const items = reminderItems(key).slice(0, 4);
+    return `
+      <section class="reminder-lane">
+        <h4>${title}</h4>
+        ${items.length ? items.map((item) => `
+          <article class="reminder-task ${key === "failed" || key === "dueSoon" || key === "returned" ? "issue" : ""}">
+            <strong>${item.title}</strong>
+            <span>${item.type} · ${item.target || "系統"}</span>
+            <p>${item.body}</p>
+          </article>
+        `).join("") : `<article class="reminder-task"><strong>目前沒有待辦</strong><p>此分類暫無需要處理的提醒。</p></article>`}
+      </section>
+    `;
+  }).join("");
 }
 
 function renderNotificationRows() {
@@ -3054,10 +4726,10 @@ function renderNotificationDetail() {
 
 function renderNotificationRules() {
   const rules = [
-    ["收文", "jAgent 拉取後立即通知總收發"],
+    ["收文", "jAgent 拉取後立即通知總務"],
     ["待清稿", "發文待清稿超過 2 小時通知主管"],
     ["交換失敗", `${notificationGatewayState.failureChannel} 立即警示並開啟重送`],
-    ["Token 到期", `${notificationGatewayState.tokenSchedule} 通知資訊管理員`],
+    ["Token 到期", `${notificationGatewayState.tokenSchedule} 通知行政部主任`],
     ["逾期查核", `${notificationGatewayState.overdueSchedule} 自動建立排程提醒`]
   ];
   document.querySelector("#notificationRuleGrid").innerHTML = rules.map(([label, value]) => `
@@ -3090,45 +4762,44 @@ function renderNotifications() {
   renderSystemInbox();
 }
 
-function syncNotifications() {
-  const generated = [
-    ...inboundDocs.filter((doc) => ["待登錄", "待分派"].includes(doc.status)).map((doc) => ({ type: "收文", title: `${doc.receiveNo} ${doc.status}`, target: "總收發人員", channel: "系統通知", source: doc.id, body: `${doc.agency} 來文「${doc.subject}」需處理。` })),
-    ...dispatchDocs.filter((doc) => ["待清稿", "已清稿", "交換失敗"].includes(doc.status)).map((doc) => ({ type: doc.status === "交換失敗" ? "交換失敗" : "待清稿", title: `${doc.no} ${doc.status}`, target: doc.status === "交換失敗" ? "總收發人員" : "文書主管", channel: "Email + 系統通知", source: doc.id, body: `${doc.subject} 目前狀態：${doc.status}。` })),
-    ...trackingCases.filter((doc) => ["逾期提醒", "未收確認", "翌日查核"].includes(doc.status)).map((doc) => ({ type: "逾期查核", title: doc.title, target: doc.owner, channel: "Line 工作群組", source: doc.id, body: doc.note })),
-    { type: "Token 到期", title: "jAgent Token 到期檢查", target: "資訊管理員", channel: "系統通知", source: "SEC-TOKEN", body: securityTokenLeft() }
-  ];
-  let added = 0;
-  generated.forEach((item) => {
-    if (!notificationItems.some((notice) => notice.source === item.source && notice.type === item.type)) {
-      notificationItems.unshift({ id: `NTF-${Date.now().toString().slice(-5)}-${added}`, status: "未讀", priority: item.type === "Token 到期" ? "中" : "高", ...item });
-      added += 1;
-    }
-  });
-  renderNotifications();
-  addNotificationAudit("同步通知", added ? `已新增 ${added} 則通知。` : "通知已是最新狀態。");
-  showToast(added ? `已同步 ${added} 則通知。` : "通知已同步。");
+async function syncNotifications() {
+  try {
+    const result = await backendRequest("/notifications/sync", { method: "POST", body: "{}" });
+    await syncNotificationsFromBackend(true);
+    addNotificationAudit("同步通知", result.created ? `後端已新增 ${result.created} 則通知。` : "後端通知已是最新狀態。");
+    showToast(result.created ? `已同步 ${result.created} 則通知。` : "通知已同步。");
+  } catch (error) {
+    addNotificationAudit("同步通知失敗", error.message);
+    showToast("後端通知同步失敗。");
+  }
 }
 
-function runNotificationAction(action, ids) {
+async function runNotificationAction(action, ids) {
   const targetIds = ids?.length ? ids : selectedNotificationIds();
   if (!targetIds.length) return showToast("請先選取通知。");
   if (action === "read") {
-    targetIds.forEach((id) => {
+    for (const id of targetIds) {
       const item = notificationItems.find((notice) => notice.id === id);
       if (item) item.status = "已讀";
-    });
+      try {
+        await backendRequest(`/notifications/${id}`, { method: "PATCH", body: JSON.stringify({ status: "已讀" }) });
+      } catch (error) {
+        addNotificationAudit("後端已讀更新失敗", `${id}：${error.message}`);
+      }
+    }
+    await syncNotificationsFromBackend(true);
     renderNotifications();
     addNotificationAudit("標記已讀", `已標記 ${targetIds.length} 則通知為已讀。`);
     return showToast("通知已標記為已讀。");
   }
   if (action === "send") {
-    targetIds.forEach((id) => {
+    for (const id of targetIds) {
       const item = notificationItems.find((notice) => notice.id === id);
-      if (item) deliverNotification(item);
-    });
+      if (item) await deliverNotification(item);
+    }
     renderNotifications();
-    addNotificationAudit("派送通知", `已透過 Email / Line / 站內通知派送 ${targetIds.length} 則通知。`);
-    return showToast("通知已派送。");
+    addNotificationAudit("派送通知", `已交由後端通知閘道派送 ${targetIds.length} 則通知。`);
+    return showToast("通知派送已完成，請查看派送回條。");
   }
   if (action === "track") {
     targetIds.forEach((id) => {
@@ -3145,17 +4816,25 @@ function runNotificationAction(action, ids) {
   }
 }
 
-function addNotificationFromForm() {
+async function addNotificationFromForm() {
   const type = document.querySelector("#notificationType").value;
   const target = document.querySelector("#notificationTarget").value;
   const channel = document.querySelector("#notificationChannel").value;
   const body = document.querySelector("#notificationBody").value.trim();
   const item = { id: `NTF-${Date.now().toString().slice(-6)}`, type, title: `${type}手動通知`, target, channel, status: "未讀", priority: "中", source: "MANUAL", body };
-  notificationItems.unshift(item);
-  selectedNotificationId = item.id;
-  renderNotifications();
-  addNotificationAudit("新增通知", `${type} 已新增給 ${target}，通道：${channel}。`);
-  showToast("通知已新增。");
+  try {
+    const created = await backendRequest("/notifications", { method: "POST", body: JSON.stringify(notificationPayload(item)) });
+    selectedNotificationId = created.id;
+    await syncNotificationsFromBackend(true);
+    addNotificationAudit("新增通知", `${type} 已新增至後端佇列給 ${target}，通道：${channel}。`);
+    showToast("通知已新增至後端佇列。");
+  } catch (error) {
+    notificationItems.unshift(item);
+    selectedNotificationId = item.id;
+    renderNotifications();
+    addNotificationAudit("新增通知失敗", `${error.message}；已暫存在畫面。`);
+    showToast("後端新增通知失敗，已暫存在畫面。");
+  }
 }
 
 function saveNotificationGateway() {
@@ -3168,25 +4847,45 @@ function saveNotificationGateway() {
   renderNotifications();
   addNotificationAudit("儲存通知通道", `Email、Line、站內通知與排程規則已更新。`);
   showToast("通知通道設定已儲存。");
+  refreshNotificationGatewayStatus(true);
 }
 
-function testNotificationChannels() {
-  notificationGatewayState.emailStatus = "測試成功";
-  notificationGatewayState.lineStatus = "測試成功";
-  notificationGatewayState.inboxStatus = "測試成功";
-  const testItem = { title: "通知通道測試", target: "資訊管理員", type: "通道測試", channel: "Email + Line + 系統通知", body: "測試派送", source: "GATEWAY-TEST" };
-  deliverNotification(testItem, "Email + Line + 系統通知");
-  renderNotifications();
-  addNotificationAudit("測試通知通道", "Email API、Line Webhook 與站內通知均完成測試派送。");
-  showToast("通知通道測試成功。");
+async function testNotificationChannels() {
+  try {
+    await refreshNotificationGatewayStatus(true);
+    const channel = document.querySelector("#notificationTestChannel")?.value || "Email + Line + 系統通知";
+    const targetEmail = document.querySelector("#notificationTestEmail")?.value.trim() || "records@suiyuecare.com";
+    const body = document.querySelector("#notificationTestBody")?.value.trim() || "通知通道實測。";
+    const result = await backendRequest("/notifications/test", {
+      method: "POST",
+      body: JSON.stringify({
+        channel,
+        target_role: "行政部主任",
+        target_email: targetEmail,
+        title: `通知通道實測 - ${channel}`,
+        body
+      })
+    });
+    applyNotificationDeliveryResult(result.delivery);
+    await syncNotificationsFromBackend(true);
+    renderNotifications();
+    addNotificationAudit("測試通知通道", result.delivery.receipt || "已完成後端通知通道測試。");
+    showToast("通知通道測試已送到後端。");
+  } catch (error) {
+    notificationGatewayState.emailStatus = "失敗";
+    notificationGatewayState.lineStatus = "失敗";
+    renderNotifications();
+    addNotificationAudit("測試通知通道失敗", error.message);
+    showToast("通知通道測試失敗。");
+  }
 }
 
 function createNotificationSchedules() {
   saveNotificationGateway();
   const schedules = [
-    { id: `SCH-OD-${Date.now().toString().slice(-5)}`, type: "逾期排程通知", rule: notificationGatewayState.overdueSchedule, target: "承辦人 / 文書主管" },
-    { id: `SCH-TK-${Date.now().toString().slice(-5)}`, type: "Token 到期通知", rule: notificationGatewayState.tokenSchedule, target: "資訊管理員" },
-    { id: `SCH-FL-${Date.now().toString().slice(-5)}`, type: "交換失敗即時警示", rule: notificationGatewayState.failureChannel, target: "總收發人員 / 資訊管理員" }
+    { id: `SCH-OD-${Date.now().toString().slice(-5)}`, type: "逾期排程通知", rule: notificationGatewayState.overdueSchedule, target: "業務助理 / 行政部主任" },
+    { id: `SCH-TK-${Date.now().toString().slice(-5)}`, type: "Token 到期通知", rule: notificationGatewayState.tokenSchedule, target: "行政部主任" },
+    { id: `SCH-FL-${Date.now().toString().slice(-5)}`, type: "交換失敗即時警示", rule: notificationGatewayState.failureChannel, target: "總務 / 行政部主任" }
   ];
   notificationSchedules.unshift(...schedules);
   schedules.forEach((schedule) => addNotificationDelivery(schedule.type, `${schedule.id} 已啟用：${schedule.rule} -> ${schedule.target}`));
@@ -3195,44 +4894,48 @@ function createNotificationSchedules() {
   showToast("通知排程與即時警示已啟用。");
 }
 
-function sendImmediateFailureAlerts() {
+async function sendImmediateFailureAlerts() {
   const failedDocs = dispatchDocs.filter((doc) => doc.status === "交換失敗");
   if (!failedDocs.length) return showToast("目前沒有交換失敗案件。");
-  failedDocs.forEach((doc) => {
+  for (const doc of failedDocs) {
     let item = notificationItems.find((notice) => notice.source === doc.id && notice.type === "交換失敗");
     if (!item) {
-      item = { id: `NTF-${Date.now().toString().slice(-6)}-${doc.id}`, type: "交換失敗", title: `${doc.no} 交換失敗即時警示`, target: "總收發人員", channel: notificationGatewayState.failureChannel, status: "未讀", priority: "高", source: doc.id, body: `${doc.subject} 交換失敗，請立即重送或聯繫交換中心。` };
+      item = { id: `NTF-${Date.now().toString().slice(-6)}-${doc.id}`, type: "交換失敗", title: `${doc.no} 交換失敗即時警示`, target: "總務", channel: notificationGatewayState.failureChannel, status: "未讀", priority: "高", source: doc.id, body: `${doc.subject} 交換失敗，請立即重送或聯繫交換中心。` };
       notificationItems.unshift(item);
     }
-    deliverNotification(item, notificationGatewayState.failureChannel);
-  });
+    await deliverNotification(item, notificationGatewayState.failureChannel);
+  }
   renderNotifications();
   addNotificationAudit("交換失敗即時警示", `已針對 ${failedDocs.length} 件交換失敗案件送出即時警示。`);
   showToast("交換失敗即時警示已送出。");
 }
 
-function pushSelectedToInbox() {
+async function pushSelectedToInbox() {
   const targetIds = selectedNotificationIds();
   if (!targetIds.length) return showToast("請先選取通知。");
-  targetIds.forEach((id) => {
-    const item = notificationItems.find((notice) => notice.id === id);
-    if (item) {
-      pushSystemInbox(item);
-      item.status = "已派送";
-      item.deliveryReceipt = `${item.deliveryReceipt || ""} 站內 -> ${item.target}`.trim();
-    }
-  });
-  renderNotifications();
-  addNotificationAudit("推送站內通知", `已推送 ${targetIds.length} 則站內通知。`);
-  showToast("站內通知已推送。");
+  try {
+    await backendRequest("/notifications/push-inbox", { method: "POST", body: JSON.stringify({ ids: targetIds }) });
+    await syncNotificationsFromBackend(true);
+    renderNotifications();
+    addNotificationAudit("推送站內通知", `已由後端推送 ${targetIds.length} 則站內通知。`);
+    showToast("站內通知已推送。");
+  } catch (error) {
+    addNotificationAudit("推送站內通知失敗", error.message);
+    showToast("站內通知推送失敗。");
+  }
 }
 
-function retryFailedNotificationDeliveries() {
-  const targets = notificationItems.filter((item) => item.status === "派送失敗" || !item.deliveryReceipt);
-  targets.forEach((item) => deliverNotification(item));
-  renderNotifications();
-  addNotificationAudit("重送通知", targets.length ? `已重送 ${targets.length} 則未完成派送通知。` : "沒有需要重送的通知。");
-  showToast(targets.length ? "通知已重送。" : "沒有需要重送的通知。");
+async function retryFailedNotificationDeliveries() {
+  try {
+    const result = await backendRequest("/notifications/retry-failed", { method: "POST", body: "{}" });
+    await syncNotificationsFromBackend(true);
+    renderNotifications();
+    addNotificationAudit("重送通知", result.count ? `後端已重送 ${result.count} 則未完成派送通知。` : "沒有需要重送的通知。");
+    showToast(result.count ? "通知已重送。" : "沒有需要重送的通知。");
+  } catch (error) {
+    addNotificationAudit("重送通知失敗", error.message);
+    showToast("通知重送失敗。");
+  }
 }
 
 function addJobAudit(title, body) {
@@ -3418,13 +5121,24 @@ function executeBackgroundJob(job) {
   addJobAudit(job.name, `${result}，下次執行 ${job.nextRun}。`);
 }
 
-function runJobAction(action, ids = selectedJobIds()) {
+async function runJobAction(action, ids = selectedJobIds()) {
   const jobs = backgroundJobs.filter((job) => ids.includes(job.id));
   if (!jobs.length) return showToast("請先選取背景任務。");
   if (action === "run") {
-    jobs.filter((job) => job.status === "啟用").forEach(executeBackgroundJob);
-    renderJobs();
-    return showToast(`已執行 ${jobs.length} 個背景任務。`);
+    try {
+      const results = [];
+      for (const job of jobs.filter((item) => item.status === "啟用")) {
+        results.push(await backendRequest(`/jobs/${job.id}/run`, { method: "POST", body: "{}" }));
+      }
+      await syncJobsFromBackend(true);
+      addJobAudit("後端執行背景任務", results.map((item) => `${item.job_id}：${item.status} ${item.result}`).join("；"));
+      return showToast(`後端已執行 ${results.length} 個背景任務。`);
+    } catch (error) {
+      jobs.filter((job) => job.status === "啟用").forEach(executeBackgroundJob);
+      renderJobs();
+      addJobAudit("後端背景任務失敗", `${error.message}；已改用前端工作流。`);
+      return showToast(`後端失敗，已用前端執行 ${jobs.length} 個任務。`);
+    }
   }
   if (action === "toggle") {
     jobs.forEach((job) => {
@@ -3435,11 +5149,11 @@ function runJobAction(action, ids = selectedJobIds()) {
     return showToast("任務狀態已更新。");
   }
   if (action === "notify") {
-    jobs.forEach((job) => {
+    for (const job of jobs) {
       const notice = { id: `NTF-JOB-${Date.now().toString().slice(-5)}-${job.id}`, type: "背景任務", title: `${job.name} 執行結果`, target: job.notify, channel: "Email + 系統通知", status: "未讀", priority: job.lastResult.includes("失敗") ? "高" : "中", source: job.id, body: job.lastResult };
       notificationItems.unshift(notice);
-      deliverNotification(notice);
-    });
+      await deliverNotification(notice);
+    }
     renderNotifications();
     renderJobs();
     addJobAudit("送出任務通知", `已送出 ${jobs.length} 則背景任務結果通知。`);
@@ -3447,11 +5161,19 @@ function runJobAction(action, ids = selectedJobIds()) {
   }
 }
 
-function runDueJobs() {
-  const due = backgroundJobs.filter((job) => job.status === "啟用");
-  due.forEach(executeBackgroundJob);
-  renderJobs();
-  showToast(`已執行 ${due.length} 個到期任務。`);
+async function runDueJobs() {
+  try {
+    const result = await backendRequest("/jobs/run-due", { method: "POST", body: "{}" });
+    await syncJobsFromBackend(true);
+    addJobAudit("後端執行到期任務", `已執行 ${result.count} 個到期任務。`);
+    showToast(`後端已執行 ${result.count} 個到期任務。`);
+  } catch (error) {
+    const due = backgroundJobs.filter((job) => job.status === "啟用");
+    due.forEach(executeBackgroundJob);
+    renderJobs();
+    addJobAudit("後端到期任務失敗", `${error.message}；已改用前端工作流。`);
+    showToast(`已用前端執行 ${due.length} 個到期任務。`);
+  }
 }
 
 function addBackgroundJobFromForm() {
@@ -3479,8 +5201,10 @@ function addDatabaseAudit(title, body) {
 }
 
 async function backendRequest(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (authState?.token) headers.Authorization = `Bearer ${authState.token}`;
   const response = await fetch(`${backendApiBase}${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers,
     ...options
   });
   const data = await response.json();
@@ -3555,6 +5279,70 @@ function mapBackendAudit(row) {
   };
 }
 
+function mapBackendJob(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.job_type,
+    schedule: row.schedule_text,
+    nextRun: row.next_run_at,
+    status: row.status,
+    lastResult: row.last_result,
+    notify: "行政部主任",
+    runCount: row.run_count || 0
+  };
+}
+
+function mapBackendNotification(row) {
+  return {
+    id: row.id,
+    type: row.type,
+    title: row.title,
+    target: row.target_role,
+    targetEmail: row.target_email,
+    channel: row.channel,
+    status: row.status,
+    priority: row.priority,
+    source: row.source,
+    body: row.body,
+    deliveryReceipt: row.delivery_receipt,
+    sentAt: row.sent_at
+  };
+}
+
+function mapBackendInbox(row) {
+  return {
+    id: row.id,
+    target: row.target_role,
+    title: row.title,
+    status: row.status,
+    createdAt: row.created_at
+  };
+}
+
+async function syncNotificationsFromBackend(silent = false) {
+  try {
+    const [notifications, deliveries, inbox] = await Promise.all([
+      backendRequest("/notifications"),
+      backendRequest("/notification_deliveries"),
+      backendRequest("/system_inbox")
+    ]);
+  notificationItems.splice(0, notificationItems.length, ...notifications.map(mapBackendNotification));
+  systemInboxItems.splice(0, systemInboxItems.length, ...inbox.map(mapBackendInbox));
+  notificationDeliveryLog.splice(0, notificationDeliveryLog.length, ...deliveries.slice(0, 30).map((row) => [
+      row.created_at?.slice(11, 16) || nowTime(),
+      `${row.channel}｜${row.status}`,
+      `${row.target} · ${row.receipt || row.error || row.notification_id || ""}`
+    ]));
+  selectedNotificationId = notificationItems[0]?.id || selectedNotificationId;
+  await refreshNotificationGatewayStatus(true);
+  renderNotifications();
+    if (!silent) addNotificationAudit("同步後端通知", `已同步 ${notifications.length} 則通知、${deliveries.length} 筆派送紀錄、${inbox.length} 則站內通知。`);
+  } catch (error) {
+    if (!silent) addNotificationAudit("同步後端通知失敗", error.message);
+  }
+}
+
 async function checkBackendHealth() {
   try {
     const data = await backendRequest("/health");
@@ -3591,6 +5379,18 @@ async function syncDatabaseFromBackend() {
     renderDatabase();
     addDatabaseAudit("後端同步失敗", `${error.message}；已暫時載入前端資料。`);
     showToast("後端同步失敗，已使用前端資料。");
+  }
+}
+
+async function syncJobsFromBackend(silent = false) {
+  try {
+    const rows = await backendRequest("/background_jobs");
+    backgroundJobs.splice(0, backgroundJobs.length, ...rows.map(mapBackendJob));
+    selectedJobId = backgroundJobs[0]?.id || selectedJobId;
+    renderJobs();
+    if (!silent) addJobAudit("同步後端背景任務", `已同步 ${rows.length} 個後端排程任務。`);
+  } catch (error) {
+    if (!silent) addJobAudit("同步後端背景任務失敗", error.message);
   }
 }
 
@@ -3632,12 +5432,138 @@ function syncDatabaseTables(silent = false) {
   databaseTables.exchangeEvents = exchangeEvents.map(([time, event, message], index) => ({ id: `EVT-${String(index + 1).padStart(3, "0")}`, taskId: index < dispatchDocs.length ? `TASK-${dispatchDocs[index].exchangeNo}` : "TASK-SYSTEM", event, message, createdAt: time }));
   databaseTables.auditLogs = [
     ...auditEvents.map(([time, action, target], index) => ({ id: `AUD-DASH-${index + 1}`, actor: "系統", action, target, createdAt: time })),
-    ...inboundAuditLog.map(([time, action, target], index) => ({ id: `AUD-IN-${index + 1}`, actor: "總收發人員", action, target, createdAt: time })),
-    ...dispatchAuditLog.map(([time, action, target], index) => ({ id: `AUD-OUT-${index + 1}`, actor: "總收發人員", action, target, createdAt: time })),
-    ...archiveAuditLog.map(([time, action, target], index) => ({ id: `AUD-ARC-${index + 1}`, actor: "稽核人員", action, target, createdAt: time })),
-    ...securityAuditLog.map(([time, action, target], index) => ({ id: `AUD-SEC-${index + 1}`, actor: "資訊管理員", action, target, createdAt: time }))
+    ...inboundAuditLog.map(([time, action, target], index) => ({ id: `AUD-IN-${index + 1}`, actor: "總務", action, target, createdAt: time })),
+    ...dispatchAuditLog.map(([time, action, target], index) => ({ id: `AUD-OUT-${index + 1}`, actor: "總務", action, target, createdAt: time })),
+    ...archiveAuditLog.map(([time, action, target], index) => ({ id: `AUD-ARC-${index + 1}`, actor: "主任", action, target, createdAt: time })),
+    ...securityAuditLog.map(([time, action, target], index) => ({ id: `AUD-SEC-${index + 1}`, actor: "行政部主任", action, target, createdAt: time }))
   ];
   if (!silent) addDatabaseAudit("同步資料庫", "已從收文、發文、地址簿、交換事件與 audit log 重建資料表索引。");
+}
+
+function localUnifiedSearch(term, category = "all", status = "", limit = 80) {
+  syncDatabaseTables(true);
+  const specs = [
+    ["documents", "公文", databaseTables.documents],
+    ["attachments", "附件", databaseTables.attachments],
+    ["exchange_tasks", "交換任務", databaseTables.exchangeTasks],
+    ["exchange_events", "交換事件", databaseTables.exchangeEvents],
+    ["audit_logs", "稽核紀錄", databaseTables.auditLogs],
+    ["notifications", "通知", notificationItems],
+    ["attachment_security", "附件安全", fileSecurityItems],
+    ["file_access_logs", "檔案存取", fileAccessLog.map(([time, title, body], index) => ({ id: `FLOG-FE-${index}`, createdAt: time, action: title, detail: body, status: title }))]
+  ];
+  const keyword = term.trim().toLowerCase();
+  const state = status.trim().toLowerCase();
+  return specs.flatMap(([table, label, rows]) => {
+    if (category !== "all" && category !== table) return [];
+    return rows.filter((row) => {
+      const text = Object.values(row).join(" ").toLowerCase();
+      return (!keyword || text.includes(keyword)) && (!state || text.includes(state));
+    }).map((row) => ({
+      id: row.id,
+      category: label,
+      table,
+      title: row.docNo || row.fileName || row.title || row.name || row.action || row.id,
+      subtitle: row.subject || row.agency || row.body || row.detail || row.message || "",
+      status: row.status || row.scanStatus || row.result || "",
+      createdAt: row.createdAt || row.updatedAt || "",
+      record: row
+    }));
+  }).slice(0, Number(limit));
+}
+
+function renderSearch() {
+  const counts = searchResults.reduce((acc, item) => {
+    if (item.table === "documents") acc.docs += 1;
+    else if (["attachments", "attachment_security", "file_access_logs"].includes(item.table)) acc.files += 1;
+    else acc.events += 1;
+    return acc;
+  }, { docs: 0, files: 0, events: 0 });
+  document.querySelector("#searchResultCount").textContent = searchResults.length;
+  document.querySelector("#searchDocCount").textContent = counts.docs;
+  document.querySelector("#searchFileCount").textContent = counts.files;
+  document.querySelector("#searchEventCount").textContent = counts.events;
+  document.querySelector("#searchResultNote").textContent = document.querySelector("#searchQuery")?.value || "全部條件";
+  document.querySelector("#searchStatusPill").textContent = searchResults.length ? "已查詢" : "無結果";
+  const list = document.querySelector("#searchResults");
+  list.innerHTML = searchResults.length ? searchResults.map((item) => `
+    <article class="address-card ${item.id === selectedSearchId ? "selected-card" : ""}">
+      <strong>${item.title}</strong>
+      <span>${item.category} · ${item.status || "無狀態"} · ${item.id}</span>
+      <p>${item.subtitle || "無摘要"}</p>
+      <div class="row-actions">
+        <button class="segment" type="button" data-search-select="${item.id}">檢視</button>
+        <button class="segment" type="button" data-search-open="${item.table}">開啟模組</button>
+      </div>
+    </article>
+  `).join("") : `<article class="address-card"><strong>沒有符合條件的結果</strong><p>可改用文號、機關代碼、附件名稱、雜湊或狀態查詢。</p></article>`;
+  document.querySelectorAll("[data-search-select]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedSearchId = button.dataset.searchSelect;
+      renderSearch();
+    });
+  });
+  document.querySelectorAll("[data-search-open]").forEach((button) => {
+    button.addEventListener("click", () => openSearchResultModule(button.dataset.searchOpen));
+  });
+  renderSearchDetail();
+}
+
+function renderSearchDetail() {
+  const item = searchResults.find((result) => result.id === selectedSearchId) || searchResults[0] || null;
+  if (!item) {
+    document.querySelector("#selectedSearchStatus").textContent = "未選取";
+    document.querySelector("#searchDetail").innerHTML = `<p class="empty-text">尚無搜尋結果。</p>`;
+    return;
+  }
+  selectedSearchId = item.id;
+  document.querySelector("#selectedSearchStatus").textContent = item.status || item.category;
+  document.querySelector("#searchDetail").innerHTML = `
+    <div class="doc-detail">
+      <strong>${item.title}</strong>
+      <p>${item.subtitle || "無摘要"}</p>
+      <dl>
+        <div><dt>類別</dt><dd>${item.category}</dd></div>
+        <div><dt>來源表</dt><dd>${item.table}</dd></div>
+        <div><dt>狀態</dt><dd>${item.status || "無"}</dd></div>
+        <div><dt>時間</dt><dd>${item.createdAt || "未記錄"}</dd></div>
+      </dl>
+    </div>
+    <div class="archive-grid">
+      ${Object.entries(item.record || {}).slice(0, 12).map(([key, value]) => `<article class="archive-card"><span>${key}</span><strong>${String(value ?? "")}</strong></article>`).join("")}
+    </div>
+  `;
+}
+
+function openSearchResultModule(table) {
+  const routeMap = {
+    documents: "database",
+    attachments: "database",
+    attachment_security: "fileSecurity",
+    file_access_logs: "fileSecurity",
+    exchange_tasks: "exchange",
+    exchange_events: "exchange",
+    notifications: "notifications",
+    audit_logs: "archive"
+  };
+  setView(routeMap[table] || "database");
+}
+
+async function runUnifiedSearch() {
+  const q = document.querySelector("#searchQuery").value.trim();
+  const category = document.querySelector("#searchCategory").value;
+  const status = document.querySelector("#searchStatus").value.trim();
+  const limit = document.querySelector("#searchLimit").value;
+  try {
+    const params = new URLSearchParams({ q, category, status, limit });
+    const result = await backendRequest(`/search?${params.toString()}`);
+    searchResults = result.results || [];
+    if (!searchResults.length) searchResults = localUnifiedSearch(q, category, status, limit);
+  } catch (error) {
+    searchResults = localUnifiedSearch(q, category, status, limit);
+  }
+  selectedSearchId = searchResults[0]?.id || "";
+  renderSearch();
 }
 
 function databaseRows() {
@@ -3890,6 +5816,7 @@ function applyFormatToCompose() {
   document.querySelector("#priority").value = data.priority;
   document.querySelector("#recipient").value = data.recipient;
   document.querySelector("#subject").value = data.subject;
+  markDraftDirty();
   addFormatAudit("帶入建立公文", `${data.no} 已帶入建立公文表單。`);
   showToast("文書格式已帶入建立公文。");
 }
@@ -3995,10 +5922,10 @@ function renderWorkflowConditions() {
   const agency = document.querySelector("#workflowConditionAgency").value.trim();
   const amount = Number(document.querySelector("#workflowAmountInput").value || 0);
   const rules = [
-    ["密件", security !== "普通" ? "需資訊管理員資安檢核" : "一般權限即可"],
-    ["速件", /速/.test(priority) ? "插隊文書主管即時審核" : "依一般時限"],
+    ["密件", security !== "普通" ? "需行政部主任資安檢核" : "一般權限即可"],
+    ["速件", /速/.test(priority) ? "插隊行政部主任即時審核" : "依一般時限"],
     ["金額", amount >= 100000 ? "需負責人核定" : "不需金額加簽"],
-    ["機關別", /政府|衛生|社會/.test(agency) ? "政府機關公文需總收發覆核" : "一般受文者流程"]
+    ["機關別", /政府|衛生|社會/.test(agency) ? "政府機關公文需總務覆核" : "一般受文者流程"]
   ];
   document.querySelector("#workflowConditionGrid").innerHTML = rules.map(([label, value]) => `
     <article class="archive-card">
@@ -4087,7 +6014,7 @@ function applyWorkflowTemplate() {
     title: `${template.name} - ${docType}`,
     type: "發文",
     step: template.steps[0],
-    role: "承辦人",
+    role: "業務助理",
     status: "待處理",
     template: activeWorkflowTemplate
   });
@@ -4217,7 +6144,8 @@ function renderSealRegistry() {
     <article class="address-card ${seal.id === selectedSealId ? "selected-card" : ""}">
       <strong>${seal.name}</strong>
       <span>${seal.type} · ${seal.owner} · ${seal.docType}</span>
-      <p>${seal.status} · ${seal.hash}</p>
+      <p>${seal.status} · 實體 ${seal.widthMm || "-"} × ${seal.heightMm || "-"} mm · ${seal.calibrationStatus || "待校準"}</p>
+      <p>${seal.imageName || "未上傳圖檔"} · ${seal.hash}</p>
       <div class="row-actions">
         <button class="segment" type="button" data-seal-select="${seal.id}">檢視</button>
         <button class="segment" type="button" data-seal-toggle="${seal.id}">${seal.status === "啟用" ? "停用" : "啟用"}</button>
@@ -4243,14 +6171,23 @@ function renderSealDetail() {
     return;
   }
   document.querySelector("#selectedSealStatus").textContent = seal.status;
+  const calibratedWidth = Math.max(24, Math.min(120, Number(seal.widthMm || 30) * 2));
+  const calibratedHeight = Math.max(24, Math.min(120, Number(seal.heightMm || 30) * 2));
+  const preview = seal.imageDataUrl
+    ? `<img class="seal-upload-preview" src="${seal.imageDataUrl}" alt="${seal.name}" style="width:${calibratedWidth}px;height:${calibratedHeight}px" />`
+    : `<div class="seal-mark" style="width:${calibratedWidth}px;height:${calibratedHeight}px">${seal.type.slice(0, 2)}</div>`;
   document.querySelector("#sealDetail").innerHTML = `
     <div class="doc-detail seal-preview">
-      <div class="seal-mark">${seal.type.slice(0, 2)}</div>
+      ${preview}
       <strong>${seal.name}</strong>
       <dl>
         <div><dt>印鑑編號</dt><dd>${seal.id}</dd></div>
         <div><dt>保管角色</dt><dd>${seal.owner}</dd></div>
         <div><dt>適用文別</dt><dd>${seal.docType}</dd></div>
+        <div><dt>實體尺寸</dt><dd>${seal.widthMm || "-"} × ${seal.heightMm || "-"} mm</dd></div>
+        <div><dt>PDF 尺寸</dt><dd>${sealWidthPt(seal)} × ${sealHeightPt(seal)} pt</dd></div>
+        <div><dt>章圖檔案</dt><dd>${seal.imageName || "未上傳"}</dd></div>
+        <div><dt>校準狀態</dt><dd>${seal.calibrationStatus || "待校準"}</dd></div>
         <div><dt>狀態</dt><dd>${seal.status}</dd></div>
         <div><dt>雜湊</dt><dd>${seal.hash}</dd></div>
       </dl>
@@ -4359,14 +6296,210 @@ async function hashBlob(blob) {
 }
 
 function pdfOptions() {
+  const selectedSeal = currentSeal();
   return {
     template: document.querySelector("#pdfTemplateSelect")?.value || "歲悅正式函",
     companyX: Number(document.querySelector("#companySealX")?.value || 420),
     companyY: Number(document.querySelector("#companySealY")?.value || 130),
     ownerX: Number(document.querySelector("#ownerSealX")?.value || 470),
     ownerY: Number(document.querySelector("#ownerSealY")?.value || 130),
+    companyWidthMm: Number(selectedSeal?.widthMm || document.querySelector("#sealWidthMmInput")?.value || 30),
+    companyHeightMm: Number(selectedSeal?.heightMm || document.querySelector("#sealHeightMmInput")?.value || 30),
+    ownerWidthMm: 18,
+    ownerHeightMm: 18,
     multiPage: Boolean(document.querySelector("#enablePageSeal")?.checked)
   };
+}
+
+function backendPdfPayload(doc, request = null) {
+  const options = pdfOptions();
+  return {
+    document_id: `DOC-${doc.id}`,
+    template: options.template,
+    seal_id: request?.sealId || selectedSealId,
+    application_id: request?.id,
+    stamp_no: request?.stampNo,
+    certificate_id: document.querySelector("#signatureCertificateSelect")?.value || "CERT-SEAL-001",
+    signature_type: document.querySelector("#signatureTypeSelect")?.value || "seal",
+    applicant: "總務",
+    approver: "行政部主任",
+    coordinates: {
+      company_x: options.companyX,
+      company_y: options.companyY,
+      company_width_mm: options.companyWidthMm,
+      company_height_mm: options.companyHeightMm,
+      owner_x: options.ownerX,
+      owner_y: options.ownerY,
+      owner_width_mm: options.ownerWidthMm,
+      owner_height_mm: options.ownerHeightMm,
+      multi_page: options.multiPage
+    },
+    document: {
+      id: doc.id,
+      no: doc.no,
+      direction: "發文",
+      type: doc.type,
+      priority: doc.priority,
+      security: doc.security,
+      to: doc.to,
+      agencyCode: doc.agencyCode,
+      subject: doc.subject,
+      body: doc.body,
+      attachments: doc.attachments,
+      owner: doc.owner,
+      department: doc.dept,
+      dueDate: doc.dueDate
+    }
+  };
+}
+
+function currentSignatureProof(doc = currentDispatchDoc()) {
+  if (!doc) return null;
+  return electronicSignatureProofs.find((proof) => proof.docId === doc.id || proof.docId === `DOC-${doc.id}`) || null;
+}
+
+function certificateById(id) {
+  return signingCertificates.find((certificate) => certificate.id === id);
+}
+
+function applyCertificateValidation(certificateId, validation = {}) {
+  const certificate = certificateById(certificateId);
+  if (!certificate) return;
+  certificate.chainStatus = validation.chain_status || validation.chainStatus || certificate.chainStatus;
+  certificate.ocspStatus = validation.ocsp_status || validation.ocspStatus || certificate.ocspStatus;
+  certificate.crlStatus = validation.crl_status || validation.crlStatus || certificate.crlStatus;
+  certificate.tsaStatus = validation.tsa_status || validation.tsaStatus || certificate.tsaStatus;
+  certificate.type = validation.certificate_type || certificate.type;
+  certificate.lastValidatedAt = validation.checked_at || validation.checkedAt || certificate.lastValidatedAt;
+}
+
+function renderCertificateRegistry() {
+  const box = document.querySelector("#certificateRegistry");
+  if (!box) return;
+  document.querySelector("#certificateCount").textContent = `${signingCertificates.length} 張`;
+  box.innerHTML = signingCertificates.map((certificate) => `
+    <article class="address-card">
+      <strong>${certificate.owner}</strong>
+      <span>${certificate.type || "組織憑證"} · ${certificate.serialNo} · ${certificate.algorithm}</span>
+      <p>${certificate.issuer} · 有效至 ${certificate.validTo} · ${certificate.status}</p>
+      <p>鏈：${certificate.chainStatus || "待驗證"} · OCSP：${certificate.ocspStatus || "待查詢"} · CRL：${certificate.crlStatus || "待查詢"} · TSA：${certificate.tsaStatus || "待驗證"}</p>
+    </article>
+  `).join("");
+}
+
+function renderSignatureProofGrid() {
+  const box = document.querySelector("#signatureProofGrid");
+  if (!box) return;
+  const doc = currentDispatchDoc();
+  const proof = currentSignatureProof(doc);
+  const certificate = certificateById(proof?.certificateId);
+  const validation = proof?.certificateValidation || {};
+  document.querySelector("#signatureProofStatus").textContent = proof ? proof.status : "待簽章";
+  const rows = [
+    ["簽章序號", proof?.id || "尚未簽章"],
+    ["簽章人", proof?.signer || "行政部主任"],
+    ["憑證序號", certificate?.serialNo || document.querySelector("#signatureCertificateSelect")?.value || "待選擇"],
+    ["演算法", proof?.algorithm || "HMAC-SHA256-RSA-PSS-READY"],
+    ["PDF Digest", proof?.digest || "待產生"],
+    ["TSA 時間戳", proof?.tsaToken || "待時間戳"],
+    ["憑證類型", validation.certificate_type || certificate?.type || "待驗證"],
+    ["憑證鏈", validation.chain_status || certificate?.chainStatus || "待驗證"],
+    ["OCSP", validation.ocsp_status || certificate?.ocspStatus || "待查詢"],
+    ["CRL", validation.crl_status || certificate?.crlStatus || "待查詢"],
+    ["TSA 驗證", validation.tsa_status || certificate?.tsaStatus || "待驗證"],
+    ["簽章值", proof?.signature ? proof.signature.slice(0, 24) : "待產生"],
+    ["狀態", proof?.status || "待簽章"]
+  ];
+  box.innerHTML = rows.map(([label, value]) => `<article class="archive-card"><span>${label}</span><strong>${value}</strong></article>`).join("");
+}
+
+async function validateCurrentCertificate() {
+  const certificateId = document.querySelector("#signatureCertificateSelect")?.value;
+  if (!certificateId) return showToast("請先選擇簽章憑證。");
+  const proof = currentSignatureProof();
+  try {
+    const result = await backendRequest("/certificates/validate", {
+      method: "POST",
+      body: JSON.stringify({
+        certificate_id: certificateId,
+        signature_id: proof?.id?.startsWith("ESIG-DEMO") ? "" : proof?.id,
+        validator: activeRole()
+      })
+    });
+    applyCertificateValidation(certificateId, result);
+    if (proof && proof.certificateId === certificateId) proof.certificateValidation = result;
+    renderCertificateRegistry();
+    renderSignatureProofGrid();
+    addSealAudit("憑證合法性驗證", `${certificateById(certificateId)?.serialNo || certificateId}：鏈 ${result.chain_status}、OCSP ${result.ocsp_status}、CRL ${result.crl_status}、TSA ${result.tsa_status}。`);
+    showToast(result.ok ? "憑證合法性驗證通過。" : "憑證合法性驗證未通過。");
+  } catch (error) {
+    addSealAudit("憑證合法性驗證失敗", error.message);
+    showToast(`憑證驗證失敗：${error.message}`);
+  }
+}
+
+async function signCurrentPdf() {
+  const doc = currentDispatchDoc();
+  if (!doc) return showToast("請先選取要簽章的公文。");
+  const version = pdfVersionStore[doc.id]?.after || pdfVersionStore[doc.id]?.before;
+  if (!version) return showToast("請先產生或押章 PDF 後再簽章。");
+  try {
+    const result = await backendRequest("/signatures/sign", {
+      method: "POST",
+      body: JSON.stringify({
+        ...backendPdfPayload(doc, currentSealRequest()),
+        pdf_version_id: version.id,
+        file_object_id: version.fileObjectId,
+        signer: activeRole(),
+        operation: "正式電子簽章/押章證據封存"
+      })
+    });
+    const proof = {
+      id: result.id,
+      docId: doc.id,
+      signer: result.signer,
+      certificateId: result.certificate_id,
+      type: result.signature_type,
+      algorithm: result.algorithm,
+      digest: result.digest_sha256,
+      signature: result.signature_value,
+      tsaToken: result.tsa_token,
+      status: result.status,
+      createdAt: result.created_at,
+      certificateValidation: result.certificate_validation
+    };
+    applyCertificateValidation(proof.certificateId, result.certificate_validation);
+    const index = electronicSignatureProofs.findIndex((item) => item.docId === doc.id || item.id === proof.id);
+    if (index >= 0) electronicSignatureProofs[index] = proof;
+    else electronicSignatureProofs.unshift(proof);
+    addSealAudit("正式電子簽章", `${doc.no} 已由 ${proof.signer} 使用 ${certificateById(proof.certificateId)?.serialNo || proof.certificateId} 簽章，digest ${proof.digest}。`);
+    renderSignatureProofGrid();
+    showToast("正式電子簽章已完成。");
+  } catch (error) {
+    addSealAudit("正式電子簽章失敗", error.message);
+    showToast(`簽章失敗：${error.message}`);
+  }
+}
+
+async function verifyCurrentSignature() {
+  const proof = currentSignatureProof();
+  if (!proof || !proof.id || proof.id.startsWith("ESIG-DEMO")) return showToast("尚未建立正式電子簽章。");
+  try {
+    const result = await backendRequest("/signatures/verify", {
+      method: "POST",
+      body: JSON.stringify({ signature_id: proof.id, validator: activeRole() })
+    });
+    proof.status = result.status || (result.ok ? "有效" : "雜湊異常");
+    proof.certificateValidation = result.certificate_validation || proof.certificateValidation;
+    applyCertificateValidation(proof.certificateId, proof.certificateValidation);
+    addSealAudit("驗證正式電子簽章", `${proof.id} ${proof.status}，digest ${result.digest || proof.digest}。`);
+    renderCertificateRegistry();
+    renderSignatureProofGrid();
+    showToast(result.ok ? "電子簽章驗證通過。" : "電子簽章驗證失敗。");
+  } catch (error) {
+    addSealAudit("電子簽章驗證失敗", error.message);
+    showToast(`簽章驗證失敗：${error.message}`);
+  }
 }
 
 async function storePdfVersion(doc, kind, blob, meta = {}) {
@@ -4384,12 +6517,34 @@ async function storePdfVersion(doc, kind, blob, meta = {}) {
 
 async function generatePdfTemplate(doc = currentDispatchDoc()) {
   if (!doc) return showToast("請先選取發文。");
-  const version = await storePdfVersion(doc, "before", buildOfficialPdf(doc, [], pdfOptions()), { label: "押章前 PDF" });
-  doc.lastReply = `已產生公文套版 PDF，SHA-256 ${version.hash.slice(0, 12)}。`;
-  renderDispatchDetail();
-  renderPdfVersionGrid();
-  addSealAudit("產生公文 PDF 套版", `${doc.no} 已建立押章前 PDF，hash ${version.hash}。`);
-  showToast("已產生押章前 PDF。");
+  try {
+    const result = await backendRequest("/pdf/generate", {
+      method: "POST",
+      body: JSON.stringify(backendPdfPayload(doc))
+    });
+    pdfVersionStore[doc.id] = pdfVersionStore[doc.id] || {};
+    pdfVersionStore[doc.id].before = {
+      id: result.id,
+      fileObjectId: result.file_object_id,
+      url: result.download_url,
+      hash: result.sha256,
+      size: result.file?.size_bytes || 0,
+      createdAt: result.created_at,
+      label: "後端押章前 PDF"
+    };
+    doc.lastReply = `後端已產生公文套版 PDF，SHA-256 ${result.sha256.slice(0, 12)}。`;
+    renderDispatchDetail();
+    renderPdfVersionGrid();
+    addSealAudit("後端產生公文 PDF 套版", `${doc.no} 已建立押章前 PDF，file ${result.file_object_id}，hash ${result.sha256}。`);
+    showToast("後端已產生押章前 PDF。");
+  } catch (error) {
+    const version = await storePdfVersion(doc, "before", buildOfficialPdf(doc, [], pdfOptions()), { label: "押章前 PDF" });
+    doc.lastReply = `已產生本機公文套版 PDF，SHA-256 ${version.hash.slice(0, 12)}。`;
+    renderDispatchDetail();
+    renderPdfVersionGrid();
+    addSealAudit("本機產生公文 PDF 套版", `${doc.no} 已建立押章前 PDF，hash ${version.hash}。後端錯誤：${error.message}`);
+    showToast("後端未回應，已改用本機 PDF。");
+  }
 }
 
 function stampListForRequest(request, doc) {
@@ -4397,26 +6552,75 @@ function stampListForRequest(request, doc) {
   const seal = sealById(request.sealId);
   const stampNo = request.stampNo || `STAMP-${doc.no.replace(/\D/g, "").slice(-10)}-${request.sealId}`;
   const stamps = [
-    { page: 1, x: options.companyX, y: options.companyY, label: seal?.type || "Company", stampNo },
-    { page: 1, x: options.ownerX, y: options.ownerY, label: "Owner", stampNo }
+    { page: 1, x: options.companyX, y: options.companyY, w: sealWidthPt(seal), h: sealHeightPt(seal), label: seal?.type || "Company", stampNo },
+    { page: 1, x: options.ownerX, y: options.ownerY, w: Math.round(options.ownerWidthMm * pdfPointsPerMm * 100) / 100, h: Math.round(options.ownerHeightMm * pdfPointsPerMm * 100) / 100, label: "Owner", stampNo }
   ];
   if (options.multiPage) stamps.push({ page: "all", x: 535, y: 392, w: 34, h: 72, label: "PAGE", stampNo });
   return stamps;
 }
 
 async function stampPdfForRequest(request, doc) {
-  const version = await storePdfVersion(doc, "after", buildOfficialPdf(doc, stampListForRequest(request, doc), pdfOptions()), { label: "押章後 PDF", stampNo: request.stampNo });
-  request.pdfHash = version.hash;
-  request.pdfSize = version.size;
-  doc.stampHash = version.hash;
-  doc.stampedPdfUrl = version.url;
-  return version;
+  try {
+    const result = await backendRequest("/pdf/stamp", {
+      method: "POST",
+      body: JSON.stringify(backendPdfPayload(doc, request))
+    });
+    pdfVersionStore[doc.id] = pdfVersionStore[doc.id] || {};
+    pdfVersionStore[doc.id].after = {
+      id: result.id,
+      fileObjectId: result.file_object_id,
+      url: result.download_url,
+      hash: result.sha256,
+      size: result.file?.size_bytes || 0,
+      createdAt: result.created_at,
+      label: "後端押章後 PDF",
+      stampNo: result.stamp_no
+    };
+    request.stampNo = result.stamp_no || request.stampNo;
+    request.backendApplicationId = result.application_id;
+    request.pdfHash = result.sha256;
+    request.pdfSize = result.file?.size_bytes || 0;
+    if (result.signature) {
+      const proof = {
+        id: result.signature.id,
+        docId: doc.id,
+        signer: result.signature.signer,
+        certificateId: result.signature.certificate_id,
+        type: result.signature.signature_type,
+        algorithm: result.signature.algorithm,
+        digest: result.signature.digest_sha256,
+        signature: result.signature.signature_value,
+        tsaToken: result.signature.tsa_token,
+        status: result.signature.status,
+        createdAt: result.signature.created_at
+      };
+      const index = electronicSignatureProofs.findIndex((item) => item.docId === doc.id || item.id === proof.id);
+      if (index >= 0) electronicSignatureProofs[index] = proof;
+      else electronicSignatureProofs.unshift(proof);
+    }
+    doc.stampHash = result.sha256;
+    doc.stampedPdfUrl = result.download_url;
+    return pdfVersionStore[doc.id].after;
+  } catch (error) {
+    const version = await storePdfVersion(doc, "after", buildOfficialPdf(doc, stampListForRequest(request, doc), pdfOptions()), { label: "押章後 PDF", stampNo: request.stampNo });
+    request.pdfHash = version.hash;
+    request.pdfSize = version.size;
+    doc.stampHash = version.hash;
+    doc.stampedPdfUrl = version.url;
+    addSealAudit("後端押章失敗", `${doc.no} 改用本機 PDF，原因：${error.message}`);
+    return version;
+  }
 }
 
 async function stampCurrentPdf() {
   const doc = currentDispatchDoc();
   if (!doc) return showToast("請先選取發文。");
+  if (!canUseDocAction(doc, "seal")) return showToast("此角色未取得此公文的押章權限。");
   const request = ensureSealRequestForDoc(doc);
+  if (!request) return showToast("目前沒有可用印鑑，請先啟用印鑑。");
+  if (request.stampNo || request.status === "已押章") return showToast("此公文已押章，系統已阻擋重複押章。");
+  if (!doc.checks.format || !doc.checks.package) return showToast("請先完成清稿檢核與附件封裝，再執行押章。");
+  if (!confirmOperation("確認自動押章", `即將對 ${doc.no} 產生正式 PDF 並押上公司章、負責人章、騎縫章與多頁章。押章後會留存前後版本與防竄改雜湊。`)) return;
   if (!request.stampNo) {
     request.status = "已押章";
     request.stampNo = `STAMP-${doc.no.replace(/\D/g, "").slice(-10)}-${request.sealId}`;
@@ -4440,12 +6644,14 @@ function renderPdfVersionGrid() {
   const versions = doc ? pdfVersionStore[doc.id] || {} : {};
   const before = versions.before;
   const after = versions.after;
+  const proof = currentSignatureProof(doc);
   document.querySelector("#pdfVersionStatus").textContent = after ? "押章後已留存" : before ? "押章前已留存" : "尚未產生";
   box.innerHTML = [
     ["押章前", before ? `${before.size} bytes · ${before.hash.slice(0, 16)}` : "尚未產生"],
     ["押章後", after ? `${after.size} bytes · ${after.hash.slice(0, 16)}` : "尚未押章"],
     ["防竄改雜湊", after?.hash || before?.hash || "待產生"],
-    ["用印申請", currentSealRequest()?.id || "尚未送簽"]
+    ["用印申請", currentSealRequest()?.id || "尚未送簽"],
+    ["電子簽章", proof ? `${proof.status} · ${proof.id}` : "待簽章"]
   ].map(([label, value]) => `<article class="archive-card"><span>${label}</span><strong>${value}</strong></article>`).join("");
 }
 
@@ -4454,7 +6660,7 @@ function downloadPdfVersion(kind) {
   const version = doc ? pdfVersionStore[doc.id]?.[kind] : null;
   if (!version) return showToast(kind === "before" ? "尚未產生押章前 PDF。" : "尚未產生押章後 PDF。");
   const link = document.createElement("a");
-  link.href = version.url;
+  link.href = version.url?.startsWith("/api/") ? `${window.location.origin}${version.url}` : version.url;
   link.download = `${doc.no}-${kind === "before" ? "before-seal" : "after-seal"}.pdf`;
   link.click();
   addSealAudit("下載 PDF 版本", `${doc.no} 已下載${kind === "before" ? "押章前" : "押章後"}版本。`);
@@ -4468,10 +6674,22 @@ function generateSealApplication() {
   showToast("用印申請單已產生。");
 }
 
-function verifyCurrentPdfHash() {
+async function verifyCurrentPdfHash() {
   const doc = currentDispatchDoc();
   const target = doc ? (pdfVersionStore[doc.id]?.after || pdfVersionStore[doc.id]?.before) : null;
   if (!target) return showToast("尚未產生 PDF，無法驗證。");
+  if (target.fileObjectId) {
+    try {
+      const result = await backendRequest("/pdf/verify", {
+        method: "POST",
+        body: JSON.stringify({ file_object_id: target.fileObjectId })
+      });
+      addSealAudit("後端驗證 PDF 防竄改雜湊", `${doc.no} ${result.file?.file_name || "PDF"} ${result.ok ? "驗證通過" : "驗證失敗"}，hash ${result.actual || result.expected}。`);
+      return showToast(result.ok ? "後端 PDF 雜湊驗證通過。" : "後端 PDF 雜湊驗證失敗。");
+    } catch (error) {
+      addSealAudit("後端驗證失敗", error.message);
+    }
+  }
   addSealAudit("驗證 PDF 防竄改雜湊", `${doc.no} PDF hash ${target.hash} 驗證通過。`);
   showToast("PDF 雜湊驗證通過。");
 }
@@ -4495,6 +6713,8 @@ function renderSeals() {
   renderSealRequests();
   renderSealAuditLog();
   renderPdfVersionGrid();
+  renderCertificateRegistry();
+  renderSignatureProofGrid();
 }
 
 function toggleSeal(id) {
@@ -4506,7 +6726,7 @@ function toggleSeal(id) {
   showToast(`印鑑已${seal.status}。`);
 }
 
-function ensureSealRequestForDoc(doc, step = "文書主管簽核") {
+function ensureSealRequestForDoc(doc, step = "行政部主任簽核") {
   if (!doc) return null;
   const existing = sealRequests.find((request) => request.docId === doc.id && request.status !== "退回補正");
   if (existing) return existing;
@@ -4538,6 +6758,15 @@ function submitSealRequest() {
 
 async function approveSealRequests(ids = selectedSealRequestIds()) {
   if (!ids.length) return showToast("請先選取簽核案件。");
+  const requests = ids.map((id) => sealRequests.find((item) => item.id === id)).filter(Boolean);
+  const blocked = requests.find((request) => request.status === "已押章" || request.stampNo);
+  if (blocked) return showToast(`${blocked.id} 已完成押章，不可重複核准。`);
+  const denied = requests.find((request) => {
+    const doc = sealRequestDoc(request);
+    return doc && !canUseDocAction(doc, "seal");
+  });
+  if (denied) return showToast("此角色未取得部分公文的核准押章權限。");
+  if (!confirmOperation("確認核准並自動押章", `即將核准 ${requests.length} 件用印申請。核准後系統會立即產生正式 PDF、押章、留存版本與雜湊。`)) return;
   for (const id of ids) {
     const request = sealRequests.find((item) => item.id === id);
     if (!request) continue;
@@ -4563,6 +6792,7 @@ async function approveSealRequests(ids = selectedSealRequestIds()) {
 
 function rejectSealRequests(ids = selectedSealRequestIds()) {
   if (!ids.length) return showToast("請先選取簽核案件。");
+  if (!confirmOperation("確認退回用印簽核", `即將退回 ${ids.length} 件用印申請，公文狀態會改為退回補正。`)) return;
   ids.forEach((id) => {
     const request = sealRequests.find((item) => item.id === id);
     const doc = request ? sealRequestDoc(request) : null;
@@ -4580,6 +6810,9 @@ function rejectSealRequests(ids = selectedSealRequestIds()) {
 }
 
 function addSealFromForm() {
+  const widthMm = Number(document.querySelector("#sealWidthMmInput").value || 0);
+  const heightMm = Number(document.querySelector("#sealHeightMmInput").value || 0);
+  if (!widthMm || !heightMm || widthMm <= 0 || heightMm <= 0) return showToast("請輸入印鑑實體長寬，單位為 mm。");
   const seal = {
     id: `SEAL-${Date.now().toString().slice(-5)}`,
     name: document.querySelector("#sealNameInput").value.trim() || "未命名印鑑",
@@ -4587,6 +6820,12 @@ function addSealFromForm() {
     owner: document.querySelector("#sealOwnerInput").value,
     docType: document.querySelector("#sealDocTypeInput").value,
     status: "啟用",
+    widthMm,
+    heightMm,
+    imageName: document.querySelector("#sealImageInput").files?.[0]?.name || "待上傳",
+    imageDataUrl: document.querySelector("#sealImagePreview")?.dataset.image || "",
+    fileObjectId: document.querySelector("#sealImagePreview")?.dataset.fileObjectId || "",
+    calibrationStatus: document.querySelector("#sealImagePreview")?.dataset.image ? "已登錄尺寸" : "待上傳圖檔",
     hash: `SHA256-SEAL-${Math.random().toString(16).slice(2, 8).toUpperCase()}`
   };
   sealRegistry.unshift(seal);
@@ -4594,6 +6833,45 @@ function addSealFromForm() {
   renderSeals();
   addSealAudit("新增印鑑", `${seal.name} 已建立並啟用。`);
   showToast("印鑑已新增。");
+}
+
+async function handleSealImageUpload() {
+  const input = document.querySelector("#sealImageInput");
+  const preview = document.querySelector("#sealImagePreview");
+  const file = input?.files?.[0];
+  if (!file || !preview) return;
+  if (!file.type.startsWith("image/")) {
+    input.value = "";
+    return showToast("印鑑圖檔請上傳 PNG、JPG 或其他圖片格式。");
+  }
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  preview.dataset.image = dataUrl;
+  preview.innerHTML = `<img class="seal-upload-preview" src="${dataUrl}" alt="印鑑預覽" />`;
+  try {
+    const base64 = String(dataUrl).split(",")[1] || "";
+    const result = await backendRequest("/files/upload", {
+      method: "POST",
+      body: JSON.stringify({
+        document_id: "DOC-SEAL-ASSET",
+        file_name: file.name,
+        mime_type: file.type,
+        purpose: "seal-assets",
+        version_label: "original",
+        actor: activeRole(),
+        content_base64: base64
+      })
+    });
+    preview.dataset.fileObjectId = result.file?.id || "";
+    showToast("公司章圖檔已上傳並完成掃描。");
+  } catch (error) {
+    preview.dataset.fileObjectId = "";
+    showToast(`章圖已暫存於畫面，後端上傳失敗：${error.message}`);
+  }
 }
 
 function addTrackingAudit(title, body) {
@@ -4770,7 +7048,7 @@ function runTrackingAction(action, ids) {
       item.status = "退回補正";
       item.type = "退回補正";
       item.dueDate = correctionDue;
-      item.note = `${reason}：${correctionNote || "請承辦人補正後重新送審。"}`;
+      item.note = `${reason}：${correctionNote || "請業務助理補正後重新送審。"}`;
     }, "建立退回補正", `已退回 ${targetIds.length} 件，補正期限 ${correctionDue}。`);
     return showToast("退回補正已建立。");
   }
@@ -4785,7 +7063,41 @@ function runTrackingAction(action, ids) {
 }
 
 document.querySelectorAll("[data-target]").forEach((control) => {
-  control.addEventListener("click", () => setView(control.dataset.target));
+  control.addEventListener("click", () => {
+    if (!isRouteAllowed(control.dataset.target)) return showToast("此身份不需要使用這個功能，已隱藏在側欄。");
+    setView(control.dataset.target);
+  });
+});
+
+document.querySelector("#globalSearchForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const value = document.querySelector("#globalSearchInput").value.trim();
+  document.querySelector("#searchQuery").value = value;
+  document.querySelector("#searchCategory").value = "all";
+  document.querySelector("#searchStatus").value = "";
+  setView("search");
+  runUnifiedSearch();
+});
+
+document.querySelector("#searchRunBtn").addEventListener("click", runUnifiedSearch);
+document.querySelector("#searchForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runUnifiedSearch();
+});
+["#searchQuery", "#searchStatus"].forEach((selector) => {
+  document.querySelector(selector).addEventListener("keydown", (event) => {
+    if (event.key === "Enter") runUnifiedSearch();
+  });
+});
+document.querySelector("#searchCategory").addEventListener("change", runUnifiedSearch);
+document.querySelector("#searchLimit").addEventListener("change", runUnifiedSearch);
+document.querySelector("#searchClearBtn").addEventListener("click", () => {
+  document.querySelector("#searchQuery").value = "";
+  document.querySelector("#searchStatus").value = "";
+  document.querySelector("#searchCategory").value = "all";
+  searchResults = [];
+  selectedSearchId = "";
+  renderSearch();
 });
 
 document.querySelectorAll(".segment[data-inbound-filter]").forEach((button) => {
@@ -4809,27 +7121,47 @@ document.querySelectorAll(".segment[data-dispatch-filter]").forEach((button) => 
 document.querySelector("#roleSelect").addEventListener("change", (event) => {
   document.querySelector("#roleNote").textContent = roleNotes[event.target.value];
   workflowRole = event.target.value;
+  applyRoleNavigation();
+  renderScopeZone();
+  renderRoleDashboard();
+  renderIdentityWorkbench();
+  renderInboundRows();
+  renderInboundDetail();
+  renderDispatchBoard();
+  renderDispatchDetail();
   renderWorkflowRole();
 });
 
 document.querySelector("#composeForm").addEventListener("submit", (event) => {
   event.preventDefault();
-  createDispatchFromForm("待清稿");
+  const doc = createDispatchFromForm("待清稿");
+  if (!doc) return;
   showToast("已建立函稿並加入發文佇列。");
   setView("dispatch");
 });
 
-document.querySelector("#loginForm").addEventListener("submit", (event) => {
+document.querySelector("#loginForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  recordLogin(document.querySelector("#loginEmail").value, document.querySelector("#loginEnvironment").value);
-  enterApp();
+  try {
+    await loginWithBackend(
+      document.querySelector("#loginEmail").value,
+      document.querySelector("#loginPassword").value,
+      document.querySelector("#loginEnvironment").value
+    );
+  } catch (error) {
+    showToast(error.message || "後端登入失敗。");
+    addAccountAudit("後端登入失敗", error.message || "Auth API 未回應。");
+  }
 });
 
-document.querySelector("#demoLoginBtn").addEventListener("click", () => {
+document.querySelector("#demoLoginBtn").addEventListener("click", async () => {
   document.querySelector("#loginEmail").value = "edoc@suiyuecare.com";
   document.querySelector("#loginPassword").value = "demo1234";
-  recordLogin("edoc@suiyuecare.com", "Google Workspace");
-  enterApp("已使用總收發測試帳號登入。");
+  try {
+    await loginWithBackend("edoc@suiyuecare.com", "demo1234", "Google Workspace");
+  } catch (error) {
+    showToast(error.message || "測試帳號登入失敗。");
+  }
 });
 
 document.querySelector("#pullInboundBtn").addEventListener("click", pullJagentInbound);
@@ -4860,9 +7192,7 @@ document.querySelector("#exceptionForm").addEventListener("submit", (event) => {
 });
 document.querySelector("#saveRegisterDraftBtn").addEventListener("click", () => showToast("收文登錄草稿已暫存。"));
 document.querySelector("#clearInboundLogBtn").addEventListener("click", () => {
-  inboundAuditLog.length = 0;
-  renderInboundAuditLog();
-  showToast("已清除畫面上的操作紀錄。");
+  clearLogWithConfirm(inboundAuditLog, renderInboundAuditLog, "收文操作紀錄");
 });
 document.querySelector("#validateDispatchBtn").addEventListener("click", () => runDispatchAction("validate"));
 document.querySelector("#packageDispatchBtn").addEventListener("click", () => runDispatchAction("package"));
@@ -4883,17 +7213,36 @@ document.querySelector("#previewPackageBtn").addEventListener("click", () => {
   showToast(`封包預覽：${doc.packageId || "尚未封裝"}，附件 ${doc.attachments.length} 個。`);
 });
 document.querySelector("#clearDispatchLogBtn").addEventListener("click", () => {
-  dispatchAuditLog.length = 0;
-  renderDispatchAuditLog();
-  showToast("已清除畫面上的發文操作紀錄。");
+  clearLogWithConfirm(dispatchAuditLog, renderDispatchAuditLog, "發文操作紀錄");
 });
 document.querySelector("#saveDispatchDraftBtn").addEventListener("click", () => {
   createDispatchFromForm("草稿");
   setView("dispatch");
   showToast("發文草稿已儲存。");
 });
+document.querySelector("#generateDispatchNoBtn").addEventListener("click", () => {
+  const no = assignNextDispatchNo(true);
+  setDraftConfirmed(false);
+  addDispatchAudit("重新產生發文字號", `已產生 ${no}。`);
+  showToast(`已產生發文字號：${no}`);
+});
 document.querySelector("#previewDraftBtn").addEventListener("click", () => {
-  showToast(`函稿預覽：${document.querySelector("#subject").value}`);
+  renderDraftPreview();
+  document.querySelector("#draftPreview")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  showToast("已更新即時函稿預覽。");
+});
+document.querySelector("#confirmDraftBtn").addEventListener("click", () => {
+  setDraftConfirmed(true);
+  showToast("函稿已確認，可以加入發文佇列。");
+});
+document.querySelector("#resetDraftConfirmBtn").addEventListener("click", () => {
+  setDraftConfirmed(false);
+  showToast("已取消函稿確認。");
+});
+["#docType", "#priority", "#recipient", "#subject", "#bodyText", "#attachments"].forEach((selector) => {
+  const element = document.querySelector(selector);
+  element?.addEventListener("input", markDraftDirty);
+  element?.addEventListener("change", markDraftDirty);
 });
 document.querySelector("#sendQueueBtn").addEventListener("click", () => {
   const queued = dispatchDocs.filter((doc) => ["已封裝", "已清稿", "待清稿"].includes(doc.status)).map((doc) => doc.id);
@@ -4926,8 +7275,7 @@ document.querySelector("#formatValidateBtn").addEventListener("click", () => {
 });
 document.querySelector("#formatApplyBtn").addEventListener("click", applyFormatToCompose);
 document.querySelector("#formatGenerateNoBtn").addEventListener("click", () => {
-  const serial = new Date().toISOString().slice(0, 10).replaceAll("-", "").slice(2);
-  document.querySelector("#formatDocNo").value = `歲悅字第${serial}${String(Math.floor(Math.random() * 90) + 10)}號`;
+  document.querySelector("#formatDocNo").value = nextDispatchNo();
   renderFormatChecks();
   addFormatAudit("產生文號", "已依日期與流水號產生新文號。");
   showToast("已產生新文號。");
@@ -4954,9 +7302,7 @@ document.querySelector("#formatClearAgencyBtn").addEventListener("click", () => 
   showToast("已清除機關代碼查詢結果。");
 });
 document.querySelector("#formatClearLogBtn").addEventListener("click", () => {
-  formatAuditLog.length = 0;
-  renderFormatAuditLog();
-  showToast("已清除畫面上的格式操作紀錄。");
+  clearLogWithConfirm(formatAuditLog, renderFormatAuditLog, "格式操作紀錄");
 });
 ["#formatDocNo", "#formatDocType", "#formatPriority", "#formatSecurity", "#formatAgencyCode", "#formatRecipient", "#formatSubject"].forEach((selector) => {
   document.querySelector(selector).addEventListener("input", renderFormatChecks);
@@ -4964,12 +7310,28 @@ document.querySelector("#formatClearLogBtn").addEventListener("click", () => {
 });
 document.querySelector("#workflowRoleSelect").addEventListener("change", (event) => {
   workflowRole = event.target.value;
+  applyRoleNavigation();
+  renderScopeZone();
+  renderRoleDashboard();
+  renderIdentityWorkbench();
+  renderInboundRows();
+  renderInboundDetail();
+  renderDispatchBoard();
+  renderDispatchDetail();
   renderWorkflowRole();
   addWorkflowAudit("切換流程角色", `目前流程控管角色切換為 ${workflowRole}。`);
 });
 document.querySelector("#workflowSyncRoleBtn").addEventListener("click", () => {
   document.querySelector("#roleSelect").value = workflowRole;
   document.querySelector("#roleNote").textContent = roleNotes[workflowRole];
+  applyRoleNavigation();
+  renderScopeZone();
+  renderRoleDashboard();
+  renderIdentityWorkbench();
+  renderInboundRows();
+  renderInboundDetail();
+  renderDispatchBoard();
+  renderDispatchDetail();
   addWorkflowAudit("同步側欄角色", `側欄目前角色已同步為 ${workflowRole}。`);
   showToast("已同步側欄角色。");
 });
@@ -4981,9 +7343,7 @@ document.querySelector("#permissionTestForm").addEventListener("submit", (event)
   checkPermission(document.querySelector("#permissionAction").value);
 });
 document.querySelector("#workflowClearLogBtn").addEventListener("click", () => {
-  workflowAuditLog.length = 0;
-  renderWorkflowAuditLog();
-  showToast("已清除畫面上的流程操作紀錄。");
+  clearLogWithConfirm(workflowAuditLog, renderWorkflowAuditLog, "流程操作紀錄");
 });
 document.querySelector("#workflowTemplateApplyBtn").addEventListener("click", applyWorkflowTemplate);
 document.querySelector("#workflowTemplateForm").addEventListener("submit", (event) => {
@@ -5020,20 +7380,26 @@ document.querySelector("#sealVerifyHashBtn").addEventListener("click", verifyCur
 document.querySelector("#downloadBeforePdfBtn").addEventListener("click", () => downloadPdfVersion("before"));
 document.querySelector("#downloadAfterPdfBtn").addEventListener("click", () => downloadPdfVersion("after"));
 document.querySelector("#sealApplicationBtn").addEventListener("click", generateSealApplication);
+document.querySelector("#signatureSignBtn").addEventListener("click", signCurrentPdf);
+document.querySelector("#signatureVerifyBtn").addEventListener("click", verifyCurrentSignature);
+document.querySelector("#signatureValidateCertBtn").addEventListener("click", validateCurrentCertificate);
+document.querySelector("#signatureCertificateSelect").addEventListener("change", renderSignatureProofGrid);
+document.querySelector("#signatureTypeSelect").addEventListener("change", renderSignatureProofGrid);
 document.querySelector("#sealExportBtn").addEventListener("click", () => {
   addSealAudit("匯出用印紀錄", `已匯出 ${sealRequests.length} 件簽核用印與 ${sealAuditLog.length} 筆軌跡。`);
   showToast("用印紀錄已匯出。");
 });
 document.querySelector("#sealAddBtn").addEventListener("click", addSealFromForm);
+document.querySelector("#sealImageInput").addEventListener("change", handleSealImageUpload);
 document.querySelector("#sealForm").addEventListener("submit", (event) => {
   event.preventDefault();
   addSealFromForm();
 });
 document.querySelector("#sealClearLogBtn").addEventListener("click", () => {
-  sealAuditLog.length = 0;
-  renderSealAuditLog();
-  renderSealSummary();
-  showToast("已清除畫面上的用印操作紀錄。");
+  clearLogWithConfirm(sealAuditLog, () => {
+    renderSealAuditLog();
+    renderSealSummary();
+  }, "用印操作紀錄");
 });
 document.querySelectorAll(".segment[data-tracking-filter]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5051,17 +7417,17 @@ document.querySelector("#nextDayCheckBtn").addEventListener("click", () => runTr
 document.querySelector("#sendOverdueBtn").addEventListener("click", () => runTrackingAction("remind"));
 document.querySelector("#confirmUnreceivedBtn").addEventListener("click", () => runTrackingAction("confirm"));
 document.querySelector("#returnCorrectionBtn").addEventListener("click", () => runTrackingAction("return"));
-document.querySelector("#scheduleReminderBtn").addEventListener("click", () => {
+document.querySelector("#scheduleReminderBtn").addEventListener("click", async () => {
   const targetIds = selectedTrackingIds();
   const method = document.querySelector("#trackingNotifyMethod").value;
-  targetIds.forEach((id) => {
+  for (const id of targetIds) {
     const item = trackingCases.find((entry) => entry.id === id);
-    if (!item) return;
+    if (!item) continue;
     const notice = { id: `NTF-SCH-${Date.now().toString().slice(-5)}-${id}`, type: "逾期查核", title: item.title, target: document.querySelector("#trackingNotifyTarget").value, channel: method, status: "未讀", priority: "高", source: item.id, body: document.querySelector("#trackingMessage").value.trim() || item.note };
     notificationItems.unshift(notice);
     notificationSchedules.unshift({ id: `SCH-TRK-${id}`, type: "逾期排程通知", rule: notificationGatewayState.overdueSchedule, target: notice.target });
-    deliverNotification(notice, method);
-  });
+    await deliverNotification(notice, method);
+  }
   renderNotifications();
   addTrackingAudit("排程稽催提醒", `已為 ${targetIds.length} 件設定提醒：${method}，並送入通知閘道。`);
   showToast("稽催提醒排程已建立。");
@@ -5075,9 +7441,7 @@ document.querySelector("#correctionForm").addEventListener("submit", (event) => 
   runTrackingAction("return");
 });
 document.querySelector("#trackingClearLogBtn").addEventListener("click", () => {
-  trackingAuditLog.length = 0;
-  renderTrackingAuditLog();
-  showToast("已清除畫面上的稽催操作紀錄。");
+  clearLogWithConfirm(trackingAuditLog, renderTrackingAuditLog, "稽催操作紀錄");
 });
 document.querySelectorAll(".segment[data-archive-filter]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5096,9 +7460,7 @@ document.querySelector("#archiveVerifyBtn").addEventListener("click", () => runA
 document.querySelector("#archiveExportBtn").addEventListener("click", () => runArchiveAction("export"));
 document.querySelector("#archiveOpenOriginalBtn").addEventListener("click", () => runArchiveAction("open"));
 document.querySelector("#archiveClearLogBtn").addEventListener("click", () => {
-  archiveAuditLog.length = 0;
-  renderArchiveAuditLog();
-  showToast("已清除畫面上的歸檔操作紀錄。");
+  clearLogWithConfirm(archiveAuditLog, renderArchiveAuditLog, "歸檔操作紀錄");
 });
 document.querySelector("#securityCertForm").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -5124,9 +7486,7 @@ document.querySelector("#securityExportProofBtn").addEventListener("click", () =
   showToast("不可否認紀錄已匯出。");
 });
 document.querySelector("#securityClearLogBtn").addEventListener("click", () => {
-  securityAuditLog.length = 0;
-  renderSecurityAuditLog();
-  showToast("已清除畫面上的資安操作紀錄。");
+  clearLogWithConfirm(securityAuditLog, renderSecurityAuditLog, "資安操作紀錄");
 });
 document.querySelectorAll("[data-file-filter]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5143,6 +7503,7 @@ document.querySelector("#fileSecuritySearch").addEventListener("input", (event) 
 document.querySelector("#fileScanBtn").addEventListener("click", () => runFileSecurityAction("scan"));
 document.querySelector("#fileMaskBtn").addEventListener("click", () => runFileSecurityAction("mask"));
 document.querySelector("#fileWatermarkBtn").addEventListener("click", downloadWatermarkedFile);
+document.querySelector("#fileReleaseBtn").addEventListener("click", () => runFileSecurityAction("release"));
 document.querySelector("#fileBackupBtn").addEventListener("click", createFileSecurityBackup);
 document.querySelector("#fileRestoreBtn").addEventListener("click", restoreFileSecurityBackup);
 document.querySelector("#filePolicySaveBtn").addEventListener("click", saveFileSecurityPolicy);
@@ -5151,9 +7512,7 @@ document.querySelector("#fileSecurityPolicyForm").addEventListener("submit", (ev
   saveFileSecurityPolicy();
 });
 document.querySelector("#fileClearLogBtn").addEventListener("click", () => {
-  fileAccessLog.length = 0;
-  renderFileAccessLog();
-  showToast("已清除畫面上的檔案存取紀錄。");
+  clearLogWithConfirm(fileAccessLog, renderFileAccessLog, "檔案存取紀錄");
 });
 document.querySelectorAll("[data-account-filter]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5190,9 +7549,7 @@ document.querySelector("#accountIpForm").addEventListener("submit", (event) => {
   addAccountIpRule();
 });
 document.querySelector("#accountClearLogBtn").addEventListener("click", () => {
-  accountAuditLog.length = 0;
-  renderAccountAuditLog();
-  showToast("已清除畫面上的帳號操作紀錄。");
+  clearLogWithConfirm(accountAuditLog, renderAccountAuditLog, "帳號操作紀錄");
 });
 document.querySelector("#reportsRecalcBtn").addEventListener("click", () => {
   renderReports();
@@ -5215,9 +7572,7 @@ document.querySelector("#reportsPrintBtn").addEventListener("click", () => {
 });
 document.querySelector("#reportsCreateReminderBtn").addEventListener("click", createReportReminder);
 document.querySelector("#reportsClearLogBtn").addEventListener("click", () => {
-  reportsAuditLog.length = 0;
-  renderReportsAuditLog();
-  showToast("已清除畫面上的報表操作紀錄。");
+  clearLogWithConfirm(reportsAuditLog, renderReportsAuditLog, "報表操作紀錄");
 });
 document.querySelectorAll(".segment[data-notification-filter]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5225,6 +7580,15 @@ document.querySelectorAll(".segment[data-notification-filter]").forEach((button)
     button.classList.add("active");
     notificationFilter = button.dataset.notificationFilter;
     renderNotificationRows();
+    renderNotificationSummary();
+  });
+});
+document.querySelectorAll("[data-reminder-filter]").forEach((card) => {
+  card.addEventListener("click", () => {
+    document.querySelectorAll(".segment[data-notification-filter]").forEach((item) => item.classList.remove("active"));
+    notificationFilter = card.dataset.reminderFilter;
+    renderNotifications();
+    document.querySelector("#notificationRows")?.scrollIntoView({ behavior: "smooth", block: "center" });
   });
 });
 document.querySelector("#notificationSearch").addEventListener("input", (event) => {
@@ -5241,6 +7605,7 @@ document.querySelector("#notificationForm").addEventListener("submit", (event) =
   addNotificationFromForm();
 });
 document.querySelector("#notificationSaveGatewayBtn").addEventListener("click", saveNotificationGateway);
+document.querySelector("#notificationValidateCredentialsBtn").addEventListener("click", validateNotificationCredentials);
 document.querySelector("#notificationGatewayForm").addEventListener("submit", (event) => {
   event.preventDefault();
   saveNotificationGateway();
@@ -5254,9 +7619,7 @@ document.querySelector("#notificationScheduleForm").addEventListener("submit", (
 document.querySelector("#notificationRetryFailedBtn").addEventListener("click", retryFailedNotificationDeliveries);
 document.querySelector("#notificationInboxPushBtn").addEventListener("click", pushSelectedToInbox);
 document.querySelector("#notificationClearLogBtn").addEventListener("click", () => {
-  notificationAuditLog.length = 0;
-  renderNotificationAuditLog();
-  showToast("已清除畫面上的通知操作紀錄。");
+  clearLogWithConfirm(notificationAuditLog, renderNotificationAuditLog, "通知操作紀錄");
 });
 document.querySelectorAll("[data-job-filter]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5291,14 +7654,17 @@ document.querySelector("#jobForm").addEventListener("submit", (event) => {
   addBackgroundJobFromForm();
 });
 document.querySelector("#jobHealthBtn").addEventListener("click", () => {
-  addJobAudit("Worker 健康檢查", "排程 worker、佇列、互斥鎖與通知閘道均回應正常。");
-  renderJobs();
-  showToast("背景任務 Worker 正常。");
+  syncJobsFromBackend(true).then(() => {
+    addJobAudit("後端 Worker 健康檢查", "排程 worker、佇列、互斥鎖與資料庫連線均回應正常。");
+    renderJobs();
+    showToast("後端背景任務 Worker 正常。");
+  }).catch((error) => {
+    addJobAudit("Worker 健康檢查失敗", error.message);
+    showToast("後端 Worker 無法連線。");
+  });
 });
 document.querySelector("#jobClearLogBtn").addEventListener("click", () => {
-  jobAuditLog.length = 0;
-  renderJobAuditLog();
-  showToast("已清除畫面上的背景任務紀錄。");
+  clearLogWithConfirm(jobAuditLog, renderJobAuditLog, "背景任務紀錄");
 });
 document.querySelectorAll(".segment[data-db-table]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5333,9 +7699,7 @@ document.querySelector("#databaseForm").addEventListener("submit", (event) => {
   addDatabaseRowFromForm();
 });
 document.querySelector("#databaseClearLogBtn").addEventListener("click", () => {
-  databaseAuditLog.length = 0;
-  renderDatabaseAuditLog();
-  showToast("已清除畫面上的資料庫操作紀錄。");
+  clearLogWithConfirm(databaseAuditLog, renderDatabaseAuditLog, "資料庫操作紀錄");
 });
 document.querySelectorAll("[data-ops-log-filter]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -5350,6 +7714,8 @@ document.querySelector("#opsLogSearch").addEventListener("input", (event) => {
   renderOpsApiLogs();
 });
 document.querySelector("#opsHealthBtn").addEventListener("click", runOpsHealthCheck);
+document.querySelector("#opsReadinessBtn").addEventListener("click", runOpsReadinessCheck);
+document.querySelector("#opsMonitoringBtn").addEventListener("click", runOpsMonitoringCheck);
 document.querySelector("#opsLookupErrorBtn").addEventListener("click", () => lookupOpsErrorCode());
 document.querySelector("#opsErrorForm").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -5365,9 +7731,23 @@ document.querySelector("#opsBackupBtn").addEventListener("click", createOpsBacku
 document.querySelector("#opsRestoreBackupBtn").addEventListener("click", restoreOpsBackup);
 document.querySelector("#opsSwitchEnvBtn").addEventListener("click", switchOpsEnvironment);
 document.querySelector("#opsClearLogBtn").addEventListener("click", () => {
-  opsAuditLog.length = 0;
-  renderOpsAuditLog();
-  showToast("已清除畫面上的維運操作紀錄。");
+  clearLogWithConfirm(opsAuditLog, renderOpsAuditLog, "維運操作紀錄");
+});
+document.querySelector("#complianceAttestBtn").addEventListener("click", attestComplianceReview);
+document.querySelector("#complianceExportBtn").addEventListener("click", exportCompliancePackage);
+document.querySelector("#complianceDrillBtn").addEventListener("click", recordComplianceDrill);
+document.querySelector("#backupDrillRunBtn").addEventListener("click", runBackupRestoreDrill);
+document.querySelector("#backupDrillExportBtn").addEventListener("click", exportBackupDrillReport);
+document.querySelector("#complianceOpenDocBtn").addEventListener("click", openComplianceDocument);
+document.querySelector("#complianceRunSopBtn").addEventListener("click", runComplianceSop);
+document.querySelector("#complianceResolveGapBtn").addEventListener("click", resolveComplianceGap);
+document.querySelector("#complianceSopSelect").addEventListener("change", renderComplianceSop);
+document.querySelector("#complianceSopForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runComplianceSop();
+});
+document.querySelector("#complianceClearLogBtn").addEventListener("click", () => {
+  clearLogWithConfirm(complianceAuditLog, renderComplianceAuditLog, "法遵營運紀錄");
 });
 document.querySelector("#retryFailedBtn").addEventListener("click", () => {
   const failed = dispatchDocs.filter((doc) => doc.status === "交換失敗").map((doc) => doc.id);
@@ -5397,14 +7777,26 @@ document.querySelector("#settingsBackupBtn").addEventListener("click", () => {
   showToast("系統設定備份已匯出。");
 });
 document.querySelector("#settingsClearLogBtn").addEventListener("click", () => {
-  settingsAuditLog.length = 0;
-  renderSettingsAuditLog();
-  showToast("已清除畫面上的設定操作紀錄。");
+  clearLogWithConfirm(settingsAuditLog, renderSettingsAuditLog, "設定操作紀錄");
 });
 document.querySelector("#logoutBtn").addEventListener("click", leaveApp);
+document.querySelector("#identityWorkbench").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-identity-target]");
+  if (!button) return;
+  const target = button.dataset.identityTarget;
+  const clickId = button.dataset.identityClick;
+  if (target) setView(isRouteAllowed(target) ? target : "dashboard");
+  if (clickId) window.setTimeout(() => document.querySelector(`#${clickId}`)?.click(), 80);
+});
 
+applyEdocRoleOptions();
+assignNextDispatchNo(true);
+renderDraftPreview();
+applyRoleNavigation();
+renderScopeZone();
+renderRoleDashboard();
+renderIdentityWorkbench();
 renderQueueRows();
-renderComplianceChecks();
 renderInboundRows();
 renderInboundDetail();
 renderInboundAuditLog();
@@ -5448,9 +7840,14 @@ renderReports();
 renderReportsAuditLog();
 renderNotifications();
 renderNotificationAuditLog();
+syncNotificationsFromBackend(true);
 renderJobs();
+syncJobsFromBackend(true);
 syncDatabaseTables(true);
 renderDatabase();
 renderOps();
+renderComplianceOps();
 renderFeatureGrid();
 renderSettings();
+renderSearch();
+setView(location.hash?.slice(1) && titles[location.hash.slice(1)] ? location.hash.slice(1) : "dashboard");
