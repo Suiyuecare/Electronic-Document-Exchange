@@ -597,6 +597,7 @@ const complianceAuditLog = [
 
 const backupRestoreDrills = [];
 let latestBackupDrill = null;
+let latestComplianceAttestation = null;
 let selectedComplianceDocId = "DOC-COMP-001";
 let complianceLastReview = "";
 let complianceLastDrill = "";
@@ -4227,6 +4228,46 @@ function renderComplianceSummary() {
   document.querySelector("#complianceDrillNote").textContent = complianceLastDrill ? "演練紀錄已建立" : "建議上線前完成";
 }
 
+function renderComplianceAttestation() {
+  const status = document.querySelector("#complianceAttestationStatus");
+  const grid = document.querySelector("#complianceAttestationGrid");
+  const detail = document.querySelector("#complianceAttestationDetail");
+  if (!status || !grid || !detail) return;
+  const item = latestComplianceAttestation;
+  status.textContent = item?.status || "尚未簽核";
+  grid.innerHTML = [
+    ["驗收結果", item?.status || "待執行"],
+    ["內控分數", item ? `${item.score} / 100` : "待執行"],
+    ["簽核期間", item?.period || "待執行"],
+    ["報告雜湊", item?.report_hash ? item.report_hash.slice(0, 16) : "待產生"]
+  ].map(([label, value]) => `
+    <article class="archive-card">
+      <span>${label}</span>
+      <strong>${value}</strong>
+    </article>
+  `).join("");
+  if (!item) {
+    detail.innerHTML = `<article class="address-card"><strong>尚未建立驗收簽核</strong><p>完成備份還原演練與正式監控檢查後，可由行政部主任送出內控制度簽核。</p></article>`;
+    return;
+  }
+  const blockers = item.report?.blockers || [];
+  detail.innerHTML = `
+    <article class="address-card">
+      <strong>${item.id} · ${item.signer_name} / ${item.signer_role}</strong>
+      <p>${item.signed_at} · 覆核 ${item.reviewer_name || "主任"} / ${item.reviewer_role || "主任"}</p>
+      <small>${item.report_hash}</small>
+    </article>
+    ${(item.report?.controls || []).map((control) => `
+      <article class="address-card">
+        <strong>${control.id} · ${control.status}</strong>
+        <p>${control.source}</p>
+        <small>${control.requirement}</small>
+      </article>
+    `).join("")}
+    ${blockers.length ? `<article class="address-card"><strong>有條件項目</strong><p>${blockers.join("；")}</p></article>` : `<article class="address-card"><strong>無阻擋項目</strong><p>本次法遵驗收與內控制度簽核未列出阻擋項目。</p></article>`}
+  `;
+}
+
 function renderComplianceRows() {
   document.querySelector("#complianceControlCount").textContent = `${complianceControls.length} 項`;
   document.querySelector("#complianceRows").innerHTML = complianceControls.map((item) => `
@@ -4336,6 +4377,7 @@ function renderComplianceAuditLog() {
 
 function renderComplianceOps() {
   renderComplianceSummary();
+  renderComplianceAttestation();
   renderComplianceRows();
   renderComplianceDocs();
   renderComplianceSop();
@@ -4371,14 +4413,32 @@ function exportCompliancePackage() {
   showToast("法遵文件包已匯出。");
 }
 
-function attestComplianceReview() {
-  complianceLastReview = new Date().toLocaleDateString("zh-TW");
-  complianceControls.forEach((item) => {
-    if (item.status === "待季檢") item.status = "已落地";
-  });
-  renderComplianceOps();
-  addComplianceAudit("完成季檢簽核", `${document.querySelector("#complianceOwnerSelect").value} 已完成本季法遵控制檢核。`);
-  showToast("季檢簽核已完成。");
+async function attestComplianceReview() {
+  const signer = document.querySelector("#complianceOwnerSelect").value;
+  try {
+    const result = await backendRequest("/compliance/attest", {
+      method: "POST",
+      body: JSON.stringify({
+        signer_name: signer,
+        signer_role: signer,
+        reviewer_name: "主任",
+        reviewer_role: "主任",
+        period: `${new Date().getFullYear()}-Q${Math.floor(new Date().getMonth() / 3) + 1}`,
+        attestation_type: "法遵驗收與內控制度簽核"
+      })
+    });
+    latestComplianceAttestation = result;
+    complianceLastReview = new Date().toLocaleDateString("zh-TW");
+    complianceControls.forEach((item) => {
+      if (item.status === "待季檢" && result.score >= 70) item.status = "已落地";
+    });
+    renderComplianceOps();
+    addComplianceAudit("完成法遵驗收與內控簽核", `${result.id} ${result.status}，分數 ${result.score}，報告雜湊 ${result.report_hash}。`);
+    showToast(result.status === "通過" ? "法遵驗收與內控簽核通過。" : "法遵驗收已簽核，仍有條件項目需追蹤。");
+  } catch (error) {
+    addComplianceAudit("法遵驗收簽核失敗", error.message);
+    showToast("法遵驗收簽核失敗。");
+  }
 }
 
 function recordComplianceDrill() {

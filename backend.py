@@ -108,6 +108,7 @@ TABLES = {
     "notification_channel_credentials": "notification_channel_credentials",
     "system_inbox": "system_inbox",
     "notification_rules": "notification_rules",
+    "compliance_attestations": "compliance_attestations",
     "settings": "settings",
 }
 
@@ -651,6 +652,22 @@ CREATE TABLE IF NOT EXISTS notification_rules (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS compliance_attestations (
+  id TEXT PRIMARY KEY,
+  attestation_type TEXT NOT NULL,
+  period TEXT NOT NULL,
+  signer_name TEXT NOT NULL,
+  signer_role TEXT NOT NULL,
+  reviewer_name TEXT,
+  reviewer_role TEXT,
+  status TEXT NOT NULL,
+  score INTEGER NOT NULL DEFAULT 0,
+  report_hash TEXT NOT NULL,
+  report_json TEXT NOT NULL,
+  signed_at TEXT NOT NULL,
+  non_repudiation_json TEXT
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value_json TEXT NOT NULL,
@@ -693,6 +710,8 @@ CREATE INDEX IF NOT EXISTS idx_notifications_source ON notifications(source);
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_notification ON notification_deliveries(notification_id);
 CREATE INDEX IF NOT EXISTS idx_notification_credentials_channel ON notification_channel_credentials(channel);
 CREATE INDEX IF NOT EXISTS idx_system_inbox_notification ON system_inbox(notification_id);
+CREATE INDEX IF NOT EXISTS idx_compliance_attestations_period ON compliance_attestations(period);
+CREATE INDEX IF NOT EXISTS idx_compliance_attestations_signed ON compliance_attestations(signed_at);
 """
 
 
@@ -1830,7 +1849,7 @@ def insert_row(conn: sqlite3.Connection, table: str, payload: Dict[str, Any]) ->
         payload["doc_no"] = next_dispatch_no(conn)
     if table in {"documents", "recipients", "exchange_tasks", "settings", "notification_rules"}:
         payload.setdefault("updated_at", now())
-    if table in {"documents", "attachments", "exchange_events", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "file_objects", "file_download_tokens", "virus_scan_jobs"}:
+    if table in {"documents", "attachments", "exchange_events", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "file_objects", "file_download_tokens", "virus_scan_jobs", "compliance_attestations"}:
         payload.setdefault("created_at", now())
     columns = list(payload.keys())
     placeholders = ", ".join(["?"] * len(columns))
@@ -4104,6 +4123,165 @@ def stable_json_hash(value: Any) -> str:
     return sha256_bytes(data)
 
 
+COMPLIANCE_CONTROL_REQUIREMENTS = [
+    ("C-001", "機關公文電子交換作業辦法", "收發文、交換事件、異常處理與留存可追蹤", ["documents", "exchange_events", "audit_logs"]),
+    ("C-002", "公文電子交換系統資訊安全管理規範", "帳號、RBAC、憑證、Token、IP/裝置與操作留痕", ["users", "auth_sessions", "login_events", "audit_logs"]),
+    ("C-003", "文書及檔案管理電腦化作業規範", "文號、附件清冊、PDF 套版、用印版本與歸檔保存", ["pdf_versions", "seal_assets", "file_objects"]),
+    ("C-004", "個人資料保護法與內部資安政策", "敏感遮罩、密件隔離、浮水印、檔案存取紀錄", ["attachment_security", "file_access_logs"]),
+    ("C-005", "正式資料庫權限政策", "RLS、密件 row-level 隔離、保留年限、audit log 不可竄改", ["document_acl", "audit_logs"]),
+    ("C-006", "正式檔案儲存與病毒掃描政策", "Private bucket、加密、短效 URL、防毒掃描與隔離阻擋", ["file_objects", "virus_scan_jobs"]),
+    ("C-007", "電子簽章憑證合法性驗證政策", "信任鏈、TSA、OCSP、CRL 與不可否認簽章證據", ["signing_certificates", "certificate_validation_events", "electronic_signatures"]),
+    ("C-008", "委外與營運管理", "部署、監控、排程、通知、備份復原與 SOP", ["background_jobs", "job_runs", "notification_deliveries"]),
+]
+
+
+def compliance_control_report(counts: Dict[str, int]) -> List[Dict[str, Any]]:
+    rows = []
+    for control_id, source, requirement, evidence_tables in COMPLIANCE_CONTROL_REQUIREMENTS:
+        evidence = {table: counts.get(table, 0) for table in evidence_tables}
+        implemented = any(count > 0 for count in evidence.values())
+        rows.append({
+            "id": control_id,
+            "source": source,
+            "requirement": requirement,
+            "evidence_tables": evidence,
+            "status": "已驗收" if implemented else "待補證據",
+        })
+    return rows
+
+
+def compliance_score(controls: List[Dict[str, Any]], blockers: List[str]) -> int:
+    base = round((len([item for item in controls if item["status"] == "已驗收"]) / max(1, len(controls))) * 100)
+    return max(0, base - min(30, len(blockers) * 5))
+
+
+def compliance_attestation_payload(
+    *,
+    counts: Dict[str, int],
+    readiness: Dict[str, Any],
+    monitoring: Dict[str, Any] | None,
+    latest_drill: Dict[str, Any] | None,
+    signer_name: str,
+    signer_role: str,
+    reviewer_name: str,
+    reviewer_role: str,
+    period: str,
+    attestation_type: str,
+) -> Dict[str, Any]:
+    controls = compliance_control_report(counts)
+    blockers = list(readiness.get("blockers") or [])
+    if not latest_drill:
+        blockers.append("尚未完成備份還原演練。")
+    if monitoring and monitoring.get("status") == "critical":
+        blockers.append("正式監控仍有 critical 告警。")
+    score = compliance_score(controls, blockers)
+    status = "通過" if score >= 90 and not blockers else "有條件通過" if score >= 70 else "不通過"
+    report = {
+        "attestation_type": attestation_type,
+        "period": period,
+        "generated_at": now(),
+        "signer": {"name": signer_name, "role": signer_role},
+        "reviewer": {"name": reviewer_name, "role": reviewer_role},
+        "status": status,
+        "score": score,
+        "controls": controls,
+        "readiness": {
+            "environment": readiness.get("environment"),
+            "ready": readiness.get("ready"),
+            "databaseMode": readiness.get("databaseMode"),
+            "missing": readiness.get("missing", []),
+            "blockers": readiness.get("blockers", []),
+            "warnings": readiness.get("warnings", []),
+        },
+        "monitoring": {
+            "status": monitoring.get("status") if monitoring else "未執行",
+            "alerts": monitoring.get("alerts", [])[:10] if monitoring else [],
+        },
+        "latest_backup_drill": latest_drill,
+        "counts": counts,
+        "blockers": blockers,
+        "evidence_documents": [
+            "docs/compliance-control-matrix.md",
+            "docs/database-security-policy.md",
+            "docs/file-storage-scanning-policy.md",
+            "docs/certificate-legality-validation-policy.md",
+            "docs/backup-restore-drill.md",
+            "docs/notification-delivery-test.md",
+            "docs/deployment-production.md",
+        ],
+    }
+    report_hash = stable_json_hash(report)
+    return {
+        "id": f"COMP-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}",
+        "attestation_type": attestation_type,
+        "period": period,
+        "signer_name": signer_name,
+        "signer_role": signer_role,
+        "reviewer_name": reviewer_name,
+        "reviewer_role": reviewer_role,
+        "status": status,
+        "score": score,
+        "report_hash": report_hash,
+        "report": report,
+        "signed_at": now(),
+        "non_repudiation": {
+            "report_hash": report_hash,
+            "signed_at": now(),
+            "signer_role": signer_role,
+            "signature_method": "backend-attestation-hash",
+            "ip": "127.0.0.1" if not RUNNING_ON_VERCEL else "vercel",
+        },
+    }
+
+
+def latest_local_backup_drill(conn: sqlite3.Connection) -> Dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM audit_logs WHERE action = '備份還原演練' ORDER BY created_at DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    item = row_to_dict(row)
+    try:
+        detail = json.loads(item.get("detail") or "{}")
+    except json.JSONDecodeError:
+        detail = {"detail": item.get("detail")}
+    return {"audit_id": item["id"], "created_at": item["created_at"], **detail}
+
+
+def create_compliance_attestation(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    counts = sqlite_table_counts(DB_PATH)
+    readiness = production_readiness()
+    monitoring = local_monitoring_snapshot(conn)
+    latest_drill = latest_local_backup_drill(conn)
+    attestation = compliance_attestation_payload(
+        counts=counts,
+        readiness=readiness,
+        monitoring=monitoring,
+        latest_drill=latest_drill,
+        signer_name=payload.get("signer_name") or payload.get("signer") or "行政部主任",
+        signer_role=payload.get("signer_role") or "行政部主任",
+        reviewer_name=payload.get("reviewer_name") or "主任",
+        reviewer_role=payload.get("reviewer_role") or "主任",
+        period=payload.get("period") or datetime.now().strftime("%Y-Q%q").replace("%q", str((datetime.now().month - 1) // 3 + 1)),
+        attestation_type=payload.get("attestation_type") or "法遵驗收與內控制度簽核",
+    )
+    conn.execute(
+        """
+        INSERT INTO compliance_attestations (
+          id, attestation_type, period, signer_name, signer_role, reviewer_name, reviewer_role,
+          status, score, report_hash, report_json, signed_at, non_repudiation_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            attestation["id"], attestation["attestation_type"], attestation["period"], attestation["signer_name"],
+            attestation["signer_role"], attestation["reviewer_name"], attestation["reviewer_role"],
+            attestation["status"], attestation["score"], attestation["report_hash"],
+            json.dumps(attestation["report"], ensure_ascii=False), attestation["signed_at"],
+            json.dumps(attestation["non_repudiation"], ensure_ascii=False),
+        ),
+    )
+    log_audit(conn, attestation["signer_name"], "法遵驗收與內控制度簽核", "compliance_attestations", attestation["id"], f"{attestation['status']} score={attestation['score']} hash={attestation['report_hash']}")
+    return attestation
+
+
 def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
     started = time.time()
     scope = payload.get("scope") or "全部資料表"
@@ -4180,6 +4358,63 @@ def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": now(),
     })
     return report
+
+
+def supabase_create_compliance_attestation(payload: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot_counts = {}
+    for table in TABLES:
+        try:
+            snapshot_counts[table] = len(supabase_list(table, {"limit": ["1000"]}))
+        except Exception:
+            snapshot_counts[table] = 0
+    readiness = production_readiness()
+    monitoring = supabase_monitoring_snapshot()
+    drill_rows = [row for row in supabase_list("audit_logs", {"limit": ["1000"]}) if row.get("action") == "備份還原演練"]
+    drill_rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    latest_drill = drill_rows[0] if drill_rows else None
+    attestation = compliance_attestation_payload(
+        counts=snapshot_counts,
+        readiness=readiness,
+        monitoring=monitoring,
+        latest_drill=latest_drill,
+        signer_name=payload.get("signer_name") or payload.get("signer") or "行政部主任",
+        signer_role=payload.get("signer_role") or "行政部主任",
+        reviewer_name=payload.get("reviewer_name") or "主任",
+        reviewer_role=payload.get("reviewer_role") or "主任",
+        period=payload.get("period") or datetime.now().strftime("%Y-Q%q").replace("%q", str((datetime.now().month - 1) // 3 + 1)),
+        attestation_type=payload.get("attestation_type") or "法遵驗收與內控制度簽核",
+    )
+    row = {
+        "id": attestation["id"],
+        "attestation_type": attestation["attestation_type"],
+        "period": attestation["period"],
+        "signer_name": attestation["signer_name"],
+        "signer_role": attestation["signer_role"],
+        "reviewer_name": attestation["reviewer_name"],
+        "reviewer_role": attestation["reviewer_role"],
+        "status": attestation["status"],
+        "score": attestation["score"],
+        "report_hash": attestation["report_hash"],
+        "report_json": attestation["report"],
+        "signed_at": attestation["signed_at"],
+        "non_repudiation_json": attestation["non_repudiation"],
+    }
+    try:
+        supabase_insert("compliance_attestations", row)
+    except Exception:
+        pass
+    supabase_insert("audit_logs", {
+        "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "actor": attestation["signer_name"],
+        "action": "法遵驗收與內控制度簽核",
+        "target_type": "compliance_attestations",
+        "target_id": attestation["id"],
+        "ip": "vercel",
+        "device": "serverless",
+        "detail": f"{attestation['status']} score={attestation['score']} hash={attestation['report_hash']}",
+        "created_at": now(),
+    })
+    return attestation
 
 
 def supabase_create_notification(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -4603,6 +4838,9 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "POST" and parts == ["backup", "restore-drill"]:
                     self.send_json(supabase_backup_restore_drill(self.read_json()), 201)
                     return
+                if method == "POST" and parts == ["compliance", "attest"]:
+                    self.send_json(supabase_create_compliance_attestation(self.read_json()), 201)
+                    return
                 if method == "GET" and parts == ["cron", "run-due"]:
                     if not self.cron_authorized():
                         self.send_json({"error": "unauthorized"}, 401)
@@ -4776,6 +5014,11 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if method == "POST" and parts == ["backup", "restore-drill"]:
                     result = run_backup_restore_drill(conn, self.read_json())
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "POST" and parts == ["compliance", "attest"]:
+                    result = create_compliance_attestation(conn, self.read_json())
                     conn.commit()
                     self.send_json(result, 201)
                     return
