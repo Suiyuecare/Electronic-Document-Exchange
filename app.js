@@ -4385,55 +4385,72 @@ function recordComplianceDrill() {
   runBackupRestoreDrill();
 }
 
-function runBackupRestoreDrill() {
+function normalizeBackupDrill(result, fallback = {}) {
+  return {
+    id: result.id,
+    createdAt: result.created_at || new Date().toLocaleString("zh-TW", { hour12: false }),
+    owner: document.querySelector("#complianceOwnerSelect")?.value || "行政部主任",
+    scope: result.scope || fallback.scope || "全部資料表",
+    targetEnv: result.target_env || fallback.targetEnv || "測試沙盒",
+    backupId: result.backup?.backup || result.backupId || "未記錄",
+    backupHash: result.backup?.sha256 || result.backupHash || "未記錄",
+    restoreHash: result.sandbox?.sha256 || result.restoreHash || "未記錄",
+    rowCount: result.row_count || result.rowCount || 0,
+    tableCounts: result.source_counts || result.tableCounts || {},
+    rtoMinutes: result.rto_minutes || result.rtoMinutes || 0,
+    rtoTarget: result.rto_target_minutes || fallback.rtoTarget || 30,
+    rpoMinutes: result.rpo_minutes || result.rpoMinutes || 0,
+    rpoTarget: result.rpo_target_minutes || fallback.rpoTarget || 15,
+    result: result.result || (result.ok ? "通過" : "需改善"),
+    steps: {
+      snapshot: result.steps?.snapshot || "備份快照已建立",
+      sourceHash: result.steps?.sourceHash || `${result.backup?.sha256 || "未記錄"} 已產生`,
+      sandboxRestore: result.steps?.sandboxRestore || `${result.target_env || fallback.targetEnv || "測試沙盒"} 還原完成`,
+      verify: result.steps?.verify || (result.checks?.counts_match && result.checks?.hash_match ? "筆數與雜湊比對通過" : "筆數或雜湊不一致"),
+      rtoRpo: result.steps?.rtoRpo || `RTO ${result.rto_minutes || 0}/${fallback.rtoTarget || 30} 分，RPO ${result.rpo_minutes || 0}/${fallback.rpoTarget || 15} 分`
+    },
+    report: result
+  };
+}
+
+async function runBackupRestoreDrill() {
   const scope = document.querySelector("#backupDrillScope").value;
   const targetEnv = document.querySelector("#backupDrillTarget").value;
   const rtoTarget = Number(document.querySelector("#backupDrillRtoTarget").value || 30);
   const rpoTarget = Number(document.querySelector("#backupDrillRpoTarget").value || 15);
-  const startedAt = Date.now();
-  const snapshot = databaseBackupSnapshot();
-  const backup = buildOpsBackupRecord(snapshot);
-  opsBackups.unshift(backup);
-  const sandbox = JSON.parse(JSON.stringify(backup.data));
-  const restoreHash = stableHash(sandbox);
-  const restoredCounts = Object.fromEntries(Object.entries(sandbox).map(([key, rows]) => [key, rows.length]));
-  const countsMatch = JSON.stringify(restoredCounts) === JSON.stringify(backup.tableCounts);
-  const hashMatch = restoreHash === backup.hash;
-  const rtoMinutes = Math.max(1, Math.ceil((Date.now() - startedAt + 42000) / 60000));
-  const rpoMinutes = Math.max(1, Math.min(rpoTarget, Math.ceil((Date.now() - startedAt + 18000) / 60000)));
-  const result = countsMatch && hashMatch && rtoMinutes <= rtoTarget && rpoMinutes <= rpoTarget ? "通過" : "需改善";
-  const drill = {
-    id: `DRILL-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${String(backupRestoreDrills.length + 1).padStart(2, "0")}`,
-    createdAt: new Date().toLocaleString("zh-TW", { hour12: false }),
-    owner: document.querySelector("#complianceOwnerSelect").value,
-    scope,
-    targetEnv,
-    backupId: backup.id,
-    backupHash: backup.hash,
-    restoreHash,
-    rowCount: backup.rowCount,
-    tableCounts: backup.tableCounts,
-    rtoMinutes,
-    rtoTarget,
-    rpoMinutes,
-    rpoTarget,
-    result,
-    steps: {
-      snapshot: `${backup.id} 已建立，${backup.rowCount} 筆資料`,
-      sourceHash: `${backup.hash} 已產生`,
-      sandboxRestore: `${targetEnv} 還原完成，未覆蓋正式資料`,
-      verify: countsMatch && hashMatch ? "筆數與雜湊比對通過" : "筆數或雜湊不一致",
-      rtoRpo: `RTO ${rtoMinutes}/${rtoTarget} 分，RPO ${rpoMinutes}/${rpoTarget} 分`
-    }
-  };
-  latestBackupDrill = drill;
-  backupRestoreDrills.unshift(drill);
-  complianceLastDrill = new Date().toLocaleDateString("zh-TW");
-  renderOps();
-  renderComplianceOps();
-  addOpsAudit("備份還原演練", `${drill.id} ${result}，備份 ${backup.id} 還原至${targetEnv}，RTO ${rtoMinutes} 分，RPO ${rpoMinutes} 分。`);
-  addComplianceAudit("備份還原演練", `${drill.id} ${result}：${drill.steps.verify}，${drill.steps.rtoRpo}。`);
-  showToast(result === "通過" ? "備份還原演練通過。" : "備份還原演練完成，請查看改善項目。");
+  try {
+    const result = await backendRequest("/backup/restore-drill", {
+      method: "POST",
+      body: JSON.stringify({
+        scope,
+        target_env: targetEnv,
+        rto_target_minutes: rtoTarget,
+        rpo_target_minutes: rpoTarget
+      })
+    });
+    const drill = normalizeBackupDrill(result, { scope, targetEnv, rtoTarget, rpoTarget });
+    latestBackupDrill = drill;
+    backupRestoreDrills.unshift(drill);
+    opsBackups.unshift({
+      id: drill.backupId,
+      createdAt: drill.createdAt,
+      env: opsState.environment,
+      note: `${drill.rowCount} 筆資料，演練 ${drill.result}`,
+      hash: drill.backupHash,
+      rowCount: drill.rowCount,
+      tableCounts: drill.tableCounts,
+      data: {}
+    });
+    complianceLastDrill = new Date().toLocaleDateString("zh-TW");
+    renderOps();
+    renderComplianceOps();
+    addOpsAudit("備份還原演練", `${drill.id} ${drill.result}，備份 ${drill.backupId} 還原至${targetEnv}，RTO ${drill.rtoMinutes} 分，RPO ${drill.rpoMinutes} 分。`);
+    addComplianceAudit("備份還原演練", `${drill.id} ${drill.result}：${drill.steps.verify}，${drill.steps.rtoRpo}。`);
+    showToast(drill.result === "通過" ? "備份還原演練通過。" : "備份還原演練完成，請查看改善項目。");
+  } catch (error) {
+    addComplianceAudit("備份還原演練失敗", error.message);
+    showToast("備份還原演練失敗。");
+  }
 }
 
 function exportBackupDrillReport() {

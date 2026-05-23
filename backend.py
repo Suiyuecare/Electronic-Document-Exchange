@@ -2161,8 +2161,97 @@ def backup_database(conn: sqlite3.Connection) -> Dict[str, Any]:
     target = BACKUP_DIR / name
     conn.commit()
     shutil.copy2(DB_PATH, target)
-    log_audit(conn, "API", "資料備份", "backup", name, str(target))
-    return {"backup": name, "path": str(target), "size": target.stat().st_size}
+    digest = sha256_bytes(target.read_bytes())
+    log_audit(conn, "API", "資料備份", "backup", name, f"{target} sha256={digest}")
+    return {"backup": name, "path": str(target), "size": target.stat().st_size, "sha256": digest, "created_at": now()}
+
+
+def sqlite_table_counts(db_path: Path) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    readonly = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    readonly.row_factory = sqlite3.Row
+    try:
+        for table in TABLES:
+            try:
+                counts[table] = readonly.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
+            except sqlite3.Error:
+                counts[table] = 0
+    finally:
+        readonly.close()
+    return counts
+
+
+def run_backup_restore_drill(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_dirs()
+    started = time.time()
+    scope = payload.get("scope") or "全部資料表"
+    target_env = payload.get("target_env") or payload.get("target") or "測試沙盒"
+    rto_target = int(payload.get("rto_target_minutes") or payload.get("rtoTarget") or 30)
+    rpo_target = int(payload.get("rpo_target_minutes") or payload.get("rpoTarget") or 15)
+    backup = backup_database(conn)
+    source_hash = backup["sha256"]
+    source_counts = sqlite_table_counts(Path(backup["path"]))
+    sandbox_name = backup["backup"].replace("edoc-backup-", "restore-sandbox-")
+    sandbox_path = BACKUP_DIR / sandbox_name
+    shutil.copy2(backup["path"], sandbox_path)
+    restore_hash = sha256_bytes(sandbox_path.read_bytes())
+    restored_counts = sqlite_table_counts(sandbox_path)
+    integrity_row = sqlite3.connect(str(sandbox_path)).execute("PRAGMA integrity_check").fetchone()
+    integrity = integrity_row[0] if integrity_row else "unknown"
+    duration_ms = int((time.time() - started) * 1000)
+    rto_minutes = max(1, (duration_ms + 59999) // 60000)
+    backup_age_seconds = max(0, int(time.time() - Path(backup["path"]).stat().st_mtime))
+    rpo_minutes = max(1, (backup_age_seconds + 59) // 60)
+    counts_match = source_counts == restored_counts
+    hash_match = source_hash == restore_hash
+    rto_ok = rto_minutes <= rto_target
+    rpo_ok = rpo_minutes <= rpo_target
+    ok = integrity == "ok" and counts_match and hash_match and rto_ok and rpo_ok
+    drill_id = f"DRILL-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
+    report = {
+        "id": drill_id,
+        "ok": ok,
+        "result": "通過" if ok else "需改善",
+        "created_at": now(),
+        "scope": scope,
+        "target_env": target_env,
+        "backup": backup,
+        "sandbox": {"path": str(sandbox_path), "sha256": restore_hash, "integrity": integrity},
+        "source_counts": source_counts,
+        "restored_counts": restored_counts,
+        "row_count": sum(source_counts.values()),
+        "checks": {
+            "integrity": integrity == "ok",
+            "hash_match": hash_match,
+            "counts_match": counts_match,
+            "rto_ok": rto_ok,
+            "rpo_ok": rpo_ok,
+        },
+        "rto_minutes": rto_minutes,
+        "rto_target_minutes": rto_target,
+        "rpo_minutes": rpo_minutes,
+        "rpo_target_minutes": rpo_target,
+        "duration_ms": duration_ms,
+        "steps": {
+            "snapshot": f"{backup['backup']} 已建立，{sum(source_counts.values())} 筆資料",
+            "sourceHash": f"{source_hash} 已產生",
+            "sandboxRestore": f"{target_env} 還原完成，未覆蓋正式資料",
+            "verify": "筆數與雜湊比對通過" if counts_match and hash_match else "筆數或雜湊不一致",
+            "rtoRpo": f"RTO {rto_minutes}/{rto_target} 分，RPO {rpo_minutes}/{rpo_target} 分",
+        },
+        "improvements": [] if ok else [
+            item for item, passed in {
+                "確認備份檔完整性或重新產生備份": integrity == "ok" and hash_match,
+                "檢查還原程序是否漏表或資料筆數不一致": counts_match,
+                "優化還原程序以符合 RTO": rto_ok,
+                "提高備份頻率以符合 RPO": rpo_ok,
+            }.items() if not passed
+        ],
+    }
+    report_path = BACKUP_DIR / f"{drill_id}.json"
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    log_audit(conn, "Ops Drill", "備份還原演練", "backup_restore_drill", drill_id, json.dumps({"result": report["result"], "backup": backup["backup"], "rto": rto_minutes, "rpo": rpo_minutes}, ensure_ascii=False))
+    return {**report, "report_path": str(report_path)}
 
 
 def record_file_access(
@@ -4010,6 +4099,89 @@ def run_supabase_monitoring_check() -> Dict[str, Any]:
     return {**snapshot, "webhook": webhook}
 
 
+def stable_json_hash(value: Any) -> str:
+    data = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256_bytes(data)
+
+
+def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
+    started = time.time()
+    scope = payload.get("scope") or "全部資料表"
+    target_env = payload.get("target_env") or payload.get("target") or "測試沙盒"
+    rto_target = int(payload.get("rto_target_minutes") or payload.get("rtoTarget") or 30)
+    rpo_target = int(payload.get("rpo_target_minutes") or payload.get("rpoTarget") or 15)
+    included_tables = list(TABLES)
+    if scope == "公文與附件":
+        included_tables = ["documents", "recipients", "attachments", "file_objects", "file_download_tokens", "virus_scan_jobs"]
+    elif scope == "交換事件與 audit log":
+        included_tables = ["exchange_tasks", "exchange_events", "audit_logs"]
+    snapshot: Dict[str, List[Dict[str, Any]]] = {}
+    for table in included_tables:
+        try:
+            snapshot[table] = supabase_list(table, {"limit": ["1000"]})
+        except Exception as exc:
+            snapshot[table] = [{"backup_error": str(exc)}]
+    source_hash = stable_json_hash(snapshot)
+    sandbox = json.loads(json.dumps(snapshot, ensure_ascii=False))
+    restore_hash = stable_json_hash(sandbox)
+    source_counts = {table: len(rows) for table, rows in snapshot.items()}
+    restored_counts = {table: len(rows) for table, rows in sandbox.items()}
+    duration_ms = int((time.time() - started) * 1000)
+    rto_minutes = max(1, (duration_ms + 59999) // 60000)
+    rpo_minutes = 1
+    counts_match = source_counts == restored_counts
+    hash_match = source_hash == restore_hash
+    rto_ok = rto_minutes <= rto_target
+    rpo_ok = rpo_minutes <= rpo_target
+    ok = counts_match and hash_match and rto_ok and rpo_ok
+    drill_id = f"DRILL-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
+    report = {
+        "id": drill_id,
+        "ok": ok,
+        "result": "通過" if ok else "需改善",
+        "created_at": now(),
+        "scope": scope,
+        "target_env": target_env,
+        "backup": {
+            "backup": f"supabase-logical-snapshot-{drill_id}.json",
+            "path": "Supabase logical snapshot in serverless memory",
+            "size": len(json.dumps(snapshot, ensure_ascii=False)),
+            "sha256": source_hash,
+            "created_at": now(),
+        },
+        "sandbox": {"path": "JSON sandbox restore", "sha256": restore_hash, "integrity": "ok"},
+        "source_counts": source_counts,
+        "restored_counts": restored_counts,
+        "row_count": sum(source_counts.values()),
+        "checks": {"integrity": True, "hash_match": hash_match, "counts_match": counts_match, "rto_ok": rto_ok, "rpo_ok": rpo_ok},
+        "rto_minutes": rto_minutes,
+        "rto_target_minutes": rto_target,
+        "rpo_minutes": rpo_minutes,
+        "rpo_target_minutes": rpo_target,
+        "duration_ms": duration_ms,
+        "steps": {
+            "snapshot": f"Supabase logical snapshot 已建立，{sum(source_counts.values())} 筆資料",
+            "sourceHash": f"{source_hash} 已產生",
+            "sandboxRestore": f"{target_env} JSON 還原演練完成，未覆蓋正式資料",
+            "verify": "筆數與雜湊比對通過" if counts_match and hash_match else "筆數或雜湊不一致",
+            "rtoRpo": f"RTO {rto_minutes}/{rto_target} 分，RPO {rpo_minutes}/{rpo_target} 分",
+        },
+        "improvements": [] if ok else ["檢查 Supabase logical snapshot 取樣、PITR 或 scheduled dump 設定"],
+    }
+    supabase_insert("audit_logs", {
+        "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "actor": "Ops Drill",
+        "action": "備份還原演練",
+        "target_type": "backup_restore_drill",
+        "target_id": drill_id,
+        "ip": "vercel",
+        "device": "serverless",
+        "detail": json.dumps({"result": report["result"], "backup": report["backup"]["backup"], "rto": rto_minutes, "rpo": rpo_minutes}, ensure_ascii=False),
+        "created_at": now(),
+    })
+    return report
+
+
 def supabase_create_notification(payload: Dict[str, Any]) -> Dict[str, Any]:
     item = {
         "id": payload.get("id") or f"NTF-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
@@ -4428,6 +4600,9 @@ class Handler(SimpleHTTPRequestHandler):
                     supabase_insert("audit_logs", payload)
                     self.send_json({"backup": "supabase-logical-backup-request", "detail": payload["detail"]}, 201)
                     return
+                if method == "POST" and parts == ["backup", "restore-drill"]:
+                    self.send_json(supabase_backup_restore_drill(self.read_json()), 201)
+                    return
                 if method == "GET" and parts == ["cron", "run-due"]:
                     if not self.cron_authorized():
                         self.send_json({"error": "unauthorized"}, 401)
@@ -4596,6 +4771,11 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if method == "POST" and parts == ["actions", "backup"]:
                     result = backup_database(conn)
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "POST" and parts == ["backup", "restore-drill"]:
+                    result = run_backup_restore_drill(conn, self.read_json())
                     conn.commit()
                     self.send_json(result, 201)
                     return

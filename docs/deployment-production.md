@@ -170,6 +170,9 @@ curl https://edoc.suiyuecare.com/api/files/storage-health
 curl -X POST https://edoc.suiyuecare.com/api/notifications/test \
   -H "Content-Type: application/json" \
   -d '{"channel":"Email + Line + 系統通知","target_email":"records@suiyuecare.com","body":"正式通知通道實測"}'
+curl -X POST https://edoc.suiyuecare.com/api/backup/restore-drill \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"全部資料表","target_env":"測試沙盒","rto_target_minutes":30,"rpo_target_minutes":15}'
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/run-due
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/monitoring
 ```
@@ -181,6 +184,7 @@ curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cro
 - `/api/production/deployment` 顯示 production、revision、branch、deployment URL、Supabase 與 Storage 設定。
 - `/api/files/storage-health` 顯示 `ready: true`，且 provider、bucket、object endpoint、加密、AV provider、AV endpoint、短效 URL 都已設定。
 - `/api/notifications/test` 回傳 `report.ok: true`，Email 有 Message-ID，LINE 有 request id 或 webhook receipt，站內通知有 inbox id。
+- `/api/backup/restore-drill` 回傳 `ok: true`，筆數、雜湊、RTO / RPO 均通過，且 audit log 留存演練紀錄。
 - `/api/production/monitoring` 回傳 `status: healthy` 或只有可接受的 warning；critical 必須先處理。
 - `/api/cron/run-due` 回傳 `count` 與 `results`，且 Supabase `job_runs` 有新增紀錄。
 - `/api/cron/monitoring` 會寫入 audit log；若有 alert 且設定 `MONITORING_WEBHOOK_URL`，會推送外部值班通道。
