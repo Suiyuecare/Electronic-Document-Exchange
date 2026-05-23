@@ -39,7 +39,7 @@ For future Vercel/Supabase deployment automation, add:
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 VERCEL_TOKEN
-VERCEL_ORG_ID
+VERCEL_ORG_ID=team_LGag47eU8tKbsK6ixAmVa5Uq
 VERCEL_PROJECT_ID=prj_iNAxeAFkzDkrwkDFoeOZvJj78L7K
 ```
 

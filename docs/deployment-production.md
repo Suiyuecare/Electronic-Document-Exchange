@@ -110,7 +110,7 @@ vercel deploy --prebuilt --prod
 
 GitHub Actions 部署：
 
-1. 在 GitHub repository secrets 建立 `VERCEL_TOKEN`、`VERCEL_ORG_ID`、`VERCEL_PROJECT_ID=prj_iNAxeAFkzDkrwkDFoeOZvJj78L7K`。
+1. 在 GitHub repository secrets 建立 `VERCEL_TOKEN`、`VERCEL_ORG_ID=team_LGag47eU8tKbsK6ixAmVa5Uq`、`VERCEL_PROJECT_ID=prj_iNAxeAFkzDkrwkDFoeOZvJj78L7K`。
 2. 在 Vercel 專案連結 GitHub repo，或本機先執行 `vercel link` 產生 `.vercel/project.json` 後，把 `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID` 依公司政策放入 CI。
 3. 建立 `EDOC_PRODUCTION_URL=https://edoc.suiyuecare.com` secret，讓 CI 部署後固定檢查正式網址；未設定時會使用 `https://edoc.suiyuecare.com`。
 4. Push 到 `main` 後執行 `.github/workflows/deploy-vercel.yml`。

@@ -33,15 +33,16 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
-BACKUP_DIR = ROOT / "backups"
-STORAGE_DIR = ROOT / "storage"
+RUNNING_ON_VERCEL = bool(os.getenv("VERCEL"))
+WRITABLE_ROOT = Path(os.getenv("EDOC_WRITABLE_DIR", "/tmp/edoc" if RUNNING_ON_VERCEL else str(ROOT)))
+DATA_DIR = WRITABLE_ROOT / "data"
+BACKUP_DIR = WRITABLE_ROOT / "backups"
+STORAGE_DIR = WRITABLE_ROOT / "storage"
 DB_PATH = DATA_DIR / "edoc.sqlite3"
 DEPLOYMENT_ENV = os.getenv("EDOC_DEPLOYMENT_ENV", os.getenv("VERCEL_ENV", "development")).lower()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY", "")
 USE_SUPABASE = os.getenv("EDOC_DB_MODE", "").lower() == "supabase" or bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
-RUNNING_ON_VERCEL = bool(os.getenv("VERCEL"))
 EDOC_STORAGE_PROVIDER = os.getenv("EDOC_STORAGE_PROVIDER", "local").lower()
 EDOC_STORAGE_BUCKET = os.getenv("EDOC_STORAGE_BUCKET", "edoc-private")
 EDOC_SIGNED_URL_TTL_SECONDS = int(os.getenv("EDOC_SIGNED_URL_TTL_SECONDS", "300"))
@@ -1005,16 +1006,24 @@ def build_official_pdf(doc: Dict[str, Any], stamps: List[Dict[str, Any]] | None 
 
 
 def ensure_dirs() -> None:
-    DATA_DIR.mkdir(exist_ok=True)
-    BACKUP_DIR.mkdir(exist_ok=True)
-    STORAGE_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+LOCAL_SCHEMA_READY = False
 
 
 def connect() -> sqlite3.Connection:
+    global LOCAL_SCHEMA_READY
     ensure_dirs()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    if not LOCAL_SCHEMA_READY:
+        conn.executescript(SCHEMA)
+        conn.commit()
+        LOCAL_SCHEMA_READY = True
     return conn
 
 
