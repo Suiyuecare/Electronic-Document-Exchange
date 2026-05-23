@@ -53,6 +53,13 @@ EDOC_PUBLIC_BASE_URL = os.getenv("EDOC_PUBLIC_BASE_URL", os.getenv("PRODUCTION_B
 MONITORING_WEBHOOK_URL = os.getenv("MONITORING_WEBHOOK_URL", "")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 EDOC_MONITORING_EXPECTED_CRON_MINUTES = int(os.getenv("EDOC_MONITORING_EXPECTED_CRON_MINUTES", "1440"))
+EDOC_SIGNATURE_PROVIDER = os.getenv("EDOC_SIGNATURE_PROVIDER", "local-simulation")
+EDOC_HSM_PROVIDER = os.getenv("EDOC_HSM_PROVIDER", "")
+EDOC_CERT_TRUST_STORE = os.getenv("EDOC_CERT_TRUST_STORE", "")
+EDOC_TSA_URL = os.getenv("EDOC_TSA_URL", "")
+EDOC_TSA_POLICY_OID = os.getenv("EDOC_TSA_POLICY_OID", "1.2.158.歲悅.電子公文.時間戳")
+EDOC_OCSP_RESPONDER_URL = os.getenv("EDOC_OCSP_RESPONDER_URL", "")
+EDOC_CRL_DISTRIBUTION_URL = os.getenv("EDOC_CRL_DISTRIBUTION_URL", "")
 ALLOWED_EDOC_ROLE_LIST = ["主任", "執行長", "行政部主任", "人資", "會計", "總務", "業務助理"]
 ALLOWED_EDOC_ROLES = set(ALLOWED_EDOC_ROLE_LIST)
 
@@ -773,6 +780,13 @@ def production_readiness() -> Dict[str, Any]:
         "LINE_CREDENTIAL_EXPIRES_AT",
         "APP_SECRET",
         "INBOX_SIGNING_KEY_EXPIRES_AT",
+        "EDOC_SIGNING_SECRET",
+        "EDOC_SIGNATURE_PROVIDER",
+        "EDOC_HSM_PROVIDER",
+        "EDOC_CERT_TRUST_STORE",
+        "EDOC_TSA_URL",
+        "EDOC_OCSP_RESPONDER_URL",
+        "EDOC_CRL_DISTRIBUTION_URL",
     ]
     missing = [name for name in required if not env_present(name)]
     blockers: List[str] = []
@@ -793,6 +807,14 @@ def production_readiness() -> Dict[str, Any]:
         warnings.append("未設定 MONITORING_WEBHOOK_URL，監控告警將只留在系統內，不會推送到外部值班通道。")
     if not env_present("SENTRY_DSN"):
         warnings.append("未設定 SENTRY_DSN，正式錯誤追蹤需依賴 Vercel runtime logs 與系統 audit log。")
+    if is_production() and EDOC_SIGNATURE_PROVIDER == "local-simulation":
+        blockers.append("production 必須接正式電子簽章服務；不可使用 local-simulation 簽章。")
+    if is_production() and not env_present("EDOC_TSA_URL"):
+        blockers.append("production 必須設定 TSA 時間戳服務 URL。")
+    if is_production() and not env_present("EDOC_OCSP_RESPONDER_URL"):
+        blockers.append("production 必須設定 OCSP 即時撤銷查詢服務。")
+    if is_production() and not env_present("EDOC_CRL_DISTRIBUTION_URL"):
+        blockers.append("production 必須設定 CRL 撤銷清單來源。")
     ready = not missing and not blockers
     return {
         "environment": DEPLOYMENT_ENV,
@@ -813,6 +835,12 @@ def production_readiness() -> Dict[str, Any]:
             "publicBaseUrl": EDOC_PUBLIC_BASE_URL,
             "monitoringWebhook": env_present("MONITORING_WEBHOOK_URL"),
             "sentry": env_present("SENTRY_DSN"),
+            "signatureProvider": EDOC_SIGNATURE_PROVIDER,
+            "hsmProvider": EDOC_HSM_PROVIDER or "未設定",
+            "trustStore": bool(EDOC_CERT_TRUST_STORE),
+            "tsa": bool(EDOC_TSA_URL),
+            "ocsp": bool(EDOC_OCSP_RESPONDER_URL),
+            "crl": bool(EDOC_CRL_DISTRIBUTION_URL),
         },
     }
 
@@ -873,6 +901,27 @@ def monitoring_status(alerts: List[Dict[str, str]]) -> str:
 
 def log_structured(level: str, message: str, **fields: Any) -> None:
     print(json.dumps({"level": level, "message": message, "time": now(), **fields}, ensure_ascii=False), flush=True)
+
+
+def signing_service_status() -> Dict[str, Any]:
+    services = {
+        "provider": {"configured": EDOC_SIGNATURE_PROVIDER != "local-simulation", "value": EDOC_SIGNATURE_PROVIDER},
+        "hsm": {"configured": env_present("EDOC_HSM_PROVIDER"), "value": EDOC_HSM_PROVIDER or "未設定"},
+        "trustStore": {"configured": env_present("EDOC_CERT_TRUST_STORE"), "value": EDOC_CERT_TRUST_STORE or "未設定"},
+        "tsa": {"configured": env_present("EDOC_TSA_URL"), "value": EDOC_TSA_URL or "未設定", "policyOid": EDOC_TSA_POLICY_OID},
+        "ocsp": {"configured": env_present("EDOC_OCSP_RESPONDER_URL"), "value": EDOC_OCSP_RESPONDER_URL or "未設定"},
+        "crl": {"configured": env_present("EDOC_CRL_DISTRIBUTION_URL"), "value": EDOC_CRL_DISTRIBUTION_URL or "未設定"},
+        "signingSecret": {"configured": env_present("EDOC_SIGNING_SECRET"), "value": "已設定" if env_present("EDOC_SIGNING_SECRET") else "未設定"},
+    }
+    missing = [key for key, item in services.items() if not item["configured"]]
+    ready = not missing
+    return {
+        "ready": ready,
+        "mode": "formal" if ready else "simulation-or-incomplete",
+        "missing": missing,
+        "services": services,
+        "productionBlocked": is_production() and not ready,
+    }
 
 
 def password_hash(password: str) -> str:
@@ -2476,21 +2525,29 @@ def validate_certificate_legality(
     is_active = certificate.get("status") == "啟用"
     is_within_validity = (valid_from is None or valid_from <= today) and (valid_to is None or today <= valid_to + timedelta(days=1))
     revoked = any(keyword in (certificate.get("status") or "") for keyword in ("撤銷", "停用", "註銷"))
+    service = signing_service_status()
     ca = conn.execute(
         "SELECT * FROM certificate_authorities WHERE trust_status = 'trusted' AND (? LIKE '%' || name || '%' OR ? LIKE '%' || subject || '%' OR ? LIKE '%' || issuer || '%') ORDER BY rowid LIMIT 1",
         (certificate.get("issuer") or "", certificate.get("issuer") or "", certificate.get("issuer") or ""),
     ).fetchone()
-    trusted_issuer = bool(ca) or "Internal CA" in (certificate.get("issuer") or "")
+    trusted_issuer = bool(ca) or ((not is_production()) and "Internal CA" in (certificate.get("issuer") or ""))
     chain_status = "有效" if is_active and is_within_validity and trusted_issuer else "憑證鏈異常"
+    ocsp_url = certificate.get("ocsp_url") or EDOC_OCSP_RESPONDER_URL
+    crl_url = certificate.get("crl_url") or EDOC_CRL_DISTRIBUTION_URL
+    tsa_url = certificate.get("tsa_url") or EDOC_TSA_URL
     if revoked:
         ocsp_status = "已撤銷"
         crl_status = "已列入撤銷清單"
     else:
-        ocsp_status = "良好" if certificate.get("ocsp_url") else "無法查詢"
-        crl_status = "未列入撤銷清單" if certificate.get("crl_url") else "無法查詢"
+        ocsp_status = "良好" if ocsp_url else "無法查詢"
+        crl_status = "未列入撤銷清單" if crl_url else "無法查詢"
     tsa_status = "不適用"
     if signature:
         tsa_status = "有效" if tsa_token_valid(signature) else "時間戳無效"
+        if not tsa_url:
+            tsa_status = "TSA 未設定"
+    if is_production() and service["productionBlocked"]:
+        chain_status = "正式憑證服務未設定"
     result = "通過" if chain_status == "有效" and ocsp_status == "良好" and crl_status == "未列入撤銷清單" and tsa_status in {"有效", "不適用"} else "不通過"
     report = {
         "ok": result == "通過",
@@ -2503,9 +2560,10 @@ def validate_certificate_legality(
         "crl_status": crl_status,
         "tsa_status": tsa_status,
         "checked_at": checked_at,
-        "ocsp_url": certificate.get("ocsp_url") or "",
-        "crl_url": certificate.get("crl_url") or "",
-        "tsa_url": certificate.get("tsa_url") or "",
+        "ocsp_url": ocsp_url,
+        "crl_url": crl_url,
+        "tsa_url": tsa_url,
+        "service_status": service,
         "trusted_ca": row_to_dict(ca) if ca else None,
         "result": result,
     }
@@ -2559,10 +2617,10 @@ def validate_certificate_legality(
                 f"TSA-{signature['id']}",
                 signature["id"],
                 "Suiyuecare TSA",
-                certificate.get("tsa_url") or "https://tsa.suiyuecare.local/rfc3161",
+                tsa_url or "https://tsa.suiyuecare.local/rfc3161",
                 signature.get("digest_sha256") or "",
                 signature.get("tsa_token") or "",
-                "1.2.158.歲悅.電子公文.時間戳",
+                EDOC_TSA_POLICY_OID,
                 tsa_status,
                 signature.get("created_at") or checked_at,
                 checked_at,
@@ -2573,6 +2631,9 @@ def validate_certificate_legality(
 
 
 def create_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    service = signing_service_status()
+    if service["productionBlocked"]:
+        raise ValueError(f"formal_signing_service_not_ready:{','.join(service['missing'])}")
     document = get_or_create_pdf_document(conn, payload)
     pdf_version_id = payload.get("pdf_version_id") or payload.get("version_id") or ""
     file_object_id = payload.get("file_object_id") or ""
@@ -2694,16 +2755,20 @@ def certificate_health(conn: sqlite3.Connection) -> Dict[str, Any]:
     certificates = [row_to_dict(row) for row in conn.execute("SELECT * FROM signing_certificates ORDER BY rowid").fetchall()]
     authorities = [row_to_dict(row) for row in conn.execute("SELECT * FROM certificate_authorities ORDER BY rowid").fetchall()]
     events = [row_to_dict(row) for row in conn.execute("SELECT * FROM certificate_validation_events ORDER BY rowid DESC LIMIT 8").fetchall()]
+    service = signing_service_status()
     return {
-        "mode": "local-simulation-ready-for-ca-integration",
+        "mode": service["mode"],
+        "ready": service["ready"],
         "certificate_count": len(certificates),
         "trusted_ca_count": len([item for item in authorities if item.get("trust_status") == "trusted"]),
         "services": {
-            "chain": "啟用",
-            "tsa": "啟用",
-            "ocsp": "啟用",
-            "crl": "啟用",
+            "chain": "啟用" if service["services"]["trustStore"]["configured"] else "未設定信任根",
+            "tsa": "啟用" if service["services"]["tsa"]["configured"] else "未設定 TSA",
+            "ocsp": "啟用" if service["services"]["ocsp"]["configured"] else "未設定 OCSP",
+            "crl": "啟用" if service["services"]["crl"]["configured"] else "未設定 CRL",
+            "hsm": "啟用" if service["services"]["hsm"]["configured"] else "未設定 HSM/KMS",
         },
+        "service": service,
         "certificates": certificates,
         "authorities": authorities,
         "recent_events": events,
@@ -3083,6 +3148,11 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
             append_alert(alerts, "critical" if is_production() else "warning", "CREDENTIAL-INVALID", f"{credential['channel']} 憑證狀態：{credential.get('status')}", "補齊正式憑證、有效期限與環境變數後重新驗證。")
         elif credential.get("status") == "即將到期":
             append_alert(alerts, "warning", "CREDENTIAL-EXPIRING", f"{credential['channel']} 憑證即將到期。", "在到期前完成換證與驗證。")
+    signing_service = signing_service_status()
+    if signing_service["productionBlocked"]:
+        append_alert(alerts, "critical", "SIGNING-SERVICE-INCOMPLETE", f"正式簽章服務尚未設定：{', '.join(signing_service['missing'])}", "設定 HSM/KMS、信任根憑證、TSA、OCSP、CRL 與 EDOC_SIGNING_SECRET 後重新部署。")
+    elif not signing_service["ready"]:
+        append_alert(alerts, "warning", "SIGNING-SERVICE-SIMULATION", f"簽章服務仍為模擬或不完整：{', '.join(signing_service['missing'])}", "正式上線前完成外部簽章服務接入。")
 
     checks = {
         "database": {"status": "ok", "mode": "sqlite", "detail": str(DB_PATH)},
@@ -3090,6 +3160,7 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
         "storage": {"status": "ok" if EDOC_STORAGE_PROVIDER else "needs_action", "provider": EDOC_STORAGE_PROVIDER, "bucket": EDOC_STORAGE_BUCKET},
         "cron": {"status": "ok" if last_job_age is not None else "not_yet_run", "lastRun": last_job, "ageMinutes": last_job_age},
         "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials},
+        "signing": {"status": "ok" if signing_service["ready"] else "needs_action", **signing_service},
         "jAgent": {"status": "needs_action" if counts["exchange_failed"] else "ok", "failedTasks": counts["exchange_failed"]},
     }
     status = monitoring_status(alerts)
@@ -3756,6 +3827,11 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
             append_alert(alerts, "critical" if is_production() else "warning", "CREDENTIAL-INVALID", f"{credential['channel']} 憑證狀態：{credential.get('status')}", "補齊正式憑證、有效期限與環境變數後重新驗證。")
         elif credential.get("status") == "即將到期":
             append_alert(alerts, "warning", "CREDENTIAL-EXPIRING", f"{credential['channel']} 憑證即將到期。", "在到期前完成換證與驗證。")
+    signing_service = signing_service_status()
+    if signing_service["productionBlocked"]:
+        append_alert(alerts, "critical", "SIGNING-SERVICE-INCOMPLETE", f"正式簽章服務尚未設定：{', '.join(signing_service['missing'])}", "設定 HSM/KMS、信任根憑證、TSA、OCSP、CRL 與 EDOC_SIGNING_SECRET 後重新部署。")
+    elif not signing_service["ready"]:
+        append_alert(alerts, "warning", "SIGNING-SERVICE-SIMULATION", f"簽章服務仍為模擬或不完整：{', '.join(signing_service['missing'])}", "正式上線前完成外部簽章服務接入。")
 
     checks = {
         "database": {"status": "ok", "mode": "supabase", "detail": SUPABASE_URL},
@@ -3763,6 +3839,7 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
         "storage": {"status": "ok" if EDOC_STORAGE_PROVIDER == "supabase" else "needs_action", "provider": EDOC_STORAGE_PROVIDER, "bucket": EDOC_STORAGE_BUCKET},
         "cron": {"status": "ok" if last_job_age is not None else "not_yet_run", "lastRun": last_job, "ageMinutes": last_job_age},
         "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials},
+        "signing": {"status": "ok" if signing_service["ready"] else "needs_action", **signing_service},
         "jAgent": {"status": "needs_action" if counts["exchange_failed"] else "ok", "failedTasks": counts["exchange_failed"]},
     }
     status = monitoring_status(alerts)
@@ -4098,11 +4175,20 @@ class Handler(SimpleHTTPRequestHandler):
                     certificates = supabase_list("signing_certificates", {})
                     authorities = supabase_list("certificate_authorities", {})
                     events = supabase_list("certificate_validation_events", {"limit": ["8"], "order": ["checked_at.desc"]})
+                    service = signing_service_status()
                     self.send_json({
-                        "mode": "supabase-ca-integration-ready",
+                        "mode": service["mode"],
+                        "ready": service["ready"],
                         "certificate_count": len(certificates),
                         "trusted_ca_count": len([item for item in authorities if item.get("trust_status") == "trusted"]),
-                        "services": {"chain": "啟用", "tsa": "啟用", "ocsp": "啟用", "crl": "啟用"},
+                        "services": {
+                            "chain": "啟用" if service["services"]["trustStore"]["configured"] else "未設定信任根",
+                            "tsa": "啟用" if service["services"]["tsa"]["configured"] else "未設定 TSA",
+                            "ocsp": "啟用" if service["services"]["ocsp"]["configured"] else "未設定 OCSP",
+                            "crl": "啟用" if service["services"]["crl"]["configured"] else "未設定 CRL",
+                            "hsm": "啟用" if service["services"]["hsm"]["configured"] else "未設定 HSM/KMS",
+                        },
+                        "service": service,
                         "certificates": certificates,
                         "authorities": authorities,
                         "recent_events": events,

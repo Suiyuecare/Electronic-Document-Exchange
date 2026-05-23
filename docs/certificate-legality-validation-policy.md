@@ -49,3 +49,20 @@
 - CRL 發布 URL 與同步排程。
 
 替換後需完成至少一筆簽章、驗章、撤銷憑證阻擋與逾期憑證阻擋測試，並將結果存入季檢稽核紀錄。
+
+## 正式環境變數
+
+正式環境不可使用本機模擬簽章，需在 Vercel 設定：
+
+```text
+EDOC_SIGNING_SECRET
+EDOC_SIGNATURE_PROVIDER
+EDOC_HSM_PROVIDER
+EDOC_CERT_TRUST_STORE
+EDOC_TSA_URL
+EDOC_TSA_POLICY_OID
+EDOC_OCSP_RESPONDER_URL
+EDOC_CRL_DISTRIBUTION_URL
+```
+
+`GET /api/certificates/health` 會回報正式憑證服務是否就緒；production 若缺少上述任一服務，`POST /api/signatures/sign` 會阻擋正式簽章，避免以模擬簽章產生對外公文。

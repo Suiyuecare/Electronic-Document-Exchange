@@ -869,6 +869,13 @@ const electronicSignatureProofs = [
   { id: "ESIG-DEMO-001", docId: "OUT-1140522-007", signer: "行政部主任", certificateId: "CERT-SEAL-001", type: "seal", algorithm: "HMAC-SHA256-RSA-PSS-READY", digest: "待正式簽章後更新", signature: "待簽章", tsaToken: "待時間戳", status: "待簽章", createdAt: "尚未建立", certificateValidation: { chain_status: "待驗證", ocsp_status: "待查詢", crl_status: "待查詢", tsa_status: "待驗證", certificate_type: "組織憑證" } }
 ];
 
+let certificateServiceState = {
+  ready: false,
+  mode: "未檢查",
+  services: {},
+  missing: []
+};
+
 const pdfVersionStore = {};
 
 let selectedTrackingId = "TRK-001";
@@ -6387,6 +6394,63 @@ function renderCertificateRegistry() {
   `).join("");
 }
 
+function renderCertificateServiceHealth() {
+  const grid = document.querySelector("#certificateServiceGrid");
+  const detail = document.querySelector("#certificateServiceDetail");
+  if (!grid || !detail) return;
+  const serviceLabels = certificateServiceState.services || {};
+  const formalServices = certificateServiceState.service?.services || {};
+  const rows = [
+    ["模式", certificateServiceState.mode || "未檢查"],
+    ["整體狀態", certificateServiceState.ready ? "可正式簽章" : "未完成設定"],
+    ["HSM/KMS", serviceLabels.hsm || formalServices.hsm?.value || "未檢查"],
+    ["信任根", serviceLabels.chain || formalServices.trustStore?.value || "未檢查"],
+    ["TSA", serviceLabels.tsa || formalServices.tsa?.value || "未檢查"],
+    ["OCSP", serviceLabels.ocsp || formalServices.ocsp?.value || "未檢查"],
+    ["CRL", serviceLabels.crl || formalServices.crl?.value || "未檢查"]
+  ];
+  grid.innerHTML = rows.map(([label, value]) => `
+    <article class="archive-card">
+      <span>${label}</span>
+      <strong>${typeof value === "object" ? value.value || JSON.stringify(value) : value}</strong>
+    </article>
+  `).join("");
+  const missing = certificateServiceState.service?.missing || certificateServiceState.missing || [];
+  detail.innerHTML = missing.length ? `
+    <article class="address-card">
+      <strong>正式服務尚未完成</strong>
+      <p>缺少：${missing.join("、")}</p>
+      <small>需設定 EDOC_SIGNATURE_PROVIDER、EDOC_HSM_PROVIDER、EDOC_CERT_TRUST_STORE、EDOC_TSA_URL、EDOC_OCSP_RESPONDER_URL、EDOC_CRL_DISTRIBUTION_URL、EDOC_SIGNING_SECRET。</small>
+    </article>
+  ` : `<article class="address-card"><strong>正式簽章服務已就緒</strong><p>簽章、TSA、OCSP、CRL 與信任根皆已設定。</p></article>`;
+}
+
+async function loadCertificateServiceHealth(show = true) {
+  try {
+    const result = await backendRequest("/certificates/health");
+    certificateServiceState = result;
+    if (Array.isArray(result.certificates)) {
+      result.certificates.forEach((item) => {
+        const certificate = certificateById(item.id);
+        if (!certificate) return;
+        certificate.chainStatus = item.chain_status || certificate.chainStatus;
+        certificate.ocspStatus = item.ocsp_status || certificate.ocspStatus;
+        certificate.crlStatus = item.crl_status || certificate.crlStatus;
+        certificate.lastValidatedAt = item.last_validated_at || certificate.lastValidatedAt;
+      });
+    }
+    renderCertificateRegistry();
+    renderCertificateServiceHealth();
+    if (show) {
+      addSealAudit("正式憑證服務檢查", `模式 ${result.mode}，${result.ready ? "可正式簽章" : `缺少 ${(result.service?.missing || result.missing || []).length} 項設定`}。`);
+      showToast(result.ready ? "正式憑證服務已就緒。" : "正式憑證服務尚未完成設定。");
+    }
+  } catch (error) {
+    addSealAudit("正式憑證服務檢查失敗", error.message);
+    showToast(`憑證服務檢查失敗：${error.message}`);
+  }
+}
+
 function renderSignatureProofGrid() {
   const box = document.querySelector("#signatureProofGrid");
   if (!box) return;
@@ -6714,6 +6778,7 @@ function renderSeals() {
   renderSealAuditLog();
   renderPdfVersionGrid();
   renderCertificateRegistry();
+  renderCertificateServiceHealth();
   renderSignatureProofGrid();
 }
 
@@ -7383,6 +7448,7 @@ document.querySelector("#sealApplicationBtn").addEventListener("click", generate
 document.querySelector("#signatureSignBtn").addEventListener("click", signCurrentPdf);
 document.querySelector("#signatureVerifyBtn").addEventListener("click", verifyCurrentSignature);
 document.querySelector("#signatureValidateCertBtn").addEventListener("click", validateCurrentCertificate);
+document.querySelector("#certificateServiceHealthBtn").addEventListener("click", () => loadCertificateServiceHealth());
 document.querySelector("#signatureCertificateSelect").addEventListener("change", renderSignatureProofGrid);
 document.querySelector("#signatureTypeSelect").addEventListener("change", renderSignatureProofGrid);
 document.querySelector("#sealExportBtn").addEventListener("click", () => {
