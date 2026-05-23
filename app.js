@@ -950,6 +950,24 @@ function confirmOperation(title, body) {
   return window.confirm(`${title}\n\n${body}`);
 }
 
+function requireTypedConfirm(title, body, phrase) {
+  if (typeof window.prompt !== "function") return true;
+  const input = window.prompt(`${title}\n\n${body}\n\n請輸入「${phrase}」以繼續。`);
+  return input === phrase;
+}
+
+function isValidFutureOrToday(dateText) {
+  if (!dateText) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const date = new Date(`${dateText}T00:00:00`);
+  return !Number.isNaN(date.getTime()) && date >= today;
+}
+
+function hasMinimumText(value, minLength = 6) {
+  return String(value || "").trim().length >= minLength;
+}
+
 function blockOperation(message, auditFn = null, auditTitle = "操作防呆阻擋") {
   if (auditFn) auditFn(auditTitle, message);
   showToast(message);
@@ -1688,24 +1706,39 @@ function mutateInbound(ids, handler) {
 function registerInbound(ids) {
   const targetIds = ids?.length ? ids : selectedInboundDocs().map((doc) => doc.id);
   if (!targetIds.length) return showToast("請先選取要登錄的收文。");
-  const denied = targetIds.map((id) => inboundDocs.find((item) => item.id === id)).filter((doc) => doc && !canUseDocAction(doc, "view"));
+  const targetDocs = targetIds.map((id) => inboundDocs.find((item) => item.id === id)).filter(Boolean);
+  const dept = document.querySelector("#registerDept").value;
+  const retentionYears = Number(document.querySelector("#retentionYears").value || 0);
+  if (!dept) return blockOperation("請先選擇收文登錄單位。", addInboundAudit, "收文操作防呆");
+  if (!retentionYears || retentionYears < 1) return blockOperation("保存年限需大於 0 年。", addInboundAudit, "收文操作防呆");
+  const duplicate = targetDocs.find((doc) => ["已收文", "待分派"].includes(doc.status));
+  if (duplicate) return blockOperation(`${duplicate.no} 已登錄或已收文，避免重複登錄。`, addInboundAudit, "收文操作防呆");
+  const denied = targetDocs.filter((doc) => !canUseDocAction(doc, "view"));
   if (denied.length) return showToast("此角色未取得部分收文的檢視/登錄權限。");
+  if (targetDocs.length > 3 && !confirmOperation("確認批次收文登錄", `即將一次登錄 ${targetDocs.length} 筆收文，登錄後會進入分派流程。`)) return;
   mutateInbound(targetIds, (doc) => {
     doc.status = doc.status === "異常待處理" ? "異常待處理" : "待分派";
-    doc.dept = document.querySelector("#registerDept").value;
+    doc.dept = dept;
     doc.note = document.querySelector("#registerNote").value;
   });
-  addInboundAudit("完成收文登錄", `已登錄 ${targetIds.length} 筆收文，保存年限：${document.querySelector("#retentionYears").value}。`);
+  addInboundAudit("完成收文登錄", `已登錄 ${targetIds.length} 筆收文，保存年限：${retentionYears}。`);
   showToast(`已完成 ${targetIds.length} 筆收文登錄。`);
 }
 
 function assignInbound(ids) {
   const targetIds = ids?.length ? ids : selectedInboundDocs().map((doc) => doc.id);
   if (!targetIds.length) return showToast("請先選取要分派的收文。");
-  const denied = targetIds.map((id) => inboundDocs.find((item) => item.id === id)).filter((doc) => doc && !canUseDocAction(doc, "sign"));
-  if (denied.length) return showToast("此角色未取得部分收文的分派/簽核權限。");
+  const targetDocs = targetIds.map((id) => inboundDocs.find((item) => item.id === id)).filter(Boolean);
   const owner = document.querySelector("#assignOwner").value;
   const dueDate = document.querySelector("#assignDueDate").value;
+  if (!owner) return blockOperation("請先選擇承辦人。", addInboundAudit, "收文分派防呆");
+  if (!isValidFutureOrToday(dueDate)) return blockOperation("辦理期限不可空白，也不可早於今天。", addInboundAudit, "收文分派防呆");
+  const invalidStatus = targetDocs.find((doc) => !["待分派", "異常待處理"].includes(doc.status));
+  if (invalidStatus) return blockOperation(`${invalidStatus.no} 目前狀態為「${invalidStatus.status}」，不可直接分派。`, addInboundAudit, "收文分派防呆");
+  const denied = targetDocs.filter((doc) => !canUseDocAction(doc, "sign"));
+  if (denied.length) return showToast("此角色未取得部分收文的分派/簽核權限。");
+  const hasSensitive = targetDocs.some((doc) => doc.security && doc.security !== "普通");
+  if ((targetDocs.length > 3 || hasSensitive) && !confirmOperation("確認收文分派", `即將分派 ${targetDocs.length} 筆收文給 ${owner}${hasSensitive ? "，其中包含密件或限閱文件" : ""}。`)) return;
   mutateInbound(targetIds, (doc) => {
     doc.status = "已收文";
     doc.owner = owner;
@@ -1720,9 +1753,12 @@ function createInboundException(ids, forcedType) {
   const targetIds = ids?.length ? ids : selectedInboundDocs().map((doc) => doc.id);
   if (!targetIds.length) return showToast("請先選取要處理異常的收文。");
   const type = forcedType || document.querySelector("#exceptionType").value;
+  const note = document.querySelector("#exceptionNote").value;
+  if (!hasMinimumText(note)) return blockOperation("請填寫至少 6 個字的異常說明，避免建立無法追蹤的誤送/漏送案件。", addInboundAudit, "異常處理防呆");
+  if (!confirmOperation(`確認建立${type}通知`, `即將對 ${targetIds.length} 筆收文建立「${type}」案件，並通知 ${document.querySelector("#exceptionTarget").value}。`)) return;
   mutateInbound(targetIds, (doc) => {
     doc.status = "異常待處理";
-    doc.note = `${type}：${document.querySelector("#exceptionNote").value}`;
+    doc.note = `${type}：${note}`;
   });
   addInboundAudit(`建立${type}通知`, `已通知 ${document.querySelector("#exceptionTarget").value}，共 ${targetIds.length} 筆。`);
   showToast(`已建立${type}通知。`);
@@ -2077,8 +2113,8 @@ function guardDispatchAction(action, docs) {
     });
   }
   if (blocked.length) return blockOperation(blocked[0], addDispatchAudit, "發文操作防呆");
-  if (action === "send") return confirmOperation("確認送交 jAgent", `即將送出 ${docs.length} 筆發文。送出後會進入交換中心等待確認，請確認函稿預覽、附件封裝、憑證與資安檢查都已完成。`);
-  if (action === "resend") return confirmOperation("確認重送發文", `即將重送 ${docs.length} 筆異常發文。系統會沿用原封包與交換紀錄產生重送事件。`);
+  if (action === "send") return requireTypedConfirm("確認送交 jAgent", `即將送出 ${docs.length} 筆發文。送出後會進入交換中心等待確認，請確認函稿預覽、附件封裝、憑證與資安檢查都已完成。`, "確認送交");
+  if (action === "resend") return requireTypedConfirm("確認重送發文", `即將重送 ${docs.length} 筆異常發文。系統會沿用原封包與交換紀錄產生重送事件。`, "確認重送");
   return true;
 }
 
@@ -3877,6 +3913,14 @@ function addSettingsRole() {
 
 function saveSettings() {
   const data = settingsPayload();
+  if (!data.agencyName || !data.agencyCode || !data.apiUrl) {
+    return blockOperation("機關名稱、機關代碼與 API URL 都必須填寫後才能儲存。", addSettingsAudit, "系統設定防呆");
+  }
+  if (!/^https:\/\//i.test(data.apiUrl)) {
+    return blockOperation("正式 API URL 必須使用 HTTPS。", addSettingsAudit, "系統設定防呆");
+  }
+  const productionLike = /正式|prod|jagent|gov/i.test(`${opsState.environment} ${data.apiMode} ${data.centerName} ${data.apiUrl}`);
+  if (productionLike && !requireTypedConfirm("確認儲存正式設定", `即將儲存 ${data.agencyName} 的交換中心、API URL、防火牆、憑證與角色設定。正式設定會影響電子公文交換作業。`, "確認儲存")) return;
   settingsState.agencyVerified = /^[A-Z]\d{8,}[A-Z]?$/.test(data.agencyCode);
   renderSettingsStatus();
   addSettingsAudit("儲存系統設定", `${data.agencyName}、${data.centerName}、${data.apiUrl}、${settingsFirewallRules.length} 條防火牆規則、${Object.keys(rolePermissions).length} 個角色已儲存。`);
@@ -4415,6 +4459,8 @@ function exportCompliancePackage() {
 
 async function attestComplianceReview() {
   const signer = document.querySelector("#complianceOwnerSelect").value;
+  if (!latestBackupDrill && !confirmOperation("尚未完成備份還原演練", "目前沒有本次工作階段的備份還原演練紀錄。仍可簽核，但驗收結果可能會列為待補。")) return;
+  if (!requireTypedConfirm("確認法遵驗收與內控簽核", `${signer} 即將簽署本季法遵驗收與內控制度紀錄。此動作會寫入 audit log 與不可否認簽核紀錄。`, "確認簽核")) return;
   try {
     const result = await backendRequest("/compliance/attest", {
       method: "POST",
@@ -4478,6 +4524,9 @@ async function runBackupRestoreDrill() {
   const targetEnv = document.querySelector("#backupDrillTarget").value;
   const rtoTarget = Number(document.querySelector("#backupDrillRtoTarget").value || 30);
   const rpoTarget = Number(document.querySelector("#backupDrillRpoTarget").value || 15);
+  if (/正式|production|prod/i.test(targetEnv)) return blockOperation("備份還原演練只能還原到測試沙盒，不可指定正式環境。", addComplianceAudit, "備份演練防呆");
+  if (rtoTarget < 1 || rpoTarget < 1) return blockOperation("RTO / RPO 目標需大於 0 分鐘。", addComplianceAudit, "備份演練防呆");
+  if (!requireTypedConfirm("確認執行備份還原演練", `即將建立 ${scope} 的備份快照並還原至「${targetEnv}」，系統會比對筆數與雜湊。`, "確認演練")) return;
   try {
     const result = await backendRequest("/backup/restore-drill", {
       method: "POST",
@@ -4987,6 +5036,7 @@ async function runNotificationAction(action, ids) {
     return showToast("通知已標記為已讀。");
   }
   if (action === "send") {
+    if (!confirmOperation("確認派送通知", `即將透過設定通道派送 ${targetIds.length} 則通知，可能會寄出 Email、Line 或站內通知。`)) return;
     for (const id of targetIds) {
       const item = notificationItems.find((notice) => notice.id === id);
       if (item) await deliverNotification(item);
@@ -5050,6 +5100,9 @@ async function testNotificationChannels() {
     const channel = document.querySelector("#notificationTestChannel")?.value || "Email + Line + 系統通知";
     const targetEmail = document.querySelector("#notificationTestEmail")?.value.trim() || "records@suiyuecare.com";
     const body = document.querySelector("#notificationTestBody")?.value.trim() || "通知通道實測。";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) return blockOperation("測試收件 Email 格式不正確。", addNotificationAudit, "通知通道防呆");
+    if (!hasMinimumText(body, 4)) return blockOperation("測試通知內容不可空白。", addNotificationAudit, "通知通道防呆");
+    if (!requireTypedConfirm("確認通知通道實測", `即將送出真實測試通知到 ${targetEmail}，通道：${channel}。`, "確認測試")) return;
     const result = await backendRequest("/notifications/test", {
       method: "POST",
       body: JSON.stringify({
@@ -5099,6 +5152,7 @@ function createNotificationSchedules() {
 async function sendImmediateFailureAlerts() {
   const failedDocs = dispatchDocs.filter((doc) => doc.status === "交換失敗");
   if (!failedDocs.length) return showToast("目前沒有交換失敗案件。");
+  if (!confirmOperation("確認送出交換失敗警示", `即將針對 ${failedDocs.length} 件交換失敗案件送出即時警示。`)) return;
   for (const doc of failedDocs) {
     let item = notificationItems.find((notice) => notice.source === doc.id && notice.type === "交換失敗");
     if (!item) {
@@ -5129,6 +5183,7 @@ async function pushSelectedToInbox() {
 
 async function retryFailedNotificationDeliveries() {
   try {
+    if (!confirmOperation("確認重送通知", "即將請後端重送所有未完成派送的通知，請避免在短時間內重複點擊。")) return;
     const result = await backendRequest("/notifications/retry-failed", { method: "POST", body: "{}" });
     await syncNotificationsFromBackend(true);
     renderNotifications();
@@ -5327,9 +5382,12 @@ async function runJobAction(action, ids = selectedJobIds()) {
   const jobs = backgroundJobs.filter((job) => ids.includes(job.id));
   if (!jobs.length) return showToast("請先選取背景任務。");
   if (action === "run") {
+    const activeJobs = jobs.filter((item) => item.status === "啟用");
+    if (!activeJobs.length) return blockOperation("選取的背景任務都未啟用，請先啟用後再執行。", addJobAudit, "背景任務防呆");
+    if (!confirmOperation("確認立即執行背景任務", `即將立即執行 ${activeJobs.length} 個啟用中的背景任務，可能會拉取收文、同步交換狀態、產生通知或歸檔。`)) return;
     try {
       const results = [];
-      for (const job of jobs.filter((item) => item.status === "啟用")) {
+      for (const job of activeJobs) {
         results.push(await backendRequest(`/jobs/${job.id}/run`, { method: "POST", body: "{}" }));
       }
       await syncJobsFromBackend(true);
@@ -5343,6 +5401,7 @@ async function runJobAction(action, ids = selectedJobIds()) {
     }
   }
   if (action === "toggle") {
+    if (!confirmOperation("確認切換任務狀態", `即將切換 ${jobs.length} 個背景任務的啟用/暫停狀態。`)) return;
     jobs.forEach((job) => {
       job.status = job.status === "啟用" ? "暫停" : "啟用";
       addJobAudit("切換任務狀態", `${job.name} 已更新為 ${job.status}。`);
@@ -5351,6 +5410,7 @@ async function runJobAction(action, ids = selectedJobIds()) {
     return showToast("任務狀態已更新。");
   }
   if (action === "notify") {
+    if (!confirmOperation("確認送出任務通知", `即將送出 ${jobs.length} 則背景任務結果通知。`)) return;
     for (const job of jobs) {
       const notice = { id: `NTF-JOB-${Date.now().toString().slice(-5)}-${job.id}`, type: "背景任務", title: `${job.name} 執行結果`, target: job.notify, channel: "Email + 系統通知", status: "未讀", priority: job.lastResult.includes("失敗") ? "高" : "中", source: job.id, body: job.lastResult };
       notificationItems.unshift(notice);
@@ -5364,6 +5424,8 @@ async function runJobAction(action, ids = selectedJobIds()) {
 }
 
 async function runDueJobs() {
+  const dueCount = backgroundJobs.filter((job) => job.status === "啟用").length;
+  if (!confirmOperation("確認執行到期任務", `即將執行目前所有啟用中的到期任務，預估 ${dueCount} 個。`)) return;
   try {
     const result = await backendRequest("/jobs/run-due", { method: "POST", body: "{}" });
     await syncJobsFromBackend(true);
@@ -6284,6 +6346,18 @@ function runWorkflowAdvancedAction() {
   const comment = document.querySelector("#workflowComment").value.trim();
   const ids = selectedWorkflowIds();
   const actionMap = { return: "退回補正", withdraw: "已抽回", addSign: "加簽中", countersign: "會辦中", reassign: "已改派" };
+  if (!ids.length) return showToast("請先選取簽核節點。");
+  if (!actionMap[action]) return showToast("請選擇有效的簽核動作。");
+  if (["addSign", "countersign", "reassign"].includes(action) && !target) {
+    return blockOperation("加簽、會辦或改派必須指定目標角色。", addWorkflowAudit, "簽核流程防呆");
+  }
+  if (["return", "withdraw", "reassign"].includes(action) && !hasMinimumText(comment)) {
+    return blockOperation("退回、抽回或改派必須填寫至少 6 個字的簽核意見。", addWorkflowAudit, "簽核流程防呆");
+  }
+  const targetTasks = ids.map((id) => workflowTasks.find((item) => item.id === id)).filter(Boolean);
+  const closedTask = targetTasks.find((task) => /已核准|已押章|完成/.test(task.status));
+  if (closedTask) return blockOperation(`${closedTask.title} 已完成，不可再執行進階簽核動作。`, addWorkflowAudit, "簽核流程防呆");
+  if (!confirmOperation("確認簽核流程異動", `即將對 ${ids.length} 個節點執行「${actionMap[action]}」${target ? `，目標：${target}` : ""}。`)) return;
   ids.forEach((id) => {
     const task = workflowTasks.find((item) => item.id === id);
     if (!task) return;
@@ -7001,11 +7075,17 @@ function submitSealRequest() {
   const doc = currentDispatchDoc();
   const request = ensureSealRequestForDoc(doc);
   if (!doc || !request) return showToast("請先選取發文與可用印鑑。");
+  if (!doc.checks.format) return blockOperation("請先完成清稿檢核後再送簽用印。", addSealAudit, "用印送簽防呆");
+  const seal = sealById(request.sealId);
+  if (!seal || seal.status !== "啟用") return blockOperation("請先確認有啟用中的印鑑。", addSealAudit, "用印送簽防呆");
+  if (!seal.widthMm || !seal.heightMm) return blockOperation("印鑑需登錄實際長寬後才能送簽用印，避免列印尺寸誤差。", addSealAudit, "用印送簽防呆");
+  if (!seal.imageDataUrl && !seal.fileObjectId) return blockOperation("請先上傳印鑑圖檔後再送簽用印。", addSealAudit, "用印送簽防呆");
   if (request.status !== "待簽核" || request.stampNo) {
     selectedSealRequestId = request.id;
     renderSeals();
     return showToast("此公文已有簽核用印流程。");
   }
+  if (!confirmOperation("確認送簽用印", `即將將 ${doc.no} 送交 ${request.step}，核准後會自動產生 PDF 並押用 ${seal.name}。`)) return;
   selectedSealRequestId = request.id;
   doc.status = "待簽核";
   doc.lastReply = "已送簽核流程，核准後將自動押章。";
