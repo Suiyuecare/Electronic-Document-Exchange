@@ -51,6 +51,7 @@ SMTP_CREDENTIAL_EXPIRES_AT=2026-12-31
 LINE_WEBHOOK_URL=...
 LINE_CHANNEL_SECRET=...
 LINE_CHANNEL_ACCESS_TOKEN=...
+LINE_TARGET_ID=...
 LINE_CREDENTIAL_EXPIRES_AT=2026-12-31
 APP_SECRET=...
 INBOX_SIGNING_KEY_EXPIRES_AT=2026-12-31
@@ -101,6 +102,7 @@ vercel env add SMTP_CREDENTIAL_EXPIRES_AT production
 vercel env add LINE_WEBHOOK_URL production --sensitive
 vercel env add LINE_CHANNEL_SECRET production --sensitive
 vercel env add LINE_CHANNEL_ACCESS_TOKEN production --sensitive
+vercel env add LINE_TARGET_ID production --sensitive
 vercel env add LINE_CREDENTIAL_EXPIRES_AT production
 vercel env add APP_SECRET production --sensitive
 vercel env add INBOX_SIGNING_KEY_EXPIRES_AT production
@@ -165,6 +167,9 @@ curl https://edoc.suiyuecare.com/api/production/readiness
 curl https://edoc.suiyuecare.com/api/production/deployment
 curl https://edoc.suiyuecare.com/api/production/monitoring
 curl https://edoc.suiyuecare.com/api/files/storage-health
+curl -X POST https://edoc.suiyuecare.com/api/notifications/test \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"Email + Line + 系統通知","target_email":"records@suiyuecare.com","body":"正式通知通道實測"}'
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/run-due
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/monitoring
 ```
@@ -175,6 +180,7 @@ curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cro
 - `/api/production/readiness` 在 production 回傳 `ready: true`。
 - `/api/production/deployment` 顯示 production、revision、branch、deployment URL、Supabase 與 Storage 設定。
 - `/api/files/storage-health` 顯示 `ready: true`，且 provider、bucket、object endpoint、加密、AV provider、AV endpoint、短效 URL 都已設定。
+- `/api/notifications/test` 回傳 `report.ok: true`，Email 有 Message-ID，LINE 有 request id 或 webhook receipt，站內通知有 inbox id。
 - `/api/production/monitoring` 回傳 `status: healthy` 或只有可接受的 warning；critical 必須先處理。
 - `/api/cron/run-due` 回傳 `count` 與 `results`，且 Supabase `job_runs` 有新增紀錄。
 - `/api/cron/monitoring` 會寫入 audit log；若有 alert 且設定 `MONITORING_WEBHOOK_URL`，會推送外部值班通道。

@@ -1773,7 +1773,7 @@ def mask_notification_credential(env_key_name: str) -> str:
 def notification_credential_seed_rows() -> List[Tuple[str, str, str, str, str, str]]:
     return [
         ("NCRED-EMAIL-SMTP", "Email", os.getenv("SMTP_PROVIDER", "SMTP / Transactional Email"), "SMTP 帳號/應用程式密碼", "SMTP_HOST,SMTP_USERNAME,SMTP_PASSWORD,SMTP_FROM", os.getenv("SMTP_CREDENTIAL_EXPIRES_AT", "")),
-        ("NCRED-LINE-WEBHOOK", "Line 工作群組", "LINE Messaging API / Webhook", "Webhook Secret / Channel Access Token", "LINE_WEBHOOK_URL,LINE_CHANNEL_SECRET,LINE_CHANNEL_ACCESS_TOKEN", os.getenv("LINE_CREDENTIAL_EXPIRES_AT", "")),
+        ("NCRED-LINE-WEBHOOK", "Line 工作群組", "LINE Messaging API / Webhook", "Webhook Secret / Channel Access Token", "LINE_WEBHOOK_URL,LINE_CHANNEL_SECRET,LINE_CHANNEL_ACCESS_TOKEN,LINE_TARGET_ID", os.getenv("LINE_CREDENTIAL_EXPIRES_AT", "")),
         ("NCRED-INBOX-SIGNING", "系統站內通知", "Suiyuecare eDoc", "站內通知簽章金鑰", "APP_SECRET,CRON_SECRET", os.getenv("INBOX_SIGNING_KEY_EXPIRES_AT", "")),
     ]
 
@@ -3091,7 +3091,9 @@ def channel_required_env(channel: str) -> List[str]:
             required.extend(["SMTP_USERNAME", "SMTP_PASSWORD"])
         return required
     if channel == "Line 工作群組":
-        return ["LINE_WEBHOOK_URL"]
+        if env_present("LINE_WEBHOOK_URL"):
+            return ["LINE_WEBHOOK_URL"]
+        return ["LINE_WEBHOOK_URL 或 LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID"]
     if channel == "系統站內通知":
         return ["APP_SECRET"] if env_present("APP_SECRET") else ["CRON_SECRET"]
     return []
@@ -3103,7 +3105,10 @@ def notification_credential_status_for_channel(conn: sqlite3.Connection, channel
         return {"channel": channel, "status": "未設定", "ok": False, "error": "credential_not_registered"}
     credential = row_to_dict(row)
     required = channel_required_env(channel)
-    missing = [name for name in required if not env_present(name)]
+    if channel == "Line 工作群組" and not env_present("LINE_WEBHOOK_URL"):
+        missing = [] if env_present("LINE_CHANNEL_ACCESS_TOKEN") and env_present("LINE_TARGET_ID") else required
+    else:
+        missing = [name for name in required if not env_present(name)]
     expires_at = credential.get("expires_at") or ""
     expiry = parse_time(expires_at) if expires_at else datetime.max
     days_left = None if expiry == datetime.max else (expiry - datetime.now()).days
@@ -3161,9 +3166,11 @@ def notification_gateway_status() -> Dict[str, Any]:
     smtp_from = os.getenv("SMTP_FROM", "").strip()
     smtp_username = os.getenv("SMTP_USERNAME", "").strip()
     line_url = os.getenv("LINE_WEBHOOK_URL", "").strip()
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    line_target = os.getenv("LINE_TARGET_ID", "").strip()
     # This function is also used in Supabase mode without a local connection, so it reports env-derived state only.
     email_configured = bool(smtp_host and smtp_from)
-    line_configured = bool(line_url)
+    line_configured = bool(line_url or (line_token and line_target))
     return {
         "email": {
             "configured": email_configured,
@@ -3176,8 +3183,10 @@ def notification_gateway_status() -> Dict[str, Any]:
         },
         "line": {
             "configured": line_configured,
-            "webhook": f"{line_url[:28]}..." if line_url else "未設定",
-            "status": "可測試" if line_url else "未設定",
+            "webhook": f"{line_url[:28]}..." if line_url else ("Messaging API push" if line_token and line_target else "未設定"),
+            "mode": "webhook" if line_url else ("messaging-api-push" if line_token and line_target else "not_configured"),
+            "target": f"{line_target[:8]}..." if line_target else "未設定",
+            "status": "可測試" if line_configured else "未設定",
             "credentialExpiresAt": os.getenv("LINE_CREDENTIAL_EXPIRES_AT", ""),
         },
         "systemInbox": {
@@ -3369,6 +3378,7 @@ def send_email_notification(to_email: str, subject: str, body: str) -> Dict[str,
     message["From"] = sender
     message["To"] = to_email
     message["Subject"] = subject
+    message["Message-ID"] = f"<edoc-{int(time.time() * 1000)}-{secrets.token_hex(4)}@suiyuecare.com>"
     message.set_content(body)
     context = ssl.create_default_context()
     try:
@@ -3384,20 +3394,28 @@ def send_email_notification(to_email: str, subject: str, body: str) -> Dict[str,
                 if username:
                     smtp.login(username, password)
                 smtp.send_message(message)
-        return {"status": "成功", "receipt": f"SMTP-{int(time.time() * 1000)}", "error": ""}
+        return {"status": "成功", "receipt": message["Message-ID"], "error": ""}
     except Exception as exc:
         return {"status": "失敗", "receipt": "", "error": str(exc)}
 
 
 def send_line_notification(message: str) -> Dict[str, str]:
     url = os.getenv("LINE_WEBHOOK_URL", "").strip()
-    if not url:
-        return {"status": "未設定", "receipt": "", "error": "LINE_WEBHOOK_URL 未設定"}
-    data = json.dumps({"message": message, "source": "suiyuecare-edoc"}, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    target_id = os.getenv("LINE_TARGET_ID", "").strip()
+    if url:
+        data = json.dumps({"message": message, "source": "suiyuecare-edoc"}, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json", "User-Agent": "suiyuecare-edoc-notify"}
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    elif token and target_id:
+        data = json.dumps({"to": target_id, "messages": [{"type": "text", "text": message[:5000]}]}, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}", "User-Agent": "suiyuecare-edoc-notify"}
+        request = urllib.request.Request("https://api.line.me/v2/bot/message/push", data=data, headers=headers, method="POST")
+    else:
+        return {"status": "未設定", "receipt": "", "error": "LINE_WEBHOOK_URL 或 LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID 未設定"}
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            receipt = response.headers.get("X-Request-Id") or f"LINE-{int(time.time() * 1000)}"
+            receipt = response.headers.get("X-Line-Request-Id") or response.headers.get("X-Request-Id") or f"LINE-{int(time.time() * 1000)}"
             return {"status": "成功" if 200 <= response.status < 300 else "失敗", "receipt": receipt, "error": ""}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")
@@ -3418,6 +3436,36 @@ def push_system_notification(conn: sqlite3.Connection, item: Dict[str, Any]) -> 
     return {"status": "成功", "receipt": inbox_id, "error": ""}
 
 
+def notification_attempt_result(channel: str, target: str, result: Dict[str, str], started: float) -> Dict[str, str | int]:
+    return {
+        "channel": channel,
+        "target": target,
+        "status": result.get("status", "失敗"),
+        "receipt": result.get("receipt", ""),
+        "error": result.get("error", ""),
+        "attempted_at": now(),
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+def notification_delivery_report(notification: Dict[str, Any], delivery: Dict[str, Any], requested_channel: str) -> Dict[str, Any]:
+    failed = [item for item in delivery.get("results", []) if item.get("status") != "成功"]
+    return {
+        "ok": delivery.get("success", 0) == delivery.get("total", 0) and delivery.get("total", 0) > 0,
+        "checked_at": now(),
+        "requested_channel": requested_channel,
+        "notification_id": notification.get("id"),
+        "title": notification.get("title"),
+        "target_role": notification.get("target_role"),
+        "target_email": notification.get("target_email"),
+        "summary": delivery.get("receipt", ""),
+        "success": delivery.get("success", 0),
+        "total": delivery.get("total", 0),
+        "failed": failed,
+        "results": delivery.get("results", []),
+    }
+
+
 def deliver_notification(conn: sqlite3.Connection, notification_id: str, force_channel: str = "") -> Dict[str, Any]:
     row = conn.execute("SELECT * FROM notifications WHERE id = ?", (notification_id,)).fetchone()
     if not row:
@@ -3432,8 +3480,9 @@ def deliver_notification(conn: sqlite3.Connection, notification_id: str, force_c
             result = {"status": "憑證異常", "receipt": "", "error": f"{channel} 正式憑證{credential['status']}，請先完成憑證驗證或更新。"}
             target = target_email if channel == "Email" else "歲悅電子公文 LINE 工作群組"
             record_notification_delivery(conn, item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
-            results.append({"channel": channel, "target": target, **result})
+            results.append({"channel": channel, "target": target, **result, "attempted_at": now(), "duration_ms": 0})
             continue
+        started = time.time()
         if channel == "Email":
             result = send_email_notification(target_email, item["title"], item["body"])
             target = target_email
@@ -3444,7 +3493,7 @@ def deliver_notification(conn: sqlite3.Connection, notification_id: str, force_c
             result = push_system_notification(conn, item)
             target = item["target_role"]
         record_notification_delivery(conn, item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
-        results.append({"channel": channel, "target": target, **result})
+        results.append(notification_attempt_result(channel, target, result, started))
 
     success_count = len([item for item in results if item["status"] == "成功"])
     receipt_text = "；".join(
@@ -3851,7 +3900,10 @@ def supabase_run_due_background_jobs(all_enabled: bool = False) -> Dict[str, Any
 def supabase_notification_credential_status(channel: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     credential = next((row for row in rows if row.get("channel") == channel), {"channel": channel, "status": "未設定"})
     required = channel_required_env(channel)
-    missing = [name for name in required if not env_present(name)]
+    if channel == "Line 工作群組" and not env_present("LINE_WEBHOOK_URL"):
+        missing = [] if env_present("LINE_CHANNEL_ACCESS_TOKEN") and env_present("LINE_TARGET_ID") else required
+    else:
+        missing = [name for name in required if env_present(name) is False]
     expires_at = credential.get("expires_at") or ""
     expiry = parse_time(expires_at) if expires_at else datetime.max
     days_left = None if expiry == datetime.max else (expiry - datetime.now()).days
@@ -4022,7 +4074,16 @@ def supabase_deliver_notification(notification_id: str, force_channel: str = "")
     channels = notification_channels(force_channel or item["channel"])
     target_email = supabase_notification_target_email(item["target_role"], item.get("target_email") or "")
     results: List[Dict[str, str]] = []
+    credential_rows = supabase_list("notification_channel_credentials", {}) if "notification_channel_credentials" in TABLES else []
     for channel in channels:
+        credential = supabase_notification_credential_status(channel, credential_rows)
+        if channel != "系統站內通知" and credential["status"] not in {"有效", "即將到期"}:
+            result = {"status": "憑證異常", "receipt": "", "error": f"{channel} 正式憑證{credential['status']}，請先完成憑證驗證或更新。"}
+            target = target_email if channel == "Email" else "歲悅電子公文 LINE 工作群組"
+            supabase_record_notification_delivery(item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
+            results.append({"channel": channel, "target": target, **result, "attempted_at": now(), "duration_ms": 0})
+            continue
+        started = time.time()
         if channel == "Email":
             result = send_email_notification(target_email, item["title"], item["body"])
             target = target_email
@@ -4033,7 +4094,7 @@ def supabase_deliver_notification(notification_id: str, force_channel: str = "")
             result = supabase_push_system_notification(item)
             target = item["target_role"]
         supabase_record_notification_delivery(item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
-        results.append({"channel": channel, "target": target, **result})
+        results.append(notification_attempt_result(channel, target, result, started))
     success_count = len([entry for entry in results if entry["status"] == "成功"])
     receipt_text = "；".join(
         f"{entry['channel']}->{entry['target']}:{entry['status']}{('/' + entry['receipt']) if entry.get('receipt') else ''}{(' / ' + entry['error']) if entry.get('error') else ''}"
@@ -4402,11 +4463,19 @@ class Handler(SimpleHTTPRequestHandler):
                     channels = [payload.get("channel")] if payload.get("channel") else ["Email", "Line 工作群組", "系統站內通知"]
                     results = []
                     for channel in channels:
-                        required = channel_required_env(channel)
-                        missing = [name for name in required if not env_present(name)]
-                        status_text = "缺少環境憑證" if missing else "有效"
-                        report = {"channel": channel, "status": status_text, "missing": missing, "checked_at": checked_at}
-                        rows = [row for row in supabase_list("notification_channel_credentials", {}) if row.get("channel") == channel]
+                        credential_rows = supabase_list("notification_channel_credentials", {})
+                        status = supabase_notification_credential_status(channel, credential_rows)
+                        status_text = status["status"]
+                        report = {
+                            "channel": channel,
+                            "status": status_text,
+                            "missing": status.get("missing", []),
+                            "expires_at": status.get("expires_at") or "",
+                            "days_left": status.get("days_left"),
+                            "fingerprint_sha256": status.get("fingerprint_sha256") or "",
+                            "checked_at": checked_at,
+                        }
+                        rows = [row for row in credential_rows if row.get("channel") == channel]
                         if rows:
                             patch_payload = {"status": status_text, "last_validated_at": checked_at, "validation_report_json": report, "updated_at": checked_at}
                             if channel == "Email" and payload.get("email_expires_at"):
@@ -4415,7 +4484,7 @@ class Handler(SimpleHTTPRequestHandler):
                                 patch_payload["expires_at"] = payload["line_expires_at"]
                             supabase_patch("notification_channel_credentials", rows[0]["id"], patch_payload)
                         results.append(report)
-                    self.send_json({"ok": all(item["status"] == "有效" for item in results), "checked_at": checked_at, "credentials": results})
+                    self.send_json({"ok": all(item["status"] in {"有效", "即將到期"} for item in results), "checked_at": checked_at, "credentials": results})
                     return
                 if method == "POST" and parts == ["notifications", "send"]:
                     payload = self.read_json()
@@ -4441,7 +4510,8 @@ class Handler(SimpleHTTPRequestHandler):
                         "body": payload.get("body") or "這是一筆歲悅電子公文交換系統通知通道測試。",
                     })
                     result = supabase_deliver_notification(notice["id"], payload.get("channel") or notice["channel"])
-                    self.send_json({"notification": notice, "delivery": result}, 201)
+                    report = notification_delivery_report(notice, result, payload.get("channel") or notice["channel"])
+                    self.send_json({"notification": notice, "delivery": result, "report": report}, 201)
                     return
                 if method == "POST" and parts == ["notifications", "retry-failed"]:
                     self.send_json(supabase_retry_failed_notifications(), 201)
@@ -4611,7 +4681,8 @@ class Handler(SimpleHTTPRequestHandler):
                     })
                     result = deliver_notification(conn, notice["id"], payload.get("channel") or notice["channel"])
                     conn.commit()
-                    self.send_json({"notification": notice, "delivery": result}, 201)
+                    report = notification_delivery_report(notice, result, payload.get("channel") or notice["channel"])
+                    self.send_json({"notification": notice, "delivery": result, "report": report}, 201)
                     return
                 if method == "POST" and parts == ["notifications", "retry-failed"]:
                     result = retry_failed_notifications(conn)

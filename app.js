@@ -628,6 +628,7 @@ const notificationGatewayState = {
   overdueSchedule: "每日 09:00",
   tokenSchedule: "到期前 30 分鐘",
   failureChannel: "Email + Line + 系統通知",
+  lastTestReport: null,
   credentials: [
     { id: "NCRED-EMAIL-SMTP", channel: "Email", provider: "SMTP / Transactional Email", credential_type: "SMTP 帳號/應用程式密碼", masked_identifier: "SMTP_HOST=未設定；SMTP_FROM=未設定", status: "待驗證", expires_at: "", last_validated_at: "" },
     { id: "NCRED-LINE-WEBHOOK", channel: "Line 工作群組", provider: "LINE Messaging API / Webhook", credential_type: "Webhook Secret / Channel Access Token", masked_identifier: "LINE_WEBHOOK_URL=未設定", status: "待驗證", expires_at: "", last_validated_at: "" },
@@ -4578,6 +4579,43 @@ function renderNotificationGatewayStatus() {
       </article>
     `).join("");
   }
+  renderNotificationTestReport();
+}
+
+function renderNotificationTestReport() {
+  const grid = document.querySelector("#notificationTestReportGrid");
+  const detail = document.querySelector("#notificationTestReportDetail");
+  if (!grid || !detail) return;
+  const report = notificationGatewayState.lastTestReport;
+  if (!report) {
+    grid.innerHTML = `
+      <article class="archive-card">
+        <span>實測狀態</span>
+        <strong>尚未測試</strong>
+        <small>按下「測試通道」後會寫入實際派送紀錄。</small>
+      </article>
+    `;
+    detail.innerHTML = "";
+    return;
+  }
+  grid.innerHTML = [
+    ["實測結果", report.ok ? "全部送達" : "需補正"],
+    ["成功通道", `${report.success || 0} / ${report.total || 0}`],
+    ["測試時間", report.checked_at || "未記錄"],
+    ["測試對象", report.target_email || report.target_role || "未記錄"]
+  ].map(([label, value]) => `
+    <article class="archive-card">
+      <span>${label}</span>
+      <strong>${value}</strong>
+    </article>
+  `).join("");
+  detail.innerHTML = (report.results || []).map((item) => `
+    <article class="address-card">
+      <strong>${item.channel} · ${item.status}</strong>
+      <p>${item.target} · ${item.duration_ms ?? 0} ms</p>
+      <small>${item.receipt || item.error || "沒有回條"}</small>
+    </article>
+  `).join("") || `<article class="address-card"><strong>沒有派送紀錄</strong><p>請重新測試通道。</p></article>`;
 }
 
 async function refreshNotificationGatewayStatus(silent = false) {
@@ -4946,10 +4984,18 @@ async function testNotificationChannels() {
       })
     });
     applyNotificationDeliveryResult(result.delivery);
+    notificationGatewayState.lastTestReport = result.report || {
+      ok: result.delivery?.success === result.delivery?.total,
+      checked_at: new Date().toLocaleString("zh-TW", { hour12: false }),
+      target_email: targetEmail,
+      success: result.delivery?.success || 0,
+      total: result.delivery?.total || 0,
+      results: result.delivery?.results || []
+    };
     await syncNotificationsFromBackend(true);
     renderNotifications();
-    addNotificationAudit("測試通知通道", result.delivery.receipt || "已完成後端通知通道測試。");
-    showToast("通知通道測試已送到後端。");
+    addNotificationAudit("測試通知通道", notificationGatewayState.lastTestReport.summary || result.delivery.receipt || "已完成後端通知通道測試。");
+    showToast(notificationGatewayState.lastTestReport.ok ? "通知通道實測成功。" : "通知通道實測完成，部分通道需補正。");
   } catch (error) {
     notificationGatewayState.emailStatus = "失敗";
     notificationGatewayState.lineStatus = "失敗";
