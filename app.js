@@ -500,6 +500,7 @@ const reportTrend = [
 const reportsAuditLog = [
   ["10:48", "報表統計初始化", "已載入收發量、成功率、異常類型、承辦量與逾期件統計。"]
 ];
+let latestFormalReport = null;
 
 const settingsState = {
   agencyVerified: false,
@@ -968,6 +969,26 @@ function hasMinimumText(value, minLength = 6) {
   return String(value || "").trim().length >= minLength;
 }
 
+function stableHash(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `SHA256-LOCAL-${(hash >>> 0).toString(16).padStart(8, "0").toUpperCase()}`;
+}
+
+function downloadTextFile(fileName, content, type = "application/json;charset=utf-8") {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function blockOperation(message, auditFn = null, auditTitle = "操作防呆阻擋") {
   if (auditFn) auditFn(auditTitle, message);
   showToast(message);
@@ -1411,6 +1432,55 @@ function renderRoleDashboard() {
       <p>${body}</p>
     </article>
   `).join("");
+  renderSupervisorCommandDashboard();
+}
+
+function renderSupervisorCommandDashboard() {
+  const panel = document.querySelector("#supervisorCommandPanel");
+  if (!panel) return;
+  const role = activeRole();
+  const kind = identityKindForRole(role);
+  const stats = reportStats();
+  const riskItems = [
+    ...stats.overdueItems.map((item) => ({ title: item.title, meta: `${item.owner} · ${item.status}`, body: `期限：${item.dueDate}`, severity: 3 })),
+    ...stats.exceptionItems.map((item) => ({ title: item.title, meta: `${item.owner} · ${item.type}`, body: "需確認補正、重送或主管覆核。", severity: 2 })),
+    ...sealRequests.filter((request) => request.status === "待簽核").map((request) => ({ title: sealRequestDoc(request)?.subject || request.id, meta: `${request.step} · 待用印`, body: "核准後會自動押章並留存 PDF 雜湊。", severity: 2 })),
+    ...workflowTasks.filter((task) => task.role === role && /待|退回|審核|查核/.test(task.status)).map((task) => ({ title: task.title, meta: `${task.step} · ${task.status}`, body: task.type, severity: 1 }))
+  ].sort((a, b) => b.severity - a.severity).slice(0, 5);
+  panel.hidden = kind !== "supervisor";
+  if (kind !== "supervisor") return;
+  const decision = stats.exchangeHealth !== "正常" || stats.overdueItems.length || stats.exceptionItems.length
+    ? "今天先處理異常與逾期"
+    : "營運穩定，維持簽核節奏";
+  document.querySelector("#supervisorCommandStatus").textContent = `${role} · ${stats.slaRate}% SLA`;
+  document.querySelector("#supervisorDecisionTitle").textContent = decision;
+  document.querySelector("#supervisorDecisionBody").textContent = `本期收發 ${stats.inboundCount + stats.dispatchCount} 件，成功率 ${stats.successRate}%，異常 ${stats.exceptionItems.length} 件，逾期 ${stats.overdueItems.length} 件。主管應先看高風險清單，再決定退回、改派或建立稽催。`;
+  document.querySelector("#supervisorDecisionActions").innerHTML = [
+    ["看簽核", "workflow", "primary"],
+    ["處理逾期", "tracking", "secondary"],
+    ["正式報表", "reports", "secondary"],
+    ["通知中心", "notifications", "secondary"]
+  ].map(([label, target, style]) => `<button class="${style === "primary" ? "primary-button" : "secondary-button"}" type="button" data-dashboard-action-target="${target}">${label}</button>`).join("");
+  document.querySelector("#supervisorRiskCount").textContent = `${riskItems.length} 件`;
+  document.querySelector("#supervisorRiskList").innerHTML = riskItems.map((item) => `
+    <article class="identity-item ${item.severity >= 2 ? "issue" : ""}">
+      <strong>${item.title}</strong>
+      <span>${item.meta}</span>
+      <p>${item.body}</p>
+    </article>
+  `).join("") || `<article class="identity-item"><strong>沒有高風險案件</strong><p>維持每日查核、抽核與歸檔即可。</p></article>`;
+  const loadRows = stats.unitRows.slice().sort((a, b) => b.load - a.load || b.pending - a.pending).slice(0, 4);
+  document.querySelector("#supervisorLoadStatus").textContent = loadRows[0]?.load >= 3 ? "需調度" : "正常";
+  document.querySelector("#supervisorLoadList").innerHTML = loadRows.map((row) => `
+    <article class="identity-item ${row.load >= 3 ? "issue" : ""}">
+      <strong>${row.unit}</strong>
+      <span>待辦 ${row.pending} 件 · ${row.users} 人</span>
+      <p>${row.load >= 3 ? "建議主管改派、加簽或調整期限。" : "負載可控。"}</p>
+    </article>
+  `).join("") || `<article class="identity-item"><strong>沒有部門負載資料</strong><p>目前沒有需調度案件。</p></article>`;
+  document.querySelectorAll("[data-dashboard-action-target]").forEach((button) => {
+    button.addEventListener("click", () => setView(button.dataset.dashboardActionTarget));
+  });
 }
 
 function renderIdentityWorkbench() {
@@ -3557,6 +3627,96 @@ function reportStats() {
   };
 }
 
+function formalReportPayload() {
+  const stats = reportStats();
+  const period = document.querySelector("#reportPeriod").value;
+  const unit = document.querySelector("#reportUnit").value;
+  const agency = document.querySelector("#reportAgencyQuery").value.trim() || "全部機關";
+  const version = document.querySelector("#reportVersion").value;
+  const generatedAt = new Date().toLocaleString("zh-TW", { hour12: false });
+  const reportNo = `RPT-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${String(reportsAuditLog.length + 1).padStart(3, "0")}`;
+  const decision = stats.slaRate >= 90 && stats.successRate >= 95 && stats.overdueItems.length === 0 ? "通過" : stats.exceptionItems.length > 3 || stats.overdueItems.length > 2 ? "需主管改善" : "觀察追蹤";
+  const payload = {
+    reportNo,
+    version,
+    generatedAt,
+    generatedBy: activeRole(),
+    scope: { period, unit, agency, dataSource: "收文、發文、流程、稽催、歸檔、通知、audit log" },
+    kpi: {
+      volume: stats.inboundCount + stats.dispatchCount,
+      inbound: stats.inboundCount,
+      dispatch: stats.dispatchCount,
+      successRate: stats.successRate,
+      slaRate: stats.slaRate,
+      backlogPressure: stats.backlogPressure,
+      exchangeHealth: stats.exchangeHealth,
+      exceptionCount: stats.exceptionItems.length,
+      overdueCount: stats.overdueItems.length
+    },
+    tables: {
+      owners: stats.ownerRows,
+      sla: stats.slaRows,
+      agencyRank: stats.agencyRank,
+      units: stats.unitRows,
+      aging: stats.agingRows,
+      exceptions: stats.exceptionItems,
+      overdue: stats.overdueItems
+    },
+    managementConclusion: {
+      decision,
+      requiredActions: [
+        stats.overdueItems.length ? `建立 ${stats.overdueItems.length} 件稽催並要求承辦回覆期限。` : "逾期件為 0，維持翌日查核。",
+        stats.exceptionItems.length ? `異常 ${stats.exceptionItems.length} 件需由主管確認補正或重送。` : "異常件為 0，維持抽核。",
+        stats.slaRate < 90 ? "SLA 未達 90%，需檢討登錄、分派、交換或歸檔瓶頸。" : "SLA 達標。"
+      ]
+    }
+  };
+  payload.reportHash = stableHash(payload);
+  return payload;
+}
+
+function renderFormalReport(report = latestFormalReport) {
+  document.querySelector("#formalReportStatus").textContent = report ? report.managementConclusion.decision : "待產製";
+  document.querySelector("#formalReportNo").textContent = report?.reportNo || "尚未產製";
+  document.querySelector("#formalReportPeriod").textContent = report ? `統計期間：${report.scope.period} / ${report.scope.unit} / ${report.scope.agency}` : "統計期間：-";
+  document.querySelector("#formalReportScope").textContent = report?.version || "前端營運資料";
+  document.querySelector("#formalReportScopeNote").textContent = report?.scope.dataSource || "收文、發文、流程、稽催、歸檔";
+  document.querySelector("#formalReportHash").textContent = report?.reportHash || "待產生";
+  document.querySelector("#formalReportDecision").textContent = report?.managementConclusion.decision || "待檢視";
+  document.querySelector("#formalReportDecisionNote").textContent = report ? report.managementConclusion.requiredActions[0] : "依 SLA、異常、逾期與交換健康判定";
+}
+
+function generateFormalReport() {
+  latestFormalReport = formalReportPayload();
+  renderFormalReport();
+  addReportsAudit("產製正式報表", `${latestFormalReport.reportNo} 已產製，結論：${latestFormalReport.managementConclusion.decision}，雜湊 ${latestFormalReport.reportHash}。`);
+  showToast("正式報表簽核包已產製。");
+  return latestFormalReport;
+}
+
+function formalReportCsv(report = latestFormalReport || formalReportPayload()) {
+  const rows = [
+    ["報表編號", report.reportNo],
+    ["版次", report.version],
+    ["產製時間", report.generatedAt],
+    ["產製角色", report.generatedBy],
+    ["統計期間", report.scope.period],
+    ["統計單位", report.scope.unit],
+    ["機關範圍", report.scope.agency],
+    ["收發量", report.kpi.volume],
+    ["收文", report.kpi.inbound],
+    ["發文", report.kpi.dispatch],
+    ["交換成功率", `${report.kpi.successRate}%`],
+    ["SLA 達成率", `${report.kpi.slaRate}%`],
+    ["異常件", report.kpi.exceptionCount],
+    ["逾期件", report.kpi.overdueCount],
+    ["交換健康", report.kpi.exchangeHealth],
+    ["主管結論", report.managementConclusion.decision],
+    ["報表雜湊", report.reportHash]
+  ];
+  return rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
+}
+
 function renderReportsSummary() {
   const stats = reportStats();
   document.querySelector("#reportVolume").textContent = stats.inboundCount + stats.dispatchCount;
@@ -3713,6 +3873,7 @@ function renderReports() {
   renderReportsSummary();
   renderReportCharts();
   renderReportLists();
+  renderFormalReport();
 }
 
 function createReportReminder() {
@@ -7904,13 +8065,27 @@ document.querySelector("#reportsApplyFilterBtn").addEventListener("click", () =>
   showToast("報表篩選已套用。");
 });
 document.querySelector("#reportsExportBtn").addEventListener("click", () => {
-  const stats = reportStats();
-  addReportsAudit("匯出報表", `已匯出收發量 ${stats.inboundCount + stats.dispatchCount}、成功率 ${stats.successRate}%、異常 ${stats.exceptionItems.length}、逾期 ${stats.overdueItems.length}。`);
-  showToast("報表檔已產生。");
+  const report = latestFormalReport || generateFormalReport();
+  downloadTextFile(`${report.reportNo}.json`, JSON.stringify(report, null, 2));
+  addReportsAudit("匯出正式報表", `${report.reportNo}.json 已匯出，雜湊 ${report.reportHash}。`);
+  showToast("正式報表 JSON 已匯出。");
 });
 document.querySelector("#reportsPrintBtn").addEventListener("click", () => {
   addReportsAudit("列印月報", "已產生報表統計月報列印版。");
   showToast("月報列印版已產生。");
+});
+document.querySelector("#reportsGenerateFormalBtn").addEventListener("click", generateFormalReport);
+document.querySelector("#reportsExportCsvBtn").addEventListener("click", () => {
+  const report = latestFormalReport || generateFormalReport();
+  downloadTextFile(`${report.reportNo}.csv`, formalReportCsv(report), "text/csv;charset=utf-8");
+  addReportsAudit("匯出正式報表 CSV", `${report.reportNo}.csv 已匯出。`);
+  showToast("正式報表 CSV 已匯出。");
+});
+document.querySelector("#reportsExportJsonBtn").addEventListener("click", () => {
+  const report = latestFormalReport || generateFormalReport();
+  downloadTextFile(`${report.reportNo}-audit.json`, JSON.stringify({ ...report, auditTrail: reportsAuditLog }, null, 2));
+  addReportsAudit("匯出稽核 JSON", `${report.reportNo}-audit.json 已匯出，含報表操作紀錄。`);
+  showToast("稽核 JSON 已匯出。");
 });
 document.querySelector("#reportsCreateReminderBtn").addEventListener("click", createReportReminder);
 document.querySelector("#reportsClearLogBtn").addEventListener("click", () => {

@@ -153,6 +153,37 @@
             </article>
           </div>
 
+          <section class="panel supervisor-command-panel" id="supervisorCommandPanel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Supervisor Command</p>
+                <h3>主管營運儀表板</h3>
+              </div>
+              <span class="status-pill" id="supervisorCommandStatus">依角色顯示</span>
+            </div>
+            <div class="supervisor-command-grid">
+              <section class="supervisor-decision">
+                <strong id="supervisorDecisionTitle">今日決策重點</strong>
+                <p id="supervisorDecisionBody">登入主管角色後顯示簽核、逾期、交換與用印風險。</p>
+                <div class="identity-actions" id="supervisorDecisionActions"></div>
+              </section>
+              <section>
+                <div class="panel-heading tight">
+                  <h3>風險排序</h3>
+                  <span class="status-pill" id="supervisorRiskCount">0 件</span>
+                </div>
+                <div class="identity-list" id="supervisorRiskList"></div>
+              </section>
+              <section>
+                <div class="panel-heading tight">
+                  <h3>部門負載</h3>
+                  <span class="status-pill" id="supervisorLoadStatus">Load</span>
+                </div>
+                <div class="identity-list" id="supervisorLoadList"></div>
+              </section>
+            </div>
+          </section>
+
           <section class="panel scope-zone" id="scopeZone">
             <div class="panel-heading">
               <h3>部門隔離工作區</h3>
@@ -1675,8 +1706,46 @@
             <label>統計期間<select id="reportPeriod"><option>今日</option><option selected>近 7 日</option><option>近 30 日</option><option>本年度</option></select></label>
             <label>統計單位<select id="reportUnit"><option>全部單位</option><option>總管理處</option><option>居家照顧課</option><option>社區據點課</option></select></label>
             <label>機關範圍<input id="reportAgencyQuery" value="全部機關" /></label>
+            <label>報表版次<select id="reportVersion"><option selected>營運日報</option><option>主管週報</option><option>月度內控報表</option><option>法遵稽核報表</option></select></label>
             <button class="primary-button" id="reportsApplyFilterBtn" type="button">套用篩選</button>
           </div>
+
+          <section class="panel formal-report-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Formal Report</p>
+                <h3>正式報表簽核包</h3>
+              </div>
+              <span class="status-pill" id="formalReportStatus">待產製</span>
+            </div>
+            <div class="formal-report-grid">
+              <article>
+                <span>報表編號</span>
+                <strong id="formalReportNo">尚未產製</strong>
+                <small id="formalReportPeriod">統計期間：-</small>
+              </article>
+              <article>
+                <span>資料口徑</span>
+                <strong id="formalReportScope">前端營運資料</strong>
+                <small id="formalReportScopeNote">收文、發文、流程、稽催、歸檔</small>
+              </article>
+              <article>
+                <span>報表雜湊</span>
+                <strong id="formalReportHash">待產生</strong>
+                <small>匯出後可供稽核比對</small>
+              </article>
+              <article>
+                <span>主管結論</span>
+                <strong id="formalReportDecision">待檢視</strong>
+                <small id="formalReportDecisionNote">依 SLA、異常、逾期與交換健康判定</small>
+              </article>
+            </div>
+            <div class="detail-actions">
+              <button class="primary-button" id="reportsGenerateFormalBtn" type="button">產製正式報表</button>
+              <button class="secondary-button" id="reportsExportCsvBtn" type="button">匯出 CSV</button>
+              <button class="secondary-button" id="reportsExportJsonBtn" type="button">匯出稽核 JSON</button>
+            </div>
+          </section>
 
           <section class="panel report-brief">
             <div>
