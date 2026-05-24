@@ -1609,6 +1609,61 @@ async function loginWithBackend(email, password, provider) {
   enterApp(`${session.user.name} 已通過後端 Auth / RBAC 登入。`);
 }
 
+function quickLoginProfile(role) {
+  const scope = roleDataScopes[role] || { departments: ["系統預設"] };
+  const titleMap = {
+    主任: "主任",
+    執行長: "執行長",
+    行政部主任: "行政部主任",
+    人資: "人資專員",
+    會計: "會計專員",
+    總務: "總務收發",
+    業務助理: "業務助理"
+  };
+  return {
+    email: `${role}@suiyuecare.local`,
+    password: "demo1234",
+    provider: "快速測試登入",
+    session: {
+      token: `quick-${role}-${Date.now()}`,
+      user: {
+        id: `QUICK-${role}`,
+        name: `${role}測試帳號`,
+        email: `${role}@suiyuecare.local`,
+        unit: scope.departments?.[0] || role,
+        title: titleMap[role] || role,
+        role,
+        provider: "快速測試登入",
+        mfa_status: "測試略過",
+        status: "啟用"
+      },
+      permissions: rolePermissions[role] || []
+    }
+  };
+}
+
+async function quickLoginAsRole(role) {
+  const profile = quickLoginProfile(role);
+  document.querySelector("#loginEmail").value = profile.email;
+  document.querySelector("#loginPassword").value = profile.password;
+  try {
+    await loginWithBackend(profile.email, profile.password, profile.provider);
+  } catch (error) {
+    authState = profile.session;
+    localStorage.setItem(authStorageKey, JSON.stringify(authState));
+    const existing = userAccounts.find((account) => account.email === authState.user.email);
+    if (existing) {
+      existing.status = "啟用";
+      existing.lastLogin = new Date().toLocaleString("zh-TW", { hour12: false });
+      existing.ip = "快速登入";
+      existing.device = "目前瀏覽器";
+    }
+    recordLogin(authState.user.email, profile.provider, "成功");
+    enterApp(`${role} 已快速登入，正在檢視 ${roleDataScopes[role]?.title || role} 權限。`);
+    addAccountAudit("快速角色登入", `${role} 使用快速登入進入系統；後端 Auth 未回應時改用本機測試 session。`);
+  }
+}
+
 function renderQueueRows() {
   document.querySelector("#queueRows").innerHTML = queueItems.map(([id, direction, agency, subject, status]) => `
     <tr>
@@ -7663,6 +7718,9 @@ document.querySelector("#demoLoginBtn").addEventListener("click", async () => {
   } catch (error) {
     showToast(error.message || "測試帳號登入失敗。");
   }
+});
+document.querySelectorAll("[data-quick-role]").forEach((button) => {
+  button.addEventListener("click", () => quickLoginAsRole(button.dataset.quickRole));
 });
 
 document.querySelector("#pullInboundBtn").addEventListener("click", pullJagentInbound);

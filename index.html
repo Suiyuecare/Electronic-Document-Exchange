@@ -50,6 +50,22 @@
           <p class="login-hint">登入會送到後端 Auth API，建立 session、寫入登入紀錄，並依 RBAC 權限載入工作台。</p>
           <button class="primary-button" type="submit">登入系統</button>
           <button class="secondary-button" id="demoLoginBtn" type="button">使用總務測試帳號</button>
+          <section class="quick-login-panel" aria-label="不同權限快速登入">
+            <div>
+              <p class="eyebrow">Quick Login</p>
+              <h3>不同權限快速登入</h3>
+            </div>
+            <div class="quick-login-grid" id="quickLoginGrid">
+              <button type="button" data-quick-role="總務">總務</button>
+              <button type="button" data-quick-role="行政部主任">行政部主任</button>
+              <button type="button" data-quick-role="主任">主任</button>
+              <button type="button" data-quick-role="執行長">執行長</button>
+              <button type="button" data-quick-role="人資">人資</button>
+              <button type="button" data-quick-role="會計">會計</button>
+              <button type="button" data-quick-role="業務助理">業務助理</button>
+            </div>
+            <p class="login-hint">用來快速檢視員工、主管、總務與行政權限，不影響正式帳號設定。</p>
+          </section>
         </form>
       </section>
     </div>

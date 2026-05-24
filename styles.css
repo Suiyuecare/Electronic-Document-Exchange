@@ -2082,6 +2082,42 @@ textarea {
   line-height: 1.65;
 }
 
+.quick-login-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.quick-login-panel h3 {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.quick-login-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.quick-login-grid button {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fff;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.quick-login-grid button:hover {
+  border-color: #0f766e;
+  color: #0f766e;
+  background: #f0fdfa;
+}
+
 .toast {
   position: fixed;
   right: 22px;
