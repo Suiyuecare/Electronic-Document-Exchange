@@ -611,9 +611,31 @@
               </div>
             </form>
 
-            <aside class="panel flow-panel">
-              <h3>下一步</h3>
-              <div class="next-action-card" id="composeNextAction"></div>
+            <aside class="panel flow-panel ai-compose-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">AI Writer</p>
+                  <h3>AI 公文助理</h3>
+                </div>
+                <span class="status-pill" id="aiDraftStatus">待輸入</span>
+              </div>
+              <label>
+                白話文撰寫內容
+                <textarea id="aiPlainText" rows="8" placeholder="例如：請衛福部協助確認本公司日照中心設立許可補正資料，附件包含清冊、證明文件，請對方查照。"></textarea>
+              </label>
+              <div class="form-actions">
+                <button class="primary-button" id="aiGenerateDraftBtn" type="button">AI 生成主旨與內文</button>
+                <button class="secondary-button" id="aiClearDraftBtn" type="button">清除</button>
+              </div>
+              <label>
+                自動生成主旨
+                <input id="aiGeneratedSubject" placeholder="AI 生成後顯示，可自行編輯" />
+              </label>
+              <label>
+                自動生成內文
+                <textarea id="aiGeneratedBody" rows="8" placeholder="AI 生成後顯示，可自行編輯"></textarea>
+              </label>
+              <button class="secondary-button full-width" id="aiApplyDraftBtn" type="button">套用到左側主旨與說明</button>
               <h3>送出前檢核</h3>
               <ol class="precheck-list" id="precheckList"></ol>
               <div class="summary-box">

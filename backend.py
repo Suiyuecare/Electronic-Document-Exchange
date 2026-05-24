@@ -66,6 +66,8 @@ EDOC_TSA_URL = os.getenv("EDOC_TSA_URL", "")
 EDOC_TSA_POLICY_OID = os.getenv("EDOC_TSA_POLICY_OID", "1.2.158.歲悅.電子公文.時間戳")
 EDOC_OCSP_RESPONDER_URL = os.getenv("EDOC_OCSP_RESPONDER_URL", "")
 EDOC_CRL_DISTRIBUTION_URL = os.getenv("EDOC_CRL_DISTRIBUTION_URL", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 ALLOWED_EDOC_ROLE_LIST = ["主任", "執行長", "行政部主任", "人資", "會計", "總務", "業務助理"]
 ALLOWED_EDOC_ROLES = set(ALLOWED_EDOC_ROLE_LIST)
 
@@ -3628,6 +3630,112 @@ def ensure_notification_for_source(conn: sqlite3.Connection, payload: Dict[str, 
     return create_notification(conn, payload)
 
 
+def fallback_ai_compose(payload: Dict[str, Any]) -> Dict[str, Any]:
+    plain = str(payload.get("plainText") or payload.get("plain_text") or "").strip()
+    recipient = str(payload.get("recipient") or "貴機關").strip()
+    doc_type = str(payload.get("docType") or payload.get("doc_type") or "函").strip()
+    topic = plain.replace("\n", "，").strip("，。 ")
+    if len(topic) > 42:
+        topic = f"{topic[:42]}..."
+    subject = f"有關{topic or '本公司業務事項'}，請查照。"
+    body_lines = [
+        f"一、依業務需要辦理，檢送相關資料予{recipient}參辦。",
+        f"二、{plain or '相關內容如附件及補充說明，請惠予協助確認。'}",
+        "三、如需補充資料或聯繫窗口，請逕洽本公司承辦人，俾利後續作業。"
+    ]
+    return {
+        "subject": subject,
+        "body": "\n".join(body_lines),
+        "model": "local-template",
+        "usedOpenAI": False,
+        "notice": "OPENAI_API_KEY 未設定或 OpenAI 服務暫不可用，已使用本機公文模板產生。"
+    }
+
+
+def extract_openai_text(data: Dict[str, Any]) -> str:
+    if isinstance(data.get("output_text"), str):
+        return data["output_text"]
+    chunks: List[str] = []
+    for item in data.get("output", []) or []:
+        for content in item.get("content", []) or []:
+            if content.get("type") in {"output_text", "text"} and isinstance(content.get("text"), str):
+                chunks.append(content["text"])
+    return "\n".join(chunks).strip()
+
+
+def parse_ai_compose_json(text: str) -> Dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").replace("json\n", "", 1).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(cleaned[start:end + 1])
+        raise
+
+
+def ai_compose_official_draft(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    plain = str(payload.get("plainText") or payload.get("plain_text") or "").strip()
+    if len(plain) < 6:
+        return {"error": "invalid_request", "detail": "白話文內容至少需要 6 個字。"}
+    context = {
+        "docType": payload.get("docType") or "函",
+        "priority": payload.get("priority") or "普通件",
+        "recipient": payload.get("recipient") or "未指定受文者",
+        "attachments": payload.get("attachments") or [],
+        "role": payload.get("role") or "業務助理"
+    }
+    if not OPENAI_API_KEY:
+        result = fallback_ai_compose({**payload, **context})
+        log_audit(conn, context["role"], "AI 公文助理產生函稿", "ai_compose", "local-template", result["notice"])
+        return result
+    request_payload = {
+        "model": OPENAI_MODEL,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "你是台灣長照公司電子公文撰寫助理。"
+                    "請把使用者白話內容改寫成正式公文用語，只輸出 JSON，"
+                    "格式為 {\"subject\":\"...\",\"body\":\"...\"}。"
+                    "subject 必須精簡、以「請查照」或相近正式語氣結尾；"
+                    "body 使用中文條列「一、」「二、」「三、」，語氣正式、清楚、不可捏造未提供的法規或事實。"
+                )
+            },
+            {
+                "role": "user",
+                "content": json.dumps({"plainText": plain, "context": context}, ensure_ascii=False)
+            }
+        ],
+        "temperature": 0.2
+    }
+    data = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=data,
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+        text = extract_openai_text(response_data)
+        parsed = parse_ai_compose_json(text)
+        subject = str(parsed.get("subject") or "").strip()
+        body = str(parsed.get("body") or "").strip()
+        if not subject or not body:
+            raise ValueError("openai_response_missing_subject_or_body")
+        result = {"subject": subject, "body": body, "model": OPENAI_MODEL, "usedOpenAI": True}
+        log_audit(conn, context["role"], "AI 公文助理產生函稿", "ai_compose", OPENAI_MODEL, f"recipient={context['recipient']}")
+        return result
+    except Exception as exc:
+        result = fallback_ai_compose({**payload, **context})
+        result["notice"] = f"OpenAI 產生失敗，已使用本機公文模板：{exc}"
+        log_audit(conn, context["role"], "AI 公文助理備援產生函稿", "ai_compose", "local-template", str(exc))
+        return result
 def sync_notifications_from_business_state(conn: sqlite3.Connection) -> Dict[str, Any]:
     created = 0
     items: List[Dict[str, Any]] = []
@@ -5131,6 +5239,11 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if method == "POST" and parts == ["pdf", "verify"]:
                     self.send_json(pdf_verify(conn, self.read_json()))
+                    return
+                if method == "POST" and parts == ["ai", "compose"]:
+                    result = ai_compose_official_draft(conn, self.read_json())
+                    conn.commit()
+                    self.send_json(result, 200 if not result.get("error") else 422)
                     return
                 if method == "POST" and parts == ["attachments", "security-action"]:
                     result = attachment_security_action(conn, self.read_json())

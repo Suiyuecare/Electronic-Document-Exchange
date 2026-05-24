@@ -948,6 +948,26 @@ tr:last-child td {
   color: #245b8d;
 }
 
+.status-pill[data-tone="loading"] {
+  background: #fff7ed;
+  color: #9a4f05;
+}
+
+.status-pill[data-tone="ok"] {
+  background: #e6f4d8;
+  color: #2a6010;
+}
+
+.status-pill[data-tone="fallback"] {
+  background: #f8fafc;
+  color: #475569;
+}
+
+.status-pill[data-tone="error"] {
+  background: #fde7e8;
+  color: #90333c;
+}
+
 .check-list,
 .dispatch-board,
 .service-grid,
@@ -2151,6 +2171,23 @@ textarea {
 .flow-panel {
   display: grid;
   gap: 14px;
+}
+
+.ai-compose-panel textarea {
+  min-height: 132px;
+}
+
+.ai-compose-panel input,
+.ai-compose-panel textarea {
+  background: #fff;
+}
+
+.ai-compose-panel .form-actions {
+  margin-bottom: 0;
+}
+
+.full-width {
+  width: 100%;
 }
 
 .precheck-list {

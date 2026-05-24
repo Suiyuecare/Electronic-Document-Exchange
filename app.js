@@ -2027,6 +2027,68 @@ function applyComposeContactDefaults(force = false) {
   renderDraftPreview();
 }
 
+function setAiDraftStatus(text, tone = "") {
+  const status = document.querySelector("#aiDraftStatus");
+  if (!status) return;
+  status.textContent = text;
+  status.dataset.tone = tone;
+}
+
+async function generateAiDraft() {
+  const plainText = document.querySelector("#aiPlainText")?.value.trim() || "";
+  if (!hasMinimumText(plainText, 6)) {
+    return blockOperation("請先在白話文欄位輸入至少 6 個字。", addDispatchAudit, "AI 公文助理防呆");
+  }
+  const button = document.querySelector("#aiGenerateDraftBtn");
+  button.disabled = true;
+  setAiDraftStatus("生成中", "loading");
+  try {
+    const data = composePayload();
+    const result = await backendRequest("/ai/compose", {
+      method: "POST",
+      body: JSON.stringify({
+        plainText,
+        docType: data.type,
+        priority: data.priority,
+        recipient: data.recipient,
+        attachments: data.attachments,
+        role: activeRole()
+      })
+    });
+    document.querySelector("#aiGeneratedSubject").value = result.subject || "";
+    document.querySelector("#aiGeneratedBody").value = result.body || "";
+    setAiDraftStatus(result.usedOpenAI ? "OpenAI 已生成" : "模板已生成", result.usedOpenAI ? "ok" : "fallback");
+    addDispatchAudit("AI 生成函稿", result.usedOpenAI ? `已使用 ${result.model} 產生主旨與內文。` : result.notice || "已使用本機模板產生主旨與內文。");
+    showToast(result.usedOpenAI ? "AI 已生成主旨與內文。" : "已生成主旨與內文，OpenAI 未啟用時使用模板備援。");
+  } catch (error) {
+    setAiDraftStatus("生成失敗", "error");
+    addDispatchAudit("AI 生成失敗", error.message);
+    showToast("AI 生成失敗，請稍後再試。");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function applyAiDraftToCompose() {
+  const subject = document.querySelector("#aiGeneratedSubject")?.value.trim() || "";
+  const body = document.querySelector("#aiGeneratedBody")?.value.trim() || "";
+  if (!subject || !body) return showToast("請先產生或填寫 AI 主旨與內文。");
+  document.querySelector("#subject").value = subject;
+  document.querySelector("#bodyText").value = body;
+  markDraftDirty();
+  addDispatchAudit("套用 AI 函稿", "AI 生成內容已帶入主旨與說明欄位。");
+  showToast("已套用到左側主旨與說明。");
+}
+
+function clearAiDraft() {
+  ["#aiPlainText", "#aiGeneratedSubject", "#aiGeneratedBody"].forEach((selector) => {
+    const input = document.querySelector(selector);
+    if (input) input.value = "";
+  });
+  setAiDraftStatus("待輸入");
+  showToast("AI 公文助理欄位已清除。");
+}
+
 function renderDraftPreview() {
   const data = composePayload();
   const preview = document.querySelector("#draftPreview");
@@ -8120,6 +8182,9 @@ document.querySelector("#generateDispatchNoBtn").addEventListener("click", () =>
   addDispatchAudit("重新產生發文字號", `已產生 ${no}。`);
   showToast(`已產生發文字號：${no}`);
 });
+document.querySelector("#aiGenerateDraftBtn").addEventListener("click", generateAiDraft);
+document.querySelector("#aiApplyDraftBtn").addEventListener("click", applyAiDraftToCompose);
+document.querySelector("#aiClearDraftBtn").addEventListener("click", clearAiDraft);
 document.querySelector("#previewDraftBtn").addEventListener("click", () => {
   renderDraftPreview();
   document.querySelector("#draftPreview")?.scrollIntoView({ behavior: "smooth", block: "center" });
