@@ -7284,9 +7284,13 @@ function renderCertificateServiceHealth() {
   const rows = [
     ["模式", certificateServiceState.mode || "未檢查"],
     ["整體狀態", certificateServiceState.ready ? "可正式簽章" : "未完成設定"],
+    ["簽章 Provider", serviceLabels.provider || formalServices.provider?.value || "未檢查"],
+    ["簽章 API", serviceLabels.providerApi || formalServices.providerApi?.value || "未檢查"],
+    ["簽章 Key", serviceLabels.keyId || formalServices.keyId?.value || "未檢查"],
     ["HSM/KMS", serviceLabels.hsm || formalServices.hsm?.value || "未檢查"],
     ["信任根", serviceLabels.chain || formalServices.trustStore?.value || "未檢查"],
     ["TSA", serviceLabels.tsa || formalServices.tsa?.value || "未檢查"],
+    ["TSA 憑證", serviceLabels.tsaCredential || formalServices.tsaCredential?.value || "未檢查"],
     ["OCSP", serviceLabels.ocsp || formalServices.ocsp?.value || "未檢查"],
     ["CRL", serviceLabels.crl || formalServices.crl?.value || "未檢查"]
   ];
@@ -7301,9 +7305,9 @@ function renderCertificateServiceHealth() {
     <article class="address-card">
       <strong>正式服務尚未完成</strong>
       <p>缺少：${missing.join("、")}</p>
-      <small>需設定 EDOC_SIGNATURE_PROVIDER、EDOC_HSM_PROVIDER、EDOC_CERT_TRUST_STORE、EDOC_TSA_URL、EDOC_OCSP_RESPONDER_URL、EDOC_CRL_DISTRIBUTION_URL、EDOC_SIGNING_SECRET。</small>
+      <small>需設定 EDOC_SIGNATURE_PROVIDER、EDOC_SIGNATURE_API_URL、EDOC_SIGNATURE_API_KEY、EDOC_SIGNATURE_KEY_ID、EDOC_HSM_PROVIDER、EDOC_CERT_TRUST_STORE、EDOC_TSA_URL、EDOC_TSA_API_KEY、EDOC_OCSP_RESPONDER_URL、EDOC_CRL_DISTRIBUTION_URL。</small>
     </article>
-  ` : `<article class="address-card"><strong>正式簽章服務已就緒</strong><p>簽章、TSA、OCSP、CRL 與信任根皆已設定。</p></article>`;
+  ` : `<article class="address-card"><strong>正式簽章服務已就緒</strong><p>簽章 provider、HSM/KMS、TSA、OCSP、CRL 與信任根皆已設定；簽章時會呼叫正式 provider，不再使用本機模擬。</p></article>`;
 }
 
 async function loadCertificateServiceHealth(show = true) {
@@ -7419,7 +7423,7 @@ async function signCurrentPdf() {
     else electronicSignatureProofs.unshift(proof);
     addSealAudit("正式電子簽章", `${doc.no} 已由 ${proof.signer} 使用 ${certificateById(proof.certificateId)?.serialNo || proof.certificateId} 簽章，digest ${proof.digest}。`);
     renderSignatureProofGrid();
-    showToast("正式電子簽章已完成。");
+    showToast(result.algorithm?.startsWith("HMAC") ? "測試簽章已完成。" : "正式電子簽章已完成。");
   } catch (error) {
     addSealAudit("正式電子簽章失敗", error.message);
     showToast(`簽章失敗：${error.message}`);

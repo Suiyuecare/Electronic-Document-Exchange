@@ -60,9 +60,13 @@ MONITORING_WEBHOOK_URL = os.getenv("MONITORING_WEBHOOK_URL", "")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 EDOC_MONITORING_EXPECTED_CRON_MINUTES = int(os.getenv("EDOC_MONITORING_EXPECTED_CRON_MINUTES", "1440"))
 EDOC_SIGNATURE_PROVIDER = os.getenv("EDOC_SIGNATURE_PROVIDER", "local-simulation")
+EDOC_SIGNATURE_API_URL = os.getenv("EDOC_SIGNATURE_API_URL", "").rstrip("/")
+EDOC_SIGNATURE_API_KEY = os.getenv("EDOC_SIGNATURE_API_KEY", "")
+EDOC_SIGNATURE_KEY_ID = os.getenv("EDOC_SIGNATURE_KEY_ID", "")
 EDOC_HSM_PROVIDER = os.getenv("EDOC_HSM_PROVIDER", "")
 EDOC_CERT_TRUST_STORE = os.getenv("EDOC_CERT_TRUST_STORE", "")
 EDOC_TSA_URL = os.getenv("EDOC_TSA_URL", "")
+EDOC_TSA_API_KEY = os.getenv("EDOC_TSA_API_KEY", "")
 EDOC_TSA_POLICY_OID = os.getenv("EDOC_TSA_POLICY_OID", "1.2.158.歲悅.電子公文.時間戳")
 EDOC_OCSP_RESPONDER_URL = os.getenv("EDOC_OCSP_RESPONDER_URL", "")
 EDOC_CRL_DISTRIBUTION_URL = os.getenv("EDOC_CRL_DISTRIBUTION_URL", "")
@@ -818,11 +822,14 @@ def production_readiness() -> Dict[str, Any]:
         "EDOC_AV_API_KEY",
         "EDOC_MAX_FILE_SIZE_MB",
         "EDOC_ALLOWED_MIME_TYPES",
-        "EDOC_SIGNING_SECRET",
         "EDOC_SIGNATURE_PROVIDER",
+        "EDOC_SIGNATURE_API_URL",
+        "EDOC_SIGNATURE_API_KEY",
+        "EDOC_SIGNATURE_KEY_ID",
         "EDOC_HSM_PROVIDER",
         "EDOC_CERT_TRUST_STORE",
         "EDOC_TSA_URL",
+        "EDOC_TSA_API_KEY",
         "EDOC_OCSP_RESPONDER_URL",
         "EDOC_CRL_DISTRIBUTION_URL",
     ]
@@ -873,6 +880,7 @@ def production_readiness() -> Dict[str, Any]:
             "monitoringWebhook": env_present("MONITORING_WEBHOOK_URL"),
             "sentry": env_present("SENTRY_DSN"),
             "signatureProvider": EDOC_SIGNATURE_PROVIDER,
+            "signatureApi": bool(EDOC_SIGNATURE_API_URL and EDOC_SIGNATURE_API_KEY),
             "hsmProvider": EDOC_HSM_PROVIDER or "未設定",
             "trustStore": bool(EDOC_CERT_TRUST_STORE),
             "tsa": bool(EDOC_TSA_URL),
@@ -947,12 +955,16 @@ def log_structured(level: str, message: str, **fields: Any) -> None:
 def signing_service_status() -> Dict[str, Any]:
     services = {
         "provider": {"configured": EDOC_SIGNATURE_PROVIDER != "local-simulation", "value": EDOC_SIGNATURE_PROVIDER},
+        "providerApi": {"configured": env_present("EDOC_SIGNATURE_API_URL"), "value": EDOC_SIGNATURE_API_URL or "未設定"},
+        "providerCredential": {"configured": env_present("EDOC_SIGNATURE_API_KEY"), "value": "已設定" if env_present("EDOC_SIGNATURE_API_KEY") else "未設定"},
+        "keyId": {"configured": env_present("EDOC_SIGNATURE_KEY_ID"), "value": EDOC_SIGNATURE_KEY_ID or "未設定"},
         "hsm": {"configured": env_present("EDOC_HSM_PROVIDER"), "value": EDOC_HSM_PROVIDER or "未設定"},
         "trustStore": {"configured": env_present("EDOC_CERT_TRUST_STORE"), "value": EDOC_CERT_TRUST_STORE or "未設定"},
         "tsa": {"configured": env_present("EDOC_TSA_URL"), "value": EDOC_TSA_URL or "未設定", "policyOid": EDOC_TSA_POLICY_OID},
+        "tsaCredential": {"configured": env_present("EDOC_TSA_API_KEY"), "value": "已設定" if env_present("EDOC_TSA_API_KEY") else "未設定"},
         "ocsp": {"configured": env_present("EDOC_OCSP_RESPONDER_URL"), "value": EDOC_OCSP_RESPONDER_URL or "未設定"},
         "crl": {"configured": env_present("EDOC_CRL_DISTRIBUTION_URL"), "value": EDOC_CRL_DISTRIBUTION_URL or "未設定"},
-        "signingSecret": {"configured": env_present("EDOC_SIGNING_SECRET"), "value": "已設定" if env_present("EDOC_SIGNING_SECRET") else "未設定"},
+        "signingSecret": {"configured": env_present("EDOC_SIGNING_SECRET") or EDOC_SIGNATURE_PROVIDER != "local-simulation", "value": "已設定" if env_present("EDOC_SIGNING_SECRET") else "正式 provider 簽章"},
     }
     missing = [key for key, item in services.items() if not item["configured"]]
     ready = not missing
@@ -2658,6 +2670,81 @@ def signature_secret() -> bytes:
     return value.encode("utf-8")
 
 
+def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeout: int = 25) -> Dict[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"provider_http_{exc.code}:{detail}") from exc
+
+
+def request_formal_signature(digest_payload: Dict[str, Any], digest: str, certificate: Dict[str, Any], signer: str) -> Dict[str, Any]:
+    if EDOC_SIGNATURE_PROVIDER == "local-simulation":
+        signature_value = hmac.new(signature_secret(), canonical_signature_payload(digest_payload).encode("utf-8"), hashlib.sha256).hexdigest().upper()
+        tsa_token = hmac.new(signature_secret(), f"TSA|{digest}|{digest_payload['timestamp']}".encode("utf-8"), hashlib.sha256).hexdigest().upper()
+        return {
+            "algorithm": "HMAC-SHA256-RSA-PSS-READY",
+            "signature_value": signature_value,
+            "tsa_token": tsa_token,
+            "provider_receipt": {"mode": "local-simulation"},
+        }
+    if not EDOC_SIGNATURE_API_URL or not EDOC_SIGNATURE_API_KEY:
+        raise ValueError("formal_signature_provider_not_configured")
+    result = provider_json_request(
+        f"{EDOC_SIGNATURE_API_URL}/sign",
+        {
+            "provider": EDOC_SIGNATURE_PROVIDER,
+            "key_id": EDOC_SIGNATURE_KEY_ID,
+            "certificate_id": certificate["id"],
+            "certificate_serial": certificate.get("serial_no"),
+            "signer": signer,
+            "digest_sha256": digest,
+            "payload": digest_payload,
+            "tsa_url": EDOC_TSA_URL,
+            "tsa_policy_oid": EDOC_TSA_POLICY_OID,
+        },
+        EDOC_SIGNATURE_API_KEY,
+    )
+    signature_value = result.get("signature_value") or result.get("signature") or result.get("cms") or result.get("p7s")
+    if not signature_value:
+        raise ValueError("formal_signature_provider_missing_signature")
+    tsa_token = result.get("tsa_token") or result.get("timestamp_token") or ""
+    if not tsa_token and EDOC_TSA_URL:
+        tsa_token = request_formal_tsa_token(digest, digest_payload["timestamp"])
+    return {
+        "algorithm": result.get("algorithm") or "RSA-PSS-SHA256",
+        "signature_value": signature_value,
+        "tsa_token": tsa_token,
+        "provider_receipt": result,
+    }
+
+
+def request_formal_tsa_token(digest: str, timestamp: str) -> str:
+    if EDOC_SIGNATURE_PROVIDER == "local-simulation":
+        return hmac.new(signature_secret(), f"TSA|{digest}|{timestamp}".encode("utf-8"), hashlib.sha256).hexdigest().upper()
+    if not EDOC_TSA_URL or not EDOC_TSA_API_KEY:
+        raise ValueError("formal_tsa_not_configured")
+    result = provider_json_request(
+        EDOC_TSA_URL,
+        {"digest_sha256": digest, "policy_oid": EDOC_TSA_POLICY_OID, "timestamp": timestamp},
+        EDOC_TSA_API_KEY,
+    )
+    token = result.get("tsa_token") or result.get("timestamp_token") or result.get("token")
+    if not token:
+        raise ValueError("formal_tsa_missing_token")
+    return token
+
+
 def canonical_signature_payload(payload: Dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -2694,6 +2781,8 @@ def tsa_token_valid(signature: Dict[str, Any]) -> bool:
     digest = signature.get("digest_sha256") or ""
     if not timestamp or not token or not digest:
         return False
+    if EDOC_SIGNATURE_PROVIDER != "local-simulation":
+        return bool(EDOC_TSA_URL and token)
     expected = hmac.new(signature_secret(), f"TSA|{digest}|{timestamp}".encode("utf-8"), hashlib.sha256).hexdigest().upper()
     return hmac.compare_digest(expected, str(token).upper())
 
@@ -2844,11 +2933,15 @@ def create_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any
         "timestamp": timestamp,
     }
     digest = sha256_bytes(canonical_signature_payload(digest_payload).encode("utf-8"))
-    signature_value = hmac.new(signature_secret(), canonical_signature_payload(digest_payload).encode("utf-8"), hashlib.sha256).hexdigest().upper()
-    tsa_token = hmac.new(signature_secret(), f"TSA|{digest}|{timestamp}".encode("utf-8"), hashlib.sha256).hexdigest().upper()
+    formal_signature = request_formal_signature(digest_payload, digest, certificate, signer)
+    signature_value = formal_signature["signature_value"]
+    tsa_token = formal_signature["tsa_token"]
     signature_id = f"ESIG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     non_repudiation = {
         "signer": signer,
+        "provider": EDOC_SIGNATURE_PROVIDER,
+        "provider_key_id": EDOC_SIGNATURE_KEY_ID,
+        "provider_receipt": formal_signature.get("provider_receipt", {}),
         "certificate_serial": certificate["serial_no"],
         "certificate_fingerprint": certificate["fingerprint_sha256"],
         "timestamp": timestamp,
@@ -2867,7 +2960,7 @@ def create_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any
         "certificate_id": certificate["id"],
         "signer": signer,
         "signature_type": payload.get("signature_type") or "seal",
-        "algorithm": "HMAC-SHA256-RSA-PSS-READY",
+        "algorithm": formal_signature["algorithm"],
         "digest_sha256": digest,
         "signature_value": signature_value,
         "tsa_token": tsa_token,
@@ -2948,8 +3041,13 @@ def certificate_health(conn: sqlite3.Connection) -> Dict[str, Any]:
         "certificate_count": len(certificates),
         "trusted_ca_count": len([item for item in authorities if item.get("trust_status") == "trusted"]),
         "services": {
+            "provider": "啟用" if service["services"]["provider"]["configured"] else "仍為模擬",
+            "providerApi": "啟用" if service["services"]["providerApi"]["configured"] else "未設定簽章 API",
+            "providerCredential": "啟用" if service["services"]["providerCredential"]["configured"] else "未設定簽章 API key",
+            "keyId": "啟用" if service["services"]["keyId"]["configured"] else "未設定簽章 key id",
             "chain": "啟用" if service["services"]["trustStore"]["configured"] else "未設定信任根",
             "tsa": "啟用" if service["services"]["tsa"]["configured"] else "未設定 TSA",
+            "tsaCredential": "啟用" if service["services"]["tsaCredential"]["configured"] else "未設定 TSA API key",
             "ocsp": "啟用" if service["services"]["ocsp"]["configured"] else "未設定 OCSP",
             "crl": "啟用" if service["services"]["crl"]["configured"] else "未設定 CRL",
             "hsm": "啟用" if service["services"]["hsm"]["configured"] else "未設定 HSM/KMS",

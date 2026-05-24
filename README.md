@@ -89,6 +89,16 @@ SMTP_PASSWORD=<smtp-password>
 SMTP_FROM=notify@suiyuecare.com
 SMTP_USE_TLS=true
 LINE_WEBHOOK_URL=<line-webhook-url>
+EDOC_SIGNATURE_PROVIDER=<formal-provider-name>
+EDOC_SIGNATURE_API_URL=https://<signature-provider>/api
+EDOC_SIGNATURE_API_KEY=<server-only-signature-api-key>
+EDOC_SIGNATURE_KEY_ID=<hsm-or-kms-key-id>
+EDOC_HSM_PROVIDER=<hsm-or-kms-provider>
+EDOC_CERT_TRUST_STORE=<trusted-root-ca-bundle-or-secret-ref>
+EDOC_TSA_URL=https://<tsa-provider>/timestamp
+EDOC_TSA_API_KEY=<server-only-tsa-api-key>
+EDOC_OCSP_RESPONDER_URL=https://<ocsp-responder>
+EDOC_CRL_DISTRIBUTION_URL=https://<crl-url>
 ```
 
 正式部署手冊：[`docs/deployment-production.md`](docs/deployment-production.md)。
