@@ -1973,16 +1973,16 @@ function renderDraftPreview() {
   const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
   const attachmentsText = data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊";
   preview.innerHTML = `
-    <div class="draft-copy-label">公文</div>
+    <section class="draft-file-meta" aria-label="檔案資訊">
+      <span>檔　號：</span>
+      <span>保存年限：</span>
+    </section>
     <header class="draft-official-head">
-      <section class="draft-recipient-block">
-        <div class="draft-barcode" aria-hidden="true"></div>
-        <div class="draft-postcode">220</div>
-        <div class="draft-address">新北市板橋區中山路1段10號</div>
-        <div class="draft-recipient">受文者：${data.recipient}</div>
-      </section>
+      <h1>
+        <span>歲悅長照股份有限公司</span>
+        <strong>${data.type}</strong>
+      </h1>
       <section class="draft-contact-block">
-        <strong>歲悅長照股份有限公司</strong>
         <span>地址：${data.contactAddress}</span>
         <span>承辦人：${data.contactOwner}</span>
         <span>電話：${data.contactPhone}</span>
@@ -1990,10 +1990,7 @@ function renderDraftPreview() {
         <span>電子信箱：${data.contactEmail}</span>
       </section>
     </header>
-    <section class="draft-paper-title">
-      <div class="draft-org">歲悅長照股份有限公司</div>
-      <div class="draft-type">${data.type}</div>
-    </section>
+    <section class="draft-recipient-line">受文者：${data.recipient}</section>
     <section class="draft-official-meta">
       <div><span>發文日期：</span><strong>${rocDate}</strong></div>
       <div><span>發文字號：</span><strong>${data.no || "系統產生中"}</strong></div>
