@@ -701,13 +701,28 @@ label textarea {
 }
 
 .official-draft-preview {
+  position: relative;
   min-height: 620px;
   padding: 32px 46px 46px;
   border: 1px solid #ead8c2;
   border-radius: 4px;
   background: #fff;
   color: #1f2937;
+  font-family: "標楷體", "DFKai-SB", "BiauKai", "KaiTi", "STKaiti", serif;
   box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.06);
+}
+
+.official-draft-preview .draft-copy-label {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  padding: 2px 8px;
+  border: 1px solid #111827;
+  color: #111827;
+  background: #fff;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1.25;
 }
 
 .official-draft-preview .draft-official-head {
@@ -717,7 +732,7 @@ label textarea {
   align-items: start;
   min-height: 150px;
   color: #111827;
-  font-family: "Noto Serif TC", "PMingLiU", "MingLiU", serif;
+  font-family: inherit;
 }
 
 .official-draft-preview .draft-recipient-block,
@@ -799,7 +814,7 @@ label textarea {
   padding: 24px 0 22px;
   border-bottom: 1px solid #e6d0b7;
   color: #111827;
-  font-family: "Noto Serif TC", "PMingLiU", "MingLiU", serif;
+  font-family: inherit;
   font-size: 17px;
   font-weight: 800;
   line-height: 1.45;

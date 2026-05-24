@@ -1973,6 +1973,7 @@ function renderDraftPreview() {
   const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
   const attachmentsText = data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊";
   preview.innerHTML = `
+    <div class="draft-copy-label">公文</div>
     <header class="draft-official-head">
       <section class="draft-recipient-block">
         <div class="draft-barcode" aria-hidden="true"></div>
