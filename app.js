@@ -1935,17 +1935,24 @@ function renderDraftPreview() {
   const submit = document.querySelector("#submitDispatchBtn");
   if (!preview) return;
   preview.innerHTML = `
-    <div class="draft-org">歲悅長照股份有限公司</div>
-    <div class="draft-type">${data.type}</div>
-    <div class="draft-meta">
+    <header class="draft-letter-head">
+      <div class="draft-org">歲悅長照股份有限公司</div>
+      <div class="draft-type">${data.type}</div>
+    </header>
+    <section class="draft-meta">
       <div class="draft-row"><span>發文字號</span><strong>${data.no || "系統產生中"}</strong></div>
       <div class="draft-row"><span>速別</span><strong>${data.priority}</strong></div>
       <div class="draft-row full"><span>受文者</span><strong>${data.recipient}</strong></div>
       <div class="draft-row full"><span>附件</span><strong>${data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊"}</strong></div>
-    </div>
-    <div class="draft-subject"><span>主旨</span><strong>${data.subject}</strong></div>
-    <div class="draft-body">${data.body || "尚未填寫說明內容。"}</div>
-    <div class="draft-footer">承辦單位：${activeUnit() || "總務"}　承辦角色：${activeRole()}</div>
+    </section>
+    <section class="draft-main">
+      <div class="draft-content-row draft-subject"><span>主旨</span><strong>${data.subject}</strong></div>
+      <div class="draft-content-row draft-description">
+        <span>說明</span>
+        <div class="draft-body">${data.body || "尚未填寫說明內容。"}</div>
+      </div>
+    </section>
+    <footer class="draft-footer">承辦單位：${activeUnit() || "總務"}　承辦角色：${activeRole()}</footer>
   `;
   if (status) status.textContent = draftConfirmed ? "已確認" : "尚未確認";
   if (submit) submit.disabled = !draftConfirmed;
