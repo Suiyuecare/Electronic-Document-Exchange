@@ -1007,7 +1007,7 @@ function setView(target) {
   if (!isRouteAllowed(target)) target = "dashboard";
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === target));
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.target === target));
-  document.querySelector("#pageTitle").textContent = titles[target] || "電子公文交換";
+  document.querySelector("#pageTitle").textContent = simpleRouteTitle(target);
   if (location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
 }
 
@@ -1185,35 +1185,48 @@ function renderScopeZone() {
 }
 
 function identityKindForRole(role = activeRole()) {
-  if (role === "總務") return "generalAffairs";
-  if (["主任", "執行長", "行政部主任"].includes(role)) return "supervisor";
+  if (["總務", "行政部主任", "執行長"].includes(role)) return "generalAffairs";
+  if (role === "主任") return "supervisor";
   return "employee";
 }
 
 const navByIdentity = {
-  employee: ["dashboard", "search", "compose", "dispatch", "inbound", "tracking", "notifications", "archive"],
-  supervisor: ["dashboard", "search", "workflow", "tracking", "dispatch", "seals", "reports", "notifications", "archive", "complianceOps"],
-  generalAffairs: ["dashboard", "search", "inbound", "dispatch", "compose", "exchange", "tracking", "notifications", "archive", "reports"],
-  admin: ["dashboard", "search", "workflow", "exchange", "security", "fileSecurity", "accounts", "reports", "notifications", "jobs", "database", "ops", "complianceOps", "settings"]
+  employee: ["compose", "dashboard", "search"],
+  supervisor: ["compose", "dashboard", "search"],
+  companyOps: ["inbound", "compose", "dashboard", "search"]
 };
 
 function allowedRoutesForRole(role = activeRole()) {
-  const kind = identityKindForRole(role);
-  const base = new Set(navByIdentity[kind] || navByIdentity.employee);
-  if (role === "行政部主任") navByIdentity.admin.forEach((item) => base.add(item));
-  if (role === "執行長") ["reports", "archive", "complianceOps"].forEach((item) => base.add(item));
-  return [...base];
+  if (["行政部主任", "總務", "執行長"].includes(role)) return navByIdentity.companyOps;
+  if (["主任"].includes(role)) return navByIdentity.supervisor;
+  return navByIdentity.employee;
 }
 
 function isRouteAllowed(target) {
   return allowedRoutesForRole().includes(target);
 }
 
+function simpleRouteLabels(role = activeRole()) {
+  const companyWide = ["行政部主任", "總務", "執行長"].includes(role);
+  return companyWide
+    ? { inbound: "公文收發", compose: "撰寫公文", dashboard: "全公司公文待辦", search: "公文紀錄" }
+    : { compose: "撰寫公文", dashboard: "公文待辦", search: "公文紀錄" };
+}
+
+function simpleRouteTitle(target, role = activeRole()) {
+  return simpleRouteLabels(role)[target] || titles[target] || "電子公文";
+}
+
 function applyRoleNavigation() {
   const allowed = allowedRoutesForRole();
+  const labels = simpleRouteLabels();
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.hidden = !allowed.includes(item.dataset.target);
+    if (labels[item.dataset.target]) item.textContent = labels[item.dataset.target];
   });
+  const companyWide = ["行政部主任", "總務", "執行長"].includes(activeRole());
+  document.querySelector("#pullInboundBtn").hidden = !companyWide;
+  document.querySelector("#sendQueueBtn").hidden = !companyWide;
   const active = document.querySelector(".view.active")?.id || "dashboard";
   if (!allowed.includes(active)) setView("dashboard");
 }
@@ -1227,15 +1240,15 @@ function identityWorkbenchData() {
   if (kind === "generalAffairs") {
     return {
       eyebrow: "General Affairs Desk",
-      title: "總務工作台",
-      status: "統一收發入口",
+      title: ["行政部主任", "執行長"].includes(role) ? "全公司公文工作台" : "總務工作台",
+      status: "公文收發 / 全公司待辦",
       headline: `${scopedInbound.filter((doc) => ["待登錄", "待分派"].includes(doc.status)).length} 件收文待處理`,
-      summary: "先拉取 jAgent 來文，再完成登錄、分派與交換異常處理。總務看的是收發入口，不混入行政部門公文。",
+      summary: "只保留公文收發、撰寫公文、全公司待辦與全公司公文紀錄；進階維運與設定不顯示在日常入口。",
       actions: [
-        ["拉取來文", "inbound", "pullJagentBtn", "primary", "從 jAgent 同步今日新來文"],
-        ["收文登錄", "inbound", "registerInboundBtn", "secondary", "補齊收文號、期限與附件"],
-        ["分派主管", "inbound", "assignInboundBtn", "secondary", "把來文送到正確部門主管"],
-        ["重送失敗", "dispatch", "resendDispatchBtn", "secondary", "處理交換失敗與異常重送"]
+        ["公文收發", "inbound", "", "primary", "收文、分派與交換處理"],
+        ["撰寫公文", "compose", "", "secondary", "建立函稿並預覽"],
+        ["全公司待辦", "dashboard", "", "secondary", "查看待處理公文"],
+        ["公文紀錄", "search", "", "secondary", "查詢全公司收發紀錄"]
       ],
       todos: [
         ...scopedInbound.filter((doc) => ["待登錄", "待分派"].includes(doc.status)).slice(0, 4).map((doc) => ({ title: doc.subject, meta: `${doc.receiveNo} · ${doc.status}`, body: `${doc.agency} · ${doc.dueDate}` })),
@@ -1254,12 +1267,11 @@ function identityWorkbenchData() {
       title: "主管工作台",
       status: "簽核與風險",
       headline: `${pendingTasks.length + myTracking.filter((item) => item.status !== "已完成").length} 件待主管處理`,
-      summary: "集中處理簽核、退回補正、逾期與高風險案件，不需要進到每個後台頁面逐一尋找。",
+      summary: "主管只保留撰寫公文、公文待辦與部門公文紀錄；不顯示收發、維運、報表與系統設定頁籤。",
       actions: [
-        ["待簽核", "workflow", "workflowApproveBtn", "primary", "核准目前待辦流程"],
-        ["退回補正", "workflow", "workflowRejectBtn", "secondary", "退回內容不足或附件缺漏案件"],
-        ["看逾期", "tracking", "sendOverdueBtn", "secondary", "掌握未收確認與逾期件"],
-        ["看報表", "reports", "", "secondary", "查看收發量、成功率與異常"]
+        ["撰寫公文", "compose", "", "primary", "建立函稿並預覽"],
+        ["公文待辦", "dashboard", "", "secondary", "簽核、退回與逾期提醒"],
+        ["公文紀錄", "search", "", "secondary", "只看該部門收發公文"]
       ],
       todos: [
         ...pendingTasks.slice(0, 4).map((task) => ({ title: task.title, meta: `${task.step} · ${task.status}`, body: task.type })),
@@ -1278,12 +1290,11 @@ function identityWorkbenchData() {
     title: "員工工作台",
     status: "我的待辦",
     headline: `${assignedInbound.length + drafts.length} 件我的公文`,
-    summary: "只保留員工日常需要的建立函稿、補附件、回覆與退回補正，不暴露總務或主管維運功能。",
+    summary: "員工只保留撰寫公文、公文待辦與部門公文紀錄；不顯示總務、主管維運或全公司功能。",
     actions: [
-      ["建立函稿", "compose", "", "primary", "填寫內容並確認即時函稿預覽"],
-      ["我的收文", "inbound", "", "secondary", "查看被分派給我的來文"],
-      ["補附件", "fileSecurity", "", "secondary", "處理缺漏附件與檔案檢核"],
-      ["退回補正", "tracking", "", "secondary", "查看主管退回原因與期限"]
+      ["撰寫公文", "compose", "", "primary", "填寫內容並確認即時函稿預覽"],
+      ["公文待辦", "dashboard", "", "secondary", "查看我的待辦與退回補正"],
+      ["公文紀錄", "search", "", "secondary", "只看該部門收發公文"]
     ],
     todos: [
       ...assignedInbound.slice(0, 3).map((doc) => ({ title: doc.subject, meta: `${doc.receiveNo} · ${doc.status}`, body: `${doc.agency} · ${doc.dueDate}` })),
@@ -1333,8 +1344,8 @@ function dashboardRoleData() {
     const pendingInbound = scopedInbound.filter((doc) => ["待登錄", "待分派"].includes(doc.status));
     return {
       eyebrow: "General Affairs Home",
-      title: "總務首頁",
-      scope: "收文入口 / 交換作業",
+      title: role === "總務" ? "總務首頁" : `${role}首頁`,
+      scope: "公文收發 / 全公司待辦",
       metrics: [
         ["待登錄/分派", pendingInbound.length, `待登錄 ${pendingInbound.filter((doc) => doc.status === "待登錄").length} / 待分派 ${pendingInbound.filter((doc) => doc.status === "待分派").length}`],
         ["待發交換", waitDispatch.length, "清稿、封裝或補正後送 jAgent"],
@@ -1348,9 +1359,9 @@ function dashboardRoleData() {
         ["等待確認", waitingConfirm.length],
         ["交換失敗", exchangeFailed.length]
       ],
-      primaryTitle: "總務收發佇列",
+      primaryTitle: "公文收發佇列",
       primaryTarget: "inbound",
-      primaryButton: "處理收文",
+      primaryButton: "公文收發",
       checks: roleChecks.generalAffairs
     };
   }
@@ -1374,8 +1385,8 @@ function dashboardRoleData() {
         ["需用印", sealRequests.filter((request) => request.status === "待簽核").length]
       ],
       primaryTitle: "主管簽核與風險",
-      primaryTarget: "workflow",
-      primaryButton: "查看流程",
+      primaryTarget: "dashboard",
+      primaryButton: "公文待辦",
       checks: roleChecks.supervisor
     };
   }
@@ -5952,6 +5963,30 @@ function localUnifiedSearch(term, category = "all", status = "", limit = 80) {
   }).slice(0, Number(limit));
 }
 
+function filterSearchResultsForRole(results) {
+  if (["行政部主任", "總務", "執行長"].includes(activeRole())) return results;
+  const visibleKeys = new Set([
+    ...scopedInboundDocs().flatMap((doc) => [doc.id, doc.receiveNo, doc.subject]),
+    ...scopedDispatchDocs().flatMap((doc) => [doc.id, doc.no, doc.subject])
+  ].filter(Boolean));
+  return results.filter((item) => {
+    const record = item.record || {};
+    const text = [
+      item.id,
+      item.title,
+      item.subtitle,
+      record.sourceId,
+      record.docNo,
+      record.docId,
+      record.subject,
+      record.owner,
+      record.dept,
+      record.unit
+    ].join(" ");
+    return [...visibleKeys].some((key) => text.includes(key)) || record.owner === activeRole() || record.dept === activeUnit();
+  });
+}
+
 function renderSearch() {
   const counts = searchResults.reduce((acc, item) => {
     if (item.table === "documents") acc.docs += 1;
@@ -6042,6 +6077,7 @@ async function runUnifiedSearch() {
   } catch (error) {
     searchResults = localUnifiedSearch(q, category, status, limit);
   }
+  searchResults = filterSearchResultsForRole(searchResults);
   selectedSearchId = searchResults[0]?.id || "";
   renderSearch();
 }
