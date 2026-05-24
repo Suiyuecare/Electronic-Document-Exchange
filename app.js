@@ -1562,6 +1562,7 @@ function enterApp(message = "登入成功，已進入電子公文交換系統。
   renderInboundDetail();
   renderDispatchBoard();
   renderDispatchDetail();
+  applyComposeContactDefaults(true);
   showToast(message);
 }
 
@@ -1592,6 +1593,7 @@ function applyAuthUser() {
   renderScopeZone();
   renderRoleDashboard();
   renderIdentityWorkbench();
+  applyComposeContactDefaults(true);
 }
 
 async function loginWithBackend(email, password, provider) {
@@ -1922,10 +1924,43 @@ function composePayload() {
     type: document.querySelector("#docType")?.value || "函",
     priority: document.querySelector("#priority")?.value || "普通件",
     recipient: document.querySelector("#recipient")?.value.trim() || "未指定受文者",
+    contactAddress: document.querySelector("#contactAddress")?.value.trim() || "220205 新北市板橋區英士路192之1號",
+    contactOwner: document.querySelector("#contactOwner")?.value.trim() || activeRole(),
+    contactPhone: document.querySelector("#contactPhone")?.value.trim() || "(02)2257-7155 分機3762",
+    contactFax: document.querySelector("#contactFax")?.value.trim() || "(02)2254-4029",
+    contactEmail: document.querySelector("#contactEmail")?.value.trim() || "edoc@suiyuecare.com",
     subject: document.querySelector("#subject")?.value.trim() || "未填主旨",
     body: document.querySelector("#bodyText")?.value.trim() || "",
     attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name)
   };
+}
+
+function composeContactDefaults(role = activeRole()) {
+  const unit = activeUnit() || roleDataScopes[role]?.departments?.[0] || "業務部";
+  const account = userAccounts.find((item) => item.role === role && item.status === "啟用");
+  return {
+    contactAddress: "220205 新北市板橋區英士路192之1號",
+    contactOwner: authState?.user?.name || account?.name || role,
+    contactPhone: "(02)2257-7155 分機3762",
+    contactFax: "(02)2254-4029",
+    contactEmail: authState?.user?.email || account?.email || "edoc@suiyuecare.com",
+    unit
+  };
+}
+
+function applyComposeContactDefaults(force = false) {
+  const defaults = composeContactDefaults();
+  [
+    ["#contactAddress", defaults.contactAddress],
+    ["#contactOwner", defaults.contactOwner],
+    ["#contactPhone", defaults.contactPhone],
+    ["#contactFax", defaults.contactFax],
+    ["#contactEmail", defaults.contactEmail]
+  ].forEach(([selector, value]) => {
+    const input = document.querySelector(selector);
+    if (input && (force || !input.value.trim())) input.value = value;
+  });
+  renderDraftPreview();
 }
 
 function renderDraftPreview() {
@@ -1947,11 +1982,11 @@ function renderDraftPreview() {
       </section>
       <section class="draft-contact-block">
         <strong>歲悅長照股份有限公司</strong>
-        <span>地址：新北市板橋區中山路1段10號</span>
-        <span>承辦人：${activeRole()}</span>
-        <span>電話：(02)2257-7155　分機3762</span>
-        <span>傳真：(02)2254-4029</span>
-        <span>電子信箱：edoc@suiyuecare.com</span>
+        <span>地址：${data.contactAddress}</span>
+        <span>承辦人：${data.contactOwner}</span>
+        <span>電話：${data.contactPhone}</span>
+        <span>傳真：${data.contactFax}</span>
+        <span>電子信箱：${data.contactEmail}</span>
       </section>
     </header>
     <section class="draft-paper-title">
@@ -7749,6 +7784,7 @@ document.querySelector("#roleSelect").addEventListener("change", (event) => {
   renderDispatchBoard();
   renderDispatchDetail();
   renderWorkflowRole();
+  applyComposeContactDefaults(true);
 });
 
 document.querySelector("#composeForm").addEventListener("submit", (event) => {
@@ -7861,7 +7897,7 @@ document.querySelector("#resetDraftConfirmBtn").addEventListener("click", () => 
   setDraftConfirmed(false);
   showToast("已取消函稿確認。");
 });
-["#docType", "#priority", "#recipient", "#subject", "#bodyText", "#attachments"].forEach((selector) => {
+["#docType", "#priority", "#recipient", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#subject", "#bodyText", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);
   element?.addEventListener("change", markDraftDirty);
@@ -8429,6 +8465,7 @@ document.querySelector("#identityWorkbench").addEventListener("click", (event) =
 
 applyEdocRoleOptions();
 assignNextDispatchNo(true);
+applyComposeContactDefaults();
 renderDraftPreview();
 applyRoleNavigation();
 renderScopeZone();
