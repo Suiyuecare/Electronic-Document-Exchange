@@ -6450,13 +6450,22 @@ function renderWorkflowTasks() {
       <td>${task.step}</td>
       <td>${task.role}</td>
       <td><span class="badge ${badgeClass(task.status)}">${task.status}</span></td>
-      <td><div class="row-actions"><button class="segment" data-workflow-approve="${task.id}" type="button">授權</button><button class="segment" data-workflow-reject="${task.id}" type="button">退回</button></div></td>
+      <td><div class="row-actions"><button class="segment" data-workflow-progress="${task.id}" type="button">進度</button><button class="segment" data-workflow-approve="${task.id}" type="button">授權</button><button class="segment" data-workflow-reject="${task.id}" type="button">退回</button></div></td>
     </tr>
   `).join("");
   document.querySelectorAll("[data-workflow-select]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedWorkflowTaskId = button.dataset.workflowSelect;
       renderWorkflowTasks();
+      renderApprovalProgress();
+    });
+  });
+  document.querySelectorAll("[data-workflow-progress]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedWorkflowTaskId = button.dataset.workflowProgress;
+      renderWorkflowTasks();
+      renderApprovalProgress();
+      document.querySelector("#approvalProgressPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   });
   document.querySelectorAll("[data-workflow-approve]").forEach((button) => {
@@ -6474,6 +6483,102 @@ function renderWorkflowSteps() {
       <div>
         <strong>${role}</strong>
         <p>${body}</p>
+      </div>
+    </article>
+  `).join("");
+}
+
+function currentWorkflowTask() {
+  return workflowTasks.find((task) => task.id === selectedWorkflowTaskId) || workflowTasks[0] || null;
+}
+
+function approvalTemplateForTask(task) {
+  if (!task) return [];
+  if (task.template && workflowTemplates[task.template]) return workflowTemplates[task.template].steps;
+  if (task.type === "發文") return workflowTemplates.standard.steps;
+  if (task.type === "收文") return ["總務收文登錄", "附件與格式檢核", "分派部門主管", "主管承接簽核", "歸檔保存"];
+  if (task.type === "稽核") return ["建立抽核案件", "稽核人員查核", "主管覆核", "完成稽核紀錄"];
+  return ["建立設定需求", "資訊管理員檢核", "行政部主任核定", "套用設定"];
+}
+
+function approvalRoleForStep(step, task) {
+  if (/執行長|負責人/.test(step)) return "執行長";
+  if (/行政部主任|清稿|資安|核定|主管覆核/.test(step)) return "行政部主任";
+  if (/總務|收文|用印|歸檔|jAgent|交換/.test(step)) return "總務";
+  if (/部門主管|主管承接/.test(step)) return "主任";
+  if (/會計|財務/.test(step)) return "會計";
+  if (/人資/.test(step)) return "人資";
+  if (/業務助理|擬稿/.test(step)) return "業務助理";
+  if (/資訊/.test(step)) return "行政部主任";
+  return task?.role || workflowRole;
+}
+
+function approvalCurrentIndex(task, steps) {
+  if (!task || !steps.length) return 0;
+  if (/已授權|完成|已押章|交換完成|歸檔/.test(task.status)) return steps.length - 1;
+  if (/退回|抽回/.test(task.status)) return Math.max(0, task.currentStepIndex || 0);
+  if (Number.isInteger(task.currentStepIndex)) return Math.min(task.currentStepIndex, steps.length - 1);
+  const stepText = task.step || "";
+  const found = steps.findIndex((step) => step.includes(stepText) || stepText.includes(step) || step.includes(task.role));
+  return found >= 0 ? found : 0;
+}
+
+function approvalProgressSnapshot(task = currentWorkflowTask()) {
+  const steps = approvalTemplateForTask(task);
+  const currentIndex = approvalCurrentIndex(task, steps);
+  return {
+    task,
+    steps: steps.map((step, index) => {
+      const returned = /退回|抽回/.test(task?.status || "") && index === currentIndex;
+      const state = returned ? "returned" : index < currentIndex ? "done" : index === currentIndex ? "current" : "pending";
+      return {
+        no: String(index + 1).padStart(2, "0"),
+        title: step,
+        owner: approvalRoleForStep(step, task),
+        state,
+        status: state === "done" ? "已完成" : state === "current" ? task.status : state === "returned" ? task.status : "待後續",
+        time: state === "done" ? task.lastSignedAt || "已留存時間戳" : state === "current" ? task.lastSignedAt || "等待處理" : "尚未到關",
+        comment: state === "current" || state === "returned" ? task.lastComment || "尚未填寫簽核意見。" : "通過後會寫入不可否認紀錄。"
+      };
+    })
+  };
+}
+
+function renderApprovalProgress() {
+  const { task, steps } = approvalProgressSnapshot();
+  const status = document.querySelector("#approvalProgressStatus");
+  const summary = document.querySelector("#approvalProgressSummary");
+  const stepList = document.querySelector("#approvalProgressSteps");
+  if (!status || !summary || !stepList) return;
+  if (!task) {
+    status.textContent = "未選取";
+    summary.innerHTML = `<p class="empty-text">請先選取一筆簽核案件。</p>`;
+    stepList.innerHTML = "";
+    return;
+  }
+  const doneCount = steps.filter((step) => step.state === "done").length;
+  const currentStep = steps.find((step) => step.state === "current" || step.state === "returned") || steps[0];
+  status.textContent = `${doneCount}/${steps.length} 關`;
+  summary.innerHTML = `
+    <article class="approval-progress-card">
+      <span>${task.id} · ${task.type}</span>
+      <strong>${task.title}</strong>
+      <p>目前停在「${currentStep.title}」，負責角色：${currentStep.owner}，狀態：${task.status}。</p>
+      <dl>
+        <div><dt>目前節點</dt><dd>${task.step}</dd></div>
+        <div><dt>簽核角色</dt><dd>${task.role}</dd></div>
+        <div><dt>最近時間戳</dt><dd>${task.lastSignedAt || "尚未簽核"}</dd></div>
+        <div><dt>簽核意見</dt><dd>${task.lastComment || "尚未填寫"}</dd></div>
+      </dl>
+    </article>
+  `;
+  stepList.innerHTML = steps.map((step) => `
+    <article class="approval-step ${step.state}">
+      <time>${step.no}</time>
+      <div>
+        <strong>${step.title}</strong>
+        <span>${step.owner} · ${step.status}</span>
+        <p>${step.time}｜${step.comment}</p>
       </div>
     </article>
   `).join("");
@@ -6577,8 +6682,65 @@ function mutateWorkflowTasks(ids, status) {
     }
   });
   renderWorkflowTasks();
+  renderApprovalProgress();
   addWorkflowAudit(status, `已更新 ${ids.length} 件待辦為「${status}」。`);
   showToast(`流程已更新：${status}。`);
+}
+
+function moveApprovalToNextStep() {
+  const task = currentWorkflowTask();
+  if (!task) return showToast("請先選取簽核案件。");
+  const steps = approvalTemplateForTask(task);
+  const currentIndex = approvalCurrentIndex(task, steps);
+  if (/已授權|完成|已押章|交換完成|歸檔/.test(task.status) && currentIndex >= steps.length - 1) {
+    return blockOperation("此案件已完成簽核流程，不需要再送下一關。", addWorkflowAudit, "簽核進度防呆");
+  }
+  const nextIndex = Math.min(currentIndex + 1, steps.length - 1);
+  task.currentStepIndex = nextIndex;
+  task.step = steps[nextIndex];
+  task.role = approvalRoleForStep(task.step, task);
+  task.status = nextIndex === steps.length - 1 ? "待最終確認" : "待簽核";
+  task.lastSignedAt = new Date().toLocaleString("zh-TW", { hour12: false });
+  task.lastComment = document.querySelector("#workflowComment")?.value.trim() || `已送至 ${task.role} 處理。`;
+  addWorkflowProof("送下一關", `${task.title} 已送至「${task.step}」，負責角色：${task.role}，意見：${task.lastComment}`);
+  addWorkflowAudit("送下一關", `${task.id} 已推進至「${task.step}」。`);
+  renderWorkflowTasks();
+  renderApprovalProgress();
+  renderIdentityWorkbench();
+  renderRoleDashboard();
+  showToast("已送下一關。");
+}
+
+function returnApprovalForCorrection() {
+  const task = currentWorkflowTask();
+  if (!task) return showToast("請先選取簽核案件。");
+  const comment = document.querySelector("#workflowComment")?.value.trim();
+  if (!hasMinimumText(comment)) return blockOperation("退回補正必須填寫至少 6 個字的簽核意見。", addWorkflowAudit, "簽核進度防呆");
+  task.status = "退回補正";
+  task.lastSignedAt = new Date().toLocaleString("zh-TW", { hour12: false });
+  task.lastComment = comment;
+  addWorkflowProof("退回補正", `${task.title} 已退回補正，意見：${comment}`);
+  addWorkflowAudit("退回補正", `${task.id} 已退回補正。`);
+  renderWorkflowTasks();
+  renderApprovalProgress();
+  renderIdentityWorkbench();
+  renderRoleDashboard();
+  showToast("已退回補正。");
+}
+
+function exportApprovalProgress() {
+  const { task, steps } = approvalProgressSnapshot();
+  if (!task) return showToast("請先選取簽核案件。");
+  const payload = {
+    exportedAt: new Date().toLocaleString("zh-TW", { hour12: false }),
+    exportedBy: activeRole(),
+    task,
+    progress: steps,
+    nonRepudiationProof: workflowProofLog.filter(([, , body]) => body.includes(task.title) || body.includes(task.id))
+  };
+  downloadTextFile(`${task.id}-approval-progress.json`, JSON.stringify(payload, null, 2));
+  addWorkflowAudit("匯出簽核進度", `${task.id} 簽核進度已匯出。`);
+  showToast("簽核進度已匯出。");
 }
 
 function applyWorkflowTemplate() {
@@ -6594,8 +6756,10 @@ function applyWorkflowTemplate() {
     status: "待處理",
     template: activeWorkflowTemplate
   });
+  selectedWorkflowTaskId = workflowTasks[0].id;
   renderWorkflowTemplateSteps();
   renderWorkflowTasks();
+  renderApprovalProgress();
   addWorkflowAudit("套用流程範本", `${template.name} 已套用，新增 ${template.steps.length} 個簽核節點。`);
   addWorkflowProof("流程範本建立", `${template.name} / ${docType} 已建立流程實例。`);
   showToast("流程範本已套用。");
@@ -6647,6 +6811,7 @@ function applyWorkflowProxy(id) {
     task.lastComment = `代理原因：${proxy.reason}`;
   });
   renderWorkflowTasks();
+  renderApprovalProgress();
   addWorkflowAudit("套用代理人", `已將待辦由 ${proxy.from} 改派給代理 ${proxy.to}。`);
   addWorkflowProof("代理改派", `${proxy.from} 待辦已由 ${proxy.to} 代理處理。`);
   showToast("代理人已套用。");
@@ -6680,6 +6845,7 @@ function runWorkflowAdvancedAction() {
     addWorkflowProof(actionMap[action], `${task.title} → ${target}，意見：${comment}`);
   });
   renderWorkflowTasks();
+  renderApprovalProgress();
   addWorkflowAudit("執行進階簽核動作", `已對 ${ids.length} 件執行「${actionMap[action]}」，目標：${target}。`);
   showToast("簽核動作已執行。");
 }
@@ -7994,6 +8160,13 @@ document.querySelector("#workflowSyncRoleBtn").addEventListener("click", () => {
 document.querySelector("#workflowApproveBtn").addEventListener("click", () => mutateWorkflowTasks(selectedWorkflowIds(), "已授權"));
 document.querySelector("#workflowRejectBtn").addEventListener("click", () => mutateWorkflowTasks(selectedWorkflowIds(), "退回補正"));
 document.querySelector("#workflowAssignBtn").addEventListener("click", () => mutateWorkflowTasks(selectedWorkflowIds(), "指派完成"));
+document.querySelector("#workflowProgressBtn").addEventListener("click", () => {
+  renderApprovalProgress();
+  document.querySelector("#approvalProgressPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+document.querySelector("#approvalNextStepBtn").addEventListener("click", moveApprovalToNextStep);
+document.querySelector("#approvalReturnBtn").addEventListener("click", returnApprovalForCorrection);
+document.querySelector("#approvalExportBtn").addEventListener("click", exportApprovalProgress);
 document.querySelector("#permissionTestForm").addEventListener("submit", (event) => {
   event.preventDefault();
   checkPermission(document.querySelector("#permissionAction").value);
@@ -8486,6 +8659,7 @@ renderFormatAuditLog();
 renderWorkflowRole();
 renderWorkflowTasks();
 renderWorkflowSteps();
+renderApprovalProgress();
 renderWorkflowAuditLog();
 renderWorkflowTemplateSteps();
 renderWorkflowConditions();

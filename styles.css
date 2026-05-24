@@ -1229,6 +1229,145 @@ tr:last-child td {
   justify-items: start;
 }
 
+.approval-progress-panel {
+  margin-top: 18px;
+}
+
+.approval-progress-summary {
+  margin-bottom: 14px;
+}
+
+.approval-progress-card {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.approval-progress-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.approval-progress-card strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--ink);
+  font-size: 20px;
+}
+
+.approval-progress-card p {
+  margin: 8px 0 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.approval-progress-card dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.approval-progress-card div {
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--soft);
+}
+
+.approval-progress-card dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.approval-progress-card dd {
+  margin: 4px 0 0;
+  color: var(--ink);
+  font-weight: 900;
+}
+
+.approval-progress-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.approval-step {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 132px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.approval-step time {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.approval-step strong {
+  display: block;
+  color: var(--ink);
+}
+
+.approval-step span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.approval-step p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.approval-step.done {
+  border-color: rgba(22, 163, 74, 0.28);
+  background: #f0fdf4;
+}
+
+.approval-step.done time {
+  background: #16a34a;
+  color: #fff;
+}
+
+.approval-step.current {
+  border-color: rgba(217, 119, 6, 0.36);
+  background: #fff7ed;
+}
+
+.approval-step.current time {
+  background: #d97706;
+  color: #fff;
+}
+
+.approval-step.returned {
+  border-color: rgba(220, 38, 38, 0.28);
+  background: #fef2f2;
+}
+
+.approval-step.returned time {
+  background: #dc2626;
+  color: #fff;
+}
+
 .seal-mark {
   display: grid;
   width: 88px;
@@ -2271,6 +2410,11 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .approval-progress-card dl,
+  .approval-progress-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .span-7,
   .span-5 {
     grid-column: 1 / -1;
@@ -2385,6 +2529,11 @@ textarea {
   .job-toolbar,
   .ops-toolbar,
   .inline-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-progress-card dl,
+  .approval-progress-steps {
     grid-template-columns: 1fr;
   }
 
