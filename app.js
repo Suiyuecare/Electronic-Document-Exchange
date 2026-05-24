@@ -1934,16 +1934,36 @@ function renderDraftPreview() {
   const status = document.querySelector("#draftConfirmStatus");
   const submit = document.querySelector("#submitDispatchBtn");
   if (!preview) return;
+  const today = new Date();
+  const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
+  const attachmentsText = data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊";
   preview.innerHTML = `
-    <header class="draft-letter-head">
+    <header class="draft-official-head">
+      <section class="draft-recipient-block">
+        <div class="draft-barcode" aria-hidden="true"></div>
+        <div class="draft-postcode">220</div>
+        <div class="draft-address">新北市板橋區中山路1段10號</div>
+        <div class="draft-recipient">受文者：${data.recipient}</div>
+      </section>
+      <section class="draft-contact-block">
+        <strong>歲悅長照股份有限公司</strong>
+        <span>地址：新北市板橋區中山路1段10號</span>
+        <span>承辦人：${activeRole()}</span>
+        <span>電話：(02)2257-7155　分機3762</span>
+        <span>傳真：(02)2254-4029</span>
+        <span>電子信箱：edoc@suiyuecare.com</span>
+      </section>
+    </header>
+    <section class="draft-paper-title">
       <div class="draft-org">歲悅長照股份有限公司</div>
       <div class="draft-type">${data.type}</div>
-    </header>
-    <section class="draft-meta">
-      <div class="draft-row"><span>發文字號</span><strong>${data.no || "系統產生中"}</strong></div>
-      <div class="draft-row"><span>速別</span><strong>${data.priority}</strong></div>
-      <div class="draft-row full"><span>受文者</span><strong>${data.recipient}</strong></div>
-      <div class="draft-row full"><span>附件</span><strong>${data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊"}</strong></div>
+    </section>
+    <section class="draft-official-meta">
+      <div><span>發文日期：</span><strong>${rocDate}</strong></div>
+      <div><span>發文字號：</span><strong>${data.no || "系統產生中"}</strong></div>
+      <div><span>速別：</span><strong>${data.priority}</strong></div>
+      <div><span>密等及解密條件或保密期限：</span><strong>普通</strong></div>
+      <div><span>附件：</span><strong>${attachmentsText}</strong></div>
     </section>
     <section class="draft-main">
       <div class="draft-content-row draft-subject"><span>主旨</span><strong>${data.subject}</strong></div>

@@ -702,7 +702,7 @@ label textarea {
 
 .official-draft-preview {
   min-height: 620px;
-  padding: 54px 56px 46px;
+  padding: 32px 46px 46px;
   border: 1px solid #ead8c2;
   border-radius: 4px;
   background: #fff;
@@ -710,56 +710,103 @@ label textarea {
   box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.06);
 }
 
-.official-draft-preview .draft-letter-head {
-  padding-bottom: 42px;
+.official-draft-preview .draft-official-head {
+  display: grid;
+  grid-template-columns: minmax(0, 0.52fr) minmax(280px, 0.48fr);
+  gap: 34px;
+  align-items: start;
+  min-height: 150px;
+  color: #111827;
+  font-family: "Noto Serif TC", "PMingLiU", "MingLiU", serif;
+}
+
+.official-draft-preview .draft-recipient-block,
+.official-draft-preview .draft-contact-block {
+  display: grid;
+  gap: 5px;
+}
+
+.official-draft-preview .draft-barcode {
+  width: 188px;
+  height: 36px;
+  margin-bottom: 8px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      #111 0 2px,
+      transparent 2px 4px,
+      #111 4px 5px,
+      transparent 5px 8px,
+      #111 8px 11px,
+      transparent 11px 14px
+    );
+}
+
+.official-draft-preview .draft-postcode,
+.official-draft-preview .draft-address {
+  padding-left: 34px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.official-draft-preview .draft-recipient {
+  margin-top: 4px;
+  padding-left: 34px;
+  color: #111827;
+  font-size: 21px;
+  font-weight: 900;
+  line-height: 1.55;
+  white-space: pre-line;
+}
+
+.official-draft-preview .draft-contact-block {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.official-draft-preview .draft-contact-block strong {
+  margin-bottom: 2px;
+  font-size: 17px;
+}
+
+.official-draft-preview .draft-paper-title {
+  margin-top: 28px;
+  padding-bottom: 26px;
   border-bottom: 1px solid #e6d0b7;
 }
 
 .official-draft-preview .draft-org {
   text-align: center;
   color: #7c3f00;
-  font-size: 30px;
+  font-size: 28px;
   font-weight: 900;
   line-height: 1.25;
 }
 
 .official-draft-preview .draft-type {
-  margin-top: 18px;
+  margin-top: 12px;
   text-align: center;
   color: #1f2937;
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 900;
   line-height: 1.1;
 }
 
-.official-draft-preview .draft-meta {
+.official-draft-preview .draft-official-meta {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px 42px;
-  padding: 26px 0;
+  gap: 5px;
+  padding: 24px 0 22px;
   border-bottom: 1px solid #e6d0b7;
-}
-
-.official-draft-preview .draft-row {
-  display: grid;
-  grid-template-columns: 118px minmax(0, 1fr);
-  gap: 18px;
-  line-height: 1.6;
-}
-
-.official-draft-preview .draft-row.full {
-  grid-column: 1 / -1;
-}
-
-.official-draft-preview .draft-row span {
-  color: #64748b;
+  color: #111827;
+  font-family: "Noto Serif TC", "PMingLiU", "MingLiU", serif;
+  font-size: 17px;
   font-weight: 800;
-  font-size: 18px;
+  line-height: 1.45;
 }
 
-.official-draft-preview .draft-row strong {
-  color: #1f2937;
-  font-size: 18px;
+.official-draft-preview .draft-official-meta span {
+  font-weight: 900;
 }
 
 .official-draft-preview .draft-main {
