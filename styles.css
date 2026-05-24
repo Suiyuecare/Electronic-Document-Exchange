@@ -1368,6 +1368,107 @@ tr:last-child td {
   color: #fff;
 }
 
+.dashboard-approval-panel {
+  margin-top: 18px;
+}
+
+.dashboard-approval-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.34fr) minmax(0, 0.66fr);
+  gap: 16px;
+}
+
+.dashboard-approval-list {
+  display: grid;
+  gap: 10px;
+}
+
+.dashboard-approval-item {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dashboard-approval-item.active {
+  border-color: rgba(217, 119, 6, 0.4);
+  background: #fff7ed;
+}
+
+.dashboard-approval-item strong {
+  font-size: 15px;
+}
+
+.dashboard-approval-item span,
+.dashboard-approval-item small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dashboard-approval-detail {
+  display: grid;
+  gap: 12px;
+}
+
+.approval-progress-card.compact {
+  padding: 14px;
+}
+
+.dashboard-approval-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dashboard-approval-step {
+  display: grid;
+  gap: 6px;
+  min-height: 104px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.dashboard-approval-step time {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.dashboard-approval-step strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.dashboard-approval-step span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dashboard-approval-step.done {
+  border-color: rgba(22, 163, 74, 0.28);
+  background: #f0fdf4;
+}
+
+.dashboard-approval-step.current {
+  border-color: rgba(217, 119, 6, 0.36);
+  background: #fff7ed;
+}
+
+.dashboard-approval-step.returned {
+  border-color: rgba(220, 38, 38, 0.28);
+  background: #fef2f2;
+}
+
 .seal-mark {
   display: grid;
   width: 88px;
@@ -2411,7 +2512,9 @@ textarea {
   }
 
   .approval-progress-card dl,
-  .approval-progress-steps {
+  .approval-progress-steps,
+  .dashboard-approval-layout,
+  .dashboard-approval-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2533,7 +2636,9 @@ textarea {
   }
 
   .approval-progress-card dl,
-  .approval-progress-steps {
+  .approval-progress-steps,
+  .dashboard-approval-layout,
+  .dashboard-approval-steps {
     grid-template-columns: 1fr;
   }
 

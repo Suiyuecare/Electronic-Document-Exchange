@@ -1443,7 +1443,71 @@ function renderRoleDashboard() {
       <p>${body}</p>
     </article>
   `).join("");
+  renderDashboardApprovalProgress();
   renderSupervisorCommandDashboard();
+}
+
+function dashboardApprovalTasks() {
+  const role = activeRole();
+  const companyWide = canSeeCompanyWideDocs(role);
+  const visible = companyWide
+    ? workflowTasks
+    : workflowTasks.filter((task) => task.role === role || (role === "主任" && /主管|主任/.test(task.step)));
+  return visible.length ? visible : workflowTasks.slice(0, 3);
+}
+
+function renderDashboardApprovalProgress() {
+  const panel = document.querySelector("#dashboardApprovalPanel");
+  const list = document.querySelector("#dashboardApprovalList");
+  const summary = document.querySelector("#dashboardApprovalSummary");
+  const steps = document.querySelector("#dashboardApprovalSteps");
+  const status = document.querySelector("#dashboardApprovalStatus");
+  if (!panel || !list || !summary || !steps || !status) return;
+  const tasks = dashboardApprovalTasks();
+  if (!tasks.some((task) => task.id === selectedWorkflowTaskId)) selectedWorkflowTaskId = tasks[0]?.id || selectedWorkflowTaskId;
+  const task = currentWorkflowTask();
+  const snapshot = approvalProgressSnapshot(task);
+  const currentStep = snapshot.steps.find((step) => step.state === "current" || step.state === "returned") || snapshot.steps[0];
+  const doneCount = snapshot.steps.filter((step) => step.state === "done").length;
+  status.textContent = `${tasks.length} 件可檢視`;
+  list.innerHTML = tasks.map((item) => {
+    const itemSnapshot = approvalProgressSnapshot(item);
+    const itemCurrent = itemSnapshot.steps.find((step) => step.state === "current" || step.state === "returned") || itemSnapshot.steps[0];
+    return `
+      <button class="dashboard-approval-item ${item.id === selectedWorkflowTaskId ? "active" : ""}" type="button" data-dashboard-approval="${item.id}">
+        <strong>${item.title}</strong>
+        <span>${item.id} · ${item.type} · ${item.status}</span>
+        <small>目前：${itemCurrent?.title || item.step}</small>
+      </button>
+    `;
+  }).join("");
+  if (!task) {
+    summary.innerHTML = `<p class="empty-text">目前沒有可檢視的簽核進度。</p>`;
+    steps.innerHTML = "";
+    return;
+  }
+  summary.innerHTML = `
+    <article class="approval-progress-card compact">
+      <span>${task.id} · ${task.type}</span>
+      <strong>${task.title}</strong>
+      <p>目前停在「${currentStep?.title || task.step}」，負責角色：${currentStep?.owner || task.role}，進度 ${doneCount}/${snapshot.steps.length} 關。</p>
+    </article>
+  `;
+  steps.innerHTML = snapshot.steps.map((step) => `
+    <article class="dashboard-approval-step ${step.state}">
+      <time>${step.no}</time>
+      <strong>${step.title}</strong>
+      <span>${step.owner} · ${step.status}</span>
+    </article>
+  `).join("");
+  document.querySelectorAll("[data-dashboard-approval]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedWorkflowTaskId = button.dataset.dashboardApproval;
+      renderDashboardApprovalProgress();
+      renderWorkflowTasks();
+      renderApprovalProgress();
+    });
+  });
 }
 
 function renderSupervisorCommandDashboard() {
@@ -6458,6 +6522,7 @@ function renderWorkflowTasks() {
       selectedWorkflowTaskId = button.dataset.workflowSelect;
       renderWorkflowTasks();
       renderApprovalProgress();
+      renderDashboardApprovalProgress();
     });
   });
   document.querySelectorAll("[data-workflow-progress]").forEach((button) => {
@@ -6465,6 +6530,7 @@ function renderWorkflowTasks() {
       selectedWorkflowTaskId = button.dataset.workflowProgress;
       renderWorkflowTasks();
       renderApprovalProgress();
+      renderDashboardApprovalProgress();
       document.querySelector("#approvalProgressPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   });
@@ -6683,6 +6749,7 @@ function mutateWorkflowTasks(ids, status) {
   });
   renderWorkflowTasks();
   renderApprovalProgress();
+  renderDashboardApprovalProgress();
   addWorkflowAudit(status, `已更新 ${ids.length} 件待辦為「${status}」。`);
   showToast(`流程已更新：${status}。`);
 }
@@ -6706,6 +6773,7 @@ function moveApprovalToNextStep() {
   addWorkflowAudit("送下一關", `${task.id} 已推進至「${task.step}」。`);
   renderWorkflowTasks();
   renderApprovalProgress();
+  renderDashboardApprovalProgress();
   renderIdentityWorkbench();
   renderRoleDashboard();
   showToast("已送下一關。");
@@ -6723,6 +6791,7 @@ function returnApprovalForCorrection() {
   addWorkflowAudit("退回補正", `${task.id} 已退回補正。`);
   renderWorkflowTasks();
   renderApprovalProgress();
+  renderDashboardApprovalProgress();
   renderIdentityWorkbench();
   renderRoleDashboard();
   showToast("已退回補正。");
@@ -6760,6 +6829,7 @@ function applyWorkflowTemplate() {
   renderWorkflowTemplateSteps();
   renderWorkflowTasks();
   renderApprovalProgress();
+  renderDashboardApprovalProgress();
   addWorkflowAudit("套用流程範本", `${template.name} 已套用，新增 ${template.steps.length} 個簽核節點。`);
   addWorkflowProof("流程範本建立", `${template.name} / ${docType} 已建立流程實例。`);
   showToast("流程範本已套用。");
@@ -6812,6 +6882,7 @@ function applyWorkflowProxy(id) {
   });
   renderWorkflowTasks();
   renderApprovalProgress();
+  renderDashboardApprovalProgress();
   addWorkflowAudit("套用代理人", `已將待辦由 ${proxy.from} 改派給代理 ${proxy.to}。`);
   addWorkflowProof("代理改派", `${proxy.from} 待辦已由 ${proxy.to} 代理處理。`);
   showToast("代理人已套用。");
@@ -6846,6 +6917,7 @@ function runWorkflowAdvancedAction() {
   });
   renderWorkflowTasks();
   renderApprovalProgress();
+  renderDashboardApprovalProgress();
   addWorkflowAudit("執行進階簽核動作", `已對 ${ids.length} 件執行「${actionMap[action]}」，目標：${target}。`);
   showToast("簽核動作已執行。");
 }
@@ -8167,6 +8239,12 @@ document.querySelector("#workflowProgressBtn").addEventListener("click", () => {
 document.querySelector("#approvalNextStepBtn").addEventListener("click", moveApprovalToNextStep);
 document.querySelector("#approvalReturnBtn").addEventListener("click", returnApprovalForCorrection);
 document.querySelector("#approvalExportBtn").addEventListener("click", exportApprovalProgress);
+document.querySelector("#dashboardApprovalOpenBtn").addEventListener("click", () => {
+  setView("workflow");
+  renderApprovalProgress();
+  document.querySelector("#approvalProgressPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+document.querySelector("#dashboardApprovalExportBtn").addEventListener("click", exportApprovalProgress);
 document.querySelector("#permissionTestForm").addEventListener("submit", (event) => {
   event.preventDefault();
   checkPermission(document.querySelector("#permissionAction").value);
