@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
+
 
 ROOT = Path(__file__).resolve().parent
 RUNNING_ON_VERCEL = bool(os.getenv("VERCEL"))
@@ -63,21 +65,520 @@ EDOC_SIGNATURE_PROVIDER = os.getenv("EDOC_SIGNATURE_PROVIDER", "local-simulation
 EDOC_SIGNATURE_API_URL = os.getenv("EDOC_SIGNATURE_API_URL", "").rstrip("/")
 EDOC_SIGNATURE_API_KEY = os.getenv("EDOC_SIGNATURE_API_KEY", "")
 EDOC_SIGNATURE_KEY_ID = os.getenv("EDOC_SIGNATURE_KEY_ID", "")
+EDOC_SIGNATURE_PROFILE = os.getenv("EDOC_SIGNATURE_PROFILE", "CAdES-B-LT")
+EDOC_SIGNATURE_TIMEOUT_SECONDS = int(os.getenv("EDOC_SIGNATURE_TIMEOUT_SECONDS", "25"))
+EDOC_SIGNATURE_MAX_RETRIES = int(os.getenv("EDOC_SIGNATURE_MAX_RETRIES", "2"))
 EDOC_HSM_PROVIDER = os.getenv("EDOC_HSM_PROVIDER", "")
 EDOC_CERT_TRUST_STORE = os.getenv("EDOC_CERT_TRUST_STORE", "")
 EDOC_TSA_URL = os.getenv("EDOC_TSA_URL", "")
 EDOC_TSA_API_KEY = os.getenv("EDOC_TSA_API_KEY", "")
-EDOC_TSA_POLICY_OID = os.getenv("EDOC_TSA_POLICY_OID", "1.2.158.歲悅.電子公文.時間戳")
+EDOC_TSA_POLICY_OID = os.getenv("EDOC_TSA_POLICY_OID", "1.3.6.1.4.1.55555.1.1")
 EDOC_OCSP_RESPONDER_URL = os.getenv("EDOC_OCSP_RESPONDER_URL", "")
 EDOC_CRL_DISTRIBUTION_URL = os.getenv("EDOC_CRL_DISTRIBUTION_URL", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
-ALLOWED_EDOC_ROLE_LIST = ["主任", "執行長", "行政部主任", "人資", "會計", "總務", "業務助理"]
+EDOC_EXCHANGE_ENV = os.getenv("EDOC_EXCHANGE_ENV", "sandbox").strip().lower()
+EDOC_EXCHANGE_PROVIDER = os.getenv("EDOC_EXCHANGE_PROVIDER", "mock").strip().lower()
+EDOC_EXCHANGE_MAX_RETRIES = int(os.getenv("EDOC_EXCHANGE_MAX_RETRIES", "3"))
+ALLOWED_EDOC_ROLE_LIST = [
+    "員工",
+    "主管",
+    "主任",
+    "執行長",
+    "行政部主任",
+    "人資",
+    "會計",
+    "總務",
+    "業務助理",
+    "董事會",
+    "股東",
+    "外部檢核單位",
+]
 ALLOWED_EDOC_ROLES = set(ALLOWED_EDOC_ROLE_LIST)
+EDOC_JOB_LEVELS = {"職員", "組長", "課長", "部長", "區經理", "執行長", "董事會", "股東", "外部檢核單位"}
+HRIS_QUICK_LOGIN_SECRET = os.getenv("HRIS_QUICK_LOGIN_SECRET", os.getenv("NEXTAUTH_SECRET", "suiyue-hris-local-quick-login-secret"))
+
+LOGGING_AUDIT_EVENT_TYPES = {
+    "login",
+    "logout",
+    "export",
+    "print",
+    "delete",
+    "submit",
+    "approve",
+    "reject",
+    "assign",
+    "permission_change",
+    "sensitive_access",
+    "external_account_status_change",
+}
+LOGGING_CRITICAL_EVENTS = {"delete", "permission_change", "sensitive_access", "external_account_status_change"}
+LOGGING_DATA_SCOPES = {"self", "assigned", "class", "department", "business_unit", "region", "institution", "company", "group", "custom"}
+
+LOGGING_ROLE_ALIASES = {
+    "team_member": "staff",
+    "employee": "staff",
+    "supervisor": "section_chief",
+    "hr": "hr_chief",
+    "super_admin": "ceo",
+    "company_admin": "admin_director",
+    "hr_manager": "hr_chief",
+    "accountant": "admin_director",
+    "department_manager": "department_head",
+    "homecare_supervisor": "section_chief",
+    "homecare_worker": "staff",
+    "daycare_staff": "staff",
+    "system": "system_department",
+    "system_admin": "system_department",
+    "it": "system_department",
+    "it_admin": "system_department",
+    "系統處": "system_department",
+    "資訊": "system_department",
+}
+
+LOGGING_ROLE_TO_EDOC_PROFILE = {
+    "board": {"role": "董事會", "job_level": "董事會", "title": "董事會成員", "unit": "董事會"},
+    "shareholder": {"role": "股東", "job_level": "股東", "title": "股東代表", "unit": "股東"},
+    "ceo": {"role": "執行長", "job_level": "執行長", "title": "執行長", "unit": "經營管理"},
+    "district_manager": {"role": "主管", "job_level": "區經理", "title": "區經理", "unit": "營運管理處"},
+    "department_head": {"role": "主任", "job_level": "部長", "title": "部門主管", "unit": "營運管理處"},
+    "section_chief": {"role": "主管", "job_level": "課長", "title": "課長", "unit": "營運管理處"},
+    "team_lead": {"role": "主管", "job_level": "組長", "title": "組長", "unit": "營運管理處"},
+    "staff": {"role": "員工", "job_level": "職員", "title": "職員", "unit": "居家照顧部"},
+    "external_auditor": {"role": "外部檢核單位", "job_level": "外部檢核單位", "title": "外部檢核", "unit": "外部檢核"},
+    "system_department": {"role": "行政部主任", "job_level": "部長", "title": "系統處管理員", "unit": "系統處"},
+    "admin_director": {"role": "行政部主任", "job_level": "部長", "title": "行政部門主任", "unit": "行政部"},
+    "hr_chief": {"role": "人資", "job_level": "課長", "title": "人資課長", "unit": "人資"},
+    "hr_staff": {"role": "人資", "job_level": "職員", "title": "人資組員", "unit": "人資"},
+}
+
+LOGGING_PERMISSION_TO_EDOC_CODES = {
+    "request:create": ["official_documents.compose"],
+    "form:document:create": ["official_documents.compose"],
+    "request:view": ["official_documents.records"],
+    "request:own:view": ["official_documents.records"],
+    "request:team:view": ["official_documents.todo", "official_documents.records"],
+    "request:approve": ["official_documents.todo"],
+    "request:admin": ["official_documents.all_todo", "official_documents.all_records"],
+    "module:admin": ["official_documents.all_todo", "official_documents.all_records", "exchange.manage", "system_permissions.view"],
+    "system:settings": ["settings.system_manage", "system_permissions.manage"],
+    "permission:settings:view": ["system_permissions.view"],
+    "permission:settings:publish": ["system_permissions.manage"],
+    "system:audit:view": ["audit_logs.view"],
+    "internal_audit:view": ["audit_logs.view"],
+    "internal_audit:manage": ["audit_logs.view", "audit_logs.export"],
+    "analytics:view": ["reports.operational_view"],
+    "analytics:export": ["reports.operational_view", "audit_logs.export"],
+    "bi:view": ["reports.operational_view"],
+    "bi:manage": ["reports.operational_view"],
+    "compliance:view": ["audit_logs.view"],
+    "compliance:manage": ["audit_logs.view", "audit_logs.export"],
+    "finance_handoff:view": ["contracts.view"],
+    "finance_handoff:manage": ["contracts.manage", "contracts.seal"],
+}
+
+EDOC_ROLE_CATALOG = [
+    ("ROLE-EMPLOYEE", "員工", "edoc_employee", "撰寫公文、處理個人待辦並查詢所屬部門公文紀錄。", "department"),
+    ("ROLE-SUPERVISOR", "主管", "edoc_supervisor", "承接所屬部門簽核、退回補正與部門公文紀錄。", "department"),
+    ("ROLE-DIRECTOR", "主任", "edoc_director", "承接所屬部門公文、核准部門分派與追蹤處理時限。", "department"),
+    ("ROLE-CEO", "執行長", "edoc_ceo", "核定重大、密件或跨部門高風險公文並查閱全公司資料。", "company"),
+    ("ROLE-ADMIN-CHIEF", "行政部主任", "edoc_admin_chief", "管理流程、清稿、角色權限、交換參數、資安與營運維護。", "company"),
+    ("ROLE-HR", "人資", "edoc_hr", "處理人資相關來文、發文、附件補正與部門公文紀錄。", "department"),
+    ("ROLE-ACCOUNTING", "會計", "edoc_accounting", "處理會計、補助款、核銷相關來文與發文。", "department"),
+    ("ROLE-GA", "總務", "edoc_general_affairs", "唯一收文入口；拉取、登錄來文後分發給各部門主管。", "company"),
+    ("ROLE-SALES-ASSISTANT", "業務助理", "edoc_sales_assistant", "建立函稿、補附件、協助發文與查詢被分派案件。", "assigned"),
+    ("ROLE-BOARD", "董事會", "edoc_board", "查閱全公司治理層級公文、合約與稽核紀錄，不處理日常收發。", "group"),
+    ("ROLE-SHAREHOLDER", "股東", "edoc_shareholder", "查閱經授權的全公司彙總紀錄與治理報表，不處理日常收發。", "group"),
+    ("ROLE-EXTERNAL-AUDITOR", "外部檢核單位", "edoc_external_auditor", "僅查閱被授權的檢核資料與 audit log。", "custom"),
+]
+
+EDOC_PERMISSION_CATALOG = [
+    ("PERM-EDOC-COMPOSE", "official_documents.compose", "撰寫公文", "official_documents", "建立函稿、預覽、送簽與補正。"),
+    ("PERM-EDOC-TODO", "official_documents.todo", "公文待辦", "official_documents", "查看並處理個人或角色待辦。"),
+    ("PERM-EDOC-RECORDS", "official_documents.records", "公文紀錄", "official_documents", "查詢可見範圍內的收發文紀錄。"),
+    ("PERM-EDOC-RECEIVE", "official_documents.receive", "公文收發", "official_documents", "總務或授權角色執行收文、登錄、分派與交換處理。"),
+    ("PERM-EDOC-ALL-TODO", "official_documents.all_todo", "全公司公文待辦", "official_documents", "查看全公司待辦與風險。"),
+    ("PERM-EDOC-ALL-RECORDS", "official_documents.all_records", "全公司公文紀錄", "official_documents", "查看全公司收發文紀錄。"),
+    ("PERM-EXCHANGE-VIEW", "exchange.view", "交換查詢", "exchange", "查詢交換狀態、地址簿與交換事件。"),
+    ("PERM-EXCHANGE-MANAGE", "exchange.manage", "交換管理", "exchange", "管理交換設定、送出、重送、退文與收文確認。"),
+    ("PERM-CONTRACTS-VIEW", "contracts.view", "合約檢視", "contracts", "查看可見範圍內合約。"),
+    ("PERM-CONTRACTS-MANAGE", "contracts.manage", "合約管理", "contracts", "建立、簽核、退回、續約與歸檔合約。"),
+    ("PERM-CONTRACTS-SEAL", "contracts.seal", "合約用印", "contracts", "處理合約用印與留存。"),
+    ("PERM-FILES-MANAGE", "files.manage", "附件管理", "files", "上傳附件、補正、安全檢查與下載控管。"),
+    ("PERM-SEALS-MANAGE", "seals.manage", "印鑑管理", "seals", "管理印章、校準尺寸、用印申請與押章設定。"),
+    ("PERM-REPORTS-VIEW", "reports.operational_view", "營運報表檢視", "reports", "查看營運報表、交換成功率與逾期件。"),
+    ("PERM-AUDIT-VIEW", "audit_logs.view", "稽核檢視", "audit_logs", "查看 audit log、交換歷程與操作軌跡。"),
+    ("PERM-AUDIT-EXPORT", "audit_logs.export", "稽核匯出", "audit_logs", "匯出稽核紀錄，並留下 export 事件。"),
+    ("PERM-SYSTEM-PERMISSIONS-VIEW", "system_permissions.view", "權限檢視", "system_permissions", "查看角色、權限、帳號與授權紀錄。"),
+    ("PERM-SYSTEM-PERMISSIONS-MANAGE", "system_permissions.manage", "權限管理", "system_permissions", "管理角色、權限、帳號與授權。"),
+    ("PERM-SETTINGS-MANAGE", "settings.system_manage", "系統設定管理", "settings", "管理環境、參數、通知、備份與維運設定。"),
+]
+
+EDOC_LEGACY_PERMISSION_CATALOG = [
+    ("PERM-INBOUND", "inbound.manage", "收文管理", "公文", "拉取、登錄、分派與誤送漏送處理。"),
+    ("PERM-DISPATCH", "dispatch.manage", "發文管理", "公文", "建立函稿、清稿、封裝、送交與重送。"),
+    ("PERM-JAGENT", "jagent.manage", "jAgent 介接", "系統", "憑證登入、Token、交換中心與地址簿。"),
+    ("PERM-WORKFLOW", "workflow.approve", "簽核流程", "流程", "簽核、退回、抽回、加簽、會辦與改派。"),
+    ("PERM-SEAL", "seal.apply", "自動用印", "印鑑", "PDF 套版、押章與用印紀錄。"),
+    ("PERM-AUDIT", "audit.view", "稽核查閱", "稽核", "Audit log、交換事件與不可否認紀錄。"),
+    ("PERM-SECURITY", "security.manage", "資安管理", "資安", "RBAC、IP/裝置限制、MFA 與 Token 過期。"),
+    ("PERM-REPORT", "reports.view", "報表統計", "報表", "收發量、成功率、異常、承辦量與逾期件。"),
+    ("PERM-SETTINGS", "settings.manage", "系統設定", "系統", "機關代碼、API URL、防火牆、憑證與角色。"),
+]
+
+EDOC_ROLE_PERMISSION_GRANTS = {
+    "ROLE-EMPLOYEE": ["PERM-EDOC-COMPOSE", "PERM-EDOC-TODO", "PERM-EDOC-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-FILES-MANAGE", "PERM-DISPATCH", "PERM-WORKFLOW"],
+    "ROLE-SUPERVISOR": ["PERM-EDOC-COMPOSE", "PERM-EDOC-TODO", "PERM-EDOC-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-FILES-MANAGE", "PERM-REPORTS-VIEW", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
+    "ROLE-DIRECTOR": ["PERM-EDOC-COMPOSE", "PERM-EDOC-TODO", "PERM-EDOC-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-CONTRACTS-VIEW", "PERM-CONTRACTS-MANAGE", "PERM-FILES-MANAGE", "PERM-REPORTS-VIEW", "PERM-INBOUND", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
+    "ROLE-CEO": ["PERM-EDOC-COMPOSE", "PERM-EDOC-RECEIVE", "PERM-EDOC-ALL-TODO", "PERM-EDOC-ALL-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-EXCHANGE-MANAGE", "PERM-CONTRACTS-VIEW", "PERM-CONTRACTS-MANAGE", "PERM-CONTRACTS-SEAL", "PERM-SEALS-MANAGE", "PERM-REPORTS-VIEW", "PERM-AUDIT-VIEW", "PERM-AUDIT-EXPORT", "PERM-SYSTEM-PERMISSIONS-VIEW", "PERM-INBOUND", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-AUDIT", "PERM-REPORT"],
+    "ROLE-ADMIN-CHIEF": ["PERM-EDOC-COMPOSE", "PERM-EDOC-RECEIVE", "PERM-EDOC-ALL-TODO", "PERM-EDOC-ALL-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-EXCHANGE-MANAGE", "PERM-CONTRACTS-VIEW", "PERM-CONTRACTS-MANAGE", "PERM-CONTRACTS-SEAL", "PERM-FILES-MANAGE", "PERM-SEALS-MANAGE", "PERM-REPORTS-VIEW", "PERM-AUDIT-VIEW", "PERM-AUDIT-EXPORT", "PERM-SYSTEM-PERMISSIONS-VIEW", "PERM-SYSTEM-PERMISSIONS-MANAGE", "PERM-SETTINGS-MANAGE", "PERM-INBOUND", "PERM-DISPATCH", "PERM-JAGENT", "PERM-WORKFLOW", "PERM-SEAL", "PERM-AUDIT", "PERM-SECURITY", "PERM-REPORT", "PERM-SETTINGS"],
+    "ROLE-HR": ["PERM-EDOC-COMPOSE", "PERM-EDOC-TODO", "PERM-EDOC-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-CONTRACTS-VIEW", "PERM-CONTRACTS-MANAGE", "PERM-FILES-MANAGE", "PERM-REPORTS-VIEW", "PERM-INBOUND", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
+    "ROLE-ACCOUNTING": ["PERM-EDOC-COMPOSE", "PERM-EDOC-TODO", "PERM-EDOC-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-CONTRACTS-VIEW", "PERM-CONTRACTS-MANAGE", "PERM-FILES-MANAGE", "PERM-REPORTS-VIEW", "PERM-INBOUND", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
+    "ROLE-GA": ["PERM-EDOC-COMPOSE", "PERM-EDOC-RECEIVE", "PERM-EDOC-ALL-TODO", "PERM-EDOC-ALL-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-EXCHANGE-MANAGE", "PERM-CONTRACTS-VIEW", "PERM-CONTRACTS-MANAGE", "PERM-CONTRACTS-SEAL", "PERM-FILES-MANAGE", "PERM-SEALS-MANAGE", "PERM-REPORTS-VIEW", "PERM-INBOUND", "PERM-DISPATCH", "PERM-JAGENT", "PERM-WORKFLOW", "PERM-REPORT"],
+    "ROLE-SALES-ASSISTANT": ["PERM-EDOC-COMPOSE", "PERM-EDOC-TODO", "PERM-EDOC-RECORDS", "PERM-EXCHANGE-VIEW", "PERM-CONTRACTS-VIEW", "PERM-CONTRACTS-MANAGE", "PERM-FILES-MANAGE", "PERM-REPORTS-VIEW", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
+    "ROLE-BOARD": ["PERM-EDOC-ALL-RECORDS", "PERM-CONTRACTS-VIEW", "PERM-REPORTS-VIEW", "PERM-AUDIT-VIEW", "PERM-SYSTEM-PERMISSIONS-VIEW", "PERM-AUDIT", "PERM-REPORT"],
+    "ROLE-SHAREHOLDER": ["PERM-EDOC-ALL-RECORDS", "PERM-CONTRACTS-VIEW", "PERM-REPORTS-VIEW", "PERM-AUDIT-VIEW", "PERM-REPORT"],
+    "ROLE-EXTERNAL-AUDITOR": ["PERM-EDOC-RECORDS", "PERM-AUDIT-VIEW", "PERM-REPORTS-VIEW", "PERM-AUDIT", "PERM-REPORT"],
+}
+
+
+def roster_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def normalize_edoc_job_level(job_level: Any) -> str:
+    text = roster_text(job_level)
+    legacy_map = {
+        "L1 員工": "職員",
+        "L2 專員": "職員",
+        "L3 主管": "課長",
+        "L4 部門主管": "部長",
+        "L5 高階主管": "區經理",
+        "L6 執行長": "執行長",
+    }
+    if text in legacy_map:
+        return legacy_map[text]
+    return text if text in EDOC_JOB_LEVELS else "職員"
+
+
+def derive_edoc_role_from_roster(
+    job_level: Any = "",
+    title: Any = "",
+    department: Any = "",
+    company: Any = "",
+    region: Any = "",
+    class_name: Any = "",
+) -> str:
+    level = normalize_edoc_job_level(job_level)
+    title_text = roster_text(title)
+    department_text = roster_text(department)
+    haystack = " ".join([level, title_text, department_text, roster_text(company), roster_text(region), roster_text(class_name)])
+
+    if "執行長" in haystack:
+        return "執行長"
+    if level in {"董事會", "股東", "外部檢核單位"}:
+        return level
+    if "行政部主任" in haystack or "行政部長" in haystack:
+        return "行政部主任"
+    if "總務" in haystack:
+        return "總務"
+    if "人資" in haystack:
+        return "人資"
+    if "會計" in haystack or "財務" in haystack:
+        return "會計"
+    if "業務助理" in title_text:
+        return "業務助理"
+    supervisor_keywords = {"督導", "負責人", "主任", "主管", "經理", "部長", "課長", "組長"}
+    if level in {"組長", "課長", "部長", "區經理"} or any(keyword in title_text for keyword in supervisor_keywords):
+        return "主管"
+    return "員工"
+
+
+def derive_edoc_data_scope_from_roster(job_level: Any = "", role: Any = "") -> str:
+    level = normalize_edoc_job_level(job_level)
+    role_text = roster_text(role)
+    if role_text in {"執行長", "行政部主任", "總務"}:
+        return "company"
+    if role_text in {"董事會", "股東"}:
+        return "group"
+    if role_text == "外部檢核單位":
+        return "custom"
+    if level == "區經理":
+        return "region"
+    if level == "部長":
+        return "business_unit"
+    return "department"
+
+
+def edoc_roster_permission_profile(row: Dict[str, Any]) -> Dict[str, Any]:
+    job_level = normalize_edoc_job_level(row.get("job_level") or row.get("職等"))
+    role = row.get("role") or row.get("角色") or derive_edoc_role_from_roster(
+        job_level=job_level,
+        title=row.get("title") or row.get("職稱"),
+        department=row.get("unit") or row.get("所屬部門"),
+        company=row.get("company") or row.get("所屬公司"),
+        region=row.get("region") or row.get("所屬區域"),
+        class_name=row.get("class_name") or row.get("課別"),
+    )
+    if role not in ALLOWED_EDOC_ROLES:
+        role = derive_edoc_role_from_roster(
+            job_level=job_level,
+            title=row.get("title") or row.get("職稱"),
+            department=row.get("unit") or row.get("所屬部門"),
+            company=row.get("company") or row.get("所屬公司"),
+            region=row.get("region") or row.get("所屬區域"),
+            class_name=row.get("class_name") or row.get("課別"),
+        )
+    return {
+        "job_level": job_level,
+        "role": role,
+        "data_scope": derive_edoc_data_scope_from_roster(job_level, role),
+    }
+
+
+def apply_user_permission_defaults(payload: Dict[str, Any]) -> None:
+    if "job_level" in payload:
+        payload["job_level"] = normalize_edoc_job_level(payload.get("job_level"))
+    profile = edoc_roster_permission_profile(payload)
+    payload.setdefault("job_level", profile["job_level"])
+    if not payload.get("role") or payload.get("role") not in ALLOWED_EDOC_ROLES:
+        payload["role"] = profile["role"]
+
+
+def canonical_logging_role(role: Any) -> str:
+    raw = roster_text(role)
+    return LOGGING_ROLE_ALIASES.get(raw, raw)
+
+
+def logging_role_profile(role: Any) -> Dict[str, str]:
+    canonical = canonical_logging_role(role)
+    return {"logging_role_key": canonical, **LOGGING_ROLE_TO_EDOC_PROFILE.get(canonical, LOGGING_ROLE_TO_EDOC_PROFILE["staff"])}
+
+
+def canonical_hris_quick_login_payload(user: Dict[str, Any]) -> str:
+    payload = {
+        "id": roster_text(user.get("id")),
+        "email": roster_text(user.get("email")),
+        "role": roster_text(user.get("role")),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def verify_hris_quick_login_signature(payload: Dict[str, Any]) -> bool:
+    if payload.get("v") != 1 or not isinstance(payload.get("user"), dict) or not payload.get("signature"):
+        return False
+    signature = roster_text(payload.get("signature"))
+    expected = hmac.new(
+        HRIS_QUICK_LOGIN_SECRET.encode("utf-8"),
+        canonical_hris_quick_login_payload(payload["user"]).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def extract_logging_bridge_user(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], str | None]:
+    if not isinstance(payload, dict):
+        return {}, "invalid_payload"
+
+    signed_payload = payload if payload.get("signature") else payload.get("signedPayload")
+    if isinstance(signed_payload, dict) and signed_payload.get("signature"):
+        if not verify_hris_quick_login_signature(signed_payload):
+            return {}, "invalid_signature"
+        return dict(signed_payload["user"]), None
+
+    source = payload.get("user") or payload.get("currentUser") or payload.get("profile")
+    if not source and isinstance(payload.get("session"), dict):
+        source = payload["session"].get("user")
+    if not source:
+        source = payload
+    if not isinstance(source, dict):
+        return {}, "missing_user"
+    if is_production() and not payload.get("accessToken") and not payload.get("idToken"):
+        return {}, "unsigned_bridge_payload"
+    return dict(source), None
+
+
+def logging_permissions_to_edoc_codes(logging_permissions: Iterable[Any]) -> List[str]:
+    codes: set[str] = set()
+    for permission in logging_permissions or []:
+        for code in LOGGING_PERMISSION_TO_EDOC_CODES.get(str(permission), []):
+            codes.add(code)
+    return sorted(codes)
+
+
+def upsert_logging_bridge_user(conn: sqlite3.Connection, payload: Dict[str, Any]) -> sqlite3.Row:
+    source_user, error = extract_logging_bridge_user(payload)
+    if error:
+        raise ValueError(error)
+    logging_role_key = canonical_logging_role(source_user.get("loggingRoleKey") or source_user.get("logging_role_key") or source_user.get("role"))
+    profile = logging_role_profile(logging_role_key)
+    email = roster_text(source_user.get("email")).lower()
+    if not email:
+        raise ValueError("missing_email")
+    logging_account_id = roster_text(source_user.get("loggingAccountId") or source_user.get("logging_account_id") or source_user.get("id") or email)
+    display_name = roster_text(source_user.get("name") or source_user.get("display_name") or source_user.get("roleLabel") or email.split("@")[0])
+    unit = roster_text(source_user.get("unit") or source_user.get("departmentCode") or source_user.get("department_code") or profile["unit"])
+    title = roster_text(source_user.get("title") or source_user.get("roleLabel") or profile["title"])
+    job_level = normalize_edoc_job_level(source_user.get("jobLevel") or source_user.get("job_level") or profile["job_level"])
+    edoc_role = profile["role"]
+    ts = now()
+    external_payload = redact_sensitive(source_user)
+    user = conn.execute(
+        "SELECT * FROM users WHERE logging_account_id = ? OR lower(email) = ? ORDER BY CASE WHEN logging_account_id = ? THEN 0 ELSE 1 END LIMIT 1",
+        (logging_account_id, email, logging_account_id),
+    ).fetchone()
+    before = row_to_dict(user) if user else {}
+    if user:
+        conn.execute(
+            """
+            UPDATE users
+            SET auth_user_id = COALESCE(auth_user_id, ?),
+                account_source = 'logging',
+                logging_account_id = ?,
+                logging_role_key = ?,
+                external_account_payload_json = ?,
+                last_synced_from_logging_at = ?,
+                name = ?,
+                email = ?,
+                unit = ?,
+                title = ?,
+                job_level = ?,
+                role = ?,
+                provider = 'Logging / 平台帳號',
+                mfa_status = CASE WHEN mfa_status = '' OR mfa_status IS NULL THEN '由平台管理' ELSE mfa_status END,
+                status = '啟用'
+            WHERE id = ?
+            """,
+            (
+                roster_text(source_user.get("authUserId") or source_user.get("auth_user_id")) or None,
+                logging_account_id,
+                logging_role_key,
+                json.dumps(external_payload, ensure_ascii=False),
+                ts,
+                display_name,
+                email,
+                unit,
+                title,
+                job_level,
+                edoc_role,
+                user["id"],
+            ),
+        )
+        user_id = user["id"]
+    else:
+        user_id = f"LOG-{hashlib.sha256(logging_account_id.encode('utf-8')).hexdigest()[:10].upper()}"
+        conn.execute(
+            """
+            INSERT INTO users (
+              id, auth_user_id, account_source, logging_account_id, logging_role_key, external_account_payload_json,
+              last_synced_from_logging_at, name, email, password_hash, unit, title, job_level, role,
+              provider, mfa_status, status, last_login_at, created_at
+            ) VALUES (?, ?, 'logging', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 'Logging / 平台帳號', '由平台管理', '啟用', NULL, ?)
+            """,
+            (
+                user_id,
+                roster_text(source_user.get("authUserId") or source_user.get("auth_user_id")) or None,
+                logging_account_id,
+                logging_role_key,
+                json.dumps(external_payload, ensure_ascii=False),
+                ts,
+                display_name,
+                email,
+                unit,
+                title,
+                job_level,
+                edoc_role,
+                ts,
+            ),
+        )
+    link_id = f"LINK-LOGGING-EDOC-{hashlib.sha256(logging_account_id.encode('utf-8')).hexdigest()[:10].upper()}"
+    conn.execute(
+        """
+        INSERT INTO module_account_links (
+          id, user_id, source_system, source_account_id, source_role_key, source_email,
+          target_module, target_role_key, sync_status, metadata_json, last_synced_at, created_at, updated_at
+        ) VALUES (?, ?, 'logging', ?, ?, ?, 'edoc', ?, 'active', ?, ?, ?, ?)
+        ON CONFLICT(source_system, source_account_id, target_module) DO UPDATE SET
+          user_id = excluded.user_id,
+          source_role_key = excluded.source_role_key,
+          source_email = excluded.source_email,
+          target_role_key = excluded.target_role_key,
+          sync_status = 'active',
+          metadata_json = excluded.metadata_json,
+          last_synced_at = excluded.last_synced_at,
+          updated_at = excluded.updated_at
+        """,
+        (link_id, user_id, logging_account_id, logging_role_key, email, edoc_role, json.dumps({"source": "logging_bridge"}, ensure_ascii=False), ts, ts, ts),
+    )
+    updated = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    after = row_to_dict(updated) if updated else {}
+    if before and any(before.get(key) != after.get(key) for key in ("role", "job_level", "unit", "title", "status", "logging_role_key")):
+        log_permission_change(
+            conn,
+            "Logging Bridge",
+            user_id,
+            email,
+            {key: before.get(key) for key in ("role", "job_level", "unit", "title", "status", "logging_role_key")},
+            {key: after.get(key) for key in ("role", "job_level", "unit", "title", "status", "logging_role_key")},
+            "Logging 帳號與 EDOC 角色權限同步。",
+            ["system_permissions.manage"],
+        )
+    else:
+        log_audit(
+            conn,
+            "Logging Bridge",
+            "同步外部帳號",
+            "module_account_links",
+            link_id,
+            f"{email} / {logging_role_key} → {edoc_role}",
+            event_type="external_account_status_change",
+            result="success",
+            module_code="system_permissions",
+            resource_type="external_account",
+            resource_id=link_id,
+            data_scope="custom",
+            actor_roles=["system_permissions.manage"],
+            target_user_id=user_id,
+            target_email=email,
+            reason="Logging 帳號進入 EDOC，自動同步帳號連結。",
+            metadata={"source_system": "logging", "target_module": "edoc", "logging_role_key": logging_role_key},
+        )
+    return updated
+
+
+def authenticate_logging_bridge(conn: sqlite3.Connection, payload: Dict[str, Any], ip: str, device: str) -> Tuple[Dict[str, Any], int]:
+    try:
+        user = upsert_logging_bridge_user(conn, payload)
+    except ValueError as error:
+        return {"error": "logging_bridge_denied", "detail": str(error)}, 403 if str(error) in {"invalid_signature", "unsigned_bridge_payload"} else 400
+    if not user or user["status"] != "啟用" or user["role"] not in ALLOWED_EDOC_ROLES:
+        return {"error": "role_forbidden", "detail": "此 Logging 帳號未授權使用 EDOC。"}, 403
+    session = create_session(conn, user, "Logging / 平台帳號", ip, device)
+    session["bridge"] = {
+        "sourceSystem": "logging",
+        "loggingAccountId": user["logging_account_id"],
+        "loggingRoleKey": user["logging_role_key"],
+        "targetModule": "edoc",
+        "targetRole": user["role"],
+    }
+    incoming_permissions = []
+    if isinstance(payload.get("permissions"), list):
+        incoming_permissions = payload["permissions"]
+    elif isinstance(payload.get("user"), dict) and isinstance(payload["user"].get("permissions"), list):
+        incoming_permissions = payload["user"]["permissions"]
+    session["permissions"] = sorted(set(session["permissions"]) | set(logging_permissions_to_edoc_codes(incoming_permissions)))
+    return session, 200
 
 
 TABLES = {
     "documents": "documents",
+    "company_registry": "company_registry",
+    "department_registry": "department_registry",
+    "seal_type_registry": "seal_type_registry",
+    "workflow_tasks": "workflow_tasks",
+    "contracts": "contracts",
+    "contract_parties": "contract_parties",
+    "contract_approvals": "contract_approvals",
     "recipients": "recipients",
     "attachments": "attachments",
     "attachment_security": "attachment_security",
@@ -91,8 +592,14 @@ TABLES = {
     "signing_certificates": "signing_certificates",
     "certificate_authorities": "certificate_authorities",
     "certificate_validation_events": "certificate_validation_events",
+    "signature_provider_events": "signature_provider_events",
     "tsa_timestamp_tokens": "tsa_timestamp_tokens",
     "electronic_signatures": "electronic_signatures",
+    "exchange_outbox": "exchange_outbox",
+    "exchange_inbox": "exchange_inbox",
+    "exchange_log": "exchange_log",
+    "exchange_attachment": "exchange_attachment",
+    "exchange_status_history": "exchange_status_history",
     "exchange_tasks": "exchange_tasks",
     "exchange_events": "exchange_events",
     "audit_logs": "audit_logs",
@@ -100,6 +607,7 @@ TABLES = {
     "roles": "roles",
     "permissions": "permissions",
     "role_permissions": "role_permissions",
+    "module_account_links": "module_account_links",
     "document_acl": "document_acl",
     "document_acl_events": "document_acl_events",
     "auth_sessions": "auth_sessions",
@@ -126,6 +634,7 @@ CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY,
   doc_no TEXT NOT NULL,
   direction TEXT NOT NULL CHECK(direction IN ('收文','發文')),
+  company_name TEXT NOT NULL DEFAULT '歲悅長照股份有限公司',
   doc_type TEXT NOT NULL DEFAULT '函',
   priority TEXT NOT NULL DEFAULT '普通件',
   security_level TEXT NOT NULL DEFAULT '普通',
@@ -133,6 +642,8 @@ CREATE TABLE IF NOT EXISTS documents (
   agency_code TEXT,
   subject TEXT NOT NULL,
   body TEXT,
+  seal_plan_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL,
   owner TEXT,
   department TEXT,
@@ -140,6 +651,113 @@ CREATE TABLE IF NOT EXISTS documents (
   received_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS company_registry (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  tax_id TEXT NOT NULL DEFAULT '待設定',
+  status TEXT NOT NULL DEFAULT '啟用',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS department_registry (
+  id TEXT PRIMARY KEY,
+  company_name TEXT NOT NULL,
+  name TEXT NOT NULL,
+  manager_role TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '啟用',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(company_name, name)
+);
+
+CREATE TABLE IF NOT EXISTS seal_type_registry (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  scope TEXT NOT NULL DEFAULT '未設定使用範圍',
+  status TEXT NOT NULL DEFAULT '啟用',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_tasks (
+  id TEXT PRIMARY KEY,
+  document_id TEXT,
+  title TEXT NOT NULL,
+  workflow_type TEXT NOT NULL DEFAULT '發文',
+  step TEXT NOT NULL,
+  role TEXT NOT NULL,
+  status TEXT NOT NULL,
+  template TEXT NOT NULL DEFAULT 'standard',
+  current_step_index INTEGER NOT NULL DEFAULT 0,
+  requester TEXT,
+  submitted_at TEXT,
+  last_signed_at TEXT,
+  last_comment TEXT,
+  proof_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS contracts (
+  id TEXT PRIMARY KEY,
+  contract_no TEXT NOT NULL UNIQUE,
+  company_name TEXT NOT NULL DEFAULT '歲悅長照股份有限公司',
+  contract_type TEXT NOT NULL DEFAULT '一般合約',
+  title TEXT NOT NULL,
+  counterparty TEXT NOT NULL,
+  counterparty_tax_id TEXT,
+  owner TEXT NOT NULL,
+  department TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL DEFAULT 'TWD',
+  start_date TEXT,
+  end_date TEXT,
+  renewal_alert_days INTEGER NOT NULL DEFAULT 60,
+  confidentiality_level TEXT NOT NULL DEFAULT '普通',
+  seal_requirement TEXT NOT NULL DEFAULT '一般章',
+  storage_status TEXT NOT NULL DEFAULT '待歸檔',
+  status TEXT NOT NULL DEFAULT '草稿',
+  summary TEXT,
+  risk_note TEXT,
+  attachment_manifest_json TEXT NOT NULL DEFAULT '[]',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contract_parties (
+  id TEXT PRIMARY KEY,
+  contract_id TEXT NOT NULL,
+  party_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  tax_id TEXT,
+  contact_name TEXT,
+  contact_email TEXT,
+  contact_phone TEXT,
+  address TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(contract_id) REFERENCES contracts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS contract_approvals (
+  id TEXT PRIMARY KEY,
+  contract_id TEXT NOT NULL,
+  step_no INTEGER NOT NULL DEFAULT 1,
+  step_name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '待簽核',
+  approver TEXT,
+  comment TEXT,
+  signed_at TEXT,
+  non_repudiation_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(contract_id) REFERENCES contracts(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS recipients (
@@ -385,6 +1003,24 @@ CREATE TABLE IF NOT EXISTS certificate_validation_events (
   FOREIGN KEY(signature_id) REFERENCES electronic_signatures(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS signature_provider_events (
+  id TEXT PRIMARY KEY,
+  document_id TEXT,
+  signature_id TEXT,
+  provider TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  endpoint TEXT NOT NULL,
+  request_digest_sha256 TEXT NOT NULL,
+  response_digest_sha256 TEXT,
+  status TEXT NOT NULL,
+  http_status INTEGER,
+  error TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 1,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tsa_timestamp_tokens (
   id TEXT PRIMARY KEY,
   signature_id TEXT NOT NULL,
@@ -397,6 +1033,91 @@ CREATE TABLE IF NOT EXISTS tsa_timestamp_tokens (
   issued_at TEXT NOT NULL,
   verified_at TEXT,
   FOREIGN KEY(signature_id) REFERENCES electronic_signatures(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS exchange_outbox (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  doc_no TEXT NOT NULL,
+  target_agency TEXT NOT NULL,
+  target_agency_code TEXT,
+  status TEXT NOT NULL CHECK(status IN ('待發文','已送出','已送達','失敗','退文','已達重送上限')),
+  provider TEXT NOT NULL DEFAULT 'mock',
+  environment TEXT NOT NULL DEFAULT 'sandbox',
+  package_id TEXT,
+  external_id TEXT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 3,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  next_retry_at TEXT,
+  sent_at TEXT,
+  returned_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS exchange_inbox (
+  id TEXT PRIMARY KEY,
+  document_id TEXT,
+  external_id TEXT NOT NULL UNIQUE,
+  source_agency TEXT NOT NULL,
+  source_agency_code TEXT,
+  doc_no TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('已收文','待確認','已入案')),
+  provider TEXT NOT NULL DEFAULT 'mock',
+  environment TEXT NOT NULL DEFAULT 'sandbox',
+  received_at TEXT NOT NULL,
+  acknowledged_at TEXT,
+  raw_summary_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS exchange_log (
+  id TEXT PRIMARY KEY,
+  exchange_ref_type TEXT NOT NULL CHECK(exchange_ref_type IN ('outbox','inbox','status','system')),
+  exchange_ref_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK(direction IN ('outbound','inbound','system')),
+  request_summary_json TEXT NOT NULL DEFAULT '{}',
+  response_summary_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL,
+  error_code TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exchange_attachment (
+  id TEXT PRIMARY KEY,
+  exchange_ref_type TEXT NOT NULL CHECK(exchange_ref_type IN ('outbox','inbox')),
+  exchange_ref_id TEXT NOT NULL,
+  document_id TEXT,
+  file_name TEXT NOT NULL,
+  mime_type TEXT,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT,
+  storage_key TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS exchange_status_history (
+  id TEXT PRIMARY KEY,
+  exchange_ref_type TEXT NOT NULL CHECK(exchange_ref_type IN ('outbox','inbox')),
+  exchange_ref_id TEXT NOT NULL,
+  from_status TEXT,
+  to_status TEXT NOT NULL,
+  message TEXT,
+  provider_status_code TEXT,
+  payload_summary_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS exchange_tasks (
@@ -433,17 +1154,40 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   ip TEXT,
   device TEXT,
   detail TEXT,
+  event_type TEXT NOT NULL DEFAULT 'submit',
+  severity TEXT NOT NULL DEFAULT 'info',
+  result TEXT NOT NULL DEFAULT 'success',
+  module_code TEXT,
+  resource_type TEXT,
+  resource_id TEXT,
+  data_scope TEXT,
+  actor_user_id TEXT,
+  actor_email TEXT,
+  actor_roles_json TEXT NOT NULL DEFAULT '[]',
+  target_user_id TEXT,
+  target_email TEXT,
+  reason TEXT,
+  request_id TEXT,
+  before_snapshot_json TEXT NOT NULL DEFAULT '{}',
+  after_snapshot_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   auth_user_id TEXT,
+  account_source TEXT NOT NULL DEFAULT 'edoc',
+  logging_account_id TEXT,
+  logging_role_key TEXT,
+  external_account_payload_json TEXT NOT NULL DEFAULT '{}',
+  last_synced_from_logging_at TEXT,
   name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT,
   unit TEXT,
   title TEXT,
+  job_level TEXT NOT NULL DEFAULT '職員',
   role TEXT NOT NULL,
   provider TEXT NOT NULL DEFAULT '本機帳號',
   mfa_status TEXT NOT NULL DEFAULT '待設定',
@@ -532,6 +1276,24 @@ CREATE TABLE IF NOT EXISTS login_events (
   reason TEXT,
   created_at TEXT NOT NULL,
   FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS module_account_links (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  source_system TEXT NOT NULL,
+  source_account_id TEXT NOT NULL,
+  source_role_key TEXT,
+  source_email TEXT,
+  target_module TEXT NOT NULL DEFAULT 'edoc',
+  target_role_key TEXT,
+  sync_status TEXT NOT NULL DEFAULT 'active',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  last_synced_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(source_system, source_account_id, target_module),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS trusted_devices (
@@ -683,6 +1445,21 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
 CREATE INDEX IF NOT EXISTS idx_documents_direction ON documents(direction);
+CREATE INDEX IF NOT EXISTS idx_company_registry_status ON company_registry(status);
+CREATE INDEX IF NOT EXISTS idx_department_registry_company ON department_registry(company_name);
+CREATE INDEX IF NOT EXISTS idx_seal_type_registry_status ON seal_type_registry(status);
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_document ON workflow_tasks(document_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_status ON workflow_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_role ON workflow_tasks(role);
+CREATE INDEX IF NOT EXISTS idx_contracts_status ON contracts(status);
+CREATE INDEX IF NOT EXISTS idx_contracts_owner ON contracts(owner);
+CREATE INDEX IF NOT EXISTS idx_contracts_department ON contracts(department);
+CREATE INDEX IF NOT EXISTS idx_contracts_counterparty ON contracts(counterparty);
+CREATE INDEX IF NOT EXISTS idx_contracts_end_date ON contracts(end_date);
+CREATE INDEX IF NOT EXISTS idx_contract_parties_contract ON contract_parties(contract_id);
+CREATE INDEX IF NOT EXISTS idx_contract_approvals_contract ON contract_approvals(contract_id);
+CREATE INDEX IF NOT EXISTS idx_contract_approvals_role ON contract_approvals(role);
+CREATE INDEX IF NOT EXISTS idx_contract_approvals_status ON contract_approvals(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_document ON attachments(document_id);
 CREATE INDEX IF NOT EXISTS idx_attachment_security_document ON attachment_security(document_id);
 CREATE INDEX IF NOT EXISTS idx_attachment_security_scan ON attachment_security(scan_status);
@@ -699,7 +1476,17 @@ CREATE INDEX IF NOT EXISTS idx_electronic_signatures_document ON electronic_sign
 CREATE INDEX IF NOT EXISTS idx_electronic_signatures_file ON electronic_signatures(file_object_id);
 CREATE INDEX IF NOT EXISTS idx_certificate_validation_events_certificate ON certificate_validation_events(certificate_id);
 CREATE INDEX IF NOT EXISTS idx_certificate_validation_events_signature ON certificate_validation_events(signature_id);
+CREATE INDEX IF NOT EXISTS idx_signature_provider_events_signature ON signature_provider_events(signature_id);
+CREATE INDEX IF NOT EXISTS idx_signature_provider_events_request ON signature_provider_events(request_id);
 CREATE INDEX IF NOT EXISTS idx_tsa_timestamp_tokens_signature ON tsa_timestamp_tokens(signature_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_outbox_document ON exchange_outbox(document_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_outbox_status ON exchange_outbox(status);
+CREATE INDEX IF NOT EXISTS idx_exchange_outbox_external ON exchange_outbox(external_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_inbox_document ON exchange_inbox(document_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_inbox_status ON exchange_inbox(status);
+CREATE INDEX IF NOT EXISTS idx_exchange_log_ref ON exchange_log(exchange_ref_type, exchange_ref_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_attachment_ref ON exchange_attachment(exchange_ref_type, exchange_ref_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_status_history_ref ON exchange_status_history(exchange_ref_type, exchange_ref_id);
 CREATE INDEX IF NOT EXISTS idx_exchange_tasks_document ON exchange_tasks(document_id);
 CREATE INDEX IF NOT EXISTS idx_exchange_events_document ON exchange_events(document_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
@@ -881,6 +1668,9 @@ def production_readiness() -> Dict[str, Any]:
             "sentry": env_present("SENTRY_DSN"),
             "signatureProvider": EDOC_SIGNATURE_PROVIDER,
             "signatureApi": bool(EDOC_SIGNATURE_API_URL and EDOC_SIGNATURE_API_KEY),
+            "signatureProfile": EDOC_SIGNATURE_PROFILE,
+            "signatureTimeoutSeconds": EDOC_SIGNATURE_TIMEOUT_SECONDS,
+            "signatureMaxRetries": EDOC_SIGNATURE_MAX_RETRIES,
             "hsmProvider": EDOC_HSM_PROVIDER or "未設定",
             "trustStore": bool(EDOC_CERT_TRUST_STORE),
             "tsa": bool(EDOC_TSA_URL),
@@ -973,6 +1763,15 @@ def signing_service_status() -> Dict[str, Any]:
         "mode": "formal" if ready else "simulation-or-incomplete",
         "missing": missing,
         "services": services,
+        "policy": {
+            "profile": EDOC_SIGNATURE_PROFILE,
+            "provider": EDOC_SIGNATURE_PROVIDER,
+            "keyId": EDOC_SIGNATURE_KEY_ID or "未設定",
+            "timeoutSeconds": EDOC_SIGNATURE_TIMEOUT_SECONDS,
+            "maxRetries": EDOC_SIGNATURE_MAX_RETRIES,
+            "tsaPolicyOid": EDOC_TSA_POLICY_OID,
+            "requiresExternalProvider": is_production(),
+        },
         "productionBlocked": is_production() and not ready,
     }
 
@@ -1082,57 +1881,281 @@ def parse_time(value: str) -> datetime:
     return datetime.min
 
 
-def pdf_escape(value: Any) -> str:
-    return str(value or "").encode("latin-1", "replace").decode("latin-1").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+A4_WIDTH_PT = 595.28
+A4_HEIGHT_PT = 841.89
+PDF_PT_PER_MM = 72 / 25.4
 
 
-def pdf_text(text: Any, x: int, y: int, size: int = 11) -> str:
-    return f"BT /F1 {size} Tf {x} {y} Td ({pdf_escape(text)}) Tj ET\n"
+def pdf_literal(value: Any) -> str:
+    return str(value or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def build_official_pdf(doc: Dict[str, Any], stamps: List[Dict[str, Any]] | None = None, template: str = "歲悅正式函", page_count: int = 1) -> bytes:
-    stamps = stamps or []
-    page_width, page_height = 595, 842
+def pdf_hex_text(value: Any) -> str:
+    return str(value or "").encode("utf-16-be", "replace").hex().upper()
+
+
+def pdf_text_width_units(value: Any) -> float:
+    units = 0.0
+    for char in str(value or ""):
+        code = ord(char)
+        if char in " \t":
+            units += 0.45
+        elif code < 128:
+            units += 0.55
+        elif 0xFF61 <= code <= 0xFF9F:
+            units += 0.55
+        else:
+            units += 1.0
+    return units
+
+
+def pdf_estimated_width(value: Any, size: float) -> float:
+    return pdf_text_width_units(value) * size
+
+
+def pdf_show_text(text: Any, x: float, y: float, size: float = 12, font: str = "F1") -> str:
+    return f"BT /{font} {size:.2f} Tf 1 0 0 1 {x:.2f} {y:.2f} Tm <{pdf_hex_text(text)}> Tj ET\n"
+
+
+def pdf_center_text(text: Any, y: float, size: float = 18, font: str = "F1") -> str:
+    x = max(36.0, (A4_WIDTH_PT - pdf_estimated_width(text, size)) / 2)
+    return pdf_show_text(text, x, y, size, font)
+
+
+def pdf_top_y(top_y: float) -> float:
+    return A4_HEIGHT_PT - top_y
+
+
+def pdf_safe_float(value: Any, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def clamp_pdf_rect(x: float, y: float, width: float, height: float) -> Tuple[float, float, float, float]:
+    width = max(12.0, min(width, A4_WIDTH_PT - 24.0))
+    height = max(12.0, min(height, A4_HEIGHT_PT - 24.0))
+    x = max(12.0, min(x, A4_WIDTH_PT - width - 12.0))
+    y = max(12.0, min(y, A4_HEIGHT_PT - height - 12.0))
+    return round(x, 2), round(y, 2), round(width, 2), round(height, 2)
+
+
+def wrap_pdf_text(text: Any, max_units: float) -> List[str]:
+    source = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines: List[str] = []
+    for paragraph in source.split("\n"):
+        if not paragraph.strip():
+            lines.append("")
+            continue
+        current = ""
+        current_units = 0.0
+        for char in paragraph.strip():
+            unit = pdf_text_width_units(char)
+            if current and current_units + unit > max_units:
+                lines.append(current)
+                current = char
+                current_units = unit
+            else:
+                current += char
+                current_units += unit
+        if current:
+            lines.append(current)
+    return lines or [""]
+
+
+def parse_json_field(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def roc_date_string(value: Any = None) -> str:
+    parsed = parse_time(str(value)) if value else datetime.now()
+    if parsed == datetime.min:
+        parsed = datetime.now()
+    return f"中華民國{parsed.year - 1911}年{parsed.month}月{parsed.day}日"
+
+
+def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
+    metadata = parse_json_field(doc.get("metadata_json"))
+    contact = metadata.get("contact") if isinstance(metadata.get("contact"), dict) else {}
+    attachments = doc.get("attachments")
+    if isinstance(attachments, list):
+        attachments_text = "、".join(str(item) for item in attachments if item) or "函稿本文、附件清冊"
+    else:
+        attachments_text = str(attachments or metadata.get("attachments") or "函稿本文、附件清冊")
+    company = doc.get("company_name") or doc.get("companyName") or metadata.get("companyName") or "歲悅長照股份有限公司"
+    doc_type = doc.get("doc_type") or doc.get("type") or template.replace(company, "").strip() or "函"
+    return {
+        "company": company,
+        "doc_type": doc_type,
+        "doc_no": doc.get("doc_no") or doc.get("no") or doc.get("docNo") or "系統產生中",
+        "date": roc_date_string(doc.get("created_at") or doc.get("date")),
+        "priority": doc.get("priority") or "普通件",
+        "security": doc.get("security_level") or doc.get("security") or "普通",
+        "recipient": doc.get("agency_name") or doc.get("to") or "未指定受文者",
+        "agency_code": doc.get("agency_code") or doc.get("agencyCode") or "",
+        "subject": doc.get("subject") or "未填主旨",
+        "body": doc.get("body") or doc.get("description") or "尚未填寫說明內容。",
+        "attachments": attachments_text,
+        "contact_address": doc.get("contactAddress") or doc.get("contact_address") or contact.get("address") or "220205 新北市板橋區英士路192之1號",
+        "contact_owner": doc.get("contactOwner") or doc.get("contact_owner") or contact.get("owner") or doc.get("owner") or "總務",
+        "contact_phone": doc.get("contactPhone") or doc.get("contact_phone") or contact.get("phone") or "(02)2257-7155 分機3762",
+        "contact_fax": doc.get("contactFax") or doc.get("contact_fax") or contact.get("fax") or "(02)2254-4029",
+        "contact_email": doc.get("contactEmail") or doc.get("contact_email") or contact.get("email") or "edoc@suiyuecare.com",
+    }
+
+
+def content_bottom_for_pdf_stamps(stamps: List[Dict[str, Any]] | None, page_number: int, fallback: float = 788.0) -> float:
+    bottom = fallback
+    for stamp in stamps or []:
+        if stamp.get("page") not in {page_number, "all"}:
+            continue
+        y = pdf_safe_float(stamp.get("y"), 0.0)
+        height = pdf_safe_float(stamp.get("h"), 0.0)
+        stamp_top_from_page_top = A4_HEIGHT_PT - (y + height)
+        if stamp_top_from_page_top > 500:
+            bottom = min(bottom, stamp_top_from_page_top - 24)
+    return max(540.0, bottom)
+
+
+def paginate_official_pdf(info: Dict[str, Any], stamps: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+    text_x = 104.0
+    right_margin = 44.0
+    max_units = (A4_WIDTH_PT - text_x - right_margin) / 18.0
+    subject_lines = wrap_pdf_text(info["subject"], max_units)
+    body_lines = wrap_pdf_text(info["body"], max_units)
+    subject_top = 468.0
+    line_height = 28.0
+    body_top = subject_top + max(1, len(subject_lines)) * line_height + 26.0
+    bottom_top = content_bottom_for_pdf_stamps(stamps, 1, 788.0)
+    first_capacity = max(1, int((bottom_top - body_top) // line_height) + 1)
+    next_top = 92.0
+    pages: List[Dict[str, Any]] = []
+    pages.append({"number": 1, "body_lines": body_lines[:first_capacity], "body_top": body_top, "bottom_top": bottom_top})
+    remaining = body_lines[first_capacity:]
+    while remaining:
+        number = len(pages) + 1
+        page_bottom = content_bottom_for_pdf_stamps(stamps, number, 788.0)
+        next_capacity = max(1, int((page_bottom - next_top) // line_height) + 1)
+        pages.append({"number": number, "body_lines": remaining[:next_capacity], "body_top": next_top, "bottom_top": page_bottom})
+        remaining = remaining[next_capacity:]
+    return {
+        "subject_lines": subject_lines,
+        "pages": pages,
+        "line_height": line_height,
+        "body_text_x": text_x,
+        "label_x": 42.0,
+        "bottom_top": 788.0,
+    }
+
+
+def draw_wrapped_lines(lines: List[str], x: float, top_y: float, size: float, line_height: float) -> str:
+    stream = ""
+    for index, line in enumerate(lines):
+        if line:
+            stream += pdf_show_text(line, x, pdf_top_y(top_y + index * line_height), size)
+    return stream
+
+
+def draw_official_page(info: Dict[str, Any], layout: Dict[str, Any], page: Dict[str, Any], total_pages: int, stamps: List[Dict[str, Any]]) -> str:
+    page_number = int(page["number"])
+    stream = "1 1 1 rg 0 0 595.28 841.89 re f 0 0 0 rg\n"
+    if page_number == 1:
+        stream += pdf_show_text("檔　號：", 430, pdf_top_y(30), 12)
+        stream += pdf_show_text("保存年限：", 430, pdf_top_y(48), 12)
+        stream += pdf_center_text(f"{info['company']}　{info['doc_type']}", pdf_top_y(112), 23)
+        contact_lines = [
+            f"地址：{info['contact_address']}",
+            f"承辦人：{info['contact_owner']}",
+            f"電話：{info['contact_phone']}",
+            f"傳真：{info['contact_fax']}",
+            f"電子信箱：{info['contact_email']}",
+        ]
+        contact_top = 150.0
+        contact_x = 300.0
+        contact_max_units = (A4_WIDTH_PT - contact_x - 36.0) / 10.5
+        for line in contact_lines:
+            for wrapped_line in wrap_pdf_text(line, contact_max_units):
+                stream += pdf_show_text(wrapped_line, contact_x, pdf_top_y(contact_top), 10.5)
+                contact_top += 15.0
+        stream += pdf_show_text(f"受文者：{info['recipient']}", 42, pdf_top_y(294), 18)
+        meta_lines = [
+            f"發文日期：{info['date']}",
+            f"發文字號：{info['doc_no']}",
+            f"速別：{info['priority']}",
+            f"密等及解密條件或保密期限：{info['security']}",
+            f"附件：{info['attachments']}",
+        ]
+        for index, line in enumerate(meta_lines):
+            stream += pdf_show_text(line, 42, pdf_top_y(340 + index * 22), 14)
+        stream += pdf_show_text("主旨：", layout["label_x"], pdf_top_y(468), 18)
+        stream += draw_wrapped_lines(layout["subject_lines"], layout["body_text_x"], 468, 18, layout["line_height"])
+        stream += pdf_show_text("說明：", layout["label_x"], pdf_top_y(page["body_top"]), 18)
+        stream += draw_wrapped_lines(page["body_lines"], layout["body_text_x"], page["body_top"], 18, layout["line_height"])
+    else:
+        stream += pdf_show_text(info["doc_no"], 42, pdf_top_y(42), 12)
+        stream += pdf_show_text(f"續第 {page_number} 頁", 490, pdf_top_y(42), 12)
+        stream += "0.75 0.75 0.75 RG 42 774 511 0.8 re S 0 0 0 RG\n"
+        stream += pdf_show_text("續：", layout["label_x"], pdf_top_y(page["body_top"]), 18)
+        stream += draw_wrapped_lines(page["body_lines"], layout["body_text_x"], page["body_top"], 18, layout["line_height"])
+    stream += pdf_show_text(f"第 {page_number} 頁 / 共 {total_pages} 頁", 248, 28, 9)
+    for stamp in stamps:
+        if stamp.get("page") not in {page_number, "all"}:
+            continue
+        x, y, width, height = clamp_pdf_rect(
+            pdf_safe_float(stamp.get("x"), 420.0),
+            pdf_safe_float(stamp.get("y"), 120.0),
+            pdf_safe_float(stamp.get("w"), 56.0),
+            pdf_safe_float(stamp.get("h"), 56.0),
+        )
+        label = str(stamp.get("label") or "用印")
+        stamp_type = str(stamp.get("type") or "")
+        stamp_no = str(stamp.get("stamp_no") or "")
+        stream += "0.75 0 0 RG 1.8 w\n"
+        stream += f"{x:.2f} {y:.2f} {width:.2f} {height:.2f} re S\n"
+        stream += f"{x + 4:.2f} {y + 4:.2f} {max(4, width - 8):.2f} {max(4, height - 8):.2f} re S\n"
+        stream += "0.72 0 0 rg\n"
+        stream += pdf_show_text(label, x + 8, y + height * 0.58, min(12, max(8, width / 7)))
+        if stamp_type:
+            stream += pdf_show_text(stamp_type, x + 8, y + height * 0.39, min(9, max(6, width / 9)))
+        if stamp_no:
+            stream += pdf_show_text(stamp_no[-18:], x + 5, y + 8, min(6.5, max(5, width / 13)))
+        stream += "0 0 0 rg 0 0 0 RG 1 w\n"
+    return stream
+
+
+def write_pdf_document(page_streams: List[str]) -> bytes:
+    page_count = len(page_streams)
     objects = ["<< /Type /Catalog /Pages 2 0 R >>"]
     page_object_numbers = [3 + index * 2 for index in range(page_count)]
     objects.append(f"<< /Type /Pages /Kids [{' '.join(f'{num} 0 R' for num in page_object_numbers)}] /Count {page_count} >>")
-    for page in range(1, page_count + 1):
-        stream = ""
-        stream += "0.97 0.97 0.95 rg 36 36 523 770 re f 0 0 0 rg\n"
-        stream += "0.85 0.42 0.04 RG 36 770 523 1 re S\n"
-        stream += pdf_text("Suiyuecare Official eDoc", 72, 740, 18)
-        stream += pdf_text(f"Template: {template}", 72, 715, 9)
-        stream += pdf_text(f"Doc No: {doc.get('doc_no') or doc.get('no')}", 72, 682, 12)
-        stream += pdf_text(f"Recipient: {doc.get('agency_name') or doc.get('to')} / {doc.get('agency_code') or doc.get('agencyCode')}", 72, 660, 11)
-        stream += pdf_text(f"Type: {doc.get('doc_type') or doc.get('type')}    Priority: {doc.get('priority')}    Security: {doc.get('security_level') or doc.get('security')}", 72, 638, 11)
-        stream += pdf_text(f"Subject: {doc.get('subject')}", 72, 610, 11)
-        body = doc.get("body") or doc.get("description") or "Generated by Suiyuecare eDoc backend."
-        stream += pdf_text(f"Body: {body}", 72, 585, 10)
-        attachments = doc.get("attachments") or []
-        if isinstance(attachments, list):
-            attachments = ", ".join(map(str, attachments))
-        stream += pdf_text(f"Attachments: {attachments}", 72, 548, 10)
-        stream += pdf_text(f"Generated: {now()}", 72, 92, 8)
-        stream += pdf_text(f"Page {page} of {page_count}", 480, 56, 8)
-        for stamp in stamps:
-            if stamp.get("page") not in {page, "all"}:
-                continue
-            x, y = int(stamp.get("x", 420)), int(stamp.get("y", 130))
-            w, h = int(stamp.get("w", 56)), int(stamp.get("h", 56))
-            stream += "1 0 0 RG 1 0 0 rg\n"
-            stream += f"{x} {y} {w} {h} re S\n"
-            stream += pdf_text(stamp.get("label", "SEAL"), x + 8, y + max(18, h - 24), 10)
-            stream += pdf_text(stamp.get("stamp_no", "STAMP"), x + 5, y + 18, 6)
-            if page_count > 1:
-                stream += pdf_text(f"Page {page}/{page_count}", x + 7, y + 7, 6)
-            stream += "0 0 0 RG 0 0 0 rg\n"
-        page_object_number = 3 + (page - 1) * 2
+    font_object_number = 3 + page_count * 2
+    cid_font_object_number = font_object_number + 1
+    for index, stream in enumerate(page_streams):
+        page_object_number = 3 + index * 2
         content_object_number = page_object_number + 1
-        font_object_number = 3 + page_count * 2
-        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] /Resources << /Font << /F1 {font_object_number} 0 R >> >> /Contents {content_object_number} 0 R >>")
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {A4_WIDTH_PT:.2f} {A4_HEIGHT_PT:.2f}] "
+            f"/Resources << /Font << /F1 {font_object_number} 0 R >> >> /Contents {content_object_number} 0 R >>"
+        )
         stream_bytes = stream.encode("latin-1", "replace")
         objects.append(f"<< /Length {len(stream_bytes)} >>\nstream\n{stream}endstream")
-    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objects.append(
+        f"<< /Type /Font /Subtype /Type0 /BaseFont /MKai-Medium /Encoding /UniCNS-UCS2-H "
+        f"/DescendantFonts [{cid_font_object_number} 0 R] >>"
+    )
+    objects.append(
+        "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /MKai-Medium "
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (CNS1) /Supplement 5 >> /DW 1000 >>"
+    )
     pdf = "%PDF-1.4\n"
     offsets = [0]
     for index, obj in enumerate(objects, start=1):
@@ -1144,6 +2167,31 @@ def build_official_pdf(doc: Dict[str, Any], stamps: List[Dict[str, Any]] | None 
         pdf += f"{offset:010d} 00000 n \n"
     pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF"
     return pdf.encode("latin-1", "replace")
+
+
+def build_official_pdf_package(doc: Dict[str, Any], stamps: List[Dict[str, Any]] | None = None, template: str = "歲悅正式函", min_page_count: int = 1) -> Dict[str, Any]:
+    stamps = stamps or []
+    info = official_pdf_info(doc, template)
+    layout = paginate_official_pdf(info, stamps)
+    while len(layout["pages"]) < max(1, int(min_page_count or 1)):
+        layout["pages"].append({"number": len(layout["pages"]) + 1, "body_lines": [], "body_top": 92.0, "bottom_top": 788.0})
+    total_pages = len(layout["pages"])
+    page_streams = [draw_official_page(info, layout, page, total_pages, stamps) for page in layout["pages"]]
+    return {
+        "data": write_pdf_document(page_streams),
+        "layout": {
+            "page_count": total_pages,
+            "page_size": {"width_pt": A4_WIDTH_PT, "height_pt": A4_HEIGHT_PT, "format": "A4"},
+            "subject_lines": len(layout["subject_lines"]),
+            "body_lines": sum(len(page["body_lines"]) for page in layout["pages"]),
+            "pages": [{"number": page["number"], "body_line_count": len(page["body_lines"]), "body_top": page["body_top"], "bottom_top": page.get("bottom_top", 788.0)} for page in layout["pages"]],
+            "font": "MKai-Medium / UniCNS-UCS2-H",
+        },
+    }
+
+
+def build_official_pdf(doc: Dict[str, Any], stamps: List[Dict[str, Any]] | None = None, template: str = "歲悅正式函", page_count: int = 1) -> bytes:
+    return build_official_pdf_package(doc, stamps, template, page_count)["data"]
 
 
 def ensure_dirs() -> None:
@@ -1172,13 +2220,139 @@ def row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
-def log_audit(conn: sqlite3.Connection, actor: str, action: str, target_type: str = "", target_id: str = "", detail: str = "") -> None:
+def audit_severity(event_type: str, result: str = "success") -> str:
+    if result == "denied" or event_type in LOGGING_CRITICAL_EVENTS:
+        return "critical"
+    if result == "failed":
+        return "warning"
+    return "info"
+
+
+def normalize_audit_event_type(event_type: str | None, action: str) -> str:
+    if event_type in LOGGING_AUDIT_EVENT_TYPES:
+        return str(event_type)
+    if "登入" in action:
+        return "login"
+    if "登出" in action:
+        return "logout"
+    if "匯出" in action:
+        return "export"
+    if "刪除" in action or "停用" in action:
+        return "delete"
+    if "退回" in action or "拒絕" in action:
+        return "reject"
+    if "核准" in action or "簽核" in action or "覆核" in action:
+        return "approve"
+    if "分派" in action or "指派" in action:
+        return "assign"
+    if "權限" in action or "角色" in action:
+        return "permission_change"
+    if "敏感" in action or "密件" in action or "下載" in action:
+        return "sensitive_access"
+    return "submit"
+
+
+def log_audit(
+    conn: sqlite3.Connection,
+    actor: str,
+    action: str,
+    target_type: str = "",
+    target_id: str = "",
+    detail: str = "",
+    *,
+    event_type: str | None = None,
+    result: str = "success",
+    module_code: str = "",
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    data_scope: str | None = None,
+    actor_user_id: str = "",
+    actor_email: str = "",
+    actor_roles: List[str] | None = None,
+    target_user_id: str = "",
+    target_email: str = "",
+    reason: str = "",
+    request_id: str = "",
+    before_snapshot: Dict[str, Any] | None = None,
+    after_snapshot: Dict[str, Any] | None = None,
+    metadata: Dict[str, Any] | None = None,
+) -> None:
+    safe_detail = redact_text(detail) if isinstance(detail, str) else json.dumps(redact_sensitive(detail), ensure_ascii=False)
+    normalized_event_type = normalize_audit_event_type(event_type, action)
+    normalized_result = result if result in {"success", "failed", "denied"} else "success"
+    normalized_scope = data_scope if data_scope in LOGGING_DATA_SCOPES else None
+    metadata_payload = {"legacy_detail": safe_detail, **(metadata or {})}
     conn.execute(
         """
-        INSERT INTO audit_logs (id, actor, action, target_type, target_id, ip, device, detail, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO audit_logs (
+          id, actor, action, target_type, target_id, ip, device, detail,
+          event_type, severity, result, module_code, resource_type, resource_id, data_scope,
+          actor_user_id, actor_email, actor_roles_json, target_user_id, target_email,
+          reason, request_id, before_snapshot_json, after_snapshot_json, metadata_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", actor, action, target_type, target_id, "127.0.0.1", "backend", detail, now()),
+        (
+            f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            actor,
+            action,
+            target_type,
+            target_id,
+            "127.0.0.1",
+            "backend",
+            safe_detail,
+            normalized_event_type,
+            audit_severity(normalized_event_type, normalized_result),
+            normalized_result,
+            module_code or target_type or "edoc",
+            resource_type or target_type or None,
+            resource_id or target_id or None,
+            normalized_scope,
+            actor_user_id,
+            actor_email,
+            json.dumps(actor_roles or ([actor] if actor else []), ensure_ascii=False),
+            target_user_id,
+            target_email,
+            reason,
+            request_id or f"req_{secrets.token_hex(8)}",
+            json.dumps(redact_sensitive(before_snapshot or {}), ensure_ascii=False),
+            json.dumps(redact_sensitive(after_snapshot or {}), ensure_ascii=False),
+            json.dumps(redact_sensitive(metadata_payload), ensure_ascii=False),
+            now(),
+        ),
+    )
+
+
+def log_permission_change(
+    conn: sqlite3.Connection,
+    actor: str,
+    target_user_id: str,
+    target_email: str,
+    before_snapshot: Dict[str, Any],
+    after_snapshot: Dict[str, Any],
+    reason: str,
+    actor_roles: List[str] | None = None,
+) -> None:
+    log_audit(
+        conn,
+        actor,
+        "權限異動",
+        "user_role",
+        target_user_id,
+        reason,
+        event_type="permission_change",
+        result="success",
+        module_code="system_permissions",
+        resource_type="user_role",
+        resource_id=target_user_id,
+        data_scope="custom",
+        actor_roles=actor_roles or [actor],
+        target_user_id=target_user_id,
+        target_email=target_email,
+        reason=reason,
+        before_snapshot=before_snapshot,
+        after_snapshot=after_snapshot,
+        metadata={"source": "edoc_rbac"},
     )
 
 
@@ -1191,8 +2365,63 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition:
 def migrate() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        ensure_column(conn, "documents", "company_name", "TEXT NOT NULL DEFAULT '歲悅長照股份有限公司'")
+        ensure_column(conn, "documents", "seal_plan_json", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(conn, "documents", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "users", "auth_user_id", "TEXT")
+        ensure_column(conn, "users", "account_source", "TEXT NOT NULL DEFAULT 'edoc'")
+        ensure_column(conn, "users", "logging_account_id", "TEXT")
+        ensure_column(conn, "users", "logging_role_key", "TEXT")
+        ensure_column(conn, "users", "external_account_payload_json", "TEXT NOT NULL DEFAULT '{}'")
+        ensure_column(conn, "users", "last_synced_from_logging_at", "TEXT")
         ensure_column(conn, "users", "password_hash", "TEXT")
+        ensure_column(conn, "users", "job_level", "TEXT NOT NULL DEFAULT '職員'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_logging_account ON users(logging_account_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_module_account_links_source ON module_account_links(source_system, source_account_id, target_module)")
+        conn.execute(
+            """
+            UPDATE users
+            SET job_level = CASE job_level
+              WHEN 'L1 員工' THEN '職員'
+              WHEN 'L2 專員' THEN '職員'
+              WHEN 'L3 主管' THEN '課長'
+              WHEN 'L4 部門主管' THEN '部長'
+              WHEN 'L5 高階主管' THEN '區經理'
+              WHEN 'L6 執行長' THEN '執行長'
+              ELSE COALESCE(NULLIF(job_level, ''), '職員')
+            END
+            WHERE job_level IS NULL
+               OR job_level = ''
+               OR job_level IN ('L1 員工', 'L2 專員', 'L3 主管', 'L4 部門主管', 'L5 高階主管', 'L6 執行長')
+            """
+        )
+        for column, definition in {
+            "event_type": "TEXT NOT NULL DEFAULT 'submit'",
+            "severity": "TEXT NOT NULL DEFAULT 'info'",
+            "result": "TEXT NOT NULL DEFAULT 'success'",
+            "module_code": "TEXT",
+            "resource_type": "TEXT",
+            "resource_id": "TEXT",
+            "data_scope": "TEXT",
+            "actor_user_id": "TEXT",
+            "actor_email": "TEXT",
+            "actor_roles_json": "TEXT NOT NULL DEFAULT '[]'",
+            "target_user_id": "TEXT",
+            "target_email": "TEXT",
+            "reason": "TEXT",
+            "request_id": "TEXT",
+            "before_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+            "after_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        }.items():
+            ensure_column(conn, "audit_logs", column, definition)
+        for statement in [
+            "CREATE INDEX IF NOT EXISTS idx_audit_logs_event_type ON audit_logs(event_type, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_logs_module ON audit_logs(module_code, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_logs_request ON audit_logs(request_id)",
+        ]:
+            conn.execute(statement)
         for column, definition in {
             "bucket": "TEXT NOT NULL DEFAULT 'edoc-private'",
             "storage_provider": "TEXT NOT NULL DEFAULT 'local'",
@@ -1229,13 +2458,29 @@ def migrate() -> None:
             "ocsp_status": "TEXT NOT NULL DEFAULT '待查詢'",
             "crl_status": "TEXT NOT NULL DEFAULT '待查詢'",
             "chain_status": "TEXT NOT NULL DEFAULT '待驗證'",
+            "provider": "TEXT",
+            "provider_key_id": "TEXT",
+            "provider_request_id": "TEXT",
+            "provider_receipt_json": "TEXT",
+            "evidence_digest_sha256": "TEXT",
         }.items():
             ensure_column(conn, "electronic_signatures", column, definition)
+        for column, definition in {
+            "signature_id": "TEXT",
+            "provider_status": "TEXT",
+            "failure_reason": "TEXT",
+            "evidence_json": "TEXT",
+            "updated_at": "TEXT",
+        }.items():
+            ensure_column(conn, "seal_applications", column, definition)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_file_objects_scan ON file_objects(scan_status)")
         seed(conn)
         seed_auth(conn)
         ensure_allowed_edoc_users(conn)
         normalize_legacy_document_owners(conn)
+        seed_persistent_registries(conn)
+        seed_workflow_tasks(conn)
+        seed_contracts(conn)
         seed_department_isolation_examples(conn)
         seed_document_acl_examples(conn)
         seed_certificate_authorities(conn)
@@ -1319,19 +2564,19 @@ def seed(conn: sqlite3.Connection) -> None:
         )
 
     users = [
-        ("USR-001", None, "林總務", "edoc@suiyuecare.com", password_hash("demo1234"), "總務", "總務", "總務", "Google Workspace", "已啟用", "啟用"),
-        ("USR-002", None, "張行政", "records@suiyuecare.com", password_hash("demo1234"), "行政部", "行政部主任", "行政部主任", "Microsoft Entra", "已啟用", "啟用"),
-        ("USR-003", None, "王主任", "director@suiyuecare.com", password_hash("demo1234"), "營運管理處", "主任", "主任", "Google Workspace", "已啟用", "啟用"),
-        ("USR-004", None, "陳執行長", "ceo@suiyuecare.com", password_hash("demo1234"), "經營管理", "執行長", "執行長", "Google Workspace", "已啟用", "啟用"),
-        ("USR-005", None, "何人資", "hr@suiyuecare.com", password_hash("demo1234"), "人資", "人資", "人資", "Microsoft Entra", "已啟用", "啟用"),
-        ("USR-006", None, "許會計", "accounting@suiyuecare.com", password_hash("demo1234"), "會計", "會計", "會計", "Microsoft Entra", "已啟用", "啟用"),
-        ("USR-007", None, "周業助", "sales-assistant@suiyuecare.com", password_hash("demo1234"), "業務部", "業務助理", "業務助理", "Google Workspace", "待設定", "啟用"),
+        ("USR-001", None, "林總務", "edoc@suiyuecare.com", password_hash("demo1234"), "總務", "總務", "L2 專員", "總務", "Google Workspace", "已啟用", "啟用"),
+        ("USR-002", None, "張行政", "records@suiyuecare.com", password_hash("demo1234"), "行政部", "行政部主任", "L4 部門主管", "行政部主任", "Microsoft Entra", "已啟用", "啟用"),
+        ("USR-003", None, "王主任", "director@suiyuecare.com", password_hash("demo1234"), "營運管理處", "主任", "L3 主管", "主任", "Google Workspace", "已啟用", "啟用"),
+        ("USR-004", None, "陳執行長", "ceo@suiyuecare.com", password_hash("demo1234"), "經營管理", "執行長", "L6 執行長", "執行長", "Google Workspace", "已啟用", "啟用"),
+        ("USR-005", None, "何人資", "hr@suiyuecare.com", password_hash("demo1234"), "人資", "人資", "L2 專員", "人資", "Microsoft Entra", "已啟用", "啟用"),
+        ("USR-006", None, "許會計", "accounting@suiyuecare.com", password_hash("demo1234"), "會計", "會計", "L2 專員", "會計", "Microsoft Entra", "已啟用", "啟用"),
+        ("USR-007", None, "周業助", "sales-assistant@suiyuecare.com", password_hash("demo1234"), "業務部", "業務助理", "L1 員工", "業務助理", "Google Workspace", "待設定", "啟用"),
     ]
     for item in users:
         conn.execute(
             """
-            INSERT INTO users (id, auth_user_id, name, email, password_hash, unit, title, role, provider, mfa_status, status, last_login_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO users (id, auth_user_id, name, email, password_hash, unit, title, job_level, role, provider, mfa_status, status, last_login_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (*item, None, ts),
         )
@@ -1369,22 +2614,19 @@ def seed_auth(conn: sqlite3.Connection) -> None:
     default_password = password_hash("demo1234")
     conn.execute("UPDATE users SET password_hash = COALESCE(password_hash, ?)", (default_password,))
 
-    roles = [
-        ("ROLE-DIRECTOR", "主任", "承接所屬部門公文、核准部門分派與追蹤處理時限。", "department"),
-        ("ROLE-CEO", "執行長", "核定重大、密件或跨部門高風險公文並查閱全域報表。", "all"),
-        ("ROLE-ADMIN-CHIEF", "行政部主任", "管理流程、清稿、角色、jAgent 參數、資安與營運維護。", "all"),
-        ("ROLE-HR", "人資", "處理人資相關來文、發文與附件補正。", "department"),
-        ("ROLE-ACCOUNTING", "會計", "處理會計、補助款、核銷相關來文與發文。", "department"),
-        ("ROLE-GA", "總務", "唯一收文入口；拉取、登錄來文後分發給各部門主管。", "all"),
-        ("ROLE-SALES-ASSISTANT", "業務助理", "建立函稿、補附件、協助發文與查詢被分派案件。", "assigned"),
-    ]
-    for role in roles:
+    for role in EDOC_ROLE_CATALOG:
         conn.execute(
             """
-            INSERT OR IGNORE INTO roles (id, name, description, data_scope, status, created_at, updated_at)
+            INSERT INTO roles (id, name, description, data_scope, status, created_at, updated_at)
             VALUES (?, ?, ?, ?, '啟用', ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              description = excluded.description,
+              data_scope = excluded.data_scope,
+              status = excluded.status,
+              updated_at = excluded.updated_at
             """,
-            (*role, ts, ts),
+            (role[0], role[1], f"{role[2]}：{role[3]}", role[4], ts, ts),
         )
     placeholders = ",".join("?" for _ in ALLOWED_EDOC_ROLE_LIST)
     conn.execute(
@@ -1401,13 +2643,14 @@ def ensure_allowed_edoc_users(conn: sqlite3.Connection) -> None:
     ts = now()
     seed_password = password_hash("demo1234")
     users = [
-        ("USR-001", None, "林總務", "edoc@suiyuecare.com", "總務", "總務", "總務", "Google Workspace", "已啟用", "啟用"),
-        ("USR-002", None, "張行政", "records@suiyuecare.com", "行政部", "行政部主任", "行政部主任", "Microsoft Entra", "已啟用", "啟用"),
-        ("USR-003", None, "王主任", "director@suiyuecare.com", "營運管理處", "主任", "主任", "Google Workspace", "已啟用", "啟用"),
-        ("USR-004", None, "陳執行長", "ceo@suiyuecare.com", "經營管理", "執行長", "執行長", "Google Workspace", "已啟用", "啟用"),
-        ("USR-005", None, "何人資", "hr@suiyuecare.com", "人資", "人資", "人資", "Microsoft Entra", "已啟用", "啟用"),
-        ("USR-006", None, "許會計", "accounting@suiyuecare.com", "會計", "會計", "會計", "Microsoft Entra", "已啟用", "啟用"),
-        ("USR-007", None, "周業助", "sales-assistant@suiyuecare.com", "業務部", "業務助理", "業務助理", "Google Workspace", "待設定", "啟用"),
+        ("USR-001", None, "林總務", "edoc@suiyuecare.com", "總務", "總務課長", "課長", "總務", "Google Workspace", "已啟用", "啟用"),
+        ("USR-002", None, "張行政", "records@suiyuecare.com", "行政部", "行政部長", "部長", "行政部主任", "Microsoft Entra", "已啟用", "啟用"),
+        ("USR-003", None, "王主管", "director@suiyuecare.com", "居家照顧部", "居家服務督導", "組長", "主管", "Google Workspace", "已啟用", "啟用"),
+        ("USR-004", None, "陳執行長", "ceo@suiyuecare.com", "經營管理", "執行長", "執行長", "執行長", "Google Workspace", "已啟用", "啟用"),
+        ("USR-005", None, "何人資", "hr@suiyuecare.com", "人資", "人資課長", "課長", "人資", "Microsoft Entra", "已啟用", "啟用"),
+        ("USR-006", None, "許會計", "accounting@suiyuecare.com", "會計", "會計課長", "課長", "會計", "Microsoft Entra", "已啟用", "啟用"),
+        ("USR-007", None, "周業助", "sales-assistant@suiyuecare.com", "業務部", "業務助理", "職員", "業務助理", "Google Workspace", "待設定", "啟用"),
+        ("USR-008", None, "員工測試", "employee@suiyuecare.com", "居家照顧部", "居家照顧服務員", "職員", "員工", "Google Workspace", "待設定", "啟用"),
     ]
     for item in users:
         updated = conn.execute(
@@ -1419,24 +2662,25 @@ def ensure_allowed_edoc_users(conn: sqlite3.Connection) -> None:
               email = ?,
               unit = ?,
               title = ?,
+              job_level = ?,
               role = ?,
               provider = ?,
               mfa_status = ?,
               status = ?
             WHERE id = ? OR lower(email) = ?
             """,
-            (item[1], item[2], item[3], item[4], item[5], item[6], item[7], item[8], item[9], item[0], item[3].lower()),
+            (item[1], item[2], item[3], item[4], item[5], item[6], item[7], item[8], item[9], item[10], item[0], item[3].lower()),
         )
         if updated.rowcount:
             continue
         conn.execute(
             """
             INSERT INTO users (
-              id, auth_user_id, name, email, password_hash, unit, title, role,
+              id, auth_user_id, name, email, password_hash, unit, title, job_level, role,
               provider, mfa_status, status, last_login_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
             """,
-            (item[0], item[1], item[2], item[3], seed_password, item[4], item[5], item[6], item[7], item[8], item[9], ts),
+            (item[0], item[1], item[2], item[3], seed_password, item[4], item[5], item[6], item[7], item[8], item[9], item[10], ts),
         )
     placeholders = ",".join("?" for _ in ALLOWED_EDOC_ROLE_LIST)
     conn.execute(f"UPDATE users SET status = '停用' WHERE role NOT IN ({placeholders})", tuple(ALLOWED_EDOC_ROLE_LIST))
@@ -1450,6 +2694,177 @@ def normalize_legacy_document_owners(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE documents SET owner = '業務助理' WHERE owner = '承辦人'")
     conn.execute("UPDATE documents SET department = '總務' WHERE owner = '總務' AND department = '總管理處'")
     conn.execute("UPDATE documents SET department = '行政部' WHERE owner = '行政部主任' AND department = '總管理處'")
+
+
+def seed_persistent_registries(conn: sqlite3.Connection) -> None:
+    ts = now()
+    companies = [
+        ("CO-001", "歲悅長照股份有限公司", "待設定", "啟用"),
+    ]
+    departments = [
+        ("DEP-001", "歲悅長照股份有限公司", "總管理處", "執行長", "啟用"),
+        ("DEP-002", "歲悅長照股份有限公司", "行政部", "行政部主任", "啟用"),
+        ("DEP-003", "歲悅長照股份有限公司", "總務", "總務", "啟用"),
+    ]
+    seal_types = [
+        ("ST-001", "一般章", "日常公文、一般函稿", "啟用"),
+        ("ST-002", "公司設立章", "設立登記、公司變更、重大文件", "啟用"),
+        ("ST-003", "銀行印鑑章", "銀行往來、帳戶、授權文件", "啟用"),
+        ("ST-004", "圖記章", "政府機關登記圖記、正式用印", "啟用"),
+    ]
+    for row in companies:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO company_registry (id, name, tax_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (*row, ts, ts),
+        )
+    for row in departments:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO department_registry (id, company_name, name, manager_role, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (*row, ts, ts),
+        )
+    for row in seal_types:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO seal_type_registry (id, name, scope, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (*row, ts, ts),
+        )
+
+
+def seed_workflow_tasks(conn: sqlite3.Connection) -> None:
+    ts = now()
+    rows = [
+        ("WF-003", "DOC-OUT-1140522-007", "日照中心補正資料發文", "發文", "清稿檢核", "行政部主任", "待審核", "standard", 1, "業務助理", "2026-05-22 10:40", "", "等待清稿檢核。"),
+        ("WF-007", "DOC-OUT-1140519-006", "補送居家服務品質改善計畫", "發文", "交換失敗重送複核", "行政部主任", "退回補正", "urgent", 1, "總務", "2026-05-19 11:20", "2026-05-22 15:18", "請確認機關代碼後重送。"),
+    ]
+    for row in rows:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO workflow_tasks (
+              id, document_id, title, workflow_type, step, role, status, template,
+              current_step_index, requester, submitted_at, last_signed_at, last_comment,
+              proof_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+            """,
+            (*row, ts, ts),
+        )
+
+
+def seed_contracts(conn: sqlite3.Connection) -> None:
+    ts = now()
+    rows = [
+        {
+            "id": "CON-1140525-001",
+            "contract_no": "合約字第1140525001號",
+            "company_name": "歲悅長照股份有限公司",
+            "contract_type": "服務委託合約",
+            "title": "日間照顧中心資訊系統維護合約",
+            "counterparty": "康照資訊股份有限公司",
+            "counterparty_tax_id": "24567890",
+            "owner": "業務助理",
+            "department": "行政部",
+            "amount": 180000,
+            "currency": "TWD",
+            "start_date": "2026-06-01",
+            "end_date": "2027-05-31",
+            "renewal_alert_days": 60,
+            "confidentiality_level": "普通",
+            "seal_requirement": "一般章",
+            "storage_status": "待歸檔",
+            "status": "待主管審核",
+            "summary": "年度資訊維護、客服支援、資安弱點修補與 SLA 回覆承諾。",
+            "risk_note": "金額超過 10 萬，需會計複核與行政部主任清稿後送執行長核定。",
+            "attachment_manifest_json": json.dumps(["合約草案.pdf", "報價單.pdf", "服務範圍清單.xlsx"], ensure_ascii=False),
+            "metadata_json": json.dumps({"approvalTemplate": "amount_over_100k", "renewalNotice": "到期前 60 天提醒"}, ensure_ascii=False),
+        },
+        {
+            "id": "CON-1140524-002",
+            "contract_no": "合約字第1140524002號",
+            "company_name": "歲悅長照股份有限公司",
+            "contract_type": "租賃合約",
+            "title": "板橋據點辦公設備租賃合約",
+            "counterparty": "新北設備租賃有限公司",
+            "counterparty_tax_id": "90345671",
+            "owner": "總務",
+            "department": "總務",
+            "amount": 72000,
+            "currency": "TWD",
+            "start_date": "2026-06-15",
+            "end_date": "2027-06-14",
+            "renewal_alert_days": 45,
+            "confidentiality_level": "普通",
+            "seal_requirement": "一般章",
+            "storage_status": "待歸檔",
+            "status": "待用印簽署",
+            "summary": "影印機、掃描設備與耗材保固租賃。",
+            "risk_note": "用印前請確認租期、提前解約條款與維修回應時間。",
+            "attachment_manifest_json": json.dumps(["租賃合約草案.pdf", "設備明細.pdf"], ensure_ascii=False),
+            "metadata_json": json.dumps({"approvalTemplate": "standard", "renewalNotice": "到期前 45 天提醒"}, ensure_ascii=False),
+        },
+    ]
+    for row in rows:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO contracts (
+              id, contract_no, company_name, contract_type, title, counterparty, counterparty_tax_id,
+              owner, department, amount, currency, start_date, end_date, renewal_alert_days,
+              confidentiality_level, seal_requirement, storage_status, status, summary, risk_note,
+              attachment_manifest_json, metadata_json, created_at, updated_at
+            ) VALUES (
+              :id, :contract_no, :company_name, :contract_type, :title, :counterparty, :counterparty_tax_id,
+              :owner, :department, :amount, :currency, :start_date, :end_date, :renewal_alert_days,
+              :confidentiality_level, :seal_requirement, :storage_status, :status, :summary, :risk_note,
+              :attachment_manifest_json, :metadata_json, :created_at, :updated_at
+            )
+            """,
+            {**row, "created_at": ts, "updated_at": ts},
+        )
+
+    parties = [
+        ("CP-001", "CON-1140525-001", "甲方", "歲悅長照股份有限公司", "待設定", "張行政", "records@suiyuecare.com", "(02)2257-7155", "220205 新北市板橋區英士路192之1號"),
+        ("CP-002", "CON-1140525-001", "乙方", "康照資訊股份有限公司", "24567890", "林專員", "service@example.com", "(02)2999-0000", "新北市板橋區文化路一段1號"),
+        ("CP-003", "CON-1140524-002", "甲方", "歲悅長照股份有限公司", "待設定", "林總務", "edoc@suiyuecare.com", "(02)2257-7155", "220205 新北市板橋區英士路192之1號"),
+        ("CP-004", "CON-1140524-002", "乙方", "新北設備租賃有限公司", "90345671", "吳小姐", "lease@example.com", "(02)2666-0000", "新北市新莊區中平路100號"),
+    ]
+    for row in parties:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO contract_parties (
+              id, contract_id, party_type, name, tax_id, contact_name, contact_email,
+              contact_phone, address, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (*row, ts, ts),
+        )
+
+    approvals = [
+        ("CA-001", "CON-1140525-001", 1, "起案完成", "業務助理", "完成", "周業助", "已上傳草案與報價單。", "2026-05-25 09:12"),
+        ("CA-002", "CON-1140525-001", 2, "部門主管審核", "主任", "待簽核", "", "請確認服務範圍與 SLA。", ""),
+        ("CA-003", "CON-1140525-001", 3, "會計複核", "會計", "待簽核", "", "金額超過 10 萬需複核預算。", ""),
+        ("CA-004", "CON-1140525-001", 4, "行政部主任清稿", "行政部主任", "待簽核", "", "確認合約條款與用印需求。", ""),
+        ("CA-005", "CON-1140525-001", 5, "執行長核定", "執行長", "待簽核", "", "重大金額合約最終核定。", ""),
+        ("CA-006", "CON-1140524-002", 1, "起案完成", "總務", "完成", "林總務", "設備租賃合約已完成草案。", "2026-05-24 15:20"),
+        ("CA-007", "CON-1140524-002", 2, "行政部主任清稿", "行政部主任", "完成", "張行政", "條款與租期已確認。", "2026-05-24 17:10"),
+        ("CA-008", "CON-1140524-002", 3, "總務用印簽署", "總務", "待簽核", "", "待確認用印與簽署後歸檔。", ""),
+    ]
+    for row in approvals:
+        evidence = json.dumps({"source": "seed", "hash": sha256_bytes("|".join(map(str, row)).encode("utf-8"))}, ensure_ascii=False)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO contract_approvals (
+              id, contract_id, step_no, step_name, role, status, approver, comment,
+              signed_at, non_repudiation_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (*row, evidence, ts, ts),
+        )
 
 
 def seed_department_isolation_examples(conn: sqlite3.Connection) -> None:
@@ -1670,6 +3085,9 @@ def seed_jobs(conn: sqlite3.Connection) -> None:
         ("JOB-005", "交換狀態同步", "exchangeSync", "每 15 分鐘", "啟用", "尚未執行", "2026-05-23 09:15", 0),
         ("JOB-006", "歸檔封存", "archiveSeal", "每日 18:00", "啟用", "尚未執行", "2026-05-23 18:00", 0),
         ("JOB-007", "報表產生", "reportGenerate", "每日 18:00", "啟用", "尚未執行", "2026-05-23 18:00", 0),
+        ("JOB-008", "合約到期與續約提醒", "contractRenewalCheck", "每日 09:30", "啟用", "尚未執行", "2026-05-23 09:30", 0),
+        ("JOB-009", "交換待發公文送出", "exchangeSendPending", "每 5 分鐘", "啟用", "尚未執行", "2026-05-23 09:05", 0),
+        ("JOB-010", "交換失敗重送", "exchangeRetryFailed", "每 15 分鐘", "啟用", "尚未執行", "2026-05-23 09:15", 0),
     ]
     for item in jobs:
         conn.execute(
@@ -1680,36 +3098,21 @@ def seed_jobs(conn: sqlite3.Connection) -> None:
             (*item, ts),
         )
 
-    permissions = [
-        ("PERM-INBOUND", "inbound.manage", "收文管理", "公文", "拉取、登錄、分派與誤送漏送處理。"),
-        ("PERM-DISPATCH", "dispatch.manage", "發文管理", "公文", "建立函稿、清稿、封裝、送交與重送。"),
-        ("PERM-JAGENT", "jagent.manage", "jAgent 介接", "系統", "憑證登入、Token、交換中心與地址簿。"),
-        ("PERM-WORKFLOW", "workflow.approve", "簽核流程", "流程", "簽核、退回、抽回、加簽、會辦與改派。"),
-        ("PERM-SEAL", "seal.apply", "自動用印", "印鑑", "PDF 套版、押章與用印紀錄。"),
-        ("PERM-AUDIT", "audit.view", "稽核查閱", "稽核", "Audit log、交換事件與不可否認紀錄。"),
-        ("PERM-SECURITY", "security.manage", "資安管理", "資安", "RBAC、IP/裝置限制、MFA 與 Token 過期。"),
-        ("PERM-REPORT", "reports.view", "報表統計", "報表", "收發量、成功率、異常、承辦量與逾期件。"),
-        ("PERM-SETTINGS", "settings.manage", "系統設定", "系統", "機關代碼、API URL、防火牆、憑證與角色。"),
-    ]
-    for permission in permissions:
+    for permission in [*EDOC_LEGACY_PERMISSION_CATALOG, *EDOC_PERMISSION_CATALOG]:
         conn.execute(
             """
-            INSERT OR IGNORE INTO permissions (id, code, name, category, description, created_at)
+            INSERT INTO permissions (id, code, name, category, description, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              code = excluded.code,
+              name = excluded.name,
+              category = excluded.category,
+              description = excluded.description
             """,
             (*permission, ts),
         )
 
-    grants = {
-        "ROLE-DIRECTOR": ["PERM-INBOUND", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
-        "ROLE-CEO": ["PERM-INBOUND", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-AUDIT", "PERM-REPORT"],
-        "ROLE-ADMIN-CHIEF": ["PERM-INBOUND", "PERM-DISPATCH", "PERM-JAGENT", "PERM-WORKFLOW", "PERM-SEAL", "PERM-AUDIT", "PERM-SECURITY", "PERM-REPORT", "PERM-SETTINGS"],
-        "ROLE-HR": ["PERM-INBOUND", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
-        "ROLE-ACCOUNTING": ["PERM-INBOUND", "PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
-        "ROLE-GA": ["PERM-INBOUND", "PERM-DISPATCH", "PERM-JAGENT", "PERM-WORKFLOW", "PERM-REPORT"],
-        "ROLE-SALES-ASSISTANT": ["PERM-DISPATCH", "PERM-WORKFLOW", "PERM-REPORT"],
-    }
-    for role_id, permission_ids in grants.items():
+    for role_id, permission_ids in EDOC_ROLE_PERMISSION_GRANTS.items():
         for permission_id in permission_ids:
             conn.execute(
                 "INSERT OR IGNORE INTO role_permissions (role_id, permission_id, created_at) VALUES (?, ?, ?)",
@@ -1859,31 +3262,78 @@ def list_rows(conn: sqlite3.Connection, table: str, query: Dict[str, List[str]])
 def insert_row(conn: sqlite3.Connection, table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if "id" not in payload or not payload["id"]:
         payload["id"] = f"{table.upper()}-{int(time.time() * 1000)}"
+    if table == "users":
+        apply_user_permission_defaults(payload)
     if table == "documents" and payload.get("direction") == "發文" and not payload.get("doc_no"):
         payload["doc_no"] = next_dispatch_no(conn)
-    if table in {"documents", "recipients", "exchange_tasks", "settings", "notification_rules"}:
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals"}:
         payload.setdefault("updated_at", now())
-    if table in {"documents", "attachments", "exchange_events", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "file_objects", "file_download_tokens", "virus_scan_jobs", "compliance_attestations"}:
+    if table in {"documents", "attachments", "exchange_events", "exchange_outbox", "exchange_inbox", "exchange_log", "exchange_attachment", "exchange_status_history", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "file_objects", "file_download_tokens", "virus_scan_jobs", "compliance_attestations", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "signature_provider_events"}:
         payload.setdefault("created_at", now())
+    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs"}:
+        for key, value in list(payload.items()):
+            if key.endswith("_json") and not isinstance(value, str):
+                payload[key] = json.dumps(value, ensure_ascii=False)
     columns = list(payload.keys())
     placeholders = ", ".join(["?"] * len(columns))
     conn.execute(
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
         [payload[column] for column in columns],
     )
-    log_audit(conn, "API", "新增資料", table, str(payload.get("id")), json.dumps(payload, ensure_ascii=False))
+    if table == "users":
+        permission_fields = {"role", "status", "unit", "title", "job_level", "mfa_status"}
+        log_permission_change(
+            conn,
+            "API",
+            str(payload.get("id")),
+            payload.get("email", ""),
+            {},
+            {key: payload.get(key) for key in sorted(permission_fields) if key in payload},
+            "建立使用者帳號與初始角色權限。",
+            ["system_permissions.manage"],
+        )
+    else:
+        log_audit(conn, "API", "新增資料", table, str(payload.get("id")), json.dumps(payload, ensure_ascii=False))
     return payload
 
 
 def patch_row(conn: sqlite3.Connection, table: str, row_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    if table in {"documents", "recipients", "exchange_tasks", "settings", "background_jobs", "notification_rules"}:
+    before_row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
+    before_data = row_to_dict(before_row) if before_row else {}
+    if table == "users":
+        permission_inputs = {"role", "unit", "title", "job_level", "company", "region", "class_name"}
+        merged_payload = {**before_data, **payload}
+        profile = edoc_roster_permission_profile(merged_payload)
+        if "job_level" in payload:
+            payload["job_level"] = profile["job_level"]
+        if permission_inputs.intersection(payload) and (not payload.get("role") or payload.get("role") not in ALLOWED_EDOC_ROLES):
+            payload["role"] = profile["role"]
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "background_jobs", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals"}:
         payload["updated_at"] = now()
+    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs"}:
+        for key, value in list(payload.items()):
+            if key.endswith("_json") and not isinstance(value, str):
+                payload[key] = json.dumps(value, ensure_ascii=False)
     if not payload:
         return {}
     assignments = ", ".join([f"{key} = ?" for key in payload.keys()])
     conn.execute(f"UPDATE {table} SET {assignments} WHERE id = ?", [*payload.values(), row_id])
-    log_audit(conn, "API", "更新資料", table, row_id, json.dumps(payload, ensure_ascii=False))
     row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
+    after_data = row_to_dict(row) if row else {}
+    permission_fields = {"role", "status", "unit", "title", "job_level", "mfa_status"}
+    if table == "users" and permission_fields.intersection(payload):
+        log_permission_change(
+            conn,
+            "API",
+            row_id,
+            after_data.get("email") or before_data.get("email") or "",
+            {key: before_data.get(key) for key in sorted(permission_fields) if key in before_data},
+            {key: after_data.get(key) for key in sorted(permission_fields) if key in after_data},
+            "使用者角色、職等、狀態或權限相關資料異動。",
+            ["system_permissions.manage"],
+        )
+    else:
+        log_audit(conn, "API", "更新資料", table, row_id, json.dumps(payload, ensure_ascii=False))
     return row_to_dict(row) if row else {}
 
 
@@ -1914,7 +3364,7 @@ def document_scope_clause(user: Dict[str, Any] | sqlite3.Row | None) -> Tuple[st
     role = user["role"] if isinstance(user, sqlite3.Row) else user.get("role", "")
     unit = user["unit"] if isinstance(user, sqlite3.Row) else user.get("unit", "")
     name = user["name"] if isinstance(user, sqlite3.Row) else user.get("name", "")
-    if role == "執行長":
+    if role in {"執行長", "董事會", "股東"}:
         return "", []
     acl_clause = """
       EXISTS (
@@ -1934,8 +3384,10 @@ def document_scope_clause(user: Dict[str, Any] | sqlite3.Row | None) -> Tuple[st
         return f"(((owner = ? OR department = ?) AND owner <> ?) OR {acl_clause})", ["總務", "總務", "行政部主任", *acl_params]
     if role == "行政部主任":
         return f"(((owner = ? OR department IN (?, ?)) AND owner <> ?) OR {acl_clause})", ["行政部主任", "行政部", "總管理處", "總務", *acl_params]
-    if role in {"人資", "會計", "業務助理", "主任"}:
+    if role in {"人資", "會計", "業務助理", "主任", "主管", "員工"}:
         return f"((owner IN (?, ?) OR department IN (?, ?)) OR {acl_clause})", [role, name, role, unit, *acl_params]
+    if role == "外部檢核單位":
+        return acl_clause, acl_params
     return "1 = 0", []
 
 
@@ -1974,6 +3426,8 @@ def unified_search(conn: sqlite3.Connection, query: Dict[str, List[str]], sessio
 
     specs = [
         ("documents", "公文", "documents", ["id", "doc_no", "agency_name", "agency_code", "subject", "body", "status", "owner", "department"], "status"),
+        ("contracts", "合約", "contracts", ["id", "contract_no", "company_name", "contract_type", "title", "counterparty", "owner", "department", "status", "summary", "risk_note"], "status"),
+        ("contract_approvals", "合約簽核", "contract_approvals", ["id", "contract_id", "step_name", "role", "status", "approver", "comment"], "status"),
         ("attachments", "附件", "attachments", ["id", "document_id", "file_name", "version", "mime_type", "sha256", "scan_status", "storage_key"], "scan_status"),
         ("attachment_security", "附件安全", "attachment_security", ["id", "attachment_id", "document_id", "file_name", "file_ext", "scan_status", "mask_status", "confidential_level", "allowed_roles", "watermark_status", "quarantine_reason"], "scan_status"),
         ("exchange_tasks", "交換任務", "exchange_tasks", ["id", "document_id", "direction", "target_agency", "status", "package_id"], "status"),
@@ -2007,8 +3461,8 @@ def unified_search(conn: sqlite3.Connection, query: Dict[str, List[str]], sessio
         rows = conn.execute(sql, (*params, limit)).fetchall()
         for row in rows:
             data = row_to_dict(row)
-            title = data.get("doc_no") or data.get("file_name") or data.get("title") or data.get("action") or data.get("event_type") or data.get("id")
-            subtitle = data.get("subject") or data.get("agency_name") or data.get("target_agency") or data.get("body") or data.get("detail") or data.get("message") or ""
+            title = data.get("doc_no") or data.get("contract_no") or data.get("file_name") or data.get("title") or data.get("action") or data.get("event_type") or data.get("id")
+            subtitle = data.get("subject") or data.get("counterparty") or data.get("step_name") or data.get("agency_name") or data.get("target_agency") or data.get("body") or data.get("detail") or data.get("message") or ""
             results.append({
                 "id": data.get("id"),
                 "category": label,
@@ -2124,7 +3578,7 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
         """
         SELECT
           s.id AS session_id, s.expires_at,
-          u.id, u.auth_user_id, u.name, u.email, u.unit, u.title, u.role,
+          u.id, u.auth_user_id, u.name, u.email, u.unit, u.title, u.job_level, u.role,
           u.provider, u.mfa_status, u.status, u.last_login_at, u.created_at
         FROM auth_sessions s
         JOIN users u ON u.id = s.user_id
@@ -2136,7 +3590,7 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
         return None
     if row["role"] not in ALLOWED_EDOC_ROLES:
         return None
-    user = {key: row[key] for key in row.keys() if key in {"id", "auth_user_id", "name", "email", "unit", "title", "role", "provider", "mfa_status", "status", "last_login_at", "created_at"}}
+    user = {key: row[key] for key in row.keys() if key in {"id", "auth_user_id", "name", "email", "unit", "title", "job_level", "role", "provider", "mfa_status", "status", "last_login_at", "created_at"}}
     return {
         "sessionId": row["session_id"],
         "expiresAt": row["expires_at"],
@@ -2164,28 +3618,68 @@ def dashboard(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 
 def pull_inbound(conn: sqlite3.Connection) -> Dict[str, Any]:
-    doc_id = f"DOC-IN-{datetime.now().strftime('%y%m%d%H%M%S')}"
-    ts = now()
-    conn.execute(
-        """
-        INSERT INTO documents (
-          id, doc_no, direction, doc_type, priority, security_level, agency_name, agency_code,
-          subject, body, status, owner, department, due_date, received_at, created_at, updated_at
-        ) VALUES (?, ?, '收文', '函', '普通件', '普通', '臺北市政府衛生局', 'A63000000I', ?, ?, '待登錄', '總務', '總管理處', ?, ?, ?, ?)
-        """,
-        (
-            doc_id,
-            f"收{datetime.now().strftime('%y%m%d%H%M%S')}",
-            "長照機構感染管制作業檢核通知",
-            "由後端 jAgent adapter 拉取的新來文。",
-            (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d"),
-            ts,
-            ts,
-            ts,
-        ),
-    )
-    log_audit(conn, "jAgent Worker", "每日收文拉取", "documents", doc_id, "後端已建立收文主檔")
-    return {"created": doc_id}
+    gateway = create_exchange_gateway(conn)
+    result = gateway.receiveOfficialDocuments({})
+    created = [item.get("document_id") for item in result.get("items", []) if item.get("document_id")]
+    for doc_id in created:
+        log_audit(conn, "Exchange Gateway", "每日收文拉取", "documents", doc_id, "mock provider 已建立收文主檔")
+    return {"created": created[0] if created else "", "created_ids": created, "count": result.get("count", 0), "gateway": result}
+
+
+def exchange_gateway_status() -> Dict[str, Any]:
+    return {
+        "provider": EDOC_EXCHANGE_PROVIDER,
+        "environment": EDOC_EXCHANGE_ENV,
+        "maxRetries": EDOC_EXCHANGE_MAX_RETRIES,
+        "formalConnection": False,
+        "mode": "mock-only" if EDOC_EXCHANGE_PROVIDER == "mock" else "provider-not-implemented",
+        "secrets": {
+            "configuredByEnvironment": True,
+            "logged": False,
+        },
+    }
+
+
+def exchange_queue_document(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    gateway = create_exchange_gateway(conn)
+    result = gateway.queueOfficialDocument(payload)
+    log_audit(conn, "Exchange Gateway", "加入交換待發佇列", "exchange_outbox", result.get("id", ""), json.dumps(redact_sensitive(payload), ensure_ascii=False))
+    return result
+
+
+def exchange_send_document(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    gateway = create_exchange_gateway(conn)
+    result = gateway.sendOfficialDocument(payload)
+    log_audit(conn, "Exchange Gateway", "送出公文交換", "exchange_outbox", result.get("item", {}).get("id", ""), json.dumps(redact_sensitive(result), ensure_ascii=False))
+    return result
+
+
+def exchange_receive_documents(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    gateway = create_exchange_gateway(conn)
+    result = gateway.receiveOfficialDocuments(payload)
+    log_audit(conn, "Exchange Gateway", "收取交換來文", "exchange_inbox", "batch", json.dumps({"count": result.get("count", 0)}, ensure_ascii=False))
+    return result
+
+
+def exchange_query_status(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    gateway = create_exchange_gateway(conn)
+    result = gateway.queryDeliveryStatus(payload)
+    log_audit(conn, "Exchange Gateway", "查詢交換狀態", "exchange_outbox", result.get("item", {}).get("id", ""), json.dumps(redact_sensitive(result), ensure_ascii=False))
+    return result
+
+
+def exchange_acknowledge_received(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    gateway = create_exchange_gateway(conn)
+    result = gateway.acknowledgeReceived(payload)
+    log_audit(conn, "Exchange Gateway", "確認收文入案", "exchange_inbox", result.get("item", {}).get("id", ""), json.dumps(redact_sensitive(result), ensure_ascii=False))
+    return result
+
+
+def exchange_retry_failed(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    gateway = create_exchange_gateway(conn)
+    result = gateway.retryFailedDelivery(payload)
+    log_audit(conn, "Exchange Gateway", "重送交換失敗公文", "exchange_outbox", result.get("item", {}).get("id", ""), json.dumps(redact_sensitive(result), ensure_ascii=False))
+    return result
 
 
 def backup_database(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -2631,6 +4125,9 @@ def create_pdf_version(conn: sqlite3.Connection, document: Dict[str, Any], versi
     insert_row(conn, "pdf_versions", row)
     row["file"] = file_row
     row["download_url"] = create_file_signed_url(conn, file_row["id"], "PDF Worker")["download_url"]
+    row["coordinates"] = coordinates
+    row["page_count"] = coordinates.get("page_count")
+    row["page_size"] = coordinates.get("page_size")
     return row
 
 
@@ -2670,25 +4167,127 @@ def signature_secret() -> bytes:
     return value.encode("utf-8")
 
 
-def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeout: int = 25) -> Dict[str, Any]:
-    headers = {"Content-Type": "application/json"}
+class SignatureProviderError(RuntimeError):
+    def __init__(self, message: str, event: Dict[str, Any] | None = None):
+        super().__init__(message)
+        self.event = event or {}
+
+
+def provider_event_row(event: Dict[str, Any], document_id: str = "", signature_id: str = "") -> Dict[str, Any]:
+    return {
+        "id": event.get("id") or f"SPE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "document_id": document_id or event.get("document_id") or "",
+        "signature_id": signature_id or event.get("signature_id") or "",
+        "provider": event.get("provider") or EDOC_SIGNATURE_PROVIDER,
+        "operation": event.get("operation") or "signature-provider",
+        "request_id": event.get("request_id") or "",
+        "endpoint": event.get("endpoint") or "",
+        "request_digest_sha256": event.get("request_digest_sha256") or "",
+        "response_digest_sha256": event.get("response_digest_sha256") or "",
+        "status": event.get("status") or "失敗",
+        "http_status": event.get("http_status"),
+        "error": event.get("error") or "",
+        "attempt_count": int(event.get("attempt_count") or 1),
+        "duration_ms": int(event.get("duration_ms") or 0),
+        "created_at": event.get("created_at") or now(),
+    }
+
+
+def record_signature_provider_event(conn: sqlite3.Connection, event: Dict[str, Any], document_id: str = "", signature_id: str = "") -> Dict[str, Any]:
+    row = provider_event_row(event, document_id, signature_id)
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO signature_provider_events (
+          id, document_id, signature_id, provider, operation, request_id, endpoint,
+          request_digest_sha256, response_digest_sha256, status, http_status,
+          error, attempt_count, duration_ms, created_at
+        ) VALUES (
+          :id, :document_id, :signature_id, :provider, :operation, :request_id, :endpoint,
+          :request_digest_sha256, :response_digest_sha256, :status, :http_status,
+          :error, :attempt_count, :duration_ms, :created_at
+        )
+        """,
+        row,
+    )
+    return row
+
+
+def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeout: int | None = None, operation: str = "signature-provider") -> Dict[str, Any]:
+    request_id = payload.get("request_id") or f"SIGREQ-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}"
+    payload["request_id"] = request_id
+    request_digest = sha256_bytes(canonical_signature_payload(payload).encode("utf-8"))
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "suiyuecare-edoc-signature/1.0",
+        "X-Request-ID": request_id,
+        "Idempotency-Key": request_digest,
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"provider_http_{exc.code}:{detail}") from exc
+    attempts = max(1, EDOC_SIGNATURE_MAX_RETRIES + 1)
+    last_event: Dict[str, Any] = {}
+    for attempt in range(1, attempts + 1):
+        started = time.time()
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout or EDOC_SIGNATURE_TIMEOUT_SECONDS) as response:
+                raw = response.read().decode("utf-8")
+                data = json.loads(raw) if raw else {}
+                return {
+                    "data": data,
+                    "event": {
+                        "provider": EDOC_SIGNATURE_PROVIDER,
+                        "operation": operation,
+                        "request_id": request_id,
+                        "endpoint": url,
+                        "request_digest_sha256": request_digest,
+                        "response_digest_sha256": sha256_bytes(raw.encode("utf-8")),
+                        "status": "成功",
+                        "http_status": response.status,
+                        "attempt_count": attempt,
+                        "duration_ms": int((time.time() - started) * 1000),
+                    },
+                }
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            last_event = {
+                "provider": EDOC_SIGNATURE_PROVIDER,
+                "operation": operation,
+                "request_id": request_id,
+                "endpoint": url,
+                "request_digest_sha256": request_digest,
+                "status": "失敗",
+                "http_status": exc.code,
+                "error": detail[:500],
+                "attempt_count": attempt,
+                "duration_ms": int((time.time() - started) * 1000),
+            }
+            if exc.code not in {408, 425, 429, 500, 502, 503, 504} or attempt == attempts:
+                raise SignatureProviderError(f"provider_http_{exc.code}:{detail}", last_event) from exc
+        except Exception as exc:
+            last_event = {
+                "provider": EDOC_SIGNATURE_PROVIDER,
+                "operation": operation,
+                "request_id": request_id,
+                "endpoint": url,
+                "request_digest_sha256": request_digest,
+                "status": "失敗",
+                "error": str(exc)[:500],
+                "attempt_count": attempt,
+                "duration_ms": int((time.time() - started) * 1000),
+            }
+            if attempt == attempts:
+                raise SignatureProviderError(f"provider_request_failed:{exc}", last_event) from exc
+        time.sleep(min(1.5, 0.25 * attempt))
+    raise SignatureProviderError("provider_request_failed", last_event)
 
 
-def request_formal_signature(digest_payload: Dict[str, Any], digest: str, certificate: Dict[str, Any], signer: str) -> Dict[str, Any]:
+def request_formal_signature(digest_payload: Dict[str, Any], digest: str, certificate: Dict[str, Any], signer: str, signature_id: str = "") -> Dict[str, Any]:
     if EDOC_SIGNATURE_PROVIDER == "local-simulation":
         signature_value = hmac.new(signature_secret(), canonical_signature_payload(digest_payload).encode("utf-8"), hashlib.sha256).hexdigest().upper()
         tsa_token = hmac.new(signature_secret(), f"TSA|{digest}|{digest_payload['timestamp']}".encode("utf-8"), hashlib.sha256).hexdigest().upper()
@@ -2696,15 +4295,22 @@ def request_formal_signature(digest_payload: Dict[str, Any], digest: str, certif
             "algorithm": "HMAC-SHA256-RSA-PSS-READY",
             "signature_value": signature_value,
             "tsa_token": tsa_token,
-            "provider_receipt": {"mode": "local-simulation"},
+            "provider_receipt": {"mode": "local-simulation", "profile": EDOC_SIGNATURE_PROFILE},
+            "provider_request_id": f"LOCAL-{signature_id or int(time.time() * 1000)}",
+            "provider_status": "local-simulation",
+            "provider_events": [],
         }
     if not EDOC_SIGNATURE_API_URL or not EDOC_SIGNATURE_API_KEY:
         raise ValueError("formal_signature_provider_not_configured")
-    result = provider_json_request(
+    request_id = f"SIGREQ-{signature_id or int(time.time() * 1000)}"
+    response = provider_json_request(
         f"{EDOC_SIGNATURE_API_URL}/sign",
         {
             "provider": EDOC_SIGNATURE_PROVIDER,
             "key_id": EDOC_SIGNATURE_KEY_ID,
+            "request_id": request_id,
+            "signature_id": signature_id,
+            "signature_profile": EDOC_SIGNATURE_PROFILE,
             "certificate_id": certificate["id"],
             "certificate_serial": certificate.get("serial_no"),
             "signer": signer,
@@ -2714,35 +4320,48 @@ def request_formal_signature(digest_payload: Dict[str, Any], digest: str, certif
             "tsa_policy_oid": EDOC_TSA_POLICY_OID,
         },
         EDOC_SIGNATURE_API_KEY,
+        operation="sign",
     )
+    result = response["data"]
     signature_value = result.get("signature_value") or result.get("signature") or result.get("cms") or result.get("p7s")
     if not signature_value:
         raise ValueError("formal_signature_provider_missing_signature")
     tsa_token = result.get("tsa_token") or result.get("timestamp_token") or ""
+    provider_events = [response["event"]]
     if not tsa_token and EDOC_TSA_URL:
-        tsa_token = request_formal_tsa_token(digest, digest_payload["timestamp"])
+        tsa_response = request_formal_tsa_token(digest, digest_payload["timestamp"], signature_id)
+        tsa_token = tsa_response["token"]
+        provider_events.append(tsa_response["event"])
     return {
         "algorithm": result.get("algorithm") or "RSA-PSS-SHA256",
         "signature_value": signature_value,
         "tsa_token": tsa_token,
-        "provider_receipt": result,
+        "provider_receipt": result.get("receipt") or result.get("provider_receipt") or result,
+        "provider_request_id": result.get("request_id") or result.get("provider_request_id") or request_id,
+        "provider_status": result.get("status") or "signed",
+        "provider_events": provider_events,
     }
 
 
-def request_formal_tsa_token(digest: str, timestamp: str) -> str:
+def request_formal_tsa_token(digest: str, timestamp: str, signature_id: str = "") -> Dict[str, Any]:
     if EDOC_SIGNATURE_PROVIDER == "local-simulation":
-        return hmac.new(signature_secret(), f"TSA|{digest}|{timestamp}".encode("utf-8"), hashlib.sha256).hexdigest().upper()
+        return {
+            "token": hmac.new(signature_secret(), f"TSA|{digest}|{timestamp}".encode("utf-8"), hashlib.sha256).hexdigest().upper(),
+            "event": {},
+        }
     if not EDOC_TSA_URL or not EDOC_TSA_API_KEY:
         raise ValueError("formal_tsa_not_configured")
-    result = provider_json_request(
+    response = provider_json_request(
         EDOC_TSA_URL,
-        {"digest_sha256": digest, "policy_oid": EDOC_TSA_POLICY_OID, "timestamp": timestamp},
+        {"digest_sha256": digest, "policy_oid": EDOC_TSA_POLICY_OID, "timestamp": timestamp, "signature_id": signature_id},
         EDOC_TSA_API_KEY,
+        operation="tsa",
     )
+    result = response["data"]
     token = result.get("tsa_token") or result.get("timestamp_token") or result.get("token")
     if not token:
         raise ValueError("formal_tsa_missing_token")
-    return token
+    return {"token": token, "event": response["event"]}
 
 
 def canonical_signature_payload(payload: Dict[str, Any]) -> str:
@@ -2923,7 +4542,9 @@ def create_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any
     certificate = active_certificate(conn, payload.get("certificate_id") or "", signer)
     previous = latest_signature(conn, document["id"])
     timestamp = now()
+    signature_id = f"ESIG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     digest_payload = {
+        "signature_id": signature_id,
         "document_id": document["id"],
         "doc_no": document["doc_no"],
         "file_hash": file_hash,
@@ -2933,25 +4554,41 @@ def create_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any
         "timestamp": timestamp,
     }
     digest = sha256_bytes(canonical_signature_payload(digest_payload).encode("utf-8"))
-    formal_signature = request_formal_signature(digest_payload, digest, certificate, signer)
+    try:
+        formal_signature = request_formal_signature(digest_payload, digest, certificate, signer, signature_id)
+    except SignatureProviderError as exc:
+        if exc.event:
+            record_signature_provider_event(conn, exc.event, document["id"], signature_id)
+        log_audit(conn, signer, "正式電子簽章失敗", "documents", document["id"], f"{signature_id} / {exc}")
+        raise
     signature_value = formal_signature["signature_value"]
     tsa_token = formal_signature["tsa_token"]
-    signature_id = f"ESIG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    for event in formal_signature.get("provider_events") or []:
+        if event:
+            record_signature_provider_event(conn, event, document["id"], signature_id)
     non_repudiation = {
+        "version": "SYC-EDOC-SIGNATURE-EVIDENCE-1",
         "signer": signer,
         "provider": EDOC_SIGNATURE_PROVIDER,
         "provider_key_id": EDOC_SIGNATURE_KEY_ID,
+        "provider_request_id": formal_signature.get("provider_request_id") or "",
+        "provider_status": formal_signature.get("provider_status") or "",
+        "signature_profile": EDOC_SIGNATURE_PROFILE,
         "provider_receipt": formal_signature.get("provider_receipt", {}),
         "certificate_serial": certificate["serial_no"],
         "certificate_fingerprint": certificate["fingerprint_sha256"],
         "timestamp": timestamp,
         "tsa_token": tsa_token,
         "file_hash": file_hash,
+        "digest_payload": digest_payload,
+        "digest_payload_sha256": digest,
         "previous_signature_id": previous["id"] if previous else "",
         "ip": payload.get("ip") or "system",
         "device": payload.get("device") or "server",
         "operation": payload.get("operation") or "PDF 電子簽章/押章",
     }
+    evidence_digest = sha256_bytes(canonical_signature_payload(non_repudiation).encode("utf-8"))
+    non_repudiation["evidence_digest_sha256"] = evidence_digest
     row = {
         "id": signature_id,
         "document_id": document["id"],
@@ -2969,6 +4606,11 @@ def create_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any
         "verified_at": timestamp,
         "status": "有效",
         "created_at": timestamp,
+        "provider": EDOC_SIGNATURE_PROVIDER,
+        "provider_key_id": EDOC_SIGNATURE_KEY_ID,
+        "provider_request_id": formal_signature.get("provider_request_id") or "",
+        "provider_receipt_json": json.dumps(formal_signature.get("provider_receipt", {}), ensure_ascii=False),
+        "evidence_digest_sha256": evidence_digest,
     }
     insert_row(conn, "electronic_signatures", row)
     validation = validate_certificate_legality(conn, certificate, row, signer)
@@ -2986,6 +4628,45 @@ def create_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any
     )
     log_audit(conn, signer, "正式電子簽章", "documents", document["id"], f"{signature_id} / {digest}")
     return {**row, "certificate": certificate, "non_repudiation": non_repudiation, "certificate_validation": validation}
+
+
+def verify_signature_value_with_provider(conn: sqlite3.Connection, signature: Dict[str, Any], certificate: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        proof = json.loads(signature.get("non_repudiation_json") or "{}")
+    except json.JSONDecodeError:
+        proof = {}
+    digest_payload = proof.get("digest_payload") if isinstance(proof.get("digest_payload"), dict) else {}
+    if EDOC_SIGNATURE_PROVIDER == "local-simulation":
+        expected = hmac.new(signature_secret(), canonical_signature_payload(digest_payload).encode("utf-8"), hashlib.sha256).hexdigest().upper() if digest_payload else ""
+        ok = bool(expected) and hmac.compare_digest(expected, str(signature.get("signature_value") or "").upper())
+        return {"ok": ok, "mode": "local-simulation", "status": "簽章值有效" if ok else "簽章值不符"}
+    if not EDOC_SIGNATURE_API_URL or not EDOC_SIGNATURE_API_KEY:
+        return {"ok": False, "mode": "formal", "status": "簽章驗證 provider 未設定"}
+    try:
+        response = provider_json_request(
+            f"{EDOC_SIGNATURE_API_URL}/verify",
+            {
+                "signature_id": signature["id"],
+                "request_id": f"SIGVERIFY-{signature['id']}",
+                "signature_profile": proof.get("signature_profile") or EDOC_SIGNATURE_PROFILE,
+                "certificate_id": certificate["id"],
+                "certificate_serial": certificate.get("serial_no"),
+                "digest_sha256": signature.get("digest_sha256"),
+                "signature_value": signature.get("signature_value"),
+                "tsa_token": signature.get("tsa_token"),
+                "payload": digest_payload,
+            },
+            EDOC_SIGNATURE_API_KEY,
+            operation="verify",
+        )
+        record_signature_provider_event(conn, response["event"], signature.get("document_id") or "", signature["id"])
+        data = response["data"]
+        ok = bool(data.get("ok", data.get("valid", False)))
+        return {"ok": ok, "mode": "formal", "status": data.get("status") or ("簽章值有效" if ok else "簽章值不符"), "provider_receipt": data}
+    except SignatureProviderError as exc:
+        if exc.event:
+            record_signature_provider_event(conn, exc.event, signature.get("document_id") or "", signature["id"])
+        return {"ok": False, "mode": "formal", "status": str(exc)}
 
 
 def verify_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -3009,11 +4690,12 @@ def verify_electronic_signature(conn: sqlite3.Connection, payload: Dict[str, Any
     if not cert_row:
         return {"ok": False, "error": "certificate_not_found", "signature": signature}
     certificate = row_to_dict(cert_row)
+    signature_value_check = verify_signature_value_with_provider(conn, signature, certificate)
     validation = validate_certificate_legality(conn, certificate, signature, payload.get("validator") or "Signature Verifier")
-    ok = file_hash_ok and validation["ok"]
-    status = "有效" if ok else "憑證驗證失敗" if file_hash_ok else "雜湊異常"
+    ok = file_hash_ok and signature_value_check["ok"] and validation["ok"]
+    status = "有效" if ok else "憑證驗證失敗" if file_hash_ok and signature_value_check["ok"] else "簽章值異常" if file_hash_ok else "雜湊異常"
     conn.execute("UPDATE electronic_signatures SET verified_at = ?, status = ? WHERE id = ?", (now(), status, signature_id))
-    return {"ok": ok, "signature": signature, "digest": file_hash, "status": status, "certificate_validation": validation}
+    return {"ok": ok, "signature": signature, "digest": file_hash, "status": status, "signature_value_check": signature_value_check, "certificate_validation": validation}
 
 
 def validate_certificate_api(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -3034,6 +4716,7 @@ def certificate_health(conn: sqlite3.Connection) -> Dict[str, Any]:
     certificates = [row_to_dict(row) for row in conn.execute("SELECT * FROM signing_certificates ORDER BY rowid").fetchall()]
     authorities = [row_to_dict(row) for row in conn.execute("SELECT * FROM certificate_authorities ORDER BY rowid").fetchall()]
     events = [row_to_dict(row) for row in conn.execute("SELECT * FROM certificate_validation_events ORDER BY rowid DESC LIMIT 8").fetchall()]
+    provider_events = [row_to_dict(row) for row in conn.execute("SELECT * FROM signature_provider_events ORDER BY rowid DESC LIMIT 8").fetchall()]
     service = signing_service_status()
     return {
         "mode": service["mode"],
@@ -3053,18 +4736,108 @@ def certificate_health(conn: sqlite3.Connection) -> Dict[str, Any]:
             "hsm": "啟用" if service["services"]["hsm"]["configured"] else "未設定 HSM/KMS",
         },
         "service": service,
+        "policy": service.get("policy", {}),
         "certificates": certificates,
         "authorities": authorities,
         "recent_events": events,
+        "provider_events": provider_events,
     }
+
+
+def pdf_render_document(document: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    doc_payload = payload.get("document") or {}
+    merged = {**document, **doc_payload}
+    company_name = payload.get("company_name") or doc_payload.get("companyName") or doc_payload.get("company_name") or document.get("company_name")
+    if company_name:
+        merged["company_name"] = company_name
+    contact_fields = {
+        "contactAddress": "contactAddress",
+        "contactOwner": "contactOwner",
+        "contactPhone": "contactPhone",
+        "contactFax": "contactFax",
+        "contactEmail": "contactEmail",
+    }
+    for target, source in contact_fields.items():
+        if doc_payload.get(source):
+            merged[target] = doc_payload[source]
+    return merged
+
+
+def pdf_seal_plan(payload: Dict[str, Any], document: Dict[str, Any]) -> Dict[str, Any]:
+    doc_payload = payload.get("document") or {}
+    for value in (
+        payload.get("seal_plan"),
+        payload.get("sealPlan"),
+        doc_payload.get("seal_plan"),
+        doc_payload.get("sealPlan"),
+        document.get("seal_plan_json"),
+    ):
+        parsed = parse_json_field(value)
+        if parsed:
+            return parsed
+    return {}
+
+
+def stamp_from_percentage(placement: Dict[str, Any], width: float, height: float, default_x: float, default_y: float, page_count: int) -> Tuple[int, float, float]:
+    page = int(pdf_safe_float(placement.get("page"), 1))
+    page = max(1, min(page, page_count))
+    center_x = A4_WIDTH_PT * pdf_safe_float(placement.get("x"), default_x) / 100
+    center_y_from_top = A4_HEIGHT_PT * pdf_safe_float(placement.get("y"), default_y) / 100
+    return page, center_x - width / 2, A4_HEIGHT_PT - center_y_from_top - height / 2
+
+
+def pdf_stamp_definitions(payload: Dict[str, Any], document: Dict[str, Any], stamp_no: str, page_count: int) -> List[Dict[str, Any]]:
+    coordinates = payload.get("coordinates") or {}
+    seal_plan = pdf_seal_plan(payload, document)
+    stamps: List[Dict[str, Any]] = []
+    seal_specs = [
+        ("large", "公司大章", 70.0, 80.0, "company_width_mm", "company_height_mm", 30.0),
+        ("small", "公司小章", 84.0, 80.0, "owner_width_mm", "owner_height_mm", 18.0),
+    ]
+    if seal_plan:
+        for kind, label, default_x, default_y, width_key, height_key, fallback_mm in seal_specs:
+            plan = seal_plan.get(kind) if isinstance(seal_plan.get(kind), dict) else {}
+            seal_type = str(plan.get("type") or "無")
+            if seal_type == "無":
+                continue
+            width = mm_to_pdf_points(plan.get("widthMm") or plan.get("width_mm") or coordinates.get(width_key), fallback_mm)
+            height = mm_to_pdf_points(plan.get("heightMm") or plan.get("height_mm") or coordinates.get(height_key), fallback_mm)
+            placement = plan.get("placement") if isinstance(plan.get("placement"), dict) else {}
+            page, x, y = stamp_from_percentage(placement, width, height, default_x, default_y, page_count)
+            x, y, width, height = clamp_pdf_rect(x, y, width, height)
+            stamps.append({"page": page, "x": x, "y": y, "w": width, "h": height, "label": label, "type": seal_type, "stamp_no": stamp_no, "source": "seal_plan"})
+    else:
+        company_width = mm_to_pdf_points(coordinates.get("company_width_mm"), 30.0)
+        company_height = mm_to_pdf_points(coordinates.get("company_height_mm"), 30.0)
+        owner_width = mm_to_pdf_points(coordinates.get("owner_width_mm"), 18.0)
+        owner_height = mm_to_pdf_points(coordinates.get("owner_height_mm"), 18.0)
+        stamps = [
+            {"page": 1, "x": pdf_safe_float(coordinates.get("company_x"), 420), "y": pdf_safe_float(coordinates.get("company_y"), 130), "w": company_width, "h": company_height, "label": "公司大章", "type": "一般章", "stamp_no": stamp_no, "source": "legacy_coordinates"},
+            {"page": 1, "x": pdf_safe_float(coordinates.get("owner_x"), 470), "y": pdf_safe_float(coordinates.get("owner_y"), 130), "w": owner_width, "h": owner_height, "label": "公司小章", "type": "一般章", "stamp_no": stamp_no, "source": "legacy_coordinates"},
+        ]
+    if coordinates.get("multi_page") and page_count > 1:
+        for page in range(1, page_count + 1):
+            stamps.append({"page": page, "x": A4_WIDTH_PT - 24, "y": A4_HEIGHT_PT / 2 - 36, "w": 18, "h": 72, "label": "騎縫章", "type": "多頁章", "stamp_no": stamp_no, "source": "page_seal"})
+    return stamps
+
+
+def pdf_coordinates_with_layout(coordinates: Dict[str, Any], package: Dict[str, Any], stamps: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+    enriched = {**coordinates, **package.get("layout", {})}
+    if stamps is not None:
+        enriched["stamp_positions"] = [
+            {key: stamp.get(key) for key in ("page", "x", "y", "w", "h", "label", "type", "source")}
+            for stamp in stamps
+        ]
+    return enriched
 
 
 def pdf_generate(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
     document = get_or_create_pdf_document(conn, payload)
     template = payload.get("template") or "歲悅正式函"
     coordinates = payload.get("coordinates") or {}
-    data = build_official_pdf({**document, **(payload.get("document") or {})}, [], template, 2 if coordinates.get("multi_page") else 1)
-    version = create_pdf_version(conn, document, "before_seal", template, data, coordinates)
+    min_page_count = 2 if coordinates.get("multi_page") else 1
+    package = build_official_pdf_package(pdf_render_document(document, payload), [], template, min_page_count)
+    version = create_pdf_version(conn, document, "before_seal", template, package["data"], pdf_coordinates_with_layout(coordinates, package, []))
     log_audit(conn, "PDF Worker", "產生公文 PDF 套版", "documents", document["id"], version["sha256"])
     return version
 
@@ -3073,28 +4846,25 @@ def pdf_stamp(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, An
     document = get_or_create_pdf_document(conn, payload)
     template = payload.get("template") or "歲悅正式函"
     coordinates = payload.get("coordinates") or {}
-    company_width = mm_to_pdf_points(coordinates.get("company_width_mm"), 30.0)
-    company_height = mm_to_pdf_points(coordinates.get("company_height_mm"), 30.0)
-    owner_width = mm_to_pdf_points(coordinates.get("owner_width_mm"), 18.0)
-    owner_height = mm_to_pdf_points(coordinates.get("owner_height_mm"), 18.0)
     doc_digits = "".join(ch for ch in document["doc_no"] if ch.isdigit())[-10:] or str(int(time.time()))
     stamp_no = payload.get("stamp_no") or f"STAMP-{doc_digits}-{int(time.time())}"
-    stamps = [
-        {"page": 1, "x": int(coordinates.get("company_x", 420)), "y": int(coordinates.get("company_y", 130)), "w": company_width, "h": company_height, "label": "COMPANY", "stamp_no": stamp_no},
-        {"page": 1, "x": int(coordinates.get("owner_x", 470)), "y": int(coordinates.get("owner_y", 130)), "w": owner_width, "h": owner_height, "label": "OWNER", "stamp_no": stamp_no},
-    ]
-    if coordinates.get("multi_page"):
-        stamps.append({"page": "all", "x": 535, "y": 392, "w": 34, "h": 72, "label": "PAGE", "stamp_no": stamp_no})
     previous = latest_pdf_version(conn, document["id"], "before_seal") or pdf_generate(conn, payload)
-    data = build_official_pdf({**document, **(payload.get("document") or {})}, stamps, template, 2 if coordinates.get("multi_page") else 1)
-    version = create_pdf_version(conn, document, "after_seal", template, data, coordinates, stamp_no, previous["id"])
+    min_page_count = 2 if coordinates.get("multi_page") else 1
+    dry_package = build_official_pdf_package(pdf_render_document(document, payload), [], template, min_page_count)
+    stamps = pdf_stamp_definitions(payload, document, stamp_no, int(dry_package["layout"]["page_count"]))
+    package = build_official_pdf_package(pdf_render_document(document, payload), stamps, template, min_page_count)
+    if coordinates.get("multi_page") and package["layout"]["page_count"] != dry_package["layout"]["page_count"]:
+        stamps = pdf_stamp_definitions(payload, document, stamp_no, int(package["layout"]["page_count"]))
+        package = build_official_pdf_package(pdf_render_document(document, payload), stamps, template, min_page_count)
+    version = create_pdf_version(conn, document, "after_seal", template, package["data"], pdf_coordinates_with_layout(coordinates, package, stamps), stamp_no, previous["id"])
     application_id = payload.get("application_id") or f"USEAL-{int(time.time() * 1000)}"
     conn.execute(
         """
         INSERT OR REPLACE INTO seal_applications (
           id, document_id, seal_id, applicant, approver, status, reason, stamp_no,
-          pdf_before_version_id, pdf_after_version_id, created_at, approved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM seal_applications WHERE id = ?), ?), ?)
+          pdf_before_version_id, pdf_after_version_id, provider_status, failure_reason,
+          evidence_json, updated_at, created_at, approved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM seal_applications WHERE id = ?), ?), ?)
         """,
         (
             application_id,
@@ -3107,6 +4877,10 @@ def pdf_stamp(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, An
             stamp_no,
             previous["id"],
             version["id"],
+            "待簽章",
+            "",
+            json.dumps({"pdf_after_sha256": version["sha256"], "stamp_positions": version.get("coordinates", {}).get("stamp_positions", [])}, ensure_ascii=False),
+            now(),
             application_id,
             now(),
             now(),
@@ -3121,6 +4895,28 @@ def pdf_stamp(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, An
         "signer": payload.get("approver") or "行政部主任",
         "operation": f"核准用印並自動押章 {stamp_no}",
     })
+    conn.execute(
+        """
+        UPDATE seal_applications
+        SET signature_id = ?, provider_status = ?, failure_reason = '', evidence_json = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            signature["id"],
+            "簽章完成" if signature.get("status") == "有效" else signature.get("status") or "簽章完成",
+            json.dumps({
+                "pdf_after_sha256": version["sha256"],
+                "signature_id": signature["id"],
+                "signature_digest": signature.get("digest_sha256"),
+                "evidence_digest_sha256": signature.get("evidence_digest_sha256"),
+                "provider": signature.get("provider"),
+                "provider_request_id": signature.get("provider_request_id"),
+                "stamp_positions": version.get("coordinates", {}).get("stamp_positions", []),
+            }, ensure_ascii=False),
+            now(),
+            application_id,
+        ),
+    )
     log_audit(conn, "PDF Worker", "自動押章 PDF", "documents", document["id"], f"{stamp_no} / {version['sha256']} / {signature['id']}")
     return {**version, "stamp_no": stamp_no, "application_id": application_id, "signature": signature}
 
@@ -3171,7 +4967,15 @@ def execute_job_logic(conn: sqlite3.Connection, job: Dict[str, Any]) -> Dict[str
     job_type = job["job_type"]
     if job_type == "pullInbound":
         result = pull_inbound(conn)
-        return {"message": f"成功：拉取 1 筆收文 {result['created']}", "payload": result}
+        return {"message": f"成功：拉取 {result.get('count', 0)} 筆收文 {result.get('created', '')}", "payload": result}
+
+    if job_type == "exchangeSendPending":
+        result = create_exchange_gateway(conn).sendPendingOfficialDocuments()
+        return {"message": f"成功：送出 {result['count']} 筆待發交換公文", "payload": result}
+
+    if job_type == "exchangeRetryFailed":
+        result = create_exchange_gateway(conn).retryFailedDeliveries()
+        return {"message": f"成功：重送 {result['count']} 筆交換失敗公文", "payload": result}
 
     if job_type == "nextDayCheck":
         rows = conn.execute("SELECT * FROM exchange_tasks WHERE direction = '發文'").fetchall()
@@ -3199,14 +5003,37 @@ def execute_job_logic(conn: sqlite3.Connection, job: Dict[str, Any]) -> Dict[str
             log_audit(conn, "Scheduler", "逾期稽催", "documents", doc["id"], f"{doc['doc_no']} / {doc['owner']} / {doc['due_date']}")
         return {"message": f"成功：產生 {len(overdue_docs)} 筆逾期稽催紀錄", "payload": {"overdue": len(overdue_docs)}}
 
+    if job_type == "contractRenewalCheck":
+        rows = conn.execute("SELECT * FROM contracts WHERE end_date IS NOT NULL AND end_date <> '' AND status NOT IN ('已終止','已作廢')").fetchall()
+        due_contracts = []
+        today = datetime.now().date()
+        for row in rows:
+            end_date = parse_time(row["end_date"]).date()
+            alert_days = int(row["renewal_alert_days"] or 60)
+            days_left = (end_date - today).days
+            if 0 <= days_left <= alert_days:
+                due_contracts.append(row)
+                notice = create_notification(conn, {
+                    "type": "合約續約",
+                    "title": f"{row['title']} 即將到期",
+                    "target_role": row["owner"] or "行政部主任",
+                    "channel": "Email + 系統通知",
+                    "priority": "高" if days_left <= 30 else "中",
+                    "source": row["contract_no"],
+                    "body": f"{row['counterparty']} 合約將於 {row['end_date']} 到期，剩餘 {days_left} 天，請確認續約、重簽或終止。",
+                })
+                log_audit(conn, "Scheduler", "合約續約提醒", "contracts", row["id"], notice["id"])
+        return {"message": f"成功：產生 {len(due_contracts)} 筆合約續約提醒", "payload": {"dueContracts": len(due_contracts)}}
+
     if job_type == "exchangeSync":
+        gateway_result = create_exchange_gateway(conn).queryPendingDeliveryStatuses()
         rows = conn.execute("SELECT * FROM exchange_tasks").fetchall()
         for row in rows:
             conn.execute(
                 "INSERT INTO exchange_events (id, task_id, document_id, event_type, message, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (f"EVT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", row["id"], row["document_id"], "status_sync", f"背景任務同步交換狀態：{row['status']}", json.dumps({"status": row["status"]}, ensure_ascii=False), now()),
             )
-        return {"message": f"成功：同步 {len(rows)} 筆交換任務狀態", "payload": {"synced": len(rows)}}
+        return {"message": f"成功：同步 {gateway_result['count']} 筆新介接層狀態，保留 {len(rows)} 筆舊交換事件", "payload": {"synced": gateway_result["count"], "gateway": gateway_result, "legacyEvents": len(rows)}}
 
     if job_type == "archiveSeal":
         files = conn.execute("SELECT * FROM file_objects").fetchall()
@@ -3940,15 +5767,49 @@ def supabase_get(table: str, row_id: str) -> Dict[str, Any] | None:
 def supabase_insert(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if "id" not in payload or not payload["id"]:
         payload["id"] = f"{table.upper()}-{int(time.time() * 1000)}"
+    if table == "users":
+        apply_user_permission_defaults(payload)
     if table == "documents" and payload.get("direction") == "發文" and not payload.get("doc_no"):
         payload["doc_no"] = supabase_next_dispatch_no()
     timestamp = now()
-    if table in {"documents", "recipients", "exchange_tasks", "settings", "notification_rules"}:
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "module_account_links"}:
         payload.setdefault("updated_at", timestamp)
-    if table in {"documents", "attachments", "exchange_events", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox"}:
+    if table in {"documents", "attachments", "exchange_events", "exchange_outbox", "exchange_inbox", "exchange_log", "exchange_attachment", "exchange_status_history", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "signature_provider_events", "module_account_links"}:
         payload.setdefault("created_at", timestamp)
+    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs", "module_account_links"}:
+        for key, value in list(payload.items()):
+            if key.endswith("_json") and not isinstance(value, str):
+                payload[key] = json.dumps(value, ensure_ascii=False)
     rows = supabase_request("POST", table, payload)
-    return rows[0] if rows else payload
+    created = rows[0] if rows else payload
+    if table == "users":
+        permission_fields = {"role", "status", "unit", "title", "job_level", "mfa_status"}
+        supabase_insert("audit_logs", {
+            "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "actor": "API",
+            "action": "權限異動",
+            "target_type": "user_role",
+            "target_id": created.get("id"),
+            "ip": "vercel",
+            "device": "serverless",
+            "detail": "建立使用者帳號與初始角色權限。",
+            "event_type": "permission_change",
+            "severity": "critical",
+            "result": "success",
+            "module_code": "system_permissions",
+            "resource_type": "user_role",
+            "resource_id": created.get("id"),
+            "data_scope": "custom",
+            "actor_roles_json": ["system_permissions.manage"],
+            "target_user_id": created.get("id"),
+            "target_email": created.get("email", ""),
+            "reason": "建立使用者帳號與初始角色權限。",
+            "request_id": f"req_{secrets.token_hex(8)}",
+            "before_snapshot_json": {},
+            "after_snapshot_json": {key: created.get(key) for key in sorted(permission_fields) if key in created},
+            "metadata_json": {"source": "edoc_rbac_supabase"},
+        })
+    return created
 
 
 def supabase_next_dispatch_no() -> str:
@@ -3972,11 +5833,52 @@ def supabase_next_dispatch_no() -> str:
 
 
 def supabase_patch(table: str, row_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    if table in {"documents", "recipients", "exchange_tasks", "settings", "background_jobs", "notification_rules"}:
+    before = supabase_get(table, row_id) if table == "users" else None
+    if table == "users":
+        permission_inputs = {"role", "unit", "title", "job_level", "company", "region", "class_name"}
+        merged_payload = {**(before or {}), **payload}
+        profile = edoc_roster_permission_profile(merged_payload)
+        if "job_level" in payload:
+            payload["job_level"] = profile["job_level"]
+        if permission_inputs.intersection(payload) and (not payload.get("role") or payload.get("role") not in ALLOWED_EDOC_ROLES):
+            payload["role"] = profile["role"]
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "background_jobs", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "module_account_links"}:
         payload["updated_at"] = now()
+    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs", "module_account_links"}:
+        for key, value in list(payload.items()):
+            if key.endswith("_json") and not isinstance(value, str):
+                payload[key] = json.dumps(value, ensure_ascii=False)
     qs = urllib.parse.urlencode({"id": f"eq.{row_id}"})
     rows = supabase_request("PATCH", f"{table}?{qs}", payload)
-    return rows[0] if rows else {}
+    updated = rows[0] if rows else {}
+    permission_fields = {"role", "status", "unit", "title", "job_level", "mfa_status"}
+    if table == "users" and before and updated and permission_fields.intersection(payload):
+        supabase_insert("audit_logs", {
+            "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "actor": "API",
+            "action": "權限異動",
+            "target_type": "user_role",
+            "target_id": row_id,
+            "ip": "vercel",
+            "device": "serverless",
+            "detail": "使用者角色、職等、狀態或權限相關資料異動。",
+            "event_type": "permission_change",
+            "severity": "critical",
+            "result": "success",
+            "module_code": "system_permissions",
+            "resource_type": "user_role",
+            "resource_id": row_id,
+            "data_scope": "custom",
+            "actor_roles_json": ["system_permissions.manage"],
+            "target_user_id": row_id,
+            "target_email": updated.get("email", before.get("email", "")),
+            "reason": "使用者角色、職等、狀態或權限相關資料異動。",
+            "request_id": f"req_{secrets.token_hex(8)}",
+            "before_snapshot_json": {key: before.get(key) for key in sorted(permission_fields) if key in before},
+            "after_snapshot_json": {key: updated.get(key) for key in sorted(permission_fields) if key in updated},
+            "metadata_json": {"source": "edoc_rbac_supabase"},
+        })
+    return updated
 
 
 def supabase_role_permissions(role_name: str) -> List[str]:
@@ -4021,6 +5923,138 @@ def supabase_authenticate(payload: Dict[str, Any], ip: str, device: str) -> Tupl
     supabase_insert("login_events", {"id": f"LOGIN-{int(time.time() * 1000)}", "user_id": user["id"], "email": email, "provider": provider, "ip": ip, "device": device, "status": "成功", "reason": "帳密驗證通過"})
     user.pop("password_hash", None)
     return {"token": token, "expiresAt": expires, "user": user, "permissions": supabase_role_permissions(user.get("role", ""))}, 200
+
+
+def supabase_authenticate_logging_bridge(payload: Dict[str, Any], ip: str, device: str) -> Tuple[Dict[str, Any], int]:
+    try:
+        source_user, error = extract_logging_bridge_user(payload)
+        if error:
+            return {"error": "logging_bridge_denied", "detail": error}, 403 if error in {"invalid_signature", "unsigned_bridge_payload"} else 400
+        logging_role_key = canonical_logging_role(source_user.get("loggingRoleKey") or source_user.get("logging_role_key") or source_user.get("role"))
+        profile = logging_role_profile(logging_role_key)
+        email = roster_text(source_user.get("email")).lower()
+        if not email:
+            return {"error": "logging_bridge_denied", "detail": "missing_email"}, 400
+        logging_account_id = roster_text(source_user.get("loggingAccountId") or source_user.get("logging_account_id") or source_user.get("id") or email)
+        display_name = roster_text(source_user.get("name") or source_user.get("display_name") or source_user.get("roleLabel") or email.split("@")[0])
+        unit = roster_text(source_user.get("unit") or source_user.get("departmentCode") or source_user.get("department_code") or profile["unit"])
+        title = roster_text(source_user.get("title") or source_user.get("roleLabel") or profile["title"])
+        job_level = normalize_edoc_job_level(source_user.get("jobLevel") or source_user.get("job_level") or profile["job_level"])
+        edoc_role = profile["role"]
+        if edoc_role not in ALLOWED_EDOC_ROLES:
+            return {"error": "role_forbidden", "detail": "此 Logging 帳號未授權使用 EDOC。"}, 403
+
+        qs = urllib.parse.urlencode({
+            "select": "*",
+            "or": f"(logging_account_id.eq.{logging_account_id},email.eq.{email})",
+            "limit": "1",
+        })
+        rows = supabase_request("GET", f"users?{qs}")
+        user = rows[0] if rows else None
+        ts = now()
+        update_payload = {
+            "auth_user_id": roster_text(source_user.get("authUserId") or source_user.get("auth_user_id")) or None,
+            "account_source": "logging",
+            "logging_account_id": logging_account_id,
+            "logging_role_key": logging_role_key,
+            "external_account_payload_json": json.dumps(redact_sensitive(source_user), ensure_ascii=False),
+            "last_synced_from_logging_at": ts,
+            "name": display_name,
+            "email": email,
+            "unit": unit,
+            "title": title,
+            "job_level": job_level,
+            "role": edoc_role,
+            "provider": "Logging / 平台帳號",
+            "mfa_status": "由平台管理",
+            "status": "啟用",
+        }
+        if user:
+            user = supabase_patch("users", user["id"], update_payload)
+        else:
+            user = supabase_insert("users", {
+                "id": f"LOG-{hashlib.sha256(logging_account_id.encode('utf-8')).hexdigest()[:10].upper()}",
+                **update_payload,
+            })
+
+        link_id = f"LINK-LOGGING-EDOC-{hashlib.sha256(logging_account_id.encode('utf-8')).hexdigest()[:10].upper()}"
+        link_qs = urllib.parse.urlencode({
+            "select": "*",
+            "source_system": "eq.logging",
+            "source_account_id": f"eq.{logging_account_id}",
+            "target_module": "eq.edoc",
+            "limit": "1",
+        })
+        links = supabase_request("GET", f"module_account_links?{link_qs}")
+        link_payload = {
+            "id": link_id,
+            "user_id": user["id"],
+            "source_system": "logging",
+            "source_account_id": logging_account_id,
+            "source_role_key": logging_role_key,
+            "source_email": email,
+            "target_module": "edoc",
+            "target_role_key": edoc_role,
+            "sync_status": "active",
+            "metadata_json": {"source": "logging_bridge"},
+            "last_synced_at": ts,
+        }
+        if links:
+            supabase_patch("module_account_links", links[0]["id"], link_payload)
+        else:
+            supabase_insert("module_account_links", link_payload)
+        supabase_insert("audit_logs", {
+            "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "actor": "Logging Bridge",
+            "action": "同步外部帳號",
+            "target_type": "module_account_links",
+            "target_id": link_id,
+            "ip": ip,
+            "device": device,
+            "detail": f"{email} / {logging_role_key} → {edoc_role}",
+            "event_type": "external_account_status_change",
+            "severity": "critical",
+            "result": "success",
+            "module_code": "system_permissions",
+            "resource_type": "external_account",
+            "resource_id": link_id,
+            "data_scope": "custom",
+            "actor_roles_json": ["system_permissions.manage"],
+            "target_user_id": user["id"],
+            "target_email": email,
+            "reason": "Logging 帳號進入 EDOC，自動同步帳號連結。",
+            "request_id": f"req_{secrets.token_hex(8)}",
+            "before_snapshot_json": {},
+            "after_snapshot_json": {"role": edoc_role, "job_level": job_level, "unit": unit, "logging_role_key": logging_role_key},
+            "metadata_json": {"source_system": "logging", "target_module": "edoc", "logging_role_key": logging_role_key},
+        })
+        token = secrets.token_urlsafe(36)
+        expires = (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        supabase_insert("auth_sessions", {"id": f"SES-{int(time.time() * 1000)}", "user_id": user["id"], "token_hash": hash_token(token), "provider": "Logging / 平台帳號", "ip": ip, "device": device, "expires_at": expires})
+        supabase_patch("users", user["id"], {"last_login_at": ts})
+        supabase_insert("login_events", {"id": f"LOGIN-{int(time.time() * 1000)}", "user_id": user["id"], "email": email, "provider": "Logging / 平台帳號", "ip": ip, "device": device, "status": "成功", "reason": "沿用 Logging 帳號進入 EDOC"})
+        user.pop("password_hash", None)
+        incoming_permissions = []
+        if isinstance(payload.get("permissions"), list):
+            incoming_permissions = payload["permissions"]
+        elif isinstance(payload.get("user"), dict) and isinstance(payload["user"].get("permissions"), list):
+            incoming_permissions = payload["user"]["permissions"]
+        permissions = sorted(set(supabase_role_permissions(user.get("role", ""))) | set(logging_permissions_to_edoc_codes(incoming_permissions)))
+        return {
+            "token": token,
+            "expiresAt": expires,
+            "user": user,
+            "permissions": permissions,
+            "bridge": {
+                "sourceSystem": "logging",
+                "loggingAccountId": logging_account_id,
+                "loggingRoleKey": logging_role_key,
+                "targetModule": "edoc",
+                "targetRole": edoc_role,
+            },
+        }, 200
+    except RuntimeError as error:
+        return {"error": "logging_bridge_unavailable", "detail": str(error)}, 503
 
 
 def supabase_current_session(token: str) -> Dict[str, Any] | None:
@@ -4088,6 +6122,198 @@ def supabase_pull_inbound() -> Dict[str, Any]:
     return {"created": doc_id}
 
 
+def supabase_exchange_history(ref_type: str, ref_id: str, from_status: str, to_status: str, message: str, provider_status: str, payload: Dict[str, Any]) -> None:
+    supabase_insert("exchange_status_history", {
+        "id": f"EXHIS-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "exchange_ref_type": ref_type,
+        "exchange_ref_id": ref_id,
+        "from_status": from_status or "",
+        "to_status": to_status,
+        "message": message,
+        "provider_status_code": provider_status,
+        "payload_summary_json": redact_sensitive(payload),
+    })
+
+
+def supabase_exchange_log(ref_type: str, ref_id: str, operation: str, direction: str, request_payload: Dict[str, Any], response_payload: Dict[str, Any], status: str) -> None:
+    supabase_insert("exchange_log", {
+        "id": f"EXLOG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "exchange_ref_type": ref_type,
+        "exchange_ref_id": ref_id,
+        "provider": EDOC_EXCHANGE_PROVIDER,
+        "environment": EDOC_EXCHANGE_ENV,
+        "operation": operation,
+        "direction": direction,
+        "request_summary_json": redact_sensitive(request_payload),
+        "response_summary_json": redact_sensitive(response_payload),
+        "status": status,
+        "error_code": response_payload.get("error_code", ""),
+        "error_message": response_payload.get("message", ""),
+    })
+
+
+def supabase_exchange_outboxes(filters: Dict[str, str]) -> List[Dict[str, Any]]:
+    params = {"select": "*", "limit": "500", **filters}
+    qs = urllib.parse.urlencode(params)
+    return supabase_request("GET", f"exchange_outbox?{qs}")
+
+
+def supabase_exchange_queue_document(payload: Dict[str, Any]) -> Dict[str, Any]:
+    document_id = payload.get("document_id")
+    if not document_id:
+        raise ValueError("document_id is required")
+    existing = supabase_exchange_outboxes({"document_id": f"eq.{document_id}"})
+    if existing:
+        return existing[0]
+    document = supabase_get("documents", document_id)
+    if not document:
+        raise ValueError(f"document_not_found:{document_id}")
+    outbox = {
+        "id": f"EXOUT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "document_id": document_id,
+        "doc_no": document.get("doc_no", ""),
+        "target_agency": payload.get("target_agency") or document.get("agency_name", ""),
+        "target_agency_code": payload.get("target_agency_code") or document.get("agency_code", ""),
+        "status": "待發文",
+        "provider": EDOC_EXCHANGE_PROVIDER,
+        "environment": EDOC_EXCHANGE_ENV,
+        "package_id": payload.get("package_id") or f"PKG-{document.get('doc_no', document_id)}",
+        "external_id": "",
+        "idempotency_key": payload.get("idempotency_key") or f"{document_id}:{document.get('doc_no', '')}",
+        "retry_count": 0,
+        "max_retries": int(payload.get("max_retries") or EDOC_EXCHANGE_MAX_RETRIES),
+        "last_error_code": "",
+        "last_error_message": "",
+        "next_retry_at": "",
+        "sent_at": "",
+        "returned_at": "",
+    }
+    created = supabase_insert("exchange_outbox", outbox)
+    supabase_exchange_history("outbox", created["id"], "", "待發文", "公文已加入交換待發佇列。", "QUEUED", {})
+    return created
+
+
+def supabase_exchange_send_document(payload: Dict[str, Any]) -> Dict[str, Any]:
+    outbox = supabase_get("exchange_outbox", payload.get("outbox_id") or payload.get("id") or "") if (payload.get("outbox_id") or payload.get("id")) else supabase_exchange_queue_document(payload)
+    if not outbox:
+        raise ValueError("outbox_not_found")
+    document = supabase_get("documents", outbox["document_id"]) or {}
+    metadata = json.loads(document.get("metadata_json") or "{}") if isinstance(document.get("metadata_json"), str) else document.get("metadata_json") or {}
+    provider = MockExchangeProvider()
+    package = {
+        "outbox_id": outbox["id"],
+        "document_id": outbox["document_id"],
+        "doc_no": outbox.get("doc_no"),
+        "subject": document.get("subject"),
+        "target_agency": outbox.get("target_agency"),
+        "target_agency_code": outbox.get("target_agency_code"),
+        "metadata": metadata,
+        "mock_scenario": payload.get("mock_scenario") or ("success" if payload.get("mock_retry_success") and outbox.get("status") in {"失敗", "退文"} else metadata.get("mock_exchange")),
+        "mock_retry_success": payload.get("mock_retry_success", True),
+    }
+    result = provider.send_official_document(package)
+    status = result.get("status") or ("已送出" if result.get("ok") else "失敗")
+    patch_payload = {
+        "status": status,
+        "external_id": result.get("external_id") or outbox.get("external_id") or "",
+        "last_error_code": result.get("error_code", ""),
+        "last_error_message": result.get("message", ""),
+        "next_retry_at": (datetime.now() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S") if status == "失敗" else "",
+        "sent_at": now() if status == "已送出" and not outbox.get("sent_at") else outbox.get("sent_at", ""),
+    }
+    updated = supabase_patch("exchange_outbox", outbox["id"], patch_payload)
+    supabase_exchange_history("outbox", outbox["id"], outbox.get("status", ""), status, result.get("message", ""), result.get("provider_status", ""), result.get("summary", {}))
+    supabase_exchange_log("outbox", outbox["id"], "sendOfficialDocument", "outbound", payload, result, "success" if result.get("ok") else "failed")
+    return {"ok": bool(result.get("ok")), "item": updated, "provider": redact_sensitive(result)}
+
+
+def supabase_exchange_query_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    outbox = supabase_get("exchange_outbox", payload.get("outbox_id") or payload.get("id") or "")
+    if not outbox:
+        return {"ok": False, "error": "outbox_not_found"}
+    result = MockExchangeProvider().query_delivery_status(outbox)
+    status = result.get("status") or outbox.get("status")
+    patch_payload = {
+        "status": status,
+        "last_error_code": result.get("error_code", ""),
+        "last_error_message": result.get("message", ""),
+        "returned_at": now() if status == "退文" and not outbox.get("returned_at") else outbox.get("returned_at", ""),
+    }
+    updated = supabase_patch("exchange_outbox", outbox["id"], patch_payload)
+    supabase_exchange_history("outbox", outbox["id"], outbox.get("status", ""), status, result.get("message", ""), result.get("provider_status", ""), result.get("summary", {}))
+    supabase_exchange_log("outbox", outbox["id"], "queryDeliveryStatus", "outbound", payload, result, "success" if result.get("ok") else "failed")
+    return {"ok": bool(result.get("ok")), "item": updated, "provider": redact_sensitive(result)}
+
+
+def supabase_exchange_retry_failed(payload: Dict[str, Any]) -> Dict[str, Any]:
+    outbox = supabase_get("exchange_outbox", payload.get("outbox_id") or payload.get("id") or "")
+    if not outbox:
+        return {"ok": False, "error": "outbox_not_found"}
+    retry_count = int(outbox.get("retry_count") or 0)
+    max_retries = int(outbox.get("max_retries") or EDOC_EXCHANGE_MAX_RETRIES)
+    if retry_count >= max_retries:
+        updated = supabase_patch("exchange_outbox", outbox["id"], {"status": "已達重送上限"})
+        return {"ok": False, "error": "retry_limit_reached", "item": updated}
+    supabase_patch("exchange_outbox", outbox["id"], {"retry_count": retry_count + 1})
+    return supabase_exchange_send_document({"outbox_id": outbox["id"], "mock_retry_success": payload.get("mock_retry_success", True)})
+
+
+def supabase_exchange_receive_documents(payload: Dict[str, Any]) -> Dict[str, Any]:
+    provider = MockExchangeProvider()
+    items = provider.receive_official_documents(payload)
+    rows = []
+    for item in items:
+        doc = supabase_insert("documents", {
+            "id": f"DOC-IN-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "doc_no": item.get("doc_no"),
+            "direction": "收文",
+            "doc_type": item.get("doc_type", "函"),
+            "priority": item.get("priority", "普通件"),
+            "security_level": item.get("security_level", "普通"),
+            "agency_name": item.get("source_agency", ""),
+            "agency_code": item.get("source_agency_code", ""),
+            "subject": item.get("subject", ""),
+            "body": item.get("body", ""),
+            "status": "待登錄",
+            "owner": "總務",
+            "department": "總管理處",
+            "due_date": (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d"),
+            "received_at": now(),
+        })
+        inbox = supabase_insert("exchange_inbox", {
+            "id": f"EXIN-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "document_id": doc["id"],
+            "external_id": item["external_id"],
+            "source_agency": item.get("source_agency", ""),
+            "source_agency_code": item.get("source_agency_code", ""),
+            "doc_no": item.get("doc_no", ""),
+            "subject": item.get("subject", ""),
+            "status": "待確認",
+            "provider": EDOC_EXCHANGE_PROVIDER,
+            "environment": EDOC_EXCHANGE_ENV,
+            "received_at": now(),
+            "acknowledged_at": "",
+            "raw_summary_json": item.get("summary", {}),
+        })
+        supabase_exchange_history("inbox", inbox["id"], "", "待確認", "Mock 收文已寫入待確認。", "MOCK_RECEIVED", item.get("summary", {}))
+        supabase_exchange_log("inbox", inbox["id"], "receiveOfficialDocuments", "inbound", payload, item, "success")
+        rows.append(inbox)
+    return {"count": len(rows), "items": rows}
+
+
+def supabase_exchange_acknowledge_received(payload: Dict[str, Any]) -> Dict[str, Any]:
+    inbox = supabase_get("exchange_inbox", payload.get("inbox_id") or payload.get("id") or "")
+    if not inbox:
+        return {"ok": False, "error": "inbox_not_found"}
+    result = MockExchangeProvider().acknowledge_received(inbox)
+    updated = supabase_patch("exchange_inbox", inbox["id"], {"status": "已入案", "acknowledged_at": now()})
+    if inbox.get("document_id"):
+        supabase_patch("documents", inbox["document_id"], {"status": "待分派"})
+    supabase_exchange_history("inbox", inbox["id"], inbox.get("status", ""), "已入案", result.get("message", ""), result.get("provider_status", ""), result.get("summary", {}))
+    supabase_exchange_log("inbox", inbox["id"], "acknowledgeReceived", "inbound", payload, result, "success")
+    return {"ok": True, "item": updated, "provider": redact_sensitive(result)}
+
+
 def supabase_next_run(schedule_text: str) -> str:
     return compute_next_run_at(schedule_text)
 
@@ -4095,8 +6321,23 @@ def supabase_next_run(schedule_text: str) -> str:
 def supabase_execute_job_logic(job: Dict[str, Any]) -> Dict[str, Any]:
     job_type = job["job_type"]
     if job_type == "pullInbound":
-        result = supabase_pull_inbound()
-        return {"message": f"成功：拉取 1 筆收文 {result['created']}", "payload": result}
+        result = supabase_exchange_receive_documents({})
+        return {"message": f"成功：拉取 {result.get('count', 0)} 筆收文", "payload": result}
+    if job_type == "exchangeSendPending":
+        outboxes = [item for item in supabase_list("exchange_outbox", {"status": ["待發文"]})[:20]]
+        results = [supabase_exchange_send_document({"outbox_id": item["id"]}) for item in outboxes]
+        return {"message": f"成功：送出 {len(results)} 筆待發交換公文", "payload": {"count": len(results), "results": results}}
+    if job_type == "exchangeRetryFailed":
+        candidates = []
+        for status_text in ["失敗", "退文"]:
+            candidates.extend(supabase_list("exchange_outbox", {"status": [status_text]}))
+        due = [
+            item for item in candidates
+            if int(item.get("retry_count") or 0) < int(item.get("max_retries") or EDOC_EXCHANGE_MAX_RETRIES)
+            and (not item.get("next_retry_at") or item.get("next_retry_at") <= now())
+        ][:20]
+        results = [supabase_exchange_retry_failed({"outbox_id": item["id"]}) for item in due]
+        return {"message": f"成功：重送 {len(results)} 筆交換失敗公文", "payload": {"count": len(results), "results": results}}
     if job_type == "tokenCheck":
         sessions = supabase_list("auth_sessions", {})
         expiring_before = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -4120,6 +6361,8 @@ def supabase_execute_job_logic(job: Dict[str, Any]) -> Dict[str, Any]:
             })
         return {"message": f"成功：完成 {checked} 筆發文翌日查核", "payload": {"checked": checked}}
     if job_type == "exchangeSync":
+        sent_outboxes = supabase_list("exchange_outbox", {"status": ["已送出"]})
+        gateway_results = [supabase_exchange_query_status({"outbox_id": item["id"]}) for item in sent_outboxes[:50]]
         tasks = supabase_list("exchange_tasks", {})
         for task in tasks:
             supabase_insert("exchange_events", {
@@ -4130,7 +6373,7 @@ def supabase_execute_job_logic(job: Dict[str, Any]) -> Dict[str, Any]:
                 "message": f"Vercel Cron 同步交換狀態：{task.get('status')}",
                 "payload_json": json.dumps({"status": task.get("status")}, ensure_ascii=False),
             })
-        return {"message": f"成功：同步 {len(tasks)} 筆交換任務狀態", "payload": {"synced": len(tasks)}}
+        return {"message": f"成功：同步 {len(gateway_results)} 筆新介接層狀態，保留 {len(tasks)} 筆舊交換事件", "payload": {"synced": len(gateway_results), "results": gateway_results, "legacyEvents": len(tasks)}}
     if job_type == "overdueReminder":
         documents = supabase_list("documents", {})
         today = datetime.now().strftime("%Y-%m-%d")
@@ -4147,6 +6390,38 @@ def supabase_execute_job_logic(job: Dict[str, Any]) -> Dict[str, Any]:
                 "detail": f"{doc.get('doc_no')} / {doc.get('owner')} / {doc.get('due_date')}",
             })
         return {"message": f"成功：產生 {len(overdue)} 筆逾期稽催紀錄", "payload": {"overdue": len(overdue)}}
+    if job_type == "contractRenewalCheck":
+        contracts = supabase_list("contracts", {})
+        today = datetime.now().date()
+        due_contracts = []
+        for contract in contracts:
+            if not contract.get("end_date") or contract.get("status") in {"已終止", "已作廢"}:
+                continue
+            end_date = parse_time(contract.get("end_date", "")).date()
+            days_left = (end_date - today).days
+            alert_days = int(contract.get("renewal_alert_days") or 60)
+            if 0 <= days_left <= alert_days:
+                due_contracts.append(contract)
+                notice = supabase_create_notification({
+                    "type": "合約續約",
+                    "title": f"{contract.get('title')} 即將到期",
+                    "target_role": contract.get("owner") or "行政部主任",
+                    "channel": "Email + 系統通知",
+                    "priority": "高" if days_left <= 30 else "中",
+                    "source": contract.get("contract_no"),
+                    "body": f"{contract.get('counterparty')} 合約將於 {contract.get('end_date')} 到期，剩餘 {days_left} 天，請確認續約、重簽或終止。",
+                })
+                supabase_insert("audit_logs", {
+                    "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+                    "actor": "Vercel Cron",
+                    "action": "合約續約提醒",
+                    "target_type": "contracts",
+                    "target_id": contract["id"],
+                    "ip": "vercel",
+                    "device": "cron",
+                    "detail": notice["id"],
+                })
+        return {"message": f"成功：產生 {len(due_contracts)} 筆合約續約提醒", "payload": {"dueContracts": len(due_contracts)}}
     if job_type == "reportGenerate":
         report = supabase_dashboard()
         supabase_request("POST", "settings?on_conflict=key", {
@@ -4891,6 +7166,10 @@ class Handler(SimpleHTTPRequestHandler):
                     payload, status = supabase_authenticate(self.read_json(), self.client_ip(), self.client_device())
                     self.send_json(payload, status)
                     return
+                if method == "POST" and parts == ["auth", "logging-bridge"]:
+                    payload, status = supabase_authenticate_logging_bridge(self.read_json(), self.client_ip(), self.client_device())
+                    self.send_json(payload, status)
+                    return
                 if method == "GET" and parts == ["auth", "me"]:
                     session = supabase_current_session(self.bearer_token())
                     self.send_json(session if session else {"error": "unauthorized"}, 200 if session else 401)
@@ -4961,6 +7240,10 @@ class Handler(SimpleHTTPRequestHandler):
                         "certificate_count": len(certificates),
                         "trusted_ca_count": len([item for item in authorities if item.get("trust_status") == "trusted"]),
                         "services": {
+                            "provider": "啟用" if service["services"]["provider"]["configured"] else "仍為模擬",
+                            "providerApi": "啟用" if service["services"]["providerApi"]["configured"] else "未設定簽章 API",
+                            "providerCredential": "啟用" if service["services"]["providerCredential"]["configured"] else "未設定簽章 API key",
+                            "keyId": "啟用" if service["services"]["keyId"]["configured"] else "未設定簽章 key id",
                             "chain": "啟用" if service["services"]["trustStore"]["configured"] else "未設定信任根",
                             "tsa": "啟用" if service["services"]["tsa"]["configured"] else "未設定 TSA",
                             "ocsp": "啟用" if service["services"]["ocsp"]["configured"] else "未設定 OCSP",
@@ -4968,9 +7251,11 @@ class Handler(SimpleHTTPRequestHandler):
                             "hsm": "啟用" if service["services"]["hsm"]["configured"] else "未設定 HSM/KMS",
                         },
                         "service": service,
+                        "policy": service.get("policy", {}),
                         "certificates": certificates,
                         "authorities": authorities,
                         "recent_events": events,
+                        "provider_events": supabase_list("signature_provider_events", {"limit": ["8"], "order": ["created_at.desc"]}) if "signature_provider_events" in TABLES else [],
                     })
                     return
                 if method == "POST" and parts == ["certificates", "validate"]:
@@ -5021,11 +7306,36 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["schema"]:
                     self.send_json({"tables": TABLES})
                     return
+                if method == "GET" and parts == ["exchange", "gateway-status"]:
+                    self.send_json(exchange_gateway_status())
+                    return
                 if method == "GET" and parts == ["documents", "next-dispatch-no"]:
                     self.send_json({"doc_no": supabase_next_dispatch_no()})
                     return
+                if method == "POST" and parts == ["exchange", "queue"]:
+                    self.send_json(supabase_exchange_queue_document(self.read_json()), 201)
+                    return
+                if method == "POST" and parts == ["exchange", "send"]:
+                    result = supabase_exchange_send_document(self.read_json())
+                    self.send_json(result, 201 if result.get("ok") else 422)
+                    return
+                if method == "POST" and parts == ["exchange", "receive"]:
+                    self.send_json(supabase_exchange_receive_documents(self.read_json()), 201)
+                    return
+                if method == "POST" and parts == ["exchange", "status"]:
+                    result = supabase_exchange_query_status(self.read_json())
+                    self.send_json(result, 200 if result.get("ok") else 404)
+                    return
+                if method == "POST" and parts == ["exchange", "acknowledge"]:
+                    result = supabase_exchange_acknowledge_received(self.read_json())
+                    self.send_json(result, 200 if result.get("ok") else 404)
+                    return
+                if method == "POST" and parts == ["exchange", "retry"]:
+                    result = supabase_exchange_retry_failed(self.read_json())
+                    self.send_json(result, 200 if result.get("ok") else 422)
+                    return
                 if method == "POST" and parts == ["actions", "pull-inbound"]:
-                    self.send_json(supabase_pull_inbound(), 201)
+                    self.send_json(supabase_exchange_receive_documents({}), 201)
                     return
                 if method == "POST" and parts == ["actions", "backup"]:
                     payload = {
@@ -5169,6 +7479,11 @@ class Handler(SimpleHTTPRequestHandler):
                     conn.commit()
                     self.send_json(payload, status)
                     return
+                if method == "POST" and parts == ["auth", "logging-bridge"]:
+                    payload, status = authenticate_logging_bridge(conn, self.read_json(), self.client_ip(), self.client_device())
+                    conn.commit()
+                    self.send_json(payload, status)
+                    return
                 if method == "GET" and parts == ["auth", "me"]:
                     session = current_session(conn, self.bearer_token())
                     self.send_json(session if session else {"error": "unauthorized"}, 200 if session else 401)
@@ -5205,8 +7520,41 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["schema"]:
                     self.send_json({"tables": TABLES})
                     return
+                if method == "GET" and parts == ["exchange", "gateway-status"]:
+                    self.send_json(exchange_gateway_status())
+                    return
                 if method == "GET" and parts == ["documents", "next-dispatch-no"]:
                     self.send_json({"doc_no": next_dispatch_no(conn)})
+                    return
+                if method == "POST" and parts == ["exchange", "queue"]:
+                    result = exchange_queue_document(conn, self.read_json())
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "POST" and parts == ["exchange", "send"]:
+                    result = exchange_send_document(conn, self.read_json())
+                    conn.commit()
+                    self.send_json(result, 201 if result.get("ok") else 422)
+                    return
+                if method == "POST" and parts == ["exchange", "receive"]:
+                    result = exchange_receive_documents(conn, self.read_json())
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "POST" and parts == ["exchange", "status"]:
+                    result = exchange_query_status(conn, self.read_json())
+                    conn.commit()
+                    self.send_json(result, 200 if result.get("ok") else 404)
+                    return
+                if method == "POST" and parts == ["exchange", "acknowledge"]:
+                    result = exchange_acknowledge_received(conn, self.read_json())
+                    conn.commit()
+                    self.send_json(result, 200 if result.get("ok") else 404)
+                    return
+                if method == "POST" and parts == ["exchange", "retry"]:
+                    result = exchange_retry_failed(conn, self.read_json())
+                    conn.commit()
+                    self.send_json(result, 200 if result.get("ok") else 422)
                     return
                 if method == "POST" and parts == ["actions", "pull-inbound"]:
                     result = pull_inbound(conn)
@@ -5416,6 +7764,15 @@ class Handler(SimpleHTTPRequestHandler):
                         self.send_json(row if row else {"error": "not_found"}, 200 if row else 404)
                         return
                 self.send_json({"error": "not_found", "path": path}, 404)
+        except ValueError as exc:
+            detail = str(exc)
+            status = 503 if detail.startswith(("formal_signing_service_not_ready", "formal_signature_provider", "formal_tsa")) else 422
+            log_structured("warning", "api_request_rejected", path=path, method=method, error=detail)
+            self.send_json({"error": "request_rejected", "detail": detail}, status)
+        except SignatureProviderError as exc:
+            detail = str(exc)
+            log_structured("warning", "signature_provider_failed", path=path, method=method, error=detail)
+            self.send_json({"error": "signature_provider_failed", "detail": detail, "event": exc.event}, 503)
         except Exception as exc:  # Keep API observable during prototype hardening.
             log_structured("error", "api_request_failed", path=path, method=method, error=str(exc))
             self.send_json({"error": "server_error", "detail": str(exc)}, 500)

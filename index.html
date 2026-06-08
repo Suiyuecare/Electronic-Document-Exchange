@@ -4,7 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>歲悅電子公文交換系統</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css?v=20260609-config-admin" />
   </head>
   <body>
     <div class="login-screen app" id="loginScreen">
@@ -13,19 +16,19 @@
           <div class="login-mark">
             <div class="login-brand">文</div>
             <div>
-              <div class="login-brand-name">歲悅長照集團</div>
-              <div class="login-brand-sub">Suiyuecare eDoc Exchange</div>
+              <div class="login-brand-name">歲悅電子公文</div>
+              <div class="login-brand-sub">Internal Document Exchange</div>
             </div>
           </div>
-          <h1 class="login-title">電子公文交換系統</h1>
+          <h1 class="login-title">內部電子公文交換系統</h1>
           <div class="login-points">
-            <div class="login-point">獨立內部模組，不併入官網 CMS</div>
-            <div class="login-point">串接機關層公文收發模組 jAgent</div>
+            <div class="login-point">這裡是公文收發、撰寫、簽核與合約管理入口</div>
+            <div class="login-point">登入後依身分只顯示可作業功能</div>
             <div class="login-point">總務統一收文，再分發給各部門主管</div>
-            <div class="login-point">僅主任、執行長、行政部主任、人資、會計、總務、業務助理可使用</div>
+            <div class="login-point">此系統與公開網站完全分離</div>
           </div>
         </div>
-        <div class="login-footnote">NDC Archives · jAgent Gateway · Official Document Exchange</div>
+        <div class="login-footnote">edoc.suiyuecare.com · jAgent Gateway · RBAC Protected</div>
       </section>
 
       <section class="login-right">
@@ -56,6 +59,8 @@
               <h3>不同權限快速登入</h3>
             </div>
             <div class="quick-login-grid" id="quickLoginGrid">
+              <button type="button" data-quick-role="員工">員工</button>
+              <button type="button" data-quick-role="主管">主管</button>
               <button type="button" data-quick-role="總務">總務</button>
               <button type="button" data-quick-role="行政部主任">行政部主任</button>
               <button type="button" data-quick-role="主任">主任</button>
@@ -83,6 +88,9 @@
         <nav class="nav-list" aria-label="電子公文交換功能">
           <button class="nav-item active" data-target="dashboard">總覽</button>
           <button class="nav-item" data-target="search">查詢搜尋</button>
+          <button class="nav-item" data-target="approvalLog">簽核紀錄</button>
+          <button class="nav-item" data-target="contracts">合約管理</button>
+          <button class="nav-item" data-target="contractSeal">合約用印</button>
           <button class="nav-item" data-target="inbound">收文管理</button>
           <button class="nav-item" data-target="dispatch">發文管理</button>
           <button class="nav-item" data-target="compose">建立公文</button>
@@ -108,6 +116,8 @@
         <section class="profile-card">
           <p class="eyebrow">目前角色</p>
           <select id="roleSelect" aria-label="切換角色">
+            <option>員工</option>
+            <option>主管</option>
             <option>主任</option>
             <option>執行長</option>
             <option>行政部主任</option>
@@ -123,17 +133,15 @@
       <main class="workspace">
         <header class="topbar">
           <div>
-            <p class="eyebrow">機關層公文收發模組 jAgent 介接作業台</p>
+            <p class="eyebrow" id="pageEyebrow">機關層公文收發模組 jAgent 介接作業台</p>
             <h2 id="pageTitle">交換總覽</h2>
           </div>
           <div class="quick-actions">
             <form class="global-search" id="globalSearchForm">
-              <input id="globalSearchInput" type="search" placeholder="文號、機關、附件、通知" />
+              <input id="globalSearchInput" type="search" placeholder="文號、合約、機關、附件、通知" />
               <button class="secondary-button" type="submit">搜尋</button>
             </form>
-            <button class="icon-button" id="pullInboundBtn" title="立即收文">↧</button>
-            <button class="primary-button" id="sendQueueBtn">送出待發文</button>
-            <button class="secondary-button" id="logoutBtn" type="button">登出</button>
+            <button class="primary-button" id="logoutBtn" type="button">登出</button>
           </div>
         </header>
 
@@ -145,6 +153,37 @@
             </div>
             <span class="status-pill" id="dashboardRoleScope">依登入身份載入</span>
           </div>
+
+          <section class="identity-workbench" id="identityWorkbench">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow" id="identityEyebrow">Role Workspace</p>
+                <h3 id="identityTitle">身份工作台</h3>
+              </div>
+              <span class="status-pill" id="identityStatus">依角色載入</span>
+            </div>
+            <div class="identity-layout">
+              <section class="identity-hero">
+                <strong id="identityHeadline">今天要處理的公文</strong>
+                <p id="identitySummary">系統會依目前角色整理最重要的待辦、提醒與快捷作業。</p>
+                <div class="identity-actions" id="identityActions"></div>
+              </section>
+              <section class="identity-panel">
+                <div class="panel-heading">
+                  <h3 id="identityTodoTitle">我的待辦</h3>
+                  <span class="status-pill" id="identityTodoCount">0 件</span>
+                </div>
+                <div class="identity-list" id="identityTodos"></div>
+              </section>
+              <section class="identity-panel">
+                <div class="panel-heading">
+                  <h3 id="identityAlertTitle">提醒與風險</h3>
+                  <span class="status-pill" id="identityAlertCount">0 則</span>
+                </div>
+                <div class="identity-list" id="identityAlerts"></div>
+              </section>
+            </div>
+          </section>
 
           <div class="metrics-grid" id="dashboardMetricGrid">
             <article class="metric-card">
@@ -206,37 +245,6 @@
               <span class="status-pill" id="scopeRoleBadge">未登入</span>
             </div>
             <div class="scope-grid" id="scopeGrid"></div>
-          </section>
-
-          <section class="identity-workbench" id="identityWorkbench">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow" id="identityEyebrow">Role Workspace</p>
-                <h3 id="identityTitle">身份工作台</h3>
-              </div>
-              <span class="status-pill" id="identityStatus">依角色載入</span>
-            </div>
-            <div class="identity-layout">
-              <section class="identity-hero">
-                <strong id="identityHeadline">今天要處理的公文</strong>
-                <p id="identitySummary">系統會依目前角色整理最重要的待辦、提醒與快捷作業。</p>
-                <div class="identity-actions" id="identityActions"></div>
-              </section>
-              <section class="identity-panel">
-                <div class="panel-heading">
-                  <h3>我的待辦</h3>
-                  <span class="status-pill" id="identityTodoCount">0 件</span>
-                </div>
-                <div class="identity-list" id="identityTodos"></div>
-              </section>
-              <section class="identity-panel">
-                <div class="panel-heading">
-                  <h3>提醒與風險</h3>
-                  <span class="status-pill" id="identityAlertCount">0 則</span>
-                </div>
-                <div class="identity-list" id="identityAlerts"></div>
-              </section>
-            </div>
           </section>
 
           <section class="panel dashboard-approval-panel" id="dashboardApprovalPanel">
@@ -314,15 +322,15 @@
           <section class="panel search-panel">
             <form class="compact-form search-form" id="searchForm">
               <label>關鍵字<input id="searchQuery" type="search" placeholder="文號、機關、主旨、附件、雜湊、通知、操作人" /></label>
-              <label>類別<select id="searchCategory"><option value="all">全部</option><option value="documents">公文</option><option value="attachments">附件</option><option value="attachment_security">附件安全</option><option value="exchange_tasks">交換任務</option><option value="exchange_events">交換事件</option><option value="notifications">通知</option><option value="audit_logs">稽核紀錄</option><option value="file_access_logs">檔案存取</option></select></label>
-              <label>狀態<input id="searchStatus" placeholder="待登錄、交換失敗、已隔離、成功" /></label>
+              <label>類別<select id="searchCategory"><option value="all">全部</option><option value="documents">公文</option><option value="approval_records">簽核進度</option><option value="contracts">合約</option><option value="contract_approvals">合約簽核</option><option value="attachments">附件</option><option value="attachment_security">附件安全</option><option value="exchange_tasks">交換任務</option><option value="exchange_events">交換事件</option><option value="notifications">通知</option><option value="audit_logs">稽核紀錄</option><option value="file_access_logs">檔案存取</option></select></label>
+              <label>狀態<input id="searchStatus" placeholder="待簽核、待清稿、退回補正、交換失敗" /></label>
               <label>筆數<select id="searchLimit"><option>30</option><option selected>80</option><option>150</option></select></label>
             </form>
           </section>
 
           <div class="metrics-grid">
             <article class="metric-card"><span>結果數</span><strong id="searchResultCount">0</strong><small id="searchResultNote">尚未查詢</small></article>
-            <article class="metric-card"><span>公文</span><strong id="searchDocCount">0</strong><small>收文與發文主檔</small></article>
+            <article class="metric-card"><span>公文 / 合約</span><strong id="searchDocCount">0</strong><small>收發文與合約主檔</small></article>
             <article class="metric-card"><span>附件/資安</span><strong id="searchFileCount">0</strong><small>附件、掃描、存取</small></article>
             <article class="metric-card"><span>事件/通知</span><strong id="searchEventCount">0</strong><small>交換、通知、稽核</small></article>
           </div>
@@ -346,31 +354,272 @@
           </div>
         </section>
 
+        <section class="view" id="approvalLog">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Approval Trail</p>
+              <h3>簽核流程紀錄</h3>
+            </div>
+            <span class="status-pill" id="approvalLogCount">0 件</span>
+          </div>
+
+          <div class="inbound-toolbar panel">
+            <div class="inbound-simple-flow" role="group" aria-label="簽核紀錄篩選">
+              <button class="flow-step-chip active" type="button" data-approval-log-filter="all">全部</button>
+              <button class="flow-step-chip" type="button" data-approval-log-filter="待">待處理</button>
+              <button class="flow-step-chip" type="button" data-approval-log-filter="退回">已退回</button>
+              <button class="flow-step-chip" type="button" data-approval-log-filter="完成">已完成</button>
+            </div>
+            <label class="toolbar-search compact">搜尋<input id="approvalLogSearch" type="search" placeholder="文號、主旨、角色、狀態" /></label>
+          </div>
+
+          <div class="approval-log-layout">
+            <section class="panel approval-log-list-panel">
+              <div class="panel-heading">
+                <h3>流程案件</h3>
+                <span class="status-pill" id="approvalLogScope">依角色權限</span>
+              </div>
+              <div class="address-results" id="approvalLogList"></div>
+            </section>
+
+            <aside class="panel approval-log-detail-panel">
+              <div class="panel-heading">
+                <h3>簽核軌跡</h3>
+                <button class="text-button" id="approvalLogOpenWorkflowBtn" type="button">開啟流程控管</button>
+              </div>
+              <div id="approvalLogDetail"></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" id="contracts">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Contract Desk</p>
+              <h3>合約管理與簽核</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="contractNewBtn" type="button">新增合約</button>
+              <button class="secondary-button" id="contractSubmitBtn" type="button">送簽核</button>
+              <button class="secondary-button" id="contractApproveBtn" type="button">核准目前關卡</button>
+              <button class="secondary-button" id="contractReturnBtn" type="button">退回補正</button>
+              <button class="secondary-button" id="contractSignBtn" type="button">前往合約用印</button>
+              <button class="secondary-button" id="contractArchiveBtn" type="button">歸檔</button>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric-card">
+              <span>合約總數</span>
+              <strong id="contractTotalCount">0</strong>
+              <small>草稿、簽核中、已簽署</small>
+            </article>
+            <article class="metric-card">
+              <span>待簽核</span>
+              <strong id="contractPendingCount">0</strong>
+              <small>主管、會計、行政、執行長</small>
+            </article>
+            <article class="metric-card">
+              <span>即將到期</span>
+              <strong id="contractRenewalCount">0</strong>
+              <small>依續約提醒天數計算</small>
+            </article>
+            <article class="metric-card">
+              <span>已簽署</span>
+              <strong id="contractSignedCount">0</strong>
+              <small>已用印、已歸檔</small>
+            </article>
+          </div>
+
+          <div class="contract-toolbar panel">
+            <div class="inbound-simple-flow" role="group" aria-label="合約篩選">
+              <button class="flow-step-chip active" type="button" data-contract-filter="all">全部</button>
+              <button class="flow-step-chip" type="button" data-contract-filter="未用印">未用印</button>
+              <button class="flow-step-chip" type="button" data-contract-filter="已用印">已用印</button>
+              <button class="flow-step-chip" type="button" data-contract-filter="到期">即將到期</button>
+              <button class="flow-step-chip issue" type="button" data-contract-filter="過期">已過期</button>
+            </div>
+            <label class="toolbar-search compact">搜尋<input id="contractSearch" type="search" placeholder="合約編號、主旨、法人、部門" /></label>
+          </div>
+
+          <div class="contract-layout">
+            <section class="panel contract-list-panel">
+              <div class="panel-heading">
+                <h3>合約台帳</h3>
+                <span class="status-pill" id="contractListCount">0 件</span>
+              </div>
+              <div class="table-wrap contract-table-wrap">
+                <table class="contract-table">
+                  <thead>
+                    <tr>
+                      <th>合約編號</th>
+                      <th>合約主旨</th>
+                      <th>法人</th>
+                      <th>部門</th>
+                      <th>用印日期</th>
+                      <th>合約期效</th>
+                      <th>過期日倒數</th>
+                    </tr>
+                  </thead>
+                  <tbody id="contractRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <span class="hidden" id="selectedContractStatus">未選取</span>
+            <div class="hidden" id="contractDetail"></div>
+          </div>
+
+          <div class="contract-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>起案資料</h3>
+                <button class="text-button" id="contractDraftBtn" type="button">儲存草稿</button>
+              </div>
+              <form class="compact-form" id="contractForm">
+                <label>公司行號<select id="contractCompanyInput"></select></label>
+                <label>文件/用印類別<select id="contractTypeInput">
+                  <optgroup label="1. 合約類（勿選）">
+                    <option>商務合約</option><option>合作意向書</option><option>採購合約</option><option selected>服務委託合約</option><option>租賃契約</option>
+                  </optgroup>
+                  <optgroup label="2. 法務／政府單位文件（勿選）">
+                    <option>主管機關 申請或回覆文件（與 費用、法令有關）</option><option>主管機關 申請或回覆文件（與 費用、法令無關）</option><option>勞保、健保、退休金文件</option>
+                  </optgroup>
+                  <optgroup label="3. 公司治理相關用印（勿選）">
+                    <option>董事會、股東會文件</option><option>法人章程、修訂案</option><option>重大決議用印</option><option>股權文件</option>
+                  </optgroup>
+                  <optgroup label="4. 品牌／公信用文件（勿選）">
+                    <option>官方公文（需公司最高層代表時）</option><option>授權書（授權對外正式行為）</option><option>合作聲明（涉及法律關係者）</option>
+                  </optgroup>
+                </select></label>
+                <label>合約標題<input id="contractTitleInput" value="長照服務合作合約" /></label>
+                <label>相對人<input id="contractCounterpartyInput" value="合作廠商股份有限公司" /></label>
+                <label>相對人統編<input id="contractTaxIdInput" value="待補" /></label>
+                <label>承辦部門<select id="contractDepartmentInput"></select></label>
+                <label>承辦角色<select id="contractOwnerInput"></select></label>
+                <label>合約金額<input id="contractAmountInput" type="number" min="0" value="0" /></label>
+                <label>起始日<input id="contractStartDateInput" type="date" /></label>
+                <label>到期日<input id="contractEndDateInput" type="date" /></label>
+                <label>續約提醒<select id="contractRenewalDaysInput"><option value="30">30 天前</option><option value="45">45 天前</option><option value="60" selected>60 天前</option><option value="90">90 天前</option></select></label>
+                <label>保密等級<select id="contractConfidentialityInput"><option>普通</option><option>限閱</option><option>密</option></select></label>
+                <label>用印需求<select id="contractSealInput"><option>無</option><option selected>一般章</option><option>公司設立章</option><option>銀行印鑑章</option><option>圖記章</option></select></label>
+                <label>附件清單<textarea id="contractAttachmentsInput" rows="3">合約草案.pdf、報價單.pdf</textarea></label>
+                <label>合約摘要<textarea id="contractSummaryInput" rows="4">請填寫合作內容、履約範圍、付款條件與重要時程。</textarea></label>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>簽核流程</h3>
+                <span class="status-pill" id="contractApprovalStatus">依條件產生</span>
+              </div>
+              <div class="workflow-step-list" id="contractApprovalSteps"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>合約操作紀錄</h3>
+                <button class="text-button" id="contractClearLogBtn" type="button">清除畫面紀錄</button>
+              </div>
+              <div class="timeline" id="contractAuditLog"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="contractSeal">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Contract Seal Desk</p>
+              <h3>合約用印</h3>
+            </div>
+            <div class="quick-actions">
+              <button class="primary-button" id="contractSealApplyBtn" type="button">確認用印</button>
+              <button class="secondary-button" id="contractSealReturnBtn" type="button">退回補正</button>
+              <button class="secondary-button" id="contractSealOpenBtn" type="button">檢視合約公文</button>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric-card">
+              <span>待總務用印</span>
+              <strong id="contractSealPendingCount">0</strong>
+              <small>已完成前置簽核</small>
+            </article>
+            <article class="metric-card">
+              <span>今日用印</span>
+              <strong id="contractSealTodayCount">0</strong>
+              <small>已留存用印紀錄</small>
+            </article>
+            <article class="metric-card">
+              <span>退回補正</span>
+              <strong id="contractSealReturnCount">0</strong>
+              <small>資料或附件需修正</small>
+            </article>
+            <article class="metric-card">
+              <span>用印雜湊</span>
+              <strong id="contractSealHashStatus">待建立</strong>
+              <small>用印後自動產生</small>
+            </article>
+          </div>
+
+          <div class="contract-seal-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>用印申請</h3>
+                <span class="status-pill" id="contractSealListCount">0 件</span>
+              </div>
+              <div class="table-wrap">
+                <table class="contract-seal-table">
+                  <thead>
+                    <tr>
+                      <th>合約編號</th>
+                      <th>主旨</th>
+                      <th>申請單位</th>
+                      <th>用印類別</th>
+                      <th>狀態</th>
+                    </tr>
+                  </thead>
+                  <tbody id="contractSealRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside class="panel">
+              <div class="panel-heading">
+                <h3>合約公文檢視</h3>
+                <span class="status-pill" id="contractSealStatus">未選取</span>
+              </div>
+              <div id="contractSealPreview"></div>
+            </aside>
+          </div>
+
+          <section class="panel contract-seal-audit-panel">
+            <div class="panel-heading">
+              <h3>合約用印紀錄</h3>
+              <span class="status-pill">不可否認紀錄</span>
+            </div>
+            <div class="timeline" id="contractSealAuditLog"></div>
+          </section>
+        </section>
+
         <section class="view" id="inbound">
           <div class="section-header">
             <div>
               <p class="eyebrow">Receive</p>
-              <h3>收文管理</h3>
+              <h3>公文收發</h3>
             </div>
-            <div class="segmented" role="group" aria-label="收文篩選">
-              <button class="segment active" data-inbound-filter="all">全部</button>
-              <button class="segment" data-inbound-filter="待登錄">待登錄</button>
-              <button class="segment" data-inbound-filter="待分派">待分派</button>
-              <button class="segment" data-inbound-filter="已收文">已收文</button>
-              <button class="segment" data-inbound-filter="異常待處理">異常</button>
-            </div>
+            <button class="primary-button" id="pullJagentBtn" type="button">拉取 jAgent 來文</button>
           </div>
 
           <div class="inbound-toolbar panel">
-            <div class="toolbar-actions">
-              <button class="primary-button" id="pullJagentBtn" type="button">拉取 jAgent 來文</button>
-              <button class="secondary-button" id="registerInboundBtn" type="button">登錄所選</button>
-              <button class="secondary-button" id="assignInboundBtn" type="button">分派所選</button>
-              <button class="secondary-button" id="misdeliveryBtn" type="button">誤送通知</button>
-              <button class="secondary-button" id="missingNoticeBtn" type="button">漏送處理</button>
-              <button class="secondary-button" id="exportInboundBtn" type="button">匯出清單</button>
+            <div class="inbound-simple-flow" role="group" aria-label="收文篩選">
+              <button class="flow-step-chip active" type="button" data-inbound-filter="all">全部</button>
+              <button class="flow-step-chip" type="button" data-inbound-filter="待登錄">1 待登錄</button>
+              <button class="flow-step-chip" type="button" data-inbound-filter="待分派">2 待分派</button>
+              <button class="flow-step-chip" type="button" data-inbound-filter="已收文">3 已分派</button>
+              <button class="flow-step-chip issue" type="button" data-inbound-filter="異常待處理">異常</button>
             </div>
-            <label class="toolbar-search">搜尋<input id="inboundSearch" type="search" placeholder="機關、主旨、收文號" /></label>
+            <label class="toolbar-search compact">搜尋<input id="inboundSearch" type="search" placeholder="搜尋機關、主旨或收文號" /></label>
           </div>
 
           <div class="inbound-layout">
@@ -383,14 +632,11 @@
                 <table>
                   <thead>
                     <tr>
-                      <th></th>
                       <th>收文號</th>
                       <th>來文機關</th>
-                      <th>文別</th>
                       <th>主旨</th>
                       <th>狀態</th>
                       <th>承辦</th>
-                      <th>操作</th>
                     </tr>
                   </thead>
                   <tbody id="inboundRows"></tbody>
@@ -398,16 +644,13 @@
               </div>
             </section>
 
-            <aside class="panel inbound-detail-panel">
-              <div class="panel-heading">
-                <h3>收文內容</h3>
-                <span class="status-pill" id="selectedInboundStatus">未選取</span>
-              </div>
-              <div id="inboundDetail"></div>
-            </aside>
+            <span class="hidden" id="selectedInboundStatus">未選取</span>
+            <div class="hidden" id="inboundDetail"></div>
           </div>
 
-          <div class="inbound-workbench">
+          <details class="advanced-section inbound-advanced">
+            <summary>進階設定：登錄、分派、異常通知內容</summary>
+            <div class="inbound-workbench">
             <section class="panel">
               <div class="panel-heading">
                 <h3>登錄表單</h3>
@@ -447,15 +690,19 @@
                 <button class="primary-button" type="submit">建立異常通知</button>
               </form>
             </section>
-          </div>
+            </div>
+          </details>
 
-          <div class="panel inbound-audit-panel">
+          <details class="advanced-section inbound-audit-panel">
+            <summary>收文操作紀錄</summary>
+            <div class="panel">
             <div class="panel-heading">
               <h3>收文操作紀錄</h3>
               <button class="text-button" id="clearInboundLogBtn" type="button">清除畫面紀錄</button>
             </div>
             <div class="timeline" id="inboundAuditLog"></div>
-          </div>
+            </div>
+          </details>
         </section>
 
         <section class="view" id="dispatch">
@@ -535,81 +782,149 @@
               <p class="eyebrow">Compose</p>
               <h3>建立電子公文</h3>
             </div>
-            <span class="status-pill">發文前清稿檢核</span>
+            <span class="status-pill" id="composeStepStatus">1 / 5 填寫</span>
           </div>
+
+          <div class="next-stepper compose-stepper" id="composeStepper" aria-label="撰寫公文步驟"></div>
+          <div class="next-action-card" id="composeNextAction"></div>
 
           <div class="compose-layout">
             <form class="form-panel" id="composeForm">
-              <div class="inline-fields">
-                <label>
-                  文別
-                  <select id="docType">
-                    <option>函</option>
-                    <option>開會通知單</option>
-                    <option>書函</option>
-                    <option>公告</option>
-                  </select>
-                </label>
-                <label>
-                  速別
-                  <select id="priority">
-                    <option>普通件</option>
-                    <option>速件</option>
-                    <option>最速件</option>
-                  </select>
-                </label>
-              </div>
-              <label>
-                發文字號
-                <div class="input-action">
-                  <input id="dispatchNo" value="" readonly />
-                  <button class="secondary-button" id="generateDispatchNoBtn" type="button">重新產生</button>
+              <section class="compose-step-panel active" data-compose-pane="fill">
+                <div class="panel-heading tight">
+                  <h3>填寫基本內容</h3>
+                  <span class="status-pill">必要欄位</span>
                 </div>
-              </label>
-              <label>
-                受文者
-                <input id="recipient" value="臺北市政府社會局" />
-              </label>
-              <div class="inline-fields">
                 <label>
-                  地址
-                  <input id="contactAddress" value="220205 新北市板橋區英士路192之1號" />
+                  公司行號
+                  <select id="composeCompanySelect">
+                    <option>歲悅長照股份有限公司</option>
+                  </select>
+                </label>
+                <div class="inline-fields">
+                  <label>
+                    文別
+                    <select id="docType">
+                      <option>函</option>
+                      <option>開會通知單</option>
+                      <option>書函</option>
+                      <option>公告</option>
+                    </select>
+                  </label>
+                  <label>
+                    速別
+                    <select id="priority">
+                      <option>普通件</option>
+                      <option>速件</option>
+                      <option>最速件</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  發文字號
+                  <div class="input-action">
+                    <input id="dispatchNo" value="" readonly />
+                    <button class="secondary-button" id="generateDispatchNoBtn" type="button">重新產生</button>
+                  </div>
                 </label>
                 <label>
-                  承辦人
-                  <input id="contactOwner" value="業務助理" />
-                </label>
-              </div>
-              <div class="inline-fields">
-                <label>
-                  電話
-                  <input id="contactPhone" value="(02)2257-7155 分機3762" />
+                  受文者
+                  <input id="recipient" value="臺北市政府社會局" />
                 </label>
                 <label>
-                  傳真
-                  <input id="contactFax" value="(02)2254-4029" />
+                  主旨
+                  <input id="subject" value="檢送本公司日間照顧中心設立許可補正資料，請查照。" />
                 </label>
-              </div>
-              <label>
-                電子信箱
-                <input id="contactEmail" value="edoc@suiyuecare.com" />
-              </label>
-              <label>
-                主旨
-                <input id="subject" value="檢送本公司日間照顧中心設立許可補正資料，請查照。" />
-              </label>
-              <label>
-                說明
-                <textarea id="bodyText" rows="7">依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。</textarea>
-              </label>
-              <label>
-                附件
-                <input id="attachments" type="file" multiple />
-              </label>
-              <div class="form-actions">
-                <button class="secondary-button" id="saveDispatchDraftBtn" type="button">儲存草稿</button>
-                <button class="secondary-button" id="previewDraftBtn" type="button">預覽函稿</button>
-                <button class="primary-button" id="submitDispatchBtn" type="submit" disabled>清稿並加入發文佇列</button>
+                <label>
+                  說明
+                  <textarea id="bodyText" rows="7">依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。</textarea>
+                </label>
+              </section>
+
+              <section class="compose-step-panel" data-compose-pane="preview">
+                <div class="panel-heading tight">
+                  <h3>附件、寄件資料與用印</h3>
+                  <span class="status-pill">可調整</span>
+                </div>
+                <div class="form-section-note">
+                  <strong>寄件人／發文單位資料</strong>
+                  <span>以下資料會顯示在函稿右上方，代表本公司發文窗口，不是受文者資料。</span>
+                </div>
+                <div class="inline-fields">
+                  <label>
+                    寄件人地址
+                    <input id="contactAddress" value="220205 新北市板橋區英士路192之1號" />
+                  </label>
+                  <label>
+                    寄件承辦人
+                    <input id="contactOwner" value="業務助理" />
+                  </label>
+                </div>
+                <div class="inline-fields">
+                  <label>
+                    寄件人電話
+                    <input id="contactPhone" value="(02)2257-7155 分機3762" />
+                  </label>
+                  <label>
+                    寄件人傳真
+                    <input id="contactFax" value="(02)2254-4029" />
+                  </label>
+                </div>
+                <label>
+                  寄件人電子信箱
+                  <input id="contactEmail" value="edoc@suiyuecare.com" />
+                </label>
+                <div class="form-section-note">
+                  <strong>用印設定</strong>
+                  <span>選擇需要的大章或小章後，可在即時函稿預覽拖曳用印位置；最後停留的位置會作為正式用印處。</span>
+                </div>
+                <div class="inline-fields">
+                  <label>
+                    大章
+                    <select id="largeSealType">
+                      <option>無</option>
+                      <option selected>一般章</option>
+                      <option>公司設立章</option>
+                      <option>銀行印鑑章</option>
+                      <option>圖記章</option>
+                    </select>
+                  </label>
+                  <label>
+                    小章
+                    <select id="smallSealType">
+                      <option selected>無</option>
+                      <option>一般章</option>
+                      <option>公司設立章</option>
+                      <option>銀行印鑑章</option>
+                      <option>圖記章</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  附件
+                  <input id="attachments" type="file" multiple />
+                </label>
+              </section>
+
+              <section class="compose-step-panel" data-compose-pane="confirm">
+                <div class="panel-heading tight">
+                  <h3>確認與送簽</h3>
+                  <span class="status-pill" id="composeConfirmHint">尚未確認</span>
+                </div>
+                <div class="next-action-card">
+                  <strong>先看下方即時函稿預覽</strong>
+                  <p>確認文號、受文者、主旨、說明、附件與用印位置後，按「確認函稿」，才可以送清稿簽核。</p>
+                </div>
+                <div class="form-actions">
+                  <button class="secondary-button" id="saveDispatchDraftBtn" type="button">儲存草稿</button>
+                  <button class="secondary-button" id="previewDraftBtn" type="button">預覽函稿</button>
+                  <button class="primary-button" id="submitDispatchBtn" type="submit" disabled>清稿並加入發文佇列</button>
+                </div>
+              </section>
+
+              <div class="compose-wizard-actions">
+                <button class="secondary-button" id="composePrevBtn" type="button">上一步</button>
+                <button class="primary-button" id="composeNextBtn" type="button">下一步</button>
               </div>
             </form>
 
@@ -758,6 +1073,44 @@
             </div>
           </div>
 
+          <section class="panel unified-flow-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Document Flow Core</p>
+                <h3>統一文件流程</h3>
+              </div>
+              <span class="status-pill" id="unifiedFlowCount">0 件</span>
+            </div>
+            <div class="unified-flow-toolbar">
+              <div class="segmented-control" role="group" aria-label="文件流程篩選">
+                <button class="segment active" type="button" data-unified-flow-filter="all">全部</button>
+                <button class="segment" type="button" data-unified-flow-filter="公文">公文</button>
+                <button class="segment" type="button" data-unified-flow-filter="合約">合約</button>
+                <button class="segment" type="button" data-unified-flow-filter="用印">用印</button>
+                <button class="segment" type="button" data-unified-flow-filter="簽核">簽核</button>
+                <button class="segment" type="button" data-unified-flow-filter="issue">異常</button>
+              </div>
+            </div>
+            <div class="unified-flow-layout">
+              <div class="table-wrap unified-flow-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>文件編號</th>
+                      <th>類型</th>
+                      <th>主旨</th>
+                      <th>目前節點</th>
+                      <th>負責</th>
+                      <th>狀態</th>
+                    </tr>
+                  </thead>
+                  <tbody id="unifiedFlowRows"></tbody>
+                </table>
+              </div>
+              <aside class="unified-flow-detail" id="unifiedFlowDetail"></aside>
+            </div>
+          </section>
+
           <div class="workflow-layout">
             <section class="panel">
               <div class="panel-heading">
@@ -856,8 +1209,22 @@
                 <button class="text-button" id="workflowTemplateApplyBtn" type="button">套用範本</button>
               </div>
               <form class="compact-form" id="workflowTemplateForm">
-                <label>流程範本<select id="workflowTemplateSelect"><option value="standard">一般發文簽核</option><option value="urgent">速件發文簽核</option><option value="confidential">密件發文簽核</option><option value="procurement">採購/金額簽核</option></select></label>
-                <label>適用文別<select id="workflowTemplateDocType"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option></select></label>
+                <label>文件/用印類別<select id="workflowDocumentCategorySelect">
+                  <optgroup label="1. 合約類（勿選）">
+                    <option>商務合約</option><option>合作意向書</option><option>採購合約</option><option selected>服務委託合約</option><option>租賃契約</option>
+                  </optgroup>
+                  <optgroup label="2. 法務／政府單位文件（勿選）">
+                    <option>主管機關 申請或回覆文件（與 費用、法令有關）</option><option>主管機關 申請或回覆文件（與 費用、法令無關）</option><option>勞保、健保、退休金文件</option>
+                  </optgroup>
+                  <optgroup label="3. 公司治理相關用印（勿選）">
+                    <option>董事會、股東會文件</option><option>法人章程、修訂案</option><option>重大決議用印</option><option>股權文件</option>
+                  </optgroup>
+                  <optgroup label="4. 品牌／公信用文件（勿選）">
+                    <option>官方公文（需公司最高層代表時）</option><option>授權書（授權對外正式行為）</option><option>合作聲明（涉及法律關係者）</option>
+                  </optgroup>
+                </select></label>
+                <label>流程範本<select id="workflowTemplateSelect"><option value="routeA">A 行政部門用印（無需會計）</option><option value="routeB">B 行政部門用印（需會計）</option><option value="routeC" selected>C 執行長用印（無需會計）</option><option value="routeD">D 執行長用印（需會計）</option></select></label>
+                <label>適用文別<select id="workflowTemplateDocType"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option><option>合約用印</option></select></label>
                 <label>簽核條件金額<input id="workflowAmountInput" type="number" value="0" /></label>
               </form>
               <div class="workflow-step-list" id="workflowTemplateSteps"></div>
@@ -952,6 +1319,52 @@
             </article>
           </div>
 
+          <section class="panel executive-seal-admin" id="executiveSealAdmin">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Executive Registry</p>
+                <h3>執行長公司、部門與印章類別設定</h3>
+              </div>
+              <span class="status-pill" id="executiveSealAdminStatus">僅執行長</span>
+            </div>
+            <div class="executive-admin-grid">
+              <section>
+                <div class="panel-heading tight">
+                  <h3>公司</h3>
+                  <button class="text-button" id="addCompanyBtn" type="button">新增公司</button>
+                </div>
+                <form class="compact-form" id="companyRegistryForm">
+                  <label>公司名稱<input id="companyNameInput" value="歲悅長照股份有限公司" /></label>
+                  <label>統一編號<input id="companyTaxIdInput" value="待設定" /></label>
+                </form>
+                <div class="address-results compact-list" id="companyRegistryList"></div>
+              </section>
+              <section>
+                <div class="panel-heading tight">
+                  <h3>部門</h3>
+                  <button class="text-button" id="addDepartmentBtn" type="button">新增部門</button>
+                </div>
+                <form class="compact-form" id="departmentRegistryForm">
+                  <label>所屬公司<select id="departmentCompanyInput"></select></label>
+                  <label>部門名稱<input id="departmentNameInput" value="行政部" /></label>
+                  <label>主管角色<select id="departmentManagerInput"><option>執行長</option><option>行政部主任</option><option>總務</option><option>主任</option><option>人資</option><option>會計</option><option>業務助理</option></select></label>
+                </form>
+                <div class="address-results compact-list" id="departmentRegistryList"></div>
+              </section>
+              <section>
+                <div class="panel-heading tight">
+                  <h3>印章類別</h3>
+                  <button class="text-button" id="addSealTypeBtn" type="button">新增類別</button>
+                </div>
+                <form class="compact-form" id="sealTypeRegistryForm">
+                  <label>類別名稱<select id="sealTypeNameInput"><option>一般章</option><option>公司設立章</option><option>銀行章</option><option>圖記章</option></select></label>
+                  <label>使用範圍<input id="sealTypeScopeInput" value="日常公文、一般函稿" /></label>
+                </form>
+                <div class="address-results compact-list" id="sealTypeRegistryList"></div>
+              </section>
+            </div>
+          </section>
+
           <div class="seal-layout">
             <section class="panel">
               <div class="panel-heading">
@@ -1000,7 +1413,9 @@
               </div>
               <form class="compact-form" id="sealForm">
                 <label>印鑑名稱<input id="sealNameInput" value="歲悅長照公司章" /></label>
-                <label>印鑑類型<select id="sealTypeInput"><option>公司章</option><option>負責人章</option><option>契約章</option><option>騎縫章</option></select></label>
+                <label>所屬公司<select id="sealCompanyInput"></select></label>
+                <label>所屬部門<select id="sealDepartmentInput"></select></label>
+                <label>印鑑類型<select id="sealTypeInput"></select></label>
                 <label>保管角色<select id="sealOwnerInput"><option>行政部主任</option><option>總務</option><option>行政部主任</option></select></label>
                 <label>適用文別<select id="sealDocTypeInput"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option></select></label>
                 <label>公司章圖檔<input id="sealImageInput" type="file" accept="image/*" /></label>
@@ -1682,7 +2097,7 @@
               <button class="segment" data-account-filter="SSO">SSO</button>
               <button class="segment" data-account-filter="本機">本機</button>
             </div>
-            <label class="toolbar-search">搜尋<input id="accountSearch" type="search" placeholder="姓名、Email、單位、角色" /></label>
+            <label class="toolbar-search">搜尋<input id="accountSearch" type="search" placeholder="姓名、Email、單位、角色、職等" /></label>
           </div>
 
           <div class="account-layout">
@@ -1697,7 +2112,7 @@
                     <tr>
                       <th></th>
                       <th>使用者</th>
-                      <th>單位 / 職稱</th>
+                      <th>單位 / 職稱 / 職等</th>
                       <th>角色</th>
                       <th>登入方式</th>
                       <th>狀態</th>
@@ -1729,7 +2144,8 @@
                 <label>Email<input id="accountEmail" type="email" value="quality@suiyuecare.com" /></label>
                 <label>單位<input id="accountUnit" value="教育品管課" /></label>
                 <label>職稱<input id="accountTitleInput" value="品管專員" /></label>
-                <label>角色<select id="accountRoleSelect"><option>總務</option><option>業務助理</option><option>行政部主任</option><option>行政部主任</option><option>主任</option></select></label>
+                <label>職等<select id="accountJobLevel"><option selected>職員</option><option>組長</option><option>課長</option><option>部長</option><option>區經理</option><option>執行長</option><option>董事會</option><option>股東</option><option>外部檢核單位</option></select></label>
+                <label>角色<select id="accountRoleSelect"><option>員工</option><option>主管</option><option>總務</option><option>業務助理</option><option>行政部主任</option><option>主任</option><option>執行長</option><option>人資</option><option>會計</option><option>董事會</option><option>股東</option><option>外部檢核單位</option></select></label>
                 <label>登入方式<select id="accountProvider"><option>Google Workspace</option><option>Microsoft Entra</option><option>本機帳號</option></select></label>
                 <label>MFA<select id="accountMfa"><option>已啟用</option><option>待設定</option><option>強制重設</option></select></label>
               </form>
@@ -2014,8 +2430,8 @@
         <section class="view" id="notifications">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Notifications</p>
-              <h3>通知中心</h3>
+              <p class="eyebrow">Task Center</p>
+              <h3>待辦中心</h3>
             </div>
             <div class="quick-actions">
               <button class="primary-button" id="notificationSyncBtn" type="button">同步通知</button>
@@ -2295,7 +2711,7 @@
               </div>
               <form class="compact-form" id="jobForm">
                 <label>任務名稱<input id="jobNameInput" value="自訂交換狀態同步" /></label>
-                <label>任務類型<select id="jobTypeInput"><option value="exchangeSync">交換狀態同步</option><option value="pullInbound">每日收文拉取</option><option value="nextDayCheck">發文翌日查核</option><option value="tokenCheck">Token 到期檢查</option><option value="overdueReminder">逾期稽催</option><option value="archiveSeal">歸檔封存</option><option value="reportGenerate">報表產生</option></select></label>
+                <label>任務類型<select id="jobTypeInput"><option value="exchangeSync">交換狀態同步</option><option value="pullInbound">每日收文拉取</option><option value="nextDayCheck">發文翌日查核</option><option value="tokenCheck">Token 到期檢查</option><option value="overdueReminder">逾期稽催</option><option value="contractRenewalCheck">合約到期與續約提醒</option><option value="archiveSeal">歸檔封存</option><option value="reportGenerate">報表產生</option></select></label>
                 <label>排程週期<select id="jobScheduleInput"><option>每 15 分鐘</option><option>每小時</option><option>每日 08:30</option><option>每日 09:00</option><option>每日 18:00</option></select></label>
                 <label>通知對象<select id="jobNotifyInput"><option>行政部主任</option><option>總務</option><option>行政部主任</option><option>主任</option></select></label>
               </form>
@@ -2361,6 +2777,8 @@
           <div class="database-toolbar panel">
             <div class="segmented" role="group" aria-label="資料表切換">
               <button class="segment active" data-db-table="documents">公文主檔</button>
+              <button class="segment" data-db-table="contracts">合約主檔</button>
+              <button class="segment" data-db-table="contractApprovals">合約簽核</button>
               <button class="segment" data-db-table="recipients">受文者</button>
               <button class="segment" data-db-table="attachments">附件</button>
               <button class="segment" data-db-table="exchangeTasks">交換任務</button>
@@ -2400,7 +2818,7 @@
                 <button class="text-button" id="databaseAddBtn" type="button">新增</button>
               </div>
               <form class="compact-form" id="databaseForm">
-                <label>資料表<select id="databaseInsertTable"><option value="documents">公文主檔</option><option value="recipients">受文者</option><option value="attachments">附件</option><option value="exchangeTasks">交換任務</option><option value="exchangeEvents">交換事件</option><option value="auditLogs">audit log</option></select></label>
+                <label>資料表<select id="databaseInsertTable"><option value="documents">公文主檔</option><option value="contracts">合約主檔</option><option value="contractApprovals">合約簽核</option><option value="recipients">受文者</option><option value="attachments">附件</option><option value="exchangeTasks">交換任務</option><option value="exchangeEvents">交換事件</option><option value="auditLogs">audit log</option></select></label>
                 <label>主鍵 / 編號<input id="databaseInsertId" value="DOC-MANUAL-001" /></label>
                 <label>名稱 / 摘要<input id="databaseInsertTitle" value="手動新增資料" /></label>
                 <label>狀態<select id="databaseInsertStatus"><option>有效</option><option>待同步</option><option>交換完成</option><option>待處理</option><option>封存</option></select></label>
@@ -2768,6 +3186,88 @@
             </section>
           </div>
 
+          <div class="settings-config-workbench">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Document Types</p>
+                  <h3>文件類型設定</h3>
+                </div>
+                <button class="text-button" id="settingsAddDocTypeBtn" type="button">新增 / 更新</button>
+              </div>
+              <form class="compact-form" id="settingsDocTypeForm">
+                <label>文件類型<input id="settingsDocTypeName" value="函" /></label>
+                <label>分類<select id="settingsDocTypeCategory"><option>公文</option><option>合約</option><option>用印</option><option>內部文件</option></select></label>
+                <label>預設流程<select id="settingsDocTypeWorkflow"></select></label>
+                <label>預設格式<select id="settingsDocTypeFormat"></select></label>
+                <label>預設速別<select id="settingsDocTypePriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
+                <label>預設密等<select id="settingsDocTypeSecurity"><option>普通</option><option>密</option><option>機密</option><option>極機密</option></select></label>
+              </form>
+              <div class="address-results config-list" id="settingsDocumentTypeList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Workflow Templates</p>
+                  <h3>流程模板設定</h3>
+                </div>
+                <button class="text-button" id="settingsAddWorkflowTemplateBtn" type="button">新增 / 更新</button>
+              </div>
+              <form class="compact-form" id="settingsWorkflowTemplateForm">
+                <label>模板代碼<input id="settingsWorkflowTemplateKey" value="customA" /></label>
+                <label>模板名稱<input id="settingsWorkflowTemplateName" value="自訂行政用印流程" /></label>
+                <label>路由<select id="settingsWorkflowTemplateRoute"><option>A</option><option>B</option><option>C</option><option>D</option></select></label>
+                <label>節點清單<textarea id="settingsWorkflowTemplateSteps" rows="4">申請人送出
+申請人主管審核
+行政部門主任核定
+總務用印登錄
+申請人確認</textarea></label>
+              </form>
+              <div class="address-results config-list" id="settingsWorkflowTemplateList"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Permission Matrix</p>
+                  <h3>權限矩陣設定</h3>
+                </div>
+                <div class="row-actions">
+                  <button class="text-button" id="settingsGrantPermissionBtn" type="button">授權</button>
+                  <button class="text-button" id="settingsRevokePermissionBtn" type="button">移除</button>
+                </div>
+              </div>
+              <form class="compact-form" id="settingsPermissionMatrixForm">
+                <label>角色<select id="settingsPermissionRoleSelect"></select></label>
+                <label>權限<select id="settingsPermissionCodeSelect"></select></label>
+              </form>
+              <div class="permission-grid config-permission-grid" id="settingsPermissionMatrixGrid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Format Templates</p>
+                  <h3>格式模板設定</h3>
+                </div>
+                <div class="row-actions">
+                  <button class="text-button" id="settingsSaveFormatTemplateBtn" type="button">儲存模板</button>
+                  <button class="text-button" id="settingsApplyFormatTemplateBtn" type="button">套用</button>
+                </div>
+              </div>
+              <form class="compact-form" id="settingsFormatTemplateForm">
+                <label>模板名稱<input id="settingsFormatTemplateName" value="政府機關函稿" /></label>
+                <label>適用文別<select id="settingsFormatTemplateDocType"></select></label>
+                <label>速別<select id="settingsFormatTemplatePriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
+                <label>密等<select id="settingsFormatTemplateSecurity"><option>普通</option><option>密</option><option>機密</option><option>極機密</option></select></label>
+                <label>主旨提示<input id="settingsFormatTemplateSubject" value="檢送相關資料，請查照。" /></label>
+                <label>附件預設<input id="settingsFormatTemplateAttachments" value="函稿本文.pdf,附件清冊.xml" /></label>
+              </form>
+              <div class="address-results config-list" id="settingsFormatTemplateList"></div>
+            </section>
+          </div>
+
           <div class="settings-workbench">
             <section class="panel">
               <div class="panel-heading">
@@ -2806,7 +3306,33 @@
       </main>
     </div>
 
+    <div class="modal-backdrop hidden" id="contractModal" role="dialog" aria-modal="true" aria-labelledby="contractModalTitle">
+      <section class="contract-modal-card">
+        <div class="contract-modal-header">
+          <div>
+            <p class="eyebrow">Contract Record</p>
+            <h3 id="contractModalTitle">合約內容</h3>
+          </div>
+          <button class="secondary-button" id="contractModalCloseBtn" type="button">關閉</button>
+        </div>
+        <div id="contractModalBody"></div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop hidden" id="inboundModal" role="dialog" aria-modal="true" aria-labelledby="inboundModalTitle">
+      <section class="contract-modal-card inbound-modal-card">
+        <div class="contract-modal-header">
+          <div>
+            <p class="eyebrow">Inbound Document</p>
+            <h3 id="inboundModalTitle">收文內容</h3>
+          </div>
+          <button class="secondary-button" id="inboundModalCloseBtn" type="button">關閉</button>
+        </div>
+        <div id="inboundModalBody"></div>
+      </section>
+    </div>
+
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="app.js"></script>
+  <script src="app.js?v=20260609-logging-bridge"></script>
   </body>
 </html>
