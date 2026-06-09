@@ -142,6 +142,8 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
         self.assertNotIn("official_documents.receive", session["permissions"])
 
     def test_signed_portal_handoff_enters_as_general_affairs(self) -> None:
+        original_secret = backend.PORTAL_HANDOFF_SECRET
+        backend.PORTAL_HANDOFF_SECRET = "unit-test-portal-handoff-secret"
         payload = {
             "source": "logging-portal",
             "moduleId": "edoc",
@@ -158,20 +160,23 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
             "exp": int(time.time()) + 600,
         }
         encoded = backend.base64.urlsafe_b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("utf-8").rstrip("=")
-        signature = backend.base64url_hmac_sha256(backend.PORTAL_HANDOFF_SECRET, encoded)
+        signature = backend.base64url_hmac_sha256("unit-test-portal-handoff-secret", encoded)
 
-        session, status = backend.authenticate_logging_bridge(
-            self.conn,
-            {"portal": "1", "payload": encoded, "signature": signature, "token": f"{encoded}.{signature}"},
-            "127.0.0.1",
-            "unittest",
-        )
+        try:
+            session, status = backend.authenticate_logging_bridge(
+                self.conn,
+                {"portal": "1", "payload": encoded, "signature": signature, "token": f"{encoded}.{signature}"},
+                "127.0.0.1",
+                "unittest",
+            )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(session["user"]["role"], "總務")
-        self.assertEqual(session["user"]["logging_role_key"], "ga_chief")
-        self.assertEqual(session["bridge"]["sourceSystem"], "logging")
-        self.assertIn("official_documents.receive", session["permissions"])
+            self.assertEqual(status, 200)
+            self.assertEqual(session["user"]["role"], "總務")
+            self.assertEqual(session["user"]["logging_role_key"], "ga_chief")
+            self.assertEqual(session["bridge"]["sourceSystem"], "logging")
+            self.assertIn("official_documents.receive", session["permissions"])
+        finally:
+            backend.PORTAL_HANDOFF_SECRET = original_secret
 
 
 if __name__ == "__main__":
