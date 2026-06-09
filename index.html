@@ -4,10 +4,33 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>歲悅電子公文交換系統</title>
+    <script>
+      (() => {
+        const isProductionEdoc = window.location.hostname === "edoc.suiyuecare.com";
+        if (!isProductionEdoc) return;
+        const params = new URLSearchParams(window.location.search);
+        const hasPortalHandoff = params.has("payload") || params.has("token") || params.get("portal") === "1";
+        const allowLocalLogin = params.get("localLogin") === "1";
+        let hasEdocSession = false;
+        try {
+          hasEdocSession = Boolean(window.localStorage?.getItem("suiyuecare-edoc-session"));
+        } catch (error) {
+          hasEdocSession = false;
+        }
+        const hasBridgeCookie = document.cookie.includes("suiyue_hris_quick_login_user=");
+        if (hasPortalHandoff || allowLocalLogin || hasEdocSession || hasBridgeCookie) return;
+        const returnUrl = new URL(window.location.href);
+        ["payload", "signature", "token", "email", "role", "scope", "portal"].forEach((key) => returnUrl.searchParams.delete(key));
+        const loginUrl = new URL("https://login.suiyuecare.com/portal/");
+        loginUrl.searchParams.set("module", "edoc");
+        loginUrl.searchParams.set("next", returnUrl.toString());
+        window.location.replace(loginUrl.toString());
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260609-usability-pass" />
+    <link rel="stylesheet" href="styles.css?v=20260609-sso-portal" />
   </head>
   <body>
     <div class="login-screen app" id="loginScreen">
@@ -3344,6 +3367,6 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="app.js?v=20260609-usability-pass"></script>
+    <script src="app.js?v=20260609-sso-portal"></script>
   </body>
 </html>

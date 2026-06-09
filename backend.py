@@ -10,6 +10,7 @@ jobs, settings, and backups.
 from __future__ import annotations
 
 import argparse
+import base64
 import smtplib
 import ssl
 import hashlib
@@ -97,6 +98,11 @@ ALLOWED_EDOC_ROLE_LIST = [
 ALLOWED_EDOC_ROLES = set(ALLOWED_EDOC_ROLE_LIST)
 EDOC_JOB_LEVELS = {"職員", "組長", "課長", "部長", "區經理", "執行長", "董事會", "股東", "外部檢核單位"}
 HRIS_QUICK_LOGIN_SECRET = os.getenv("HRIS_QUICK_LOGIN_SECRET", os.getenv("NEXTAUTH_SECRET", "suiyue-hris-local-quick-login-secret"))
+PORTAL_HANDOFF_SECRET = os.getenv(
+    "EDOC_PORTAL_HANDOFF_SECRET",
+    os.getenv("PORTAL_HANDOFF_SIGNING_SECRET", os.getenv("APM_PORTAL_SIGNING_SECRET", HRIS_QUICK_LOGIN_SECRET)),
+).strip()
+PORTAL_HANDOFF_MAX_AGE_SECONDS = int(os.getenv("EDOC_PORTAL_HANDOFF_MAX_AGE_SECONDS", "600"))
 
 LOGGING_AUDIT_EVENT_TYPES = {
     "login",
@@ -134,6 +140,18 @@ LOGGING_ROLE_ALIASES = {
     "it_admin": "system_department",
     "系統處": "system_department",
     "資訊": "system_department",
+    "admin-director": "admin_director",
+    "hr-chief": "hr_chief",
+    "hr-staff": "hr_staff",
+    "accounting-chief": "accounting_chief",
+    "cashier-chief": "accounting_chief",
+    "ga-chief": "ga_chief",
+    "business-director": "department_head",
+    "section-chief": "section_chief",
+    "team-lead": "team_lead",
+    "region-manager": "district_manager",
+    "external-audit": "external_auditor",
+    "external-auditor": "external_auditor",
 }
 
 LOGGING_ROLE_TO_EDOC_PROFILE = {
@@ -150,6 +168,8 @@ LOGGING_ROLE_TO_EDOC_PROFILE = {
     "admin_director": {"role": "行政部主任", "job_level": "部長", "title": "行政部門主任", "unit": "行政部"},
     "hr_chief": {"role": "人資", "job_level": "課長", "title": "人資課長", "unit": "人資"},
     "hr_staff": {"role": "人資", "job_level": "職員", "title": "人資組員", "unit": "人資"},
+    "accounting_chief": {"role": "會計", "job_level": "課長", "title": "會計課長", "unit": "會計"},
+    "ga_chief": {"role": "總務", "job_level": "課長", "title": "總務課長", "unit": "總務"},
 }
 
 LOGGING_PERMISSION_TO_EDOC_CODES = {
@@ -364,6 +384,56 @@ def canonical_hris_quick_login_payload(user: Dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def base64url_decode(value: str) -> bytes:
+    text = urllib.parse.unquote(roster_text(value))
+    padding = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode((text + padding).encode("utf-8"))
+
+
+def base64url_json(value: str) -> Dict[str, Any]:
+    decoded = base64url_decode(value).decode("utf-8")
+    parsed = json.loads(decoded)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def base64url_hmac_sha256(secret: str, value: str) -> str:
+    digest = hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def verify_portal_handoff_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], str | None]:
+    encoded_payload = roster_text(payload.get("payload"))
+    signature = roster_text(payload.get("signature"))
+    token = roster_text(payload.get("token"))
+    if token and (not encoded_payload or not signature):
+        parts = token.split(".", 1)
+        if len(parts) == 2:
+            encoded_payload, signature = parts
+    if not encoded_payload or not signature:
+        return {}, "missing_portal_handoff"
+    if not PORTAL_HANDOFF_SECRET:
+        return {}, "missing_portal_handoff_secret"
+    expected = base64url_hmac_sha256(PORTAL_HANDOFF_SECRET, encoded_payload)
+    if not hmac.compare_digest(signature, expected):
+        return {}, "invalid_signature"
+    try:
+        decoded = base64url_json(encoded_payload)
+    except Exception:
+        return {}, "invalid_payload"
+    if decoded.get("moduleId") != "edoc":
+        return {}, "invalid_target_module"
+    now_ts = int(time.time())
+    exp = int(decoded.get("exp") or 0)
+    iat = int(decoded.get("iat") or 0)
+    if exp and exp < now_ts:
+        return {}, "expired_portal_handoff"
+    if iat and iat > now_ts + 300:
+        return {}, "invalid_issued_at"
+    if iat and not exp and now_ts - iat > PORTAL_HANDOFF_MAX_AGE_SECONDS:
+        return {}, "expired_portal_handoff"
+    return decoded, None
+
+
 def verify_hris_quick_login_signature(payload: Dict[str, Any]) -> bool:
     if payload.get("v") != 1 or not isinstance(payload.get("user"), dict) or not payload.get("signature"):
         return False
@@ -379,6 +449,12 @@ def verify_hris_quick_login_signature(payload: Dict[str, Any]) -> bool:
 def extract_logging_bridge_user(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], str | None]:
     if not isinstance(payload, dict):
         return {}, "invalid_payload"
+
+    if payload.get("token") or (payload.get("payload") and payload.get("signature")):
+        portal_payload, error = verify_portal_handoff_payload(payload)
+        if error:
+            return {}, error
+        return portal_payload, None
 
     signed_payload = payload if payload.get("signature") else payload.get("signedPayload")
     if isinstance(signed_payload, dict) and signed_payload.get("signature"):
@@ -415,9 +491,9 @@ def upsert_logging_bridge_user(conn: sqlite3.Connection, payload: Dict[str, Any]
     email = roster_text(source_user.get("email")).lower()
     if not email:
         raise ValueError("missing_email")
-    logging_account_id = roster_text(source_user.get("loggingAccountId") or source_user.get("logging_account_id") or source_user.get("id") or email)
+    logging_account_id = roster_text(source_user.get("loggingAccountId") or source_user.get("logging_account_id") or source_user.get("id") or source_user.get("profileId") or email)
     display_name = roster_text(source_user.get("name") or source_user.get("display_name") or source_user.get("roleLabel") or email.split("@")[0])
-    unit = roster_text(source_user.get("unit") or source_user.get("departmentCode") or source_user.get("department_code") or profile["unit"])
+    unit = roster_text(source_user.get("unit") or source_user.get("department") or source_user.get("departmentCode") or source_user.get("department_code") or profile["unit"])
     title = roster_text(source_user.get("title") or source_user.get("roleLabel") or profile["title"])
     job_level = normalize_edoc_job_level(source_user.get("jobLevel") or source_user.get("job_level") or profile["job_level"])
     edoc_role = profile["role"]
@@ -5935,9 +6011,9 @@ def supabase_authenticate_logging_bridge(payload: Dict[str, Any], ip: str, devic
         email = roster_text(source_user.get("email")).lower()
         if not email:
             return {"error": "logging_bridge_denied", "detail": "missing_email"}, 400
-        logging_account_id = roster_text(source_user.get("loggingAccountId") or source_user.get("logging_account_id") or source_user.get("id") or email)
+        logging_account_id = roster_text(source_user.get("loggingAccountId") or source_user.get("logging_account_id") or source_user.get("id") or source_user.get("profileId") or email)
         display_name = roster_text(source_user.get("name") or source_user.get("display_name") or source_user.get("roleLabel") or email.split("@")[0])
-        unit = roster_text(source_user.get("unit") or source_user.get("departmentCode") or source_user.get("department_code") or profile["unit"])
+        unit = roster_text(source_user.get("unit") or source_user.get("department") or source_user.get("departmentCode") or source_user.get("department_code") or profile["unit"])
         title = roster_text(source_user.get("title") or source_user.get("roleLabel") or profile["title"])
         job_level = normalize_edoc_job_level(source_user.get("jobLevel") or source_user.get("job_level") or profile["job_level"])
         edoc_role = profile["role"]

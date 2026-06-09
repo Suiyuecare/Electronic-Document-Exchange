@@ -11,6 +11,7 @@ const localBackendOrigin = "http://127.0.0.1:5174";
 const backendOrigin = window.location.protocol === "file:" ? localBackendOrigin : window.location.origin;
 const backendApiBase = `${backendOrigin}/api`;
 const authStorageKey = "suiyuecare-edoc-session";
+const loggingPortalUrl = "https://login.suiyuecare.com/portal/";
 const loggingBridgeStorageKeys = [
   "suiyue-hris-quick-login-user",
   "suiyuecare-logging-session",
@@ -2931,7 +2932,67 @@ function readCookieValue(name) {
   }
 }
 
+function isProductionEdocHost() {
+  return window.location.hostname === "edoc.suiyuecare.com";
+}
+
+function portalHandoffParams() {
+  const params = new URLSearchParams(window.location.search);
+  const payload = params.get("payload") || "";
+  const signature = params.get("signature") || "";
+  const token = params.get("token") || "";
+  if (!payload && !token) return null;
+  return {
+    source: "logging-portal",
+    bridgeSource: "portal-query",
+    payload,
+    signature,
+    token,
+    email: params.get("email") || "",
+    role: params.get("role") || "",
+    scope: params.get("scope") || "",
+    portal: params.get("portal") || ""
+  };
+}
+
+function cleanPortalHandoffUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const keys = ["payload", "signature", "token", "email", "role", "scope", "portal"];
+  if (!keys.some((key) => params.has(key))) return;
+  keys.forEach((key) => params.delete(key));
+  const nextUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash || ""}`;
+  history.replaceState(null, "", nextUrl || "/");
+}
+
+function edocReturnUrlForPortal() {
+  const url = new URL(window.location.href);
+  ["payload", "signature", "token", "email", "role", "scope", "portal"].forEach((key) => url.searchParams.delete(key));
+  url.searchParams.delete("localLogin");
+  return url.toString();
+}
+
+function buildLoggingPortalUrl() {
+  const url = new URL(loggingPortalUrl);
+  url.searchParams.set("module", "edoc");
+  url.searchParams.set("next", edocReturnUrlForPortal());
+  return url.toString();
+}
+
+function redirectToLoggingPortal() {
+  window.location.replace(buildLoggingPortalUrl());
+}
+
+function shouldRedirectToLoggingPortal() {
+  if (!isProductionEdocHost()) return false;
+  if (new URLSearchParams(window.location.search).get("localLogin") === "1") return false;
+  if (portalHandoffParams()) return false;
+  if (readCookieValue(loggingQuickLoginCookieKey)) return false;
+  return true;
+}
+
 function readLoggingBridgePayload() {
+  const portalPayload = portalHandoffParams();
+  if (portalPayload) return portalPayload;
   for (const key of loggingBridgeStorageKeys) {
     const value = readJsonStorage(key);
     if (value?.user || value?.email || value?.session || value?.profile || value?.currentUser) {
@@ -3009,6 +3070,10 @@ function leaveApp() {
   }
   authState = null;
   localStorage.removeItem(authStorageKey);
+  if (isProductionEdocHost()) {
+    redirectToLoggingPortal();
+    return;
+  }
   document.querySelector("#appShell").classList.add("hidden");
   document.querySelector("#loginScreen").classList.remove("hidden");
   showToast("已登出系統。");
@@ -3055,6 +3120,7 @@ async function loginWithLoggingBridge(bridgePayload) {
   });
   authState = session;
   localStorage.setItem(authStorageKey, JSON.stringify(session));
+  cleanPortalHandoffUrl();
   syncUserAccountFromSession(session, "Logging / 平台帳號");
   recordLogin(session.user.email, "Logging / 平台帳號", "成功");
   addAccountAudit("Logging 帳號連動", `${session.user.email} 已沿用 Logging 帳號進入 EDOC，角色同步為 ${session.user.role}。`);
@@ -3077,12 +3143,22 @@ async function tryResumePlatformSession() {
     }
   }
   const bridgePayload = readLoggingBridgePayload();
-  if (!bridgePayload) return false;
+  if (!bridgePayload) {
+    if (shouldRedirectToLoggingPortal()) {
+      redirectToLoggingPortal();
+      return true;
+    }
+    return false;
+  }
   try {
     return await loginWithLoggingBridge(bridgePayload);
   } catch (error) {
     console.warn("Logging bridge login failed", error);
     addAccountAudit("Logging 帳號連動失敗", error.message || "無法沿用 Logging 帳號進入 EDOC。");
+    if (shouldRedirectToLoggingPortal()) {
+      redirectToLoggingPortal();
+      return true;
+    }
     return false;
   }
 }

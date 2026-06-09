@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
+import time
 import unittest
 
 import backend
@@ -139,6 +140,38 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
         self.assertEqual(session["user"]["logging_role_key"], "staff")
         self.assertIn("official_documents.compose", session["permissions"])
         self.assertNotIn("official_documents.receive", session["permissions"])
+
+    def test_signed_portal_handoff_enters_as_general_affairs(self) -> None:
+        payload = {
+            "source": "logging-portal",
+            "moduleId": "edoc",
+            "profileId": "EMP-0006",
+            "loggingAccountId": "EMP-0006",
+            "displayName": "總務測試",
+            "email": "ga.portal@suiyuecare.com",
+            "role": "ga-chief",
+            "sourceRoleKey": "ga-chief",
+            "title": "總務課長",
+            "department": "行政部",
+            "moduleActions": ["view", "submit", "approve", "assign"],
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 600,
+        }
+        encoded = backend.base64.urlsafe_b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("utf-8").rstrip("=")
+        signature = backend.base64url_hmac_sha256(backend.PORTAL_HANDOFF_SECRET, encoded)
+
+        session, status = backend.authenticate_logging_bridge(
+            self.conn,
+            {"portal": "1", "payload": encoded, "signature": signature, "token": f"{encoded}.{signature}"},
+            "127.0.0.1",
+            "unittest",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(session["user"]["role"], "總務")
+        self.assertEqual(session["user"]["logging_role_key"], "ga_chief")
+        self.assertEqual(session["bridge"]["sourceSystem"], "logging")
+        self.assertIn("official_documents.receive", session["permissions"])
 
 
 if __name__ == "__main__":
