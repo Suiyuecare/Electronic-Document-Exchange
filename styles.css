@@ -758,6 +758,89 @@ body[data-identity-kind="generalAffairs"] #dashboard .content-grid {
   background: #fff7ed;
 }
 
+.daily-action-center {
+  margin: 0 0 14px;
+}
+
+.daily-action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.daily-action-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px 12px;
+  min-height: 142px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.daily-action-item:hover {
+  border-color: rgba(56, 125, 115, 0.55);
+  box-shadow: 0 12px 32px rgba(52, 36, 18, 0.08);
+  transform: translateY(-1px);
+}
+
+.daily-action-item.issue {
+  border-color: #f5c184;
+  background: #fff8ef;
+}
+
+.daily-action-item strong {
+  grid-column: 1 / -1;
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.daily-action-item small,
+.daily-action-item p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.daily-action-item p {
+  grid-column: 1 / -1;
+}
+
+.daily-action-item em {
+  display: inline-flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  margin-top: auto;
+  border-radius: 8px;
+  background: #387d73;
+  color: #fff;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.daily-action-empty {
+  display: grid;
+  gap: 8px;
+  grid-column: 1 / -1;
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: #fffaf2;
+}
+
+.daily-action-empty p {
+  margin: 0;
+  color: var(--muted);
+}
+
 body[data-identity-kind="generalAffairs"] .identity-workbench {
   padding: 24px;
   border-radius: 26px;
@@ -3890,6 +3973,7 @@ textarea {
   }
 
   .metrics-grid,
+  .daily-action-grid,
   .dispatch-board,
   .feature-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3973,6 +4057,7 @@ textarea {
   .nav-list,
   .metrics-grid,
   .identity-layout,
+  .daily-action-grid,
   .next-stepper,
   .reminder-lanes,
   .pipeline,

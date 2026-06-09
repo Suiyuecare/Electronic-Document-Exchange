@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260609-config-admin" />
+    <link rel="stylesheet" href="styles.css?v=20260609-usability-pass" />
   </head>
   <body>
     <div class="login-screen app" id="loginScreen">
@@ -183,6 +183,17 @@
                 <div class="identity-list" id="identityAlerts"></div>
               </section>
             </div>
+          </section>
+
+          <section class="panel daily-action-center" id="dailyActionCenter">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Next Actions</p>
+                <h3>今日下一步</h3>
+              </div>
+              <span class="status-pill" id="dailyActionCount">0 件</span>
+            </div>
+            <div class="daily-action-grid" id="dailyActionGrid"></div>
           </section>
 
           <div class="metrics-grid" id="dashboardMetricGrid">
@@ -3333,6 +3344,6 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="app.js?v=20260609-logging-bridge"></script>
+  <script src="app.js?v=20260609-usability-pass"></script>
   </body>
 </html>

@@ -1692,32 +1692,32 @@ function openUnifiedFlowSource(flowId = selectedUnifiedFlowId) {
     selectedInboundId = flow.sourceId;
     renderInboundRows();
     renderInboundDetail();
-    setView("inbound");
+    setView(isRouteAllowed("inbound") ? "inbound" : "search");
     return;
   }
   if (flow.sourceType === "dispatch") {
     selectedDispatchId = flow.sourceId;
     renderDispatchBoard();
     renderDispatchDetail();
-    setView(isRouteAllowed("dispatch") ? "dispatch" : "search");
+    setView(isRouteAllowed("dispatch") ? "dispatch" : isRouteAllowed("approvalLog") ? "approvalLog" : "search");
     return;
   }
   if (flow.sourceType === "contract") {
     selectedContractId = flow.sourceId;
     renderContracts();
-    setView("contracts");
+    setView(isRouteAllowed("contracts") ? "contracts" : isRouteAllowed("notifications") ? "notifications" : "search");
     return;
   }
   if (flow.sourceType === "seal") {
     selectedSealRequestId = flow.sourceId;
     renderSeals();
-    setView(isRouteAllowed("seals") ? "seals" : isRouteAllowed("contractSeal") ? "contractSeal" : "workflow");
+    setView(isRouteAllowed("seals") ? "seals" : isRouteAllowed("contractSeal") ? "contractSeal" : isRouteAllowed("workflow") ? "workflow" : "notifications");
     return;
   }
   selectedWorkflowTaskId = flow.sourceId;
   renderWorkflowTasks();
   renderApprovalProgress();
-  setView("workflow");
+  setView(isRouteAllowed("workflow") ? "workflow" : isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
 }
 
 function syncUnifiedFlowViews() {
@@ -1741,6 +1741,8 @@ const trackingCases = [
 const trackingAuditLog = [
   ["10:30", "稽催追蹤初始化", "已載入翌日查核、逾期提醒、未收確認與退回補正案件。"]
 ];
+
+let dailyActionCache = [];
 
 const titles = {
   dashboard: "交換總覽",
@@ -2041,11 +2043,11 @@ function canSeeCompanyWideDocs(role = activeRole()) {
 }
 
 const navByIdentity = {
-  employee: ["dashboard", "compose", "search"],
-  supervisor: ["dashboard", "compose", "search"],
+  employee: ["dashboard", "compose", "notifications", "search"],
+  supervisor: ["dashboard", "compose", "notifications", "search"],
   viewer: ["dashboard", "search"],
-  companyOps: ["dashboard", "inbound", "compose", "search"],
-  executive: ["dashboard", "inbound", "compose", "search"]
+  companyOps: ["dashboard", "compose", "inbound", "notifications", "search"],
+  executive: ["dashboard", "compose", "inbound", "notifications", "search"]
 };
 
 const secondaryRoutesByIdentity = {
@@ -2082,10 +2084,10 @@ function isRouteAllowed(target) {
 
 function simpleRouteLabels(role = activeRole()) {
   const companyWide = ["行政部主任", "總務", "執行長"].includes(role);
-  if (role === "執行長") return { dashboard: "儀表板", compose: "撰寫公文", inbound: "公文收發", notifications: "待辦中心", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", search: "公文紀錄", seals: "公司與印章設定" };
+  if (role === "執行長") return { dashboard: "儀表板", compose: "撰寫公文", inbound: "公文收發", notifications: "全公司待辦", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", search: "公文紀錄", seals: "公司與印章設定" };
   return companyWide
-    ? { dashboard: "儀表板", compose: "撰寫公文", inbound: "公文收發", notifications: "待辦中心", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", search: "公文紀錄" }
-    : { dashboard: "公文待辦", compose: "撰寫公文", notifications: "待辦中心", approvalLog: "簽核紀錄", search: "公文紀錄" };
+    ? { dashboard: "儀表板", compose: "撰寫公文", inbound: "公文收發", notifications: "全公司待辦", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", search: "公文紀錄" }
+    : { dashboard: "我的工作台", compose: "撰寫公文", notifications: "我的待辦", approvalLog: "簽核紀錄", search: "公文紀錄" };
 }
 
 function simpleRouteTitle(target, role = activeRole()) {
@@ -2133,6 +2135,12 @@ function applyRoleNavigation() {
   const active = document.querySelector(".view.active")?.id || "dashboard";
   document.querySelector("#pageTitle").textContent = simpleRouteTitle(active);
   document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(active);
+  document.querySelectorAll("[data-target]").forEach((control) => {
+    if (control.classList.contains("nav-item")) return;
+    const target = control.dataset.target;
+    if (!target || !titles[target]) return;
+    control.toggleAttribute("hidden", !allowed.includes(target));
+  });
   if (!allowed.includes(active)) setView("dashboard");
 }
 
@@ -2232,6 +2240,185 @@ function identityWorkbenchData() {
   };
 }
 
+function dailyActionForFlow(flow) {
+  const routeBySource = {
+    inbound: "inbound",
+    dispatch: "compose",
+    contract: "contracts",
+    seal: "contractSeal",
+    workflow: "approvalLog"
+  };
+  let target = routeBySource[flow.sourceType] || "notifications";
+  let action = "查看待辦";
+  if (flow.sourceType === "inbound") {
+    action = /待登錄/.test(flow.status) ? "登錄收文" : /待分派/.test(flow.status) ? "分派承辦" : "查看來文";
+  } else if (flow.sourceType === "dispatch") {
+    action = /草稿|退回/.test(flow.status) ? "補正函稿" : /待清稿|待簽核/.test(flow.status) ? "查看簽核" : /失敗/.test(flow.status) ? "重送或查詢" : "查看發文";
+    if (/待清稿|待簽核/.test(flow.status)) target = "approvalLog";
+    if (/失敗|等待確認/.test(flow.status)) target = "search";
+  } else if (flow.sourceType === "contract") {
+    action = /用印/.test(flow.status) ? "處理用印" : /退回/.test(flow.status) ? "補正合約" : "查看合約";
+    if (/用印/.test(flow.status)) target = "contractSeal";
+  } else if (flow.sourceType === "seal") {
+    action = "總務用印";
+  } else if (flow.sourceType === "workflow") {
+    action = /退回/.test(flow.status) ? "查看退回原因" : "處理簽核";
+  }
+  const dedupePrefix = {
+    inbound: "INBOUND",
+    dispatch: "DISPATCH",
+    contract: "CONTRACT",
+    seal: "SEAL",
+    workflow: "WORKFLOW"
+  }[flow.sourceType] || "FLOW";
+  return {
+    id: flow.id,
+    dedupeKey: `${dedupePrefix}-${flow.sourceId || flow.sourceNo || flow.id}`,
+    tone: flow.isIssue ? "issue" : "normal",
+    badge: flow.kind,
+    title: flow.title,
+    meta: `${flow.sourceNo} · ${flow.currentStep}`,
+    body: `${flow.currentOwner || flow.owner} · ${flow.status}`,
+    action,
+    target,
+    flowId: target === "compose" ? "" : flow.id,
+    priority: flow.isIssue ? 3 : /待|退回|失敗/.test(flow.status) ? 2 : 1
+  };
+}
+
+function dailyActionItems() {
+  const role = activeRole();
+  const kind = identityKindForRole(role);
+  const flows = visibleUnifiedDocumentFlows().filter(isUnifiedFlowTodo).map(dailyActionForFlow);
+  const items = [...flows];
+
+  if (kind === "generalAffairs") {
+    scopedInboundDocs()
+      .filter((doc) => ["待登錄", "待分派", "異常待處理"].includes(doc.status))
+      .forEach((doc) => items.push({
+        id: `INBOUND-${doc.id}`,
+        dedupeKey: `INBOUND-${doc.id}`,
+        tone: doc.status === "異常待處理" ? "issue" : "normal",
+        badge: "收文",
+        title: doc.subject,
+        meta: `${doc.receiveNo} · ${doc.agency}`,
+        body: `${doc.status} · 承辦 ${doc.owner}`,
+        action: doc.status === "待登錄" ? "登錄收文" : doc.status === "待分派" ? "分派承辦" : "處理異常",
+        target: "inbound",
+        selectInboundId: doc.id,
+        priority: doc.status === "異常待處理" ? 3 : 2
+      }));
+    scopedDispatchDocs()
+      .filter((doc) => ["交換失敗", "等待確認", "已封裝"].includes(doc.status))
+      .forEach((doc) => items.push({
+        id: `DISPATCH-${doc.id}`,
+        dedupeKey: `DISPATCH-${doc.id}`,
+        tone: doc.status === "交換失敗" ? "issue" : "normal",
+        badge: "發文",
+        title: doc.subject,
+        meta: `${doc.no} · ${doc.to}`,
+        body: `${doc.status} · ${doc.lastReply || "待同步交換狀態"}`,
+        action: doc.status === "交換失敗" ? "重送或查詢" : "查詢狀態",
+        target: "search",
+        priority: doc.status === "交換失敗" ? 3 : 2
+      }));
+  }
+
+  trackingCases
+    .filter((item) => item.owner === role || item.owner === authState?.user?.name || (kind !== "employee" && canSeeCompanyWideDocs(role)))
+    .filter((item) => item.status !== "已完成")
+    .forEach((item) => items.push({
+      id: `TRACK-${item.id}`,
+      dedupeKey: `TRACK-${item.id}`,
+      tone: /逾期|退回|未收/.test(item.status) ? "issue" : "normal",
+      badge: item.type,
+      title: item.title,
+      meta: `${item.agency} · ${item.dueDate}`,
+      body: item.note,
+      action: /退回/.test(item.status) ? "補正內容" : "查看稽催",
+      target: isRouteAllowed("tracking") ? "tracking" : "notifications",
+      priority: /逾期|未收/.test(item.status) ? 3 : 2
+    }));
+
+  visibleContracts()
+    .filter((contract) => /草稿|待|退回|用印|簽核/.test(contract.status) || isContractRenewalSoon(contract))
+    .forEach((contract) => {
+      const current = currentContractApproval(contract);
+      items.push({
+        id: `CONTRACT-${contract.id}`,
+        dedupeKey: `CONTRACT-${contract.id}`,
+        tone: /退回/.test(contract.status) || Number(contractDaysToEnd(contract)) < 0 ? "issue" : "normal",
+        badge: "合約",
+        title: contract.title,
+        meta: `${contract.contractNo} · ${contract.counterparty}`,
+        body: `${contract.status} · ${current?.role || contract.dept}`,
+        action: /用印/.test(contract.status) ? "合約用印" : /退回/.test(contract.status) ? "補正合約" : "查看合約",
+        target: /用印/.test(contract.status) && isRouteAllowed("contractSeal") ? "contractSeal" : "contracts",
+        selectContractId: contract.id,
+        priority: /退回|用印|待/.test(contract.status) ? 2 : 1
+      });
+    });
+
+  const unique = [];
+  const seen = new Set();
+  for (const item of items) {
+    const key = item.dedupeKey || item.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(item);
+  }
+  return unique
+    .sort((a, b) => b.priority - a.priority || String(a.meta).localeCompare(String(b.meta), "zh-Hant"))
+    .slice(0, 6);
+}
+
+function openDailyAction(index) {
+  const item = dailyActionCache[Number(index)];
+  if (!item) return;
+  if (item.selectInboundId) {
+    selectedInboundId = item.selectInboundId;
+    renderInboundRows();
+    renderInboundDetail();
+  }
+  if (item.selectContractId) {
+    selectedContractId = item.selectContractId;
+    renderContracts();
+    renderContractSeal();
+  }
+  if (item.flowId && isRouteAllowed(item.target)) {
+    openUnifiedFlowSource(item.flowId);
+    return;
+  }
+  setView(isRouteAllowed(item.target) ? item.target : "notifications");
+}
+
+function renderDailyActionCenter() {
+  const grid = document.querySelector("#dailyActionGrid");
+  const count = document.querySelector("#dailyActionCount");
+  if (!grid || !count) return;
+  dailyActionCache = dailyActionItems();
+  count.textContent = `${dailyActionCache.length} 件`;
+  grid.innerHTML = dailyActionCache.length ? dailyActionCache.map((item, index) => `
+    <button class="daily-action-item ${item.tone === "issue" ? "issue" : ""}" type="button" data-daily-action="${index}">
+      <span class="identity-item-badge">${item.badge}</span>
+      <strong>${item.title}</strong>
+      <small>${item.meta}</small>
+      <p>${item.body}</p>
+      <em>${item.action}</em>
+    </button>
+  `).join("") : `
+    <article class="daily-action-empty">
+      <strong>目前沒有急件</strong>
+      <p>你可以先撰寫新公文，或查詢部門公文紀錄。</p>
+      <button class="secondary-button" type="button" data-daily-action-empty="compose">撰寫公文</button>
+    </article>
+  `;
+  document.querySelectorAll("[data-daily-action]").forEach((button) => {
+    button.addEventListener("click", () => openDailyAction(button.dataset.dailyAction));
+  });
+  document.querySelector("[data-daily-action-empty]")?.addEventListener("click", () => setView("compose"));
+}
+
 function dashboardRoleData() {
   const role = activeRole();
   const kind = identityKindForRole(role);
@@ -2310,7 +2497,7 @@ function dashboardRoleData() {
         ["需用印", sealRequests.filter((request) => request.status === "待簽核").length]
       ],
       primaryTitle: "主管簽核與風險",
-      primaryTarget: "dashboard",
+      primaryTarget: "notifications",
       primaryButton: "公文待辦",
       checks: roleChecks.supervisor
     };
@@ -2387,6 +2574,7 @@ function renderRoleDashboard() {
   const button = document.querySelector("#dashboardPrimaryPanelBtn");
   button.textContent = data.primaryButton;
   button.dataset.target = data.primaryTarget;
+  button.hidden = !isRouteAllowed(data.primaryTarget);
   document.querySelector("#dashboardSecondaryPanelTitle").textContent = `${data.title}注意事項`;
   document.querySelector("#dashboardSecondaryPanelBadge").textContent = data.scope;
   document.querySelector("#dashboardRoleChecks").innerHTML = data.checks.map(([title, body]) => `
@@ -2395,6 +2583,7 @@ function renderRoleDashboard() {
       <p>${body}</p>
     </article>
   `).join("");
+  renderDailyActionCenter();
   renderDashboardApprovalProgress();
   renderSupervisorCommandDashboard();
 }
@@ -12138,7 +12327,7 @@ document.querySelector("#composeForm").addEventListener("submit", async (event) 
   if (!doc) return;
   activeComposeStep = "send";
   showToast("已建立函稿並加入發文佇列。");
-  setView("dispatch");
+  setView(isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
 });
 
 document.querySelector("#loginForm").addEventListener("submit", async (event) => {
@@ -12286,7 +12475,6 @@ document.querySelector("#clearDispatchLogBtn").addEventListener("click", () => {
 });
 document.querySelector("#saveDispatchDraftBtn").addEventListener("click", async () => {
   await createDispatchFromForm("草稿");
-  setView("dispatch");
   showToast("發文草稿已儲存。");
 });
 document.querySelector("#generateDispatchNoBtn").addEventListener("click", () => {
