@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import smtplib
 import ssl
 import hashlib
@@ -652,6 +653,7 @@ TABLES = {
     "department_registry": "department_registry",
     "seal_type_registry": "seal_type_registry",
     "workflow_tasks": "workflow_tasks",
+    "approval_step_actor_snapshots": "approval_step_actor_snapshots",
     "contracts": "contracts",
     "contract_parties": "contract_parties",
     "contract_approvals": "contract_approvals",
@@ -776,6 +778,26 @@ CREATE TABLE IF NOT EXISTS workflow_tasks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS approval_step_actor_snapshots (
+  id TEXT PRIMARY KEY,
+  workflow_task_id TEXT,
+  seal_application_id TEXT,
+  source_type TEXT NOT NULL DEFAULT 'seal_application',
+  source_id TEXT NOT NULL,
+  step_no INTEGER NOT NULL DEFAULT 1,
+  step_name TEXT NOT NULL,
+  approver_role TEXT NOT NULL,
+  approver_user_id TEXT,
+  approver_name TEXT,
+  approver_email TEXT,
+  status TEXT NOT NULL DEFAULT '待簽核',
+  comment TEXT,
+  acted_at TEXT,
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS contracts (
@@ -998,15 +1020,43 @@ CREATE TABLE IF NOT EXISTS seal_applications (
   id TEXT PRIMARY KEY,
   document_id TEXT NOT NULL,
   seal_id TEXT NOT NULL,
+  application_type TEXT NOT NULL DEFAULT 'official_document',
+  company_name TEXT NOT NULL DEFAULT '歲悅股份有限公司',
+  department TEXT,
+  title TEXT,
+  source_pdf_file_object_id TEXT,
+  source_pdf_sha256 TEXT,
+  source_pdf_name TEXT,
+  locked_pdf_sha256 TEXT,
+  locked_positions_sha256 TEXT,
+  stamp_positions_json TEXT NOT NULL DEFAULT '[]',
+  approval_route_code TEXT,
+  approval_route_name TEXT,
+  approval_snapshot_json TEXT NOT NULL DEFAULT '{}',
+  current_step_no INTEGER NOT NULL DEFAULT 1,
+  current_step_name TEXT,
+  current_approver_role TEXT,
+  applicant_user_id TEXT,
+  applicant_name TEXT,
+  applicant_email TEXT,
   applicant TEXT NOT NULL,
   approver TEXT,
   status TEXT NOT NULL,
   reason TEXT,
+  reject_reason TEXT,
   stamp_no TEXT,
   pdf_before_version_id TEXT,
   pdf_after_version_id TEXT,
+  returned_at TEXT,
+  completed_at TEXT,
+  notification_id TEXT,
   created_at TEXT NOT NULL,
-  approved_at TEXT
+  approved_at TEXT,
+  signature_id TEXT,
+  provider_status TEXT,
+  failure_reason TEXT,
+  evidence_json TEXT,
+  updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS signing_certificates (
@@ -1019,7 +1069,19 @@ CREATE TABLE IF NOT EXISTS signing_certificates (
   valid_from TEXT NOT NULL,
   valid_to TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT '啟用',
+  certificate_type TEXT NOT NULL DEFAULT 'organization',
   fingerprint_sha256 TEXT NOT NULL,
+  key_usage TEXT,
+  extended_key_usage TEXT,
+  chain_status TEXT NOT NULL DEFAULT '待驗證',
+  ocsp_status TEXT NOT NULL DEFAULT '待查詢',
+  crl_status TEXT NOT NULL DEFAULT '待查詢',
+  tsa_url TEXT,
+  ocsp_url TEXT,
+  crl_url TEXT,
+  root_ca_fingerprint TEXT,
+  last_validated_at TEXT,
+  validation_report_json TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -1054,6 +1116,16 @@ CREATE TABLE IF NOT EXISTS electronic_signatures (
   non_repudiation_json TEXT,
   verified_at TEXT,
   status TEXT NOT NULL DEFAULT '有效',
+  certificate_validation_id TEXT,
+  tsa_status TEXT NOT NULL DEFAULT '待驗證',
+  ocsp_status TEXT NOT NULL DEFAULT '待查詢',
+  crl_status TEXT NOT NULL DEFAULT '待查詢',
+  chain_status TEXT NOT NULL DEFAULT '待驗證',
+  provider TEXT,
+  provider_key_id TEXT,
+  provider_request_id TEXT,
+  provider_receipt_json TEXT,
+  evidence_digest_sha256 TEXT,
   created_at TEXT NOT NULL,
   FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
   FOREIGN KEY(pdf_version_id) REFERENCES pdf_versions(id) ON DELETE SET NULL,
@@ -1536,6 +1608,8 @@ CREATE INDEX IF NOT EXISTS idx_contract_parties_contract ON contract_parties(con
 CREATE INDEX IF NOT EXISTS idx_contract_approvals_contract ON contract_approvals(contract_id);
 CREATE INDEX IF NOT EXISTS idx_contract_approvals_role ON contract_approvals(role);
 CREATE INDEX IF NOT EXISTS idx_contract_approvals_status ON contract_approvals(status);
+CREATE INDEX IF NOT EXISTS idx_approval_actor_snapshots_source ON approval_step_actor_snapshots(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_approval_actor_snapshots_status ON approval_step_actor_snapshots(approver_role, status);
 CREATE INDEX IF NOT EXISTS idx_attachments_document ON attachments(document_id);
 CREATE INDEX IF NOT EXISTS idx_attachment_security_document ON attachment_security(document_id);
 CREATE INDEX IF NOT EXISTS idx_attachment_security_scan ON attachment_security(scan_status);
@@ -2052,6 +2126,17 @@ def parse_json_field(value: Any) -> Dict[str, Any]:
         return {}
 
 
+def parse_json_any(value: Any, fallback: Any = None) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if not value:
+        return fallback
+    try:
+        return json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback
+
+
 def roc_date_string(value: Any = None) -> str:
     parsed = parse_time(str(value)) if value else datetime.now()
     if parsed == datetime.min:
@@ -2542,6 +2627,29 @@ def migrate() -> None:
         }.items():
             ensure_column(conn, "electronic_signatures", column, definition)
         for column, definition in {
+            "application_type": "TEXT NOT NULL DEFAULT 'official_document'",
+            "company_name": "TEXT NOT NULL DEFAULT '歲悅股份有限公司'",
+            "department": "TEXT",
+            "title": "TEXT",
+            "source_pdf_file_object_id": "TEXT",
+            "source_pdf_sha256": "TEXT",
+            "source_pdf_name": "TEXT",
+            "locked_pdf_sha256": "TEXT",
+            "locked_positions_sha256": "TEXT",
+            "stamp_positions_json": "TEXT NOT NULL DEFAULT '[]'",
+            "approval_route_code": "TEXT",
+            "approval_route_name": "TEXT",
+            "approval_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+            "current_step_no": "INTEGER NOT NULL DEFAULT 1",
+            "current_step_name": "TEXT",
+            "current_approver_role": "TEXT",
+            "applicant_user_id": "TEXT",
+            "applicant_name": "TEXT",
+            "applicant_email": "TEXT",
+            "reject_reason": "TEXT",
+            "returned_at": "TEXT",
+            "completed_at": "TEXT",
+            "notification_id": "TEXT",
             "signature_id": "TEXT",
             "provider_status": "TEXT",
             "failure_reason": "TEXT",
@@ -2549,6 +2657,8 @@ def migrate() -> None:
             "updated_at": "TEXT",
         }.items():
             ensure_column(conn, "seal_applications", column, definition)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_seal_applications_type_status ON seal_applications(application_type, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_seal_applications_current_approver ON seal_applications(current_approver_role, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_file_objects_scan ON file_objects(scan_status)")
         seed(conn)
         seed_auth(conn)
@@ -2775,12 +2885,19 @@ def normalize_legacy_document_owners(conn: sqlite3.Connection) -> None:
 def seed_persistent_registries(conn: sqlite3.Connection) -> None:
     ts = now()
     companies = [
-        ("CO-001", "歲悅長照股份有限公司", "待設定", "啟用"),
+        ("CO-001", "歲悅股份有限公司", "60792234", "啟用"),
+        ("CO-002", "樂齡歲悅股份有限公司", "60541552", "啟用"),
+        ("CO-003", "移站式股份有限公司", "待設定", "啟用"),
+        ("CO-004", "大齡好好投資有限公司", "待設定", "啟用"),
+        ("CO-005", "歲悅股份有限公司附設臺北市私立歲悅居家長照機構", "00602175", "啟用"),
+        ("CO-006", "樂齡歲悅股份有限公司附設臺北市私立歲悅萬華社區長照機構", "00667423", "啟用"),
+        ("CO-007", "愛無限整合服務有限公司", "90691342", "啟用"),
+        ("CO-008", "愛無限整合有限公司附設新北市私立愛無限居家長照機構", "91254360", "啟用"),
     ]
     departments = [
-        ("DEP-001", "歲悅長照股份有限公司", "總管理處", "執行長", "啟用"),
-        ("DEP-002", "歲悅長照股份有限公司", "行政部", "行政部主任", "啟用"),
-        ("DEP-003", "歲悅長照股份有限公司", "總務", "總務", "啟用"),
+        ("DEP-001", "歲悅股份有限公司", "總管理處", "執行長", "啟用"),
+        ("DEP-002", "歲悅股份有限公司", "行政部", "行政部主任", "啟用"),
+        ("DEP-003", "歲悅股份有限公司", "總務", "總務", "啟用"),
     ]
     seal_types = [
         ("ST-001", "一般章", "日常公文、一般函稿", "啟用"),
@@ -3342,11 +3459,11 @@ def insert_row(conn: sqlite3.Connection, table: str, payload: Dict[str, Any]) ->
         apply_user_permission_defaults(payload)
     if table == "documents" and payload.get("direction") == "發文" and not payload.get("doc_no"):
         payload["doc_no"] = next_dispatch_no(conn)
-    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals"}:
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications"}:
         payload.setdefault("updated_at", now())
-    if table in {"documents", "attachments", "exchange_events", "exchange_outbox", "exchange_inbox", "exchange_log", "exchange_attachment", "exchange_status_history", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "file_objects", "file_download_tokens", "virus_scan_jobs", "compliance_attestations", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "signature_provider_events"}:
+    if table in {"documents", "attachments", "exchange_events", "exchange_outbox", "exchange_inbox", "exchange_log", "exchange_attachment", "exchange_status_history", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "file_objects", "file_download_tokens", "virus_scan_jobs", "compliance_attestations", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications", "signature_provider_events"}:
         payload.setdefault("created_at", now())
-    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs"}:
+    if table in {"documents", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_approvals", "seal_applications", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs"}:
         for key, value in list(payload.items()):
             if key.endswith("_json") and not isinstance(value, str):
                 payload[key] = json.dumps(value, ensure_ascii=False)
@@ -3384,9 +3501,9 @@ def patch_row(conn: sqlite3.Connection, table: str, row_id: str, payload: Dict[s
             payload["job_level"] = profile["job_level"]
         if permission_inputs.intersection(payload) and (not payload.get("role") or payload.get("role") not in ALLOWED_EDOC_ROLES):
             payload["role"] = profile["role"]
-    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "background_jobs", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals"}:
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "background_jobs", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications"}:
         payload["updated_at"] = now()
-    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs"}:
+    if table in {"documents", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_approvals", "seal_applications", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs"}:
         for key, value in list(payload.items()):
             if key.endswith("_json") and not isinstance(value, str):
                 payload[key] = json.dumps(value, ensure_ascii=False)
@@ -3434,9 +3551,80 @@ def role_permission_codes(conn: sqlite3.Connection, role_name: str) -> List[str]
     return [row["code"] for row in rows]
 
 
+def session_permissions(session: Dict[str, Any] | None) -> set[str]:
+    return set(session.get("permissions") or []) if session else set()
+
+
+def session_has_any_permission(session: Dict[str, Any] | None, permissions: List[str]) -> bool:
+    available = session_permissions(session)
+    return any(permission in available for permission in permissions)
+
+
+TABLE_READ_PERMISSIONS: Dict[str, List[str]] = {
+    "users": ["system_permissions.view", "system_permissions.manage"],
+    "roles": ["system_permissions.view", "system_permissions.manage"],
+    "permissions": ["system_permissions.view", "system_permissions.manage"],
+    "role_permissions": ["system_permissions.view", "system_permissions.manage"],
+    "module_account_links": ["system_permissions.view", "system_permissions.manage"],
+    "auth_sessions": ["system_permissions.view", "system_permissions.manage"],
+    "login_events": ["system_permissions.view", "system_permissions.manage"],
+    "trusted_devices": ["system_permissions.view", "system_permissions.manage"],
+    "ip_allowlist": ["system_permissions.view", "system_permissions.manage"],
+    "sso_providers": ["system_permissions.view", "system_permissions.manage"],
+    "audit_logs": ["audit_logs.view", "audit_logs.export", "audit.view"],
+    "document_acl": ["system_permissions.view", "system_permissions.manage", "audit_logs.view"],
+    "document_acl_events": ["system_permissions.view", "system_permissions.manage", "audit_logs.view"],
+    "settings": ["settings.system_manage", "settings.manage"],
+    "notification_channel_credentials": ["settings.system_manage", "settings.manage"],
+    "exchange_outbox": ["exchange.view", "exchange.manage"],
+    "exchange_inbox": ["exchange.view", "exchange.manage"],
+    "exchange_log": ["exchange.view", "exchange.manage", "audit_logs.view"],
+    "exchange_attachment": ["exchange.view", "exchange.manage", "files.manage"],
+    "exchange_status_history": ["exchange.view", "exchange.manage"],
+    "signature_provider_events": ["seals.manage", "audit_logs.view"],
+    "file_download_tokens": ["files.manage", "audit_logs.view"],
+}
+
+
+TABLE_WRITE_PERMISSIONS: Dict[str, List[str]] = {
+    "users": ["system_permissions.manage"],
+    "roles": ["system_permissions.manage"],
+    "permissions": ["system_permissions.manage"],
+    "role_permissions": ["system_permissions.manage"],
+    "module_account_links": ["system_permissions.manage"],
+    "auth_sessions": ["system_permissions.manage"],
+    "login_events": ["system_permissions.manage"],
+    "trusted_devices": ["system_permissions.manage"],
+    "ip_allowlist": ["system_permissions.manage"],
+    "sso_providers": ["system_permissions.manage"],
+    "audit_logs": ["audit_logs.export"],
+    "document_acl": ["system_permissions.manage"],
+    "document_acl_events": ["system_permissions.manage"],
+    "settings": ["settings.system_manage", "settings.manage"],
+    "notification_channel_credentials": ["settings.system_manage", "settings.manage"],
+    "exchange_outbox": ["exchange.manage"],
+    "exchange_inbox": ["exchange.manage"],
+    "exchange_log": ["exchange.manage"],
+    "exchange_attachment": ["exchange.manage", "files.manage"],
+    "exchange_status_history": ["exchange.manage"],
+    "signature_provider_events": ["seals.manage"],
+    "file_download_tokens": ["files.manage"],
+}
+
+
+def can_read_table(session: Dict[str, Any] | None, table: str) -> bool:
+    permissions = TABLE_READ_PERMISSIONS.get(table)
+    return bool(session) if not permissions else session_has_any_permission(session, permissions)
+
+
+def can_write_table(session: Dict[str, Any] | None, table: str) -> bool:
+    permissions = TABLE_WRITE_PERMISSIONS.get(table)
+    return bool(session) if not permissions else session_has_any_permission(session, permissions)
+
+
 def document_scope_clause(user: Dict[str, Any] | sqlite3.Row | None) -> Tuple[str, List[Any]]:
     if not user:
-        return "", []
+        return "1 = 0", []
     role = user["role"] if isinstance(user, sqlite3.Row) else user.get("role", "")
     unit = user["unit"] if isinstance(user, sqlite3.Row) else user.get("unit", "")
     name = user["name"] if isinstance(user, sqlite3.Row) else user.get("name", "")
@@ -3465,6 +3653,16 @@ def document_scope_clause(user: Dict[str, Any] | sqlite3.Row | None) -> Tuple[st
     if role == "外部檢核單位":
         return acl_clause, acl_params
     return "1 = 0", []
+
+
+def scoped_document_where(session: Dict[str, Any] | None, extra: List[str] | None = None) -> Tuple[str, List[Any]]:
+    where = list(extra or [])
+    params: List[Any] = []
+    scope_clause, scope_params = document_scope_clause(session.get("user") if session else None)
+    if scope_clause:
+        where.append(scope_clause)
+        params.extend(scope_params)
+    return (" WHERE " + " AND ".join(where)) if where else "", params
 
 
 def scoped_document_rows(conn: sqlite3.Connection, query: Dict[str, List[str]], session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
@@ -3515,6 +3713,8 @@ def unified_search(conn: sqlite3.Connection, query: Dict[str, List[str]], sessio
     results: List[Dict[str, Any]] = []
     for table_key, label, table, columns, status_column in specs:
         if category not in {"all", table_key, label}:
+            continue
+        if not can_read_table(session, table):
             continue
         where: List[str] = []
         params: List[Any] = []
@@ -3675,21 +3875,29 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
     }
 
 
-def dashboard(conn: sqlite3.Connection) -> Dict[str, Any]:
+def dashboard(conn: sqlite3.Connection, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
     def scalar(sql: str, params: Tuple[Any, ...] = ()) -> int:
         return int(conn.execute(sql, params).fetchone()[0])
 
-    total_tasks = scalar("SELECT COUNT(*) FROM exchange_tasks")
-    failed_tasks = scalar("SELECT COUNT(*) FROM exchange_tasks WHERE status LIKE '%失敗%'")
-    complete_tasks = scalar("SELECT COUNT(*) FROM exchange_tasks WHERE status LIKE '%完成%' OR status LIKE '%確認%'")
+    document_where, document_params = scoped_document_where(session)
+    inbound_where, inbound_params = scoped_document_where(session, ["direction = '收文'", "status IN ('待登錄','待分派')"])
+    dispatch_where, dispatch_params = scoped_document_where(session, ["direction = '發文'", "status IN ('草稿','待清稿','已清稿')"])
+    exchange_scope = f"document_id IN (SELECT id FROM documents{document_where})"
+    total_tasks = scalar(f"SELECT COUNT(*) FROM exchange_tasks WHERE {exchange_scope}", tuple(document_params))
+    failed_tasks = scalar(f"SELECT COUNT(*) FROM exchange_tasks WHERE status LIKE '%失敗%' AND {exchange_scope}", tuple(document_params))
+    complete_tasks = scalar(
+        f"SELECT COUNT(*) FROM exchange_tasks WHERE (status LIKE '%完成%' OR status LIKE '%確認%') AND {exchange_scope}",
+        tuple(document_params),
+    )
+    audit_count = scalar("SELECT COUNT(*) FROM audit_logs") if session_has_any_permission(session, ["audit_logs.view", "audit_logs.export", "audit.view"]) else 0
     return {
-        "documents": scalar("SELECT COUNT(*) FROM documents"),
-        "inboundPending": scalar("SELECT COUNT(*) FROM documents WHERE direction = '收文' AND status IN ('待登錄','待分派')"),
-        "dispatchPending": scalar("SELECT COUNT(*) FROM documents WHERE direction = '發文' AND status IN ('草稿','待清稿','已清稿')"),
+        "documents": scalar(f"SELECT COUNT(*) FROM documents{document_where}", tuple(document_params)),
+        "inboundPending": scalar(f"SELECT COUNT(*) FROM documents{inbound_where}", tuple(inbound_params)),
+        "dispatchPending": scalar(f"SELECT COUNT(*) FROM documents{dispatch_where}", tuple(dispatch_params)),
         "exchangeTasks": total_tasks,
         "exchangeFailed": failed_tasks,
         "successRate": round((complete_tasks / total_tasks) * 100, 1) if total_tasks else 100,
-        "auditLogs": scalar("SELECT COUNT(*) FROM audit_logs"),
+        "auditLogs": audit_count,
     }
 
 
@@ -4216,6 +4424,465 @@ def latest_pdf_version(conn: sqlite3.Connection, document_id: str, version_type:
     sql += " ORDER BY rowid DESC LIMIT 1"
     row = conn.execute(sql, params).fetchone()
     return row_to_dict(row) if row else None
+
+
+def create_pdf_version_for_file(
+    conn: sqlite3.Connection,
+    document: Dict[str, Any],
+    file_row: Dict[str, Any],
+    version_type: str,
+    template: str,
+    coordinates: Dict[str, Any],
+    stamp_no: str = "",
+    previous_version_id: str = "",
+) -> Dict[str, Any]:
+    version_id = f"PDF-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    row = {
+        "id": version_id,
+        "document_id": document["id"],
+        "file_object_id": file_row["id"],
+        "version_type": version_type,
+        "template_name": template,
+        "stamp_no": stamp_no,
+        "coordinates_json": json.dumps(coordinates, ensure_ascii=False),
+        "previous_version_id": previous_version_id,
+        "sha256": file_row["sha256"],
+        "created_at": now(),
+    }
+    insert_row(conn, "pdf_versions", row)
+    row["file"] = file_row
+    row["download_url"] = create_file_signed_url(conn, file_row["id"], "PDF Worker")["download_url"]
+    row["coordinates"] = coordinates
+    row["page_count"] = coordinates.get("page_count")
+    row["page_size"] = coordinates.get("page_size")
+    return row
+
+
+def read_file_object_bytes(conn: sqlite3.Connection, file_id: str) -> Tuple[Dict[str, Any], bytes]:
+    row = conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_id,)).fetchone()
+    if not row:
+        raise ValueError("file_not_found")
+    item = row_to_dict(row)
+    path = STORAGE_DIR / item["storage_key"]
+    if not path.exists():
+        raise ValueError("file_missing")
+    raw = path.read_bytes()
+    data = decrypt_file_bytes(raw, item.get("encryption_status", ""), item.get("encryption_alg", ""))
+    actual = sha256_bytes(data)
+    if actual != item["sha256"]:
+        raise ValueError("file_hash_mismatch")
+    return item, data
+
+
+def canonical_json_hash(value: Any) -> str:
+    return sha256_bytes(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def normalized_stamp_positions(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = payload.get("stamp_positions") or payload.get("stamps") or payload.get("positions") or []
+    if isinstance(raw, str):
+        raw = parse_json_any(raw, []) or []
+    if not isinstance(raw, list):
+        raise ValueError("stamp_positions_required")
+    positions: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise ValueError("invalid_stamp_position")
+        width = pdf_safe_float(item.get("w", item.get("width")), 0)
+        height = pdf_safe_float(item.get("h", item.get("height")), 0)
+        if width <= 0 or height <= 0:
+            raise ValueError("invalid_stamp_size")
+        page = item.get("page", 1)
+        normalized = {
+            "id": str(item.get("id") or f"STAMP-POS-{index}"),
+            "page": "all" if page == "all" else max(1, int(pdf_safe_float(page, 1))),
+            "x": round(pdf_safe_float(item.get("x"), 0), 2),
+            "y": round(pdf_safe_float(item.get("y"), 0), 2),
+            "w": round(width, 2),
+            "h": round(height, 2),
+            "label": str(item.get("label") or item.get("seal_type") or "用印"),
+            "type": str(item.get("type") or item.get("seal_type") or "一般章"),
+            "seal_id": str(item.get("seal_id") or item.get("sealId") or payload.get("seal_id") or ""),
+        }
+        if normalized["x"] < 0 or normalized["y"] < 0:
+            raise ValueError("invalid_stamp_coordinate")
+        positions.append(normalized)
+    if not positions:
+        raise ValueError("stamp_positions_required")
+    return positions
+
+
+def pdf_page_sizes(data: bytes) -> List[Tuple[float, float]]:
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        reader = PdfReader(io.BytesIO(data))
+        sizes: List[Tuple[float, float]] = []
+        for page in reader.pages:
+            box = page.mediabox
+            sizes.append((float(box.width), float(box.height)))
+        return sizes or [(A4_WIDTH_PT, A4_HEIGHT_PT)]
+    except Exception:
+        return [(A4_WIDTH_PT, A4_HEIGHT_PT)]
+
+
+def write_stamp_overlay_pdf(page_sizes: List[Tuple[float, float]], stamps: List[Dict[str, Any]], stamp_no: str) -> bytes:
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>"]
+    page_object_numbers = [3 + index * 2 for index in range(len(page_sizes))]
+    objects.append(f"<< /Type /Pages /Kids [{' '.join(f'{num} 0 R' for num in page_object_numbers)}] /Count {len(page_sizes)} >>")
+    font_object_number = 3 + len(page_sizes) * 2
+    for page_index, (page_width, page_height) in enumerate(page_sizes, start=1):
+        stream = ""
+        for stamp in stamps:
+            if stamp.get("page") not in {page_index, "all"}:
+                continue
+            x, y, width, height = clamp_pdf_rect(
+                pdf_safe_float(stamp.get("x"), 0),
+                pdf_safe_float(stamp.get("y"), 0),
+                pdf_safe_float(stamp.get("w"), 56),
+                pdf_safe_float(stamp.get("h"), 56),
+            )
+            if x + width > page_width:
+                x = max(0, page_width - width)
+            if y + height > page_height:
+                y = max(0, page_height - height)
+            label = stamp.get("label") or "用印"
+            stamp_type = stamp.get("type") or ""
+            stream += "1 0 0 RG 1 0 0 rg\n"
+            stream += f"{x:.2f} {y:.2f} {width:.2f} {height:.2f} re S\n"
+            stream += pdf_show_text(label, x + 6, y + height * 0.58, min(12, max(7, width / 7)))
+            if stamp_type:
+                stream += pdf_show_text(stamp_type, x + 6, y + height * 0.38, min(9, max(6, width / 9)))
+            stream += pdf_show_text(stamp_no[-18:], x + 4, y + 6, min(6.5, max(5, width / 13)))
+            stream += "0 0 0 RG 0 0 0 rg\n"
+        page_object_number = 3 + (page_index - 1) * 2
+        content_object_number = page_object_number + 1
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width:.2f} {page_height:.2f}] /Resources << /Font << /F1 {font_object_number} 0 R >> >> /Contents {content_object_number} 0 R >>")
+        stream_bytes = stream.encode("latin-1", "replace")
+        objects.append(f"<< /Length {len(stream_bytes)} >>\nstream\n{stream}endstream")
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    pdf = "%PDF-1.4\n"
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf.encode("latin-1")))
+        pdf += f"{index} 0 obj\n{obj}\nendobj\n"
+    xref_at = len(pdf.encode("latin-1"))
+    pdf += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n"
+    for offset in offsets[1:]:
+        pdf += f"{offset:010d} 00000 n \n"
+    pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF"
+    return pdf.encode("latin-1", "replace")
+
+
+def stamp_uploaded_pdf_bytes(original: bytes, stamps: List[Dict[str, Any]], stamp_no: str) -> Tuple[bytes, str, Dict[str, Any]]:
+    page_sizes = pdf_page_sizes(original)
+    try:
+        from pypdf import PdfReader, PdfWriter  # type: ignore
+
+        source = PdfReader(io.BytesIO(original))
+        overlay = PdfReader(io.BytesIO(write_stamp_overlay_pdf(page_sizes, stamps, stamp_no)))
+        writer = PdfWriter()
+        for index, page in enumerate(source.pages):
+            page.merge_page(overlay.pages[index])
+            writer.add_page(page)
+        out = io.BytesIO()
+        writer.write(out)
+        return out.getvalue(), "pypdf-overlay", {"page_count": len(source.pages), "page_size": page_sizes[0] if page_sizes else (A4_WIDTH_PT, A4_HEIGHT_PT)}
+    except Exception as exc:
+        fallback_doc = {
+            "doc_no": stamp_no,
+            "company_name": "歲悅股份有限公司",
+            "doc_type": "用印證明",
+            "agency_name": "PDF 用印工作台",
+            "subject": "上傳 PDF 用印證明",
+            "body": f"原始 PDF hash 已鎖定，因本環境缺少 PDF 疊章套件，產生用印證明 PDF。原因：{str(exc)[:120]}",
+        }
+        package = build_official_pdf_package(fallback_doc, [{**stamp, "stamp_no": stamp_no} for stamp in stamps], "上傳 PDF 用印證明", max(1, len(page_sizes)))
+        return package["data"], "audit-receipt-fallback", {"page_count": package["layout"]["page_count"], "page_size": (A4_WIDTH_PT, A4_HEIGHT_PT), "fallback_reason": str(exc)[:160]}
+
+
+def approval_route_steps(route_code: str = "A") -> Tuple[str, List[Dict[str, Any]]]:
+    code = route_code if route_code in {"A", "B", "C", "D"} else "A"
+    names = ["申請人送出", "主管簽核"]
+    if code in {"B", "D"}:
+        names.append("會計複核")
+    names.append("行政部主任核定")
+    if code in {"C", "D"}:
+        names.append("執行長核定")
+    names.extend(["系統自動用印", "申請人確認"])
+    role_map = {
+        "申請人送出": "員工",
+        "主管簽核": "主管",
+        "會計複核": "會計",
+        "行政部主任核定": "行政部主任",
+        "執行長核定": "執行長",
+        "系統自動用印": "總務",
+        "申請人確認": "員工",
+    }
+    return code, [{"step_no": index, "step_name": name, "role": role_map[name]} for index, name in enumerate(names, start=1)]
+
+
+def current_user_from_session(session: Dict[str, Any] | None) -> Dict[str, Any]:
+    return (session or {}).get("user") or {}
+
+
+def seal_application_row(conn: sqlite3.Connection, application_id: str) -> Dict[str, Any]:
+    row = conn.execute("SELECT * FROM seal_applications WHERE id = ?", (application_id,)).fetchone()
+    if not row:
+        raise ValueError("seal_application_not_found")
+    data = row_to_dict(row)
+    for field in ("stamp_positions_json", "approval_snapshot_json", "evidence_json"):
+        data[field.replace("_json", "")] = parse_json_any(data.get(field), [] if field == "stamp_positions_json" else {}) or ([] if field == "stamp_positions_json" else {})
+    return data
+
+
+def insert_approval_snapshots(conn: sqlite3.Connection, application_id: str, steps: List[Dict[str, Any]], applicant: Dict[str, Any]) -> None:
+    conn.execute("DELETE FROM approval_step_actor_snapshots WHERE source_type = 'seal_application' AND source_id = ?", (application_id,))
+    timestamp = now()
+    for step in steps:
+        is_submitter = step["step_no"] == 1
+        status = "已完成" if is_submitter else "待簽核" if step["step_no"] == 2 else "未開始"
+        conn.execute(
+            """
+            INSERT INTO approval_step_actor_snapshots (
+              id, seal_application_id, source_type, source_id, step_no, step_name, approver_role,
+              approver_user_id, approver_name, approver_email, status, comment, acted_at,
+              snapshot_json, created_at, updated_at
+            ) VALUES (?, ?, 'seal_application', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"APSN-{application_id}-{step['step_no']}",
+                application_id,
+                application_id,
+                step["step_no"],
+                step["step_name"],
+                step["role"],
+                applicant.get("id") if is_submitter else "",
+                applicant.get("name") if is_submitter else "",
+                applicant.get("email") if is_submitter else "",
+                status,
+                "送出申請並鎖定 PDF 與章位。" if is_submitter else "",
+                timestamp if is_submitter else "",
+                json.dumps({"source": "finance-style-actor-snapshot", "role": step["role"], "step": step["step_name"]}, ensure_ascii=False),
+                timestamp,
+                timestamp,
+            ),
+        )
+
+
+def create_seal_notification(conn: sqlite3.Connection, application: Dict[str, Any], title: str, target_role: str, body: str, priority: str = "中") -> Dict[str, Any]:
+    return create_notification(conn, {
+        "type": "用印簽核",
+        "title": title,
+        "target_role": target_role,
+        "target_email": application.get("applicant_email") or "",
+        "channel": "系統通知",
+        "priority": priority,
+        "source": application["id"],
+        "body": body,
+    })
+
+
+def seal_application_submit(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    user = current_user_from_session(session)
+    applicant_name = payload.get("applicant_name") or user.get("name") or payload.get("applicant") or "申請人"
+    document = get_or_create_pdf_document(conn, payload)
+    file_id = payload.get("source_pdf_file_object_id") or payload.get("file_object_id")
+    if not file_id and payload.get("source_pdf_content_base64"):
+        upload = upload_file_object(conn, {
+            "document_id": document["id"],
+            "file_name": payload.get("source_pdf_name") or f"{document['doc_no']}-uploaded.pdf",
+            "mime_type": "application/pdf",
+            "purpose": "source-pdf",
+            "version_label": "uploaded-source",
+            "actor": applicant_name,
+            "content_base64": payload["source_pdf_content_base64"],
+        })
+        if upload.get("error"):
+            raise ValueError(upload["error"])
+        file_id = upload["file"]["id"]
+    if not file_id:
+        raise ValueError("source_pdf_required")
+    file_row, source_bytes = read_file_object_bytes(conn, file_id)
+    if file_row.get("scan_status") == "已隔離":
+        raise ValueError("source_pdf_quarantined")
+    if file_row.get("mime_type") != "application/pdf" and not str(file_row.get("file_name") or "").lower().endswith(".pdf"):
+        raise ValueError("source_pdf_must_be_pdf")
+    positions = normalized_stamp_positions(payload)
+    locked_pdf_sha256 = sha256_bytes(source_bytes)
+    locked_positions_sha256 = canonical_json_hash(positions)
+    route_code, steps = approval_route_steps(payload.get("approval_route_code") or payload.get("route") or "A")
+    route_name = payload.get("approval_route_name") or f"{route_code} 會計系統式用印流程"
+    application_id = payload.get("id") or payload.get("application_id") or f"USEAL-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    before_version = create_pdf_version_for_file(conn, document, file_row, "before_seal", payload.get("template") or "上傳 PDF", {
+        "source": "uploaded_pdf",
+        "page_count": len(pdf_page_sizes(source_bytes)),
+        "locked_pdf_sha256": locked_pdf_sha256,
+        "locked_positions_sha256": locked_positions_sha256,
+        "stamp_positions": positions,
+    })
+    application = {
+        "id": application_id,
+        "document_id": document["id"],
+        "seal_id": payload.get("seal_id") or positions[0].get("seal_id") or "SEAL-001",
+        "application_type": payload.get("application_type") or payload.get("type") or "official_document",
+        "company_name": payload.get("company_name") or document.get("company_name") or "歲悅股份有限公司",
+        "department": payload.get("department") or document.get("department") or "",
+        "title": payload.get("title") or document.get("subject") or document["doc_no"],
+        "source_pdf_file_object_id": file_row["id"],
+        "source_pdf_sha256": file_row["sha256"],
+        "source_pdf_name": file_row["file_name"],
+        "locked_pdf_sha256": locked_pdf_sha256,
+        "locked_positions_sha256": locked_positions_sha256,
+        "stamp_positions_json": json.dumps(positions, ensure_ascii=False),
+        "approval_route_code": route_code,
+        "approval_route_name": route_name,
+        "approval_snapshot_json": json.dumps({"steps": steps, "source": "finance_system_pattern"}, ensure_ascii=False),
+        "current_step_no": 2,
+        "current_step_name": steps[1]["step_name"],
+        "current_approver_role": steps[1]["role"],
+        "applicant_user_id": user.get("id") or "",
+        "applicant_name": applicant_name,
+        "applicant_email": user.get("email") or payload.get("applicant_email") or "",
+        "applicant": applicant_name,
+        "approver": steps[1]["role"],
+        "status": "待主管簽核",
+        "reason": payload.get("reason") or payload.get("purpose") or "上傳 PDF 後申請用印",
+        "reject_reason": "",
+        "stamp_no": "",
+        "pdf_before_version_id": before_version["id"],
+        "pdf_after_version_id": "",
+        "returned_at": "",
+        "completed_at": "",
+        "notification_id": "",
+        "created_at": now(),
+        "approved_at": "",
+        "updated_at": now(),
+    }
+    insert_row(conn, "seal_applications", application)
+    insert_approval_snapshots(conn, application_id, steps, user)
+    notice = create_seal_notification(conn, application, f"{application['title']} 待主管簽核", steps[1]["role"], f"{applicant_name} 已送出 {file_row['file_name']} 用印申請，PDF 與 {len(positions)} 個章位已鎖定。")
+    conn.execute("UPDATE seal_applications SET notification_id = ? WHERE id = ?", (notice["id"], application_id))
+    log_audit(conn, applicant_name, "送簽 PDF 用印", "seal_applications", application_id, f"pdf={locked_pdf_sha256}, positions={locked_positions_sha256}", event_type="submit", module_code="seals")
+    return {**seal_application_row(conn, application_id), "pdf_before": before_version, "notification": notice}
+
+
+def seal_application_approve(conn: sqlite3.Connection, application_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    application = seal_application_row(conn, application_id)
+    if application["status"] in {"已押章", "完成"} or application.get("stamp_no"):
+        raise ValueError("seal_application_already_completed")
+    user = current_user_from_session(session)
+    actor_role = payload.get("approver_role") or user.get("role") or application.get("current_approver_role") or "主管"
+    allowed_roles = {application.get("current_approver_role"), "主管", "主任", "行政部主任", "執行長"}
+    if actor_role not in allowed_roles:
+        raise ValueError("current_approver_mismatch")
+    file_row, source_bytes = read_file_object_bytes(conn, application["source_pdf_file_object_id"])
+    if sha256_bytes(source_bytes) != application["locked_pdf_sha256"]:
+        raise ValueError("locked_pdf_hash_mismatch")
+    positions = parse_json_any(application["stamp_positions_json"], []) or []
+    if canonical_json_hash(positions) != application["locked_positions_sha256"]:
+        raise ValueError("locked_stamp_positions_mismatch")
+    document = row_to_dict(conn.execute("SELECT * FROM documents WHERE id = ?", (application["document_id"],)).fetchone())
+    stamp_no = payload.get("stamp_no") or f"STAMP-{''.join(ch for ch in document['doc_no'] if ch.isdigit())[-10:] or int(time.time())}-{int(time.time())}"
+    stamped_bytes, mode, metadata = stamp_uploaded_pdf_bytes(source_bytes, [{**position, "stamp_no": stamp_no} for position in positions], stamp_no)
+    after_version = create_pdf_version(conn, document, "after_seal", payload.get("template") or "上傳 PDF 自動用印", stamped_bytes, {
+        "source": "uploaded_pdf",
+        "stamp_engine": mode,
+        "page_count": metadata.get("page_count") or len(pdf_page_sizes(source_bytes)),
+        "page_size": metadata.get("page_size"),
+        "locked_pdf_sha256": application["locked_pdf_sha256"],
+        "locked_positions_sha256": application["locked_positions_sha256"],
+        "stamp_positions": positions,
+        "fallback_reason": metadata.get("fallback_reason", ""),
+    }, stamp_no, application["pdf_before_version_id"])
+    signature = create_electronic_signature(conn, {
+        **payload,
+        "document_id": document["id"],
+        "pdf_version_id": after_version["id"],
+        "file_object_id": after_version["file_object_id"],
+        "certificate_id": payload.get("certificate_id") or "CERT-SEAL-001",
+        "signature_type": "seal",
+        "signer": payload.get("approver") or user.get("name") or actor_role,
+        "operation": f"主管核准後自動用印 {stamp_no}",
+    })
+    timestamp = now()
+    conn.execute(
+        """
+        UPDATE seal_applications
+        SET status = '已押章', approver = ?, stamp_no = ?, pdf_after_version_id = ?,
+            approved_at = ?, completed_at = ?, current_step_no = ?, current_step_name = '申請人確認',
+            current_approver_role = '員工', signature_id = ?, provider_status = ?, evidence_json = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            payload.get("approver") or user.get("name") or actor_role,
+            stamp_no,
+            after_version["id"],
+            timestamp,
+            timestamp,
+            5,
+            signature["id"],
+            "簽章完成" if signature.get("status") == "有效" else signature.get("status") or "簽章完成",
+            json.dumps({"pdf_after_sha256": after_version["sha256"], "stamp_engine": mode, "signature_id": signature["id"], "stamp_positions": positions}, ensure_ascii=False),
+            timestamp,
+            application_id,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE approval_step_actor_snapshots
+        SET status = '已完成', approver_user_id = ?, approver_name = ?, approver_email = ?,
+            comment = ?, acted_at = ?, updated_at = ?
+        WHERE source_type = 'seal_application' AND source_id = ? AND step_no = ?
+        """,
+        (user.get("id") or "", user.get("name") or payload.get("approver") or actor_role, user.get("email") or "", payload.get("comment") or "核准，系統自動用印。", timestamp, timestamp, application_id, application["current_step_no"]),
+    )
+    conn.execute(
+        """
+        UPDATE approval_step_actor_snapshots
+        SET status = CASE WHEN step_name IN ('系統自動用印', '申請人確認') THEN '已完成' ELSE status END,
+            acted_at = CASE WHEN step_name IN ('系統自動用印', '申請人確認') THEN ? ELSE acted_at END,
+            updated_at = ?
+        WHERE source_type = 'seal_application' AND source_id = ?
+        """,
+        (timestamp, timestamp, application_id),
+    )
+    refreshed = seal_application_row(conn, application_id)
+    notice = create_seal_notification(conn, refreshed, f"{refreshed['title']} 已完成用印", refreshed.get("applicant") or "員工", f"主管已核准，系統已自動押章並產生 PDF hash {after_version['sha256']}。", "高")
+    conn.execute("UPDATE seal_applications SET notification_id = ? WHERE id = ?", (notice["id"], application_id))
+    log_audit(conn, user.get("name") or actor_role, "主管核准並自動用印", "seal_applications", application_id, f"{stamp_no} / {after_version['sha256']}", event_type="approve", module_code="seals")
+    return {**seal_application_row(conn, application_id), "pdf_after": after_version, "signature": signature, "notification": notice}
+
+
+def seal_application_return(conn: sqlite3.Connection, application_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    application = seal_application_row(conn, application_id)
+    user = current_user_from_session(session)
+    reason = payload.get("reason") or payload.get("comment") or "資料需補正後重新送簽。"
+    timestamp = now()
+    conn.execute(
+        """
+        UPDATE seal_applications
+        SET status = '退回補正', reject_reason = ?, reason = ?, returned_at = ?,
+            current_step_name = '申請人補正', current_approver_role = '員工', updated_at = ?
+        WHERE id = ?
+        """,
+        (reason, reason, timestamp, timestamp, application_id),
+    )
+    conn.execute(
+        """
+        UPDATE approval_step_actor_snapshots
+        SET status = '退回補正', comment = ?, approver_user_id = ?, approver_name = ?,
+            approver_email = ?, acted_at = ?, updated_at = ?
+        WHERE source_type = 'seal_application' AND source_id = ? AND step_no = ?
+        """,
+        (reason, user.get("id") or "", user.get("name") or payload.get("actor") or application.get("current_approver_role") or "主管", user.get("email") or "", timestamp, timestamp, application_id, application.get("current_step_no") or 2),
+    )
+    refreshed = seal_application_row(conn, application_id)
+    notice = create_seal_notification(conn, refreshed, f"{refreshed['title']} 已退回補正", refreshed.get("applicant") or "員工", reason, "高")
+    conn.execute("UPDATE seal_applications SET notification_id = ? WHERE id = ?", (notice["id"], application_id))
+    log_audit(conn, user.get("name") or payload.get("actor") or "主管", "退回 PDF 用印", "seal_applications", application_id, reason, event_type="reject", module_code="seals")
+    return {**seal_application_row(conn, application_id), "notification": notice}
 
 
 def latest_signature(conn: sqlite3.Connection, document_id: str) -> Dict[str, Any] | None:
@@ -7530,19 +8197,35 @@ class Handler(SimpleHTTPRequestHandler):
                 if parts and parts[0] in TABLES:
                     table = TABLES[parts[0]]
                     if method == "GET" and len(parts) == 1:
+                        session = supabase_current_session(self.bearer_token())
+                        if not can_read_table(session, table):
+                            self.send_json({"error": "forbidden", "detail": f"{table}_read_forbidden"}, 403)
+                            return
                         rows = supabase_list(table, query)
                         if table == "users":
                             rows = [public_user(row) for row in rows]
                         self.send_json(rows)
                         return
                     if method == "GET" and len(parts) == 2:
+                        session = supabase_current_session(self.bearer_token())
+                        if not can_read_table(session, table):
+                            self.send_json({"error": "forbidden", "detail": f"{table}_read_forbidden"}, 403)
+                            return
                         row = supabase_get(table, parts[1])
                         self.send_json(row if row else {"error": "not_found"}, 200 if row else 404)
                         return
                     if method == "POST" and len(parts) == 1:
+                        session = supabase_current_session(self.bearer_token())
+                        if not can_write_table(session, table):
+                            self.send_json({"error": "forbidden", "detail": f"{table}_write_forbidden"}, 403)
+                            return
                         self.send_json(supabase_insert(table, self.read_json()), 201)
                         return
                     if method == "PATCH" and len(parts) == 2:
+                        session = supabase_current_session(self.bearer_token())
+                        if not can_write_table(session, table):
+                            self.send_json({"error": "forbidden", "detail": f"{table}_write_forbidden"}, 403)
+                            return
                         row = supabase_patch(table, parts[1], self.read_json())
                         self.send_json(row if row else {"error": "not_found"}, 200 if row else 404)
                         return
@@ -7587,7 +8270,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(snapshot, 200 if snapshot["ok"] or not is_production() else 503)
                     return
                 if method == "GET" and parts == ["dashboard"]:
-                    self.send_json(dashboard(conn))
+                    session = current_session(conn, self.bearer_token())
+                    self.send_json(dashboard(conn, session))
                     return
                 if method == "GET" and parts == ["search"]:
                     session = current_session(conn, self.bearer_token())
@@ -7762,6 +8446,24 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "POST" and parts == ["pdf", "verify"]:
                     self.send_json(pdf_verify(conn, self.read_json()))
                     return
+                if method == "POST" and parts == ["seal-applications", "submit"]:
+                    session = current_session(conn, self.bearer_token())
+                    result = seal_application_submit(conn, self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "seal-applications" and parts[2] == "approve":
+                    session = current_session(conn, self.bearer_token())
+                    result = seal_application_approve(conn, parts[1], self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "seal-applications" and parts[2] == "return":
+                    session = current_session(conn, self.bearer_token())
+                    result = seal_application_return(conn, parts[1], self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
                 if method == "POST" and parts == ["ai", "compose"]:
                     result = ai_compose_official_draft(conn, self.read_json())
                     conn.commit()
@@ -7815,6 +8517,9 @@ class Handler(SimpleHTTPRequestHandler):
                     table = TABLES[parts[0]]
                     if method == "GET" and len(parts) == 1:
                         session = current_session(conn, self.bearer_token())
+                        if not can_read_table(session, table):
+                            self.send_json({"error": "forbidden", "detail": f"{table}_read_forbidden"}, 403)
+                            return
                         rows = scoped_document_rows(conn, query, session) if table == "documents" else list_rows(conn, table, query)
                         if table == "users":
                             rows = [public_user(row) for row in rows]
@@ -7822,6 +8527,9 @@ class Handler(SimpleHTTPRequestHandler):
                         return
                     if method == "GET" and len(parts) == 2:
                         session = current_session(conn, self.bearer_token())
+                        if not can_read_table(session, table):
+                            self.send_json({"error": "forbidden", "detail": f"{table}_read_forbidden"}, 403)
+                            return
                         if table == "documents" and not can_read_document(conn, parts[1], session):
                             self.send_json({"error": "forbidden", "detail": "document_acl_denied"}, 403)
                             return
@@ -7830,11 +8538,19 @@ class Handler(SimpleHTTPRequestHandler):
                         self.send_json(data, 200 if row else 404)
                         return
                     if method == "POST" and len(parts) == 1:
+                        session = current_session(conn, self.bearer_token())
+                        if not can_write_table(session, table):
+                            self.send_json({"error": "forbidden", "detail": f"{table}_write_forbidden"}, 403)
+                            return
                         row = insert_row(conn, table, self.read_json())
                         conn.commit()
                         self.send_json(row, 201)
                         return
                     if method == "PATCH" and len(parts) == 2:
+                        session = current_session(conn, self.bearer_token())
+                        if not can_write_table(session, table):
+                            self.send_json({"error": "forbidden", "detail": f"{table}_write_forbidden"}, 403)
+                            return
                         row = patch_row(conn, table, parts[1], self.read_json())
                         conn.commit()
                         self.send_json(row if row else {"error": "not_found"}, 200 if row else 404)

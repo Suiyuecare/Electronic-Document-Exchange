@@ -1417,6 +1417,46 @@
             </aside>
           </div>
 
+          <section class="panel uploaded-seal-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Uploaded PDF Seal</p>
+                <h3>上傳 PDF 用印申請</h3>
+              </div>
+              <span class="status-pill" id="uploadedSealPdfStatus">尚未上傳</span>
+            </div>
+            <div class="uploaded-seal-layout">
+              <form class="compact-form" id="uploadedSealForm">
+                <label>文件類型<select id="uploadedSealType">
+                  <option value="official_document">電子公文</option>
+                  <option value="contract">電子合約</option>
+                </select></label>
+                <label>公司別<select id="uploadedSealCompany"></select></label>
+                <label>申請主旨<input id="uploadedSealTitle" value="PDF 用印申請" /></label>
+                <label>簽核路由<select id="uploadedSealRoute">
+                  <option value="A">A 行政部門用印</option>
+                  <option value="B">B 行政部門用印 + 會計</option>
+                  <option value="C">C 執行長用印</option>
+                  <option value="D">D 執行長用印 + 會計</option>
+                </select></label>
+                <label>上傳 PDF<input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" /></label>
+                <div class="form-actions">
+                  <button class="secondary-button" id="addCompanyStampBtn" type="button">加入公司章</button>
+                  <button class="secondary-button" id="addOwnerStampBtn" type="button">加入負責人章</button>
+                  <button class="secondary-button" id="addPageStampBtn" type="button">加入騎縫章</button>
+                  <button class="secondary-button" id="clearUploadedStampsBtn" type="button">清除章位</button>
+                </div>
+                <button class="primary-button" id="submitUploadedSealBtn" type="button">送出 PDF 用印簽核</button>
+              </form>
+              <div class="uploaded-pdf-stage" id="uploadedPdfStage">
+                <iframe id="uploadedPdfFrame" title="上傳 PDF 預覽"></iframe>
+                <div class="uploaded-stamp-layer" id="uploadedStampLayer"></div>
+                <p class="empty-text" id="uploadedPdfEmpty">上傳 PDF 後可拖拉多個用印處。</p>
+              </div>
+            </div>
+            <div class="archive-grid" id="uploadedStampSummary"></div>
+          </section>
+
           <div class="seal-workbench">
             <section class="panel">
               <div class="panel-heading">

@@ -699,6 +699,8 @@ let selectedDatabaseId = "DOC-IN-1140522-00018";
 let databaseSearchTerm = "";
 let searchResults = [];
 let selectedSearchId = "";
+let backendDashboardMetrics = null;
+const databaseAccessState = {};
 const databaseAuditLog = [
   ["11:10", "後端資料庫初始化", "已建立公文主檔、受文者、附件、交換任務、交換事件與 audit log 檢視。"]
 ];
@@ -1196,6 +1198,10 @@ const sealRequests = [
 const sealAuditLog = [
   ["11:18", "印鑑管理初始化", "已載入印鑑清冊、簽核佇列與用印軌跡。"]
 ];
+
+let uploadedSealPdf = null;
+let uploadedSealObjectUrl = "";
+let uploadedSealStampPositions = [];
 
 const pdfPointsPerMm = 72 / 25.4;
 
@@ -2559,10 +2565,30 @@ function dashboardRoleData() {
 
 function renderRoleDashboard() {
   const data = dashboardRoleData();
+  const backendMetrics = backendDashboardMetrics;
+  const kind = identityKindForRole();
+  const metrics = backendMetrics ? (
+    kind === "generalAffairs" ? [
+      ["可見公文", backendMetrics.documents, "後端依登入角色與 ACL 計算"],
+      ["待登錄/分派", backendMetrics.inboundPending, "收文待登錄與待分派"],
+      ["待發交換", backendMetrics.dispatchPending, "草稿、待清稿與已清稿"],
+      ["交換異常", backendMetrics.exchangeFailed, `交換成功率 ${backendMetrics.successRate}%`]
+    ] : kind === "supervisor" ? [
+      ["可見公文", backendMetrics.documents, "後端依部門、角色與 ACL 計算"],
+      ["待清稿/送簽", backendMetrics.dispatchPending, "主管可見範圍內待處理發文"],
+      ["交換成功率", `${backendMetrics.successRate}%`, `${backendMetrics.exchangeTasks} 件交換任務`],
+      ["稽核資料", backendMetrics.auditLogs ? backendMetrics.auditLogs : "受限", backendMetrics.auditLogs ? "已授權查看 audit log" : "此角色無後台稽核權限"]
+    ] : [
+      ["我的公文", backendMetrics.documents, "後端依承辦、部門與 ACL 計算"],
+      ["待送簽/清稿", backendMetrics.dispatchPending, "我的草稿、清稿或補正"],
+      ["交換成功率", `${backendMetrics.successRate}%`, `${backendMetrics.exchangeTasks} 件交換任務`],
+      ["後台資料", backendMetrics.auditLogs ? backendMetrics.auditLogs : "受限", "帳號、權限與 audit log 依 RBAC 隱藏"]
+    ]
+  ) : data.metrics;
   document.querySelector("#dashboardRoleEyebrow").textContent = data.eyebrow;
   document.querySelector("#dashboardRoleTitle").textContent = data.title;
-  document.querySelector("#dashboardRoleScope").textContent = data.scope;
-  data.metrics.forEach(([label, value, note], index) => {
+  document.querySelector("#dashboardRoleScope").textContent = backendMetrics ? `${data.scope} · 後端權限範圍` : data.scope;
+  metrics.forEach(([label, value, note], index) => {
     const position = index + 1;
     document.querySelector(`#dashboardMetricLabel${position}`).textContent = label;
     document.querySelector(`#dashboardMetricValue${position}`).textContent = value;
@@ -3061,6 +3087,8 @@ function enterApp(message = "登入成功，已進入電子公文交換系統。
   renderDispatchDetail();
   renderApprovalLog();
   applyComposeContactDefaults(true);
+  void syncDashboardFromBackend(true);
+  void syncDatabaseFromBackend(true);
   showToast(message);
 }
 
@@ -9330,6 +9358,19 @@ function addDatabaseAudit(title, body) {
   renderDatabaseAuditLog();
 }
 
+async function syncDashboardFromBackend(silent = false) {
+  try {
+    backendDashboardMetrics = await backendRequest("/dashboard");
+    renderRoleDashboard();
+    if (!silent) addDatabaseAudit("同步角色儀表板", `後端已依 ${activeRole()} 權限回傳 ${backendDashboardMetrics.documents} 筆可見公文。`);
+    return backendDashboardMetrics;
+  } catch (error) {
+    backendDashboardMetrics = null;
+    if (!silent) addDatabaseAudit("同步角色儀表板失敗", error.message);
+    return null;
+  }
+}
+
 async function backendRequest(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
@@ -9344,8 +9385,18 @@ async function backendRequest(path, options = {}) {
   } catch (error) {
     throw new Error(`後端回傳格式錯誤：${raw.slice(0, 120) || response.status}`);
   }
-  if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(data.detail || data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = data.error || "";
+    error.detail = data.detail || "";
+    throw error;
+  }
   return data;
+}
+
+function isForbiddenError(error) {
+  return error?.status === 403 || error?.code === "forbidden" || /forbidden|_forbidden|權限/.test(error?.message || "");
 }
 
 function persistToBackend(path, payload, method = "POST") {
@@ -9845,54 +9896,83 @@ async function checkBackendHealth() {
   }
 }
 
+async function fetchBackendTable(path, tableKey) {
+  try {
+    const rows = await backendRequest(path);
+    databaseAccessState[tableKey] = { status: "allowed", detail: "" };
+    return rows;
+  } catch (error) {
+    if (isForbiddenError(error)) {
+      databaseAccessState[tableKey] = { status: "restricted", detail: error.message };
+      return null;
+    }
+    databaseAccessState[tableKey] = { status: "error", detail: error.message };
+    return null;
+  }
+}
+
 async function syncDatabaseFromBackend(silent = false) {
   try {
-    const [documents, companies, departments, sealTypes, workflowRows, contracts, contractParties, contractApprovalsRows, recipients, attachments, tasks, events, audits] = await Promise.all([
-      backendRequest("/documents"),
-      backendRequest("/company_registry"),
-      backendRequest("/department_registry"),
-      backendRequest("/seal_type_registry"),
-      backendRequest("/workflow_tasks"),
-      backendRequest("/contracts"),
-      backendRequest("/contract_parties"),
-      backendRequest("/contract_approvals"),
-      backendRequest("/recipients"),
-      backendRequest("/attachments"),
-      backendRequest("/exchange_tasks"),
-      backendRequest("/exchange_events"),
-      backendRequest("/audit_logs")
+    const tables = await Promise.all([
+      fetchBackendTable("/documents", "documents"),
+      fetchBackendTable("/company_registry", "companyRegistry"),
+      fetchBackendTable("/department_registry", "departmentRegistry"),
+      fetchBackendTable("/seal_type_registry", "sealTypeRegistry"),
+      fetchBackendTable("/workflow_tasks", "workflowTasks"),
+      fetchBackendTable("/contracts", "contracts"),
+      fetchBackendTable("/contract_parties", "contractParties"),
+      fetchBackendTable("/contract_approvals", "contractApprovals"),
+      fetchBackendTable("/recipients", "recipients"),
+      fetchBackendTable("/attachments", "attachments"),
+      fetchBackendTable("/exchange_tasks", "exchangeTasks"),
+      fetchBackendTable("/exchange_events", "exchangeEvents"),
+      fetchBackendTable("/audit_logs", "auditLogs")
     ]);
-    applyPersistentDocuments(documents);
-    databaseTables.documents = documents.map(mapBackendDocument);
-    databaseTables.companyRegistry = companies.map(mapBackendCompany);
-    databaseTables.departmentRegistry = departments.map(mapBackendDepartment);
-    databaseTables.sealTypeRegistry = sealTypes.map(mapBackendSealType);
-    databaseTables.contracts = contracts.map(mapBackendContract);
-    databaseTables.contractParties = contractParties.map(mapBackendContractParty);
-    databaseTables.contractApprovals = contractApprovalsRows.map(mapBackendContractApproval);
-    databaseTables.workflowTasks = workflowRows.map(mapBackendWorkflowTask);
-    databaseTables.recipients = recipients.map(mapBackendRecipient);
-    databaseTables.attachments = attachments.map(mapBackendAttachment);
-    databaseTables.exchangeTasks = tasks.map(mapBackendTask);
-    databaseTables.exchangeEvents = events.map(mapBackendEvent);
-    databaseTables.auditLogs = audits.map(mapBackendAudit);
-    applyPersistentRegistries(companies, departments, sealTypes);
-    applyPersistentWorkflowTasks(workflowRows);
-    applyPersistentContracts(contracts, contractApprovalsRows);
+    const [documents, companies, departments, sealTypes, workflowRows, contracts, contractParties, contractApprovalsRows, recipients, attachments, tasks, events, audits] = tables;
+    const safeDocuments = documents || [];
+    const safeCompanies = companies || [];
+    const safeDepartments = departments || [];
+    const safeSealTypes = sealTypes || [];
+    const safeWorkflowRows = workflowRows || [];
+    const safeContracts = contracts || [];
+    const safeContractParties = contractParties || [];
+    const safeContractApprovals = contractApprovalsRows || [];
+    const safeRecipients = recipients || [];
+    const safeAttachments = attachments || [];
+    const safeTasks = tasks || [];
+    const safeEvents = events || [];
+    const safeAudits = audits || [];
+    applyPersistentDocuments(safeDocuments);
+    databaseTables.documents = safeDocuments.map(mapBackendDocument);
+    databaseTables.companyRegistry = safeCompanies.map(mapBackendCompany);
+    databaseTables.departmentRegistry = safeDepartments.map(mapBackendDepartment);
+    databaseTables.sealTypeRegistry = safeSealTypes.map(mapBackendSealType);
+    databaseTables.contracts = safeContracts.map(mapBackendContract);
+    databaseTables.contractParties = safeContractParties.map(mapBackendContractParty);
+    databaseTables.contractApprovals = safeContractApprovals.map(mapBackendContractApproval);
+    databaseTables.workflowTasks = safeWorkflowRows.map(mapBackendWorkflowTask);
+    databaseTables.recipients = safeRecipients.map(mapBackendRecipient);
+    databaseTables.attachments = safeAttachments.map(mapBackendAttachment);
+    databaseTables.exchangeTasks = safeTasks.map(mapBackendTask);
+    databaseTables.exchangeEvents = safeEvents.map(mapBackendEvent);
+    databaseTables.auditLogs = safeAudits.map(mapBackendAudit);
+    applyPersistentRegistries(safeCompanies, safeDepartments, safeSealTypes);
+    applyPersistentWorkflowTasks(safeWorkflowRows);
+    applyPersistentContracts(safeContracts, safeContractApprovals);
     databaseTables.documentFlows = buildUnifiedDocumentFlows().map((flow) => ({ id: flow.id, sourceNo: flow.sourceNo, kind: flow.kind, title: flow.title, currentStep: flow.currentStep, owner: flow.currentOwner, status: flow.status }));
     selectedDatabaseId = (databaseTables[activeDatabaseTable] || [])[0]?.id || "";
     renderDatabase();
     renderUnifiedFlows();
     if (!silent) {
-      addDatabaseAudit("同步後端資料庫", `已同步 ${documents.length} 筆公文、${contracts.length} 筆合約、${workflowRows.length} 筆簽核流程。`);
+      const restricted = Object.entries(databaseAccessState).filter(([, state]) => state.status === "restricted").map(([table]) => databaseLabels[table] || table);
+      addDatabaseAudit("同步後端資料庫", `已同步 ${safeDocuments.length} 筆公文、${safeContracts.length} 筆合約、${safeWorkflowRows.length} 筆簽核流程。${restricted.length ? `受限：${restricted.join("、")}。` : ""}`);
       showToast("已同步真正後端資料庫。");
     }
   } catch (error) {
-    syncDatabaseTables(true);
     renderDatabase();
     if (!silent) {
-      addDatabaseAudit("後端同步失敗", `${error.message}；已暫時載入前端資料。`);
-      showToast("後端同步失敗，已使用前端資料。");
+      addDatabaseAudit("後端同步失敗", error.message);
+      showToast("後端同步失敗。");
     }
   }
 }
@@ -10208,6 +10288,18 @@ function currentDatabaseRow() {
   return (databaseTables[activeDatabaseTable] || []).find((row) => row.id === selectedDatabaseId) || databaseRows()[0] || null;
 }
 
+function databaseTableRestriction(table = activeDatabaseTable) {
+  return databaseAccessState[table]?.status === "restricted" ? databaseAccessState[table] : null;
+}
+
+function renderDatabaseTableAccess() {
+  document.querySelectorAll("[data-db-table]").forEach((button) => {
+    const state = databaseAccessState[button.dataset.dbTable];
+    button.classList.toggle("restricted", state?.status === "restricted");
+    button.title = state?.status === "restricted" ? "此資料表依目前角色權限隱藏" : "";
+  });
+}
+
 function renderDatabaseSummary() {
   document.querySelector("#dbDocCount").textContent = databaseTables.documents.length;
   document.querySelector("#dbRecipientCount").textContent = databaseTables.recipients.length;
@@ -10218,9 +10310,23 @@ function renderDatabaseSummary() {
 function renderDatabaseRows() {
   const rows = databaseRows();
   const columns = databaseColumns[activeDatabaseTable] || [];
+  const restriction = databaseTableRestriction();
   document.querySelector("#databaseTableTitle").textContent = databaseLabels[activeDatabaseTable];
-  document.querySelector("#databaseCount").textContent = `${rows.length} 筆`;
+  document.querySelector("#databaseCount").textContent = restriction ? "權限受限" : `${rows.length} 筆`;
   document.querySelector("#databaseHead").innerHTML = `<tr>${columns.map((column) => `<th>${column}</th>`).join("")}<th>操作</th></tr>`;
+  if (restriction) {
+    document.querySelector("#databaseRows").innerHTML = `
+      <tr>
+        <td colspan="${columns.length + 1}">
+          <div class="restricted-state">
+            <strong>此資料表依目前角色權限隱藏</strong>
+            <p>${restriction.detail || "帳號、角色權限、稽核與敏感後台資料只開放授權管理角色查看。"}</p>
+          </div>
+        </td>
+      </tr>
+    `;
+    return;
+  }
   document.querySelector("#databaseRows").innerHTML = rows.map((row) => `
     <tr class="${row.id === selectedDatabaseId ? "selected-row" : ""}">
       ${columns.map((column) => `<td>${row[column] ?? ""}</td>`).join("")}
@@ -10237,6 +10343,22 @@ function renderDatabaseRows() {
 }
 
 function renderDatabaseDetail() {
+  const restriction = databaseTableRestriction();
+  const addButton = document.querySelector("#databaseAddBtn");
+  if (addButton) addButton.disabled = Boolean(restriction);
+  const exportButton = document.querySelector("#databaseExportBtn");
+  if (exportButton) exportButton.disabled = Boolean(restriction);
+  if (restriction) {
+    document.querySelector("#selectedDatabaseStatus").textContent = "權限受限";
+    document.querySelector("#databaseDetail").innerHTML = `
+      <div class="doc-detail restricted-detail">
+        <strong>${databaseLabels[activeDatabaseTable]}已受 RBAC 保護</strong>
+        <p>${restriction.detail || "目前登入角色沒有查看此資料表的權限。"}</p>
+        <p>請改用角色首頁、簽核紀錄或公文紀錄處理日常作業；後台資料需由行政部主任或授權管理者查看。</p>
+      </div>
+    `;
+    return;
+  }
   const row = currentDatabaseRow();
   if (!row) {
     document.querySelector("#selectedDatabaseStatus").textContent = "未選取";
@@ -10298,6 +10420,7 @@ function renderDatabaseAuditLog() {
 }
 
 function renderDatabase() {
+  renderDatabaseTableAccess();
   renderDatabaseSummary();
   renderDatabaseRows();
   renderDatabaseDetail();
@@ -10307,6 +10430,10 @@ function renderDatabase() {
 
 function addDatabaseRowFromForm() {
   const table = document.querySelector("#databaseInsertTable").value;
+  if (databaseTableRestriction(table)) {
+    addDatabaseAudit("新增資料列阻擋", `${databaseLabels[table] || table} 依目前角色權限受限。`);
+    return showToast("此資料表依目前角色權限隱藏，無法新增。");
+  }
   const id = document.querySelector("#databaseInsertId").value.trim() || `${table}-${Date.now()}`;
   const title = document.querySelector("#databaseInsertTitle").value.trim();
   const status = document.querySelector("#databaseInsertStatus").value;
@@ -11351,6 +11478,244 @@ function renderSealRequests() {
   });
 }
 
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || "").split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function uploadedSealDocumentId() {
+  const doc = currentDispatchDoc();
+  return doc?.id ? (doc.id.startsWith("DOC-") ? doc.id : `DOC-${doc.id}`) : `DOC-UPLOAD-SEAL-${Date.now()}`;
+}
+
+function uploadedStampToStageRect(stamp) {
+  const stage = document.querySelector("#uploadedPdfStage");
+  const width = stage?.clientWidth || 1;
+  const height = stage?.clientHeight || 1;
+  const pageWidth = 595;
+  const pageHeight = 842;
+  return {
+    left: (Number(stamp.x || 0) / pageWidth) * width,
+    top: height - ((Number(stamp.y || 0) + Number(stamp.h || 0)) / pageHeight) * height,
+    width: (Number(stamp.w || 0) / pageWidth) * width,
+    height: (Number(stamp.h || 0) / pageHeight) * height
+  };
+}
+
+function stageRectToUploadedStamp(left, top, width, height, stamp) {
+  const stage = document.querySelector("#uploadedPdfStage");
+  const stageWidth = stage?.clientWidth || 1;
+  const stageHeight = stage?.clientHeight || 1;
+  const pageWidth = 595;
+  const pageHeight = 842;
+  return {
+    ...stamp,
+    x: Math.round((left / stageWidth) * pageWidth * 100) / 100,
+    y: Math.round(((stageHeight - top - height) / stageHeight) * pageHeight * 100) / 100,
+    w: Math.round((width / stageWidth) * pageWidth * 100) / 100,
+    h: Math.round((height / stageHeight) * pageHeight * 100) / 100
+  };
+}
+
+function addUploadedStamp(kind = "company") {
+  if (!uploadedSealPdf) return showToast("請先上傳 PDF。");
+  const seal = kind === "owner"
+    ? (sealRegistry.find((item) => item.status === "啟用" && /負責人|圖記/.test(`${item.name}${item.type}`)) || currentSeal())
+    : currentSeal();
+  const pageSeal = kind === "page";
+  uploadedSealStampPositions.push({
+    id: `UPOS-${Date.now()}-${uploadedSealStampPositions.length + 1}`,
+    page: pageSeal ? "all" : 1,
+    x: pageSeal ? 560 : kind === "owner" ? 500 : 420,
+    y: pageSeal ? 385 : 130,
+    w: pageSeal ? 24 : sealWidthPt(seal),
+    h: pageSeal ? 96 : sealHeightPt(seal),
+    label: pageSeal ? "騎縫章" : kind === "owner" ? "負責人章" : "公司章",
+    type: pageSeal ? "多頁章" : seal?.type || "一般章",
+    seal_id: seal?.id || selectedSealId
+  });
+  renderUploadedSealWorkbench();
+}
+
+function bindUploadedStampDrag(marker, stamp) {
+  marker.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    marker.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLeft = marker.offsetLeft;
+    const startTop = marker.offsetTop;
+    const stage = document.querySelector("#uploadedPdfStage");
+    const move = (moveEvent) => {
+      const maxLeft = (stage?.clientWidth || 0) - marker.offsetWidth;
+      const maxTop = (stage?.clientHeight || 0) - marker.offsetHeight;
+      const left = Math.max(0, Math.min(maxLeft, startLeft + moveEvent.clientX - startX));
+      const top = Math.max(0, Math.min(maxTop, startTop + moveEvent.clientY - startY));
+      marker.style.left = `${left}px`;
+      marker.style.top = `${top}px`;
+    };
+    const up = () => {
+      marker.removeEventListener("pointermove", move);
+      marker.removeEventListener("pointerup", up);
+      const index = uploadedSealStampPositions.findIndex((item) => item.id === stamp.id);
+      if (index >= 0) {
+        uploadedSealStampPositions[index] = stageRectToUploadedStamp(marker.offsetLeft, marker.offsetTop, marker.offsetWidth, marker.offsetHeight, uploadedSealStampPositions[index]);
+        renderUploadedSealWorkbench();
+      }
+    };
+    marker.addEventListener("pointermove", move);
+    marker.addEventListener("pointerup", up);
+  });
+}
+
+function renderUploadedSealWorkbench() {
+  const companySelect = document.querySelector("#uploadedSealCompany");
+  if (companySelect) {
+    const current = companySelect.value || companyRegistry[0]?.name || "歲悅股份有限公司";
+    companySelect.innerHTML = optionTags(companyRegistry.map((item) => item.name), current);
+  }
+  const status = document.querySelector("#uploadedSealPdfStatus");
+  if (status) status.textContent = uploadedSealPdf ? `${uploadedSealPdf.name} · ${uploadedSealStampPositions.length} 個章位` : "尚未上傳";
+  const frame = document.querySelector("#uploadedPdfFrame");
+  const empty = document.querySelector("#uploadedPdfEmpty");
+  if (frame) {
+    frame.hidden = !uploadedSealPdf;
+    frame.src = uploadedSealObjectUrl || "about:blank";
+  }
+  if (empty) empty.hidden = Boolean(uploadedSealPdf);
+  const layer = document.querySelector("#uploadedStampLayer");
+  if (layer) {
+    layer.innerHTML = uploadedSealStampPositions.map((stamp) => {
+      const rect = uploadedStampToStageRect(stamp);
+      return `
+        <button class="uploaded-stamp-marker" type="button" data-uploaded-stamp="${stamp.id}" style="left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px">
+          ${stamp.label}<small>${stamp.page === "all" ? "全部頁" : `第 ${stamp.page} 頁`}</small>
+        </button>
+      `;
+    }).join("");
+    layer.querySelectorAll("[data-uploaded-stamp]").forEach((marker) => {
+      const stamp = uploadedSealStampPositions.find((item) => item.id === marker.dataset.uploadedStamp);
+      if (stamp) bindUploadedStampDrag(marker, stamp);
+    });
+  }
+  const summary = document.querySelector("#uploadedStampSummary");
+  if (summary) {
+    summary.innerHTML = [
+      ["PDF", uploadedSealPdf ? `${uploadedSealPdf.name} · ${uploadedSealPdf.size} bytes` : "待上傳"],
+      ["章位", `${uploadedSealStampPositions.length} 個`],
+      ["流程", document.querySelector("#uploadedSealRoute")?.value || "A"],
+      ["類型", document.querySelector("#uploadedSealType")?.value === "contract" ? "電子合約" : "電子公文"]
+    ].map(([label, value]) => `<article class="archive-card"><span>${label}</span><strong>${value}</strong></article>`).join("");
+  }
+}
+
+async function handleUploadedSealPdfChange() {
+  const input = document.querySelector("#uploadedSealPdfInput");
+  const file = input?.files?.[0];
+  if (!file) return;
+  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+    input.value = "";
+    return showToast("請上傳 PDF 檔。");
+  }
+  if (uploadedSealObjectUrl) URL.revokeObjectURL(uploadedSealObjectUrl);
+  uploadedSealObjectUrl = URL.createObjectURL(file);
+  uploadedSealPdf = {
+    file,
+    name: file.name,
+    size: file.size,
+    contentBase64: await fileToBase64(file),
+    hash: await hashBlob(file)
+  };
+  if (!uploadedSealStampPositions.length) {
+    addUploadedStamp("company");
+    addUploadedStamp("owner");
+  }
+  renderUploadedSealWorkbench();
+  addSealAudit("上傳 PDF 用印來源", `${file.name} 已上傳至前端工作台，hash ${uploadedSealPdf.hash}。`);
+}
+
+function localSealRequestFromBackend(result) {
+  return {
+    id: result.id,
+    backendApplicationId: result.id,
+    docId: result.document_id,
+    sealId: result.seal_id,
+    step: result.current_step_name || "主管簽核",
+    status: result.status,
+    stampNo: result.stamp_no || "",
+    stampedAt: result.completed_at || "",
+    sourcePdfFileObjectId: result.source_pdf_file_object_id,
+    stampPositions: result.stamp_positions || [],
+    pdfHash: result.pdf_after?.sha256 || result.locked_pdf_sha256 || "",
+    pdfSize: result.pdf_after?.file?.size_bytes || result.pdf_before?.file?.size_bytes || 0,
+    applicationType: result.application_type
+  };
+}
+
+async function submitUploadedSealApplication() {
+  if (!uploadedSealPdf) return showToast("請先上傳 PDF。");
+  if (!uploadedSealStampPositions.length) return showToast("請先加入至少一個用印處。");
+  const sourceType = document.querySelector("#uploadedSealType")?.value || "official_document";
+  const doc = currentDispatchDoc();
+  const documentId = uploadedSealDocumentId();
+  const payload = {
+    id: `USEAL-${Date.now()}`,
+    document_id: documentId,
+    application_type: sourceType,
+    company_name: document.querySelector("#uploadedSealCompany")?.value || companyRegistry[0]?.name || "歲悅股份有限公司",
+    department: activeUnit() || "行政部",
+    title: document.querySelector("#uploadedSealTitle")?.value || uploadedSealPdf.name,
+    seal_id: selectedSealId,
+    source_pdf_name: uploadedSealPdf.name,
+    source_pdf_content_base64: uploadedSealPdf.contentBase64,
+    approval_route_code: document.querySelector("#uploadedSealRoute")?.value || "A",
+    reason: sourceType === "contract" ? "電子合約上傳 PDF 用印" : "電子公文上傳 PDF 用印",
+    stamp_positions: uploadedSealStampPositions,
+    document: {
+      document_id: documentId,
+      id: documentId,
+      no: doc?.no || documentId,
+      companyName: document.querySelector("#uploadedSealCompany")?.value || companyRegistry[0]?.name || "歲悅股份有限公司",
+      direction: "發文",
+      type: sourceType === "contract" ? "合約用印" : "函",
+      subject: document.querySelector("#uploadedSealTitle")?.value || uploadedSealPdf.name,
+      body: "上傳 PDF 用印申請。",
+      owner: activeRole(),
+      department: activeUnit() || "行政部"
+    }
+  };
+  try {
+    const result = await backendRequest("/seal-applications/submit", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    const request = localSealRequestFromBackend(result);
+    sealRequests.unshift(request);
+    selectedSealRequestId = request.id;
+    pdfVersionStore[request.docId] = pdfVersionStore[request.docId] || {};
+    pdfVersionStore[request.docId].before = {
+      id: result.pdf_before?.id,
+      fileObjectId: result.pdf_before?.file_object_id,
+      url: result.pdf_before?.download_url,
+      hash: result.pdf_before?.sha256,
+      size: result.pdf_before?.file?.size_bytes || uploadedSealPdf.size,
+      createdAt: result.created_at,
+      label: "上傳 PDF 鎖版",
+      pageCount: result.pdf_before?.page_count || 1
+    };
+    addSealAudit("送出上傳 PDF 用印", `${payload.title} 已送主管簽核，PDF hash ${result.locked_pdf_sha256}，章位 hash ${result.locked_positions_sha256}。`);
+    renderSeals();
+    showToast("PDF 用印申請已送出。");
+  } catch (error) {
+    addSealAudit("上傳 PDF 用印送簽失敗", error.message);
+    showToast(`送簽失敗：${error.message}`);
+  }
+}
+
 function pdfEscape(value) {
   return String(value ?? "").replace(/[^\x20-\x7E]/g, "?").replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
@@ -11964,6 +12329,7 @@ function renderSeals() {
   renderCertificateRegistry();
   renderCertificateServiceHealth();
   renderSignatureProofGrid();
+  renderUploadedSealWorkbench();
   renderUnifiedFlows();
 }
 
@@ -12028,6 +12394,59 @@ async function approveSealRequests(ids = selectedSealRequestIds()) {
   for (const id of ids) {
     const request = sealRequests.find((item) => item.id === id);
     if (!request) continue;
+    if (request.backendApplicationId || request.sourcePdfFileObjectId) {
+      try {
+        const result = await backendRequest(`/seal-applications/${request.backendApplicationId || request.id}/approve`, {
+          method: "POST",
+          body: JSON.stringify({
+            approver_role: activeRole(),
+            approver: authState?.user?.name || activeRole(),
+            certificate_id: document.querySelector("#signatureCertificateSelect")?.value || "CERT-SEAL-001",
+            comment: "主管核准後自動用印"
+          })
+        });
+        Object.assign(request, localSealRequestFromBackend(result));
+        if (result.pdf_after) {
+          pdfVersionStore[request.docId] = pdfVersionStore[request.docId] || {};
+          pdfVersionStore[request.docId].after = {
+            id: result.pdf_after.id,
+            fileObjectId: result.pdf_after.file_object_id,
+            url: result.pdf_after.download_url,
+            hash: result.pdf_after.sha256,
+            size: result.pdf_after.file?.size_bytes || 0,
+            createdAt: result.pdf_after.created_at,
+            label: "上傳 PDF 押章後",
+            stampNo: result.stamp_no,
+            pageCount: result.pdf_after.page_count || 1
+          };
+        }
+        if (result.signature) {
+          electronicSignatureProofs.unshift({
+            id: result.signature.id,
+            docId: request.docId,
+            signer: result.signature.signer,
+            certificateId: result.signature.certificate_id,
+            type: result.signature.signature_type,
+            algorithm: result.signature.algorithm,
+            digest: result.signature.digest_sha256,
+            signature: result.signature.signature_value,
+            tsaToken: result.signature.tsa_token,
+            status: result.signature.status,
+            createdAt: result.signature.created_at,
+            provider: result.signature.provider || "",
+            providerRequestId: result.signature.provider_request_id || "",
+            evidenceDigest: result.signature.evidence_digest_sha256 || "",
+            certificateValidation: result.signature.certificate_validation
+          });
+        }
+        addSealAudit("主管核准上傳 PDF 用印", `${request.id} 已自動押章，PDF hash ${request.pdfHash || result.pdf_after?.sha256 || "已建立"}。`);
+      } catch (error) {
+        request.status = "待主管簽核";
+        addSealAudit("上傳 PDF 用印核准失敗", `${request.id}：${error.message}`);
+        showToast(`核准失敗：${error.message}`);
+      }
+      continue;
+    }
     const seal = sealById(request.sealId);
     const doc = sealRequestDoc(request);
     if (!seal || seal.status !== "啟用" || !doc) continue;
@@ -12049,18 +12468,30 @@ async function approveSealRequests(ids = selectedSealRequestIds()) {
   showToast("簽核通過，已自動押章。");
 }
 
-function rejectSealRequests(ids = selectedSealRequestIds()) {
+async function rejectSealRequests(ids = selectedSealRequestIds()) {
   if (!ids.length) return showToast("請先選取簽核案件。");
   if (!confirmOperation("確認退回用印簽核", `即將退回 ${ids.length} 件用印申請，公文狀態會改為退回補正。`)) return;
-  ids.forEach((id) => {
+  for (const id of ids) {
     const request = sealRequests.find((item) => item.id === id);
     const doc = request ? sealRequestDoc(request) : null;
-    if (request) request.status = "退回補正";
+    if (request?.backendApplicationId || request?.sourcePdfFileObjectId) {
+      try {
+        const result = await backendRequest(`/seal-applications/${request.backendApplicationId || request.id}/return`, {
+          method: "POST",
+          body: JSON.stringify({ actor: authState?.user?.name || activeRole(), reason: "請補正 PDF、章位或附件後重新送簽。" })
+        });
+        Object.assign(request, localSealRequestFromBackend(result));
+      } catch (error) {
+        addSealAudit("上傳 PDF 用印退回失敗", `${request.id}：${error.message}`);
+      }
+    } else if (request) {
+      request.status = "退回補正";
+    }
     if (doc) {
       doc.status = "退回補正";
       doc.lastReply = "用印簽核退回，請修正後重新送簽。";
     }
-  });
+  }
   renderSeals();
   renderDispatchBoard();
   renderDispatchDetail();
@@ -12754,6 +13185,15 @@ document.querySelector("#sealApproveBtn").addEventListener("click", () => approv
 document.querySelector("#sealGeneratePdfBtn").addEventListener("click", () => generatePdfTemplate());
 document.querySelector("#sealStampPdfBtn").addEventListener("click", stampCurrentPdf);
 document.querySelector("#sealVerifyHashBtn").addEventListener("click", verifyCurrentPdfHash);
+document.querySelector("#uploadedSealPdfInput").addEventListener("change", handleUploadedSealPdfChange);
+document.querySelector("#addCompanyStampBtn").addEventListener("click", () => addUploadedStamp("company"));
+document.querySelector("#addOwnerStampBtn").addEventListener("click", () => addUploadedStamp("owner"));
+document.querySelector("#addPageStampBtn").addEventListener("click", () => addUploadedStamp("page"));
+document.querySelector("#clearUploadedStampsBtn").addEventListener("click", () => {
+  uploadedSealStampPositions = [];
+  renderUploadedSealWorkbench();
+});
+document.querySelector("#submitUploadedSealBtn").addEventListener("click", submitUploadedSealApplication);
 document.querySelector("#downloadBeforePdfBtn").addEventListener("click", () => downloadPdfVersion("before"));
 document.querySelector("#downloadAfterPdfBtn").addEventListener("click", () => downloadPdfVersion("after"));
 document.querySelector("#sealApplicationBtn").addEventListener("click", generateSealApplication);

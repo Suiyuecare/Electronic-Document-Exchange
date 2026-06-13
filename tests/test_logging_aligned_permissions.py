@@ -16,12 +16,26 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(backend.SCHEMA)
+        backend.seed(self.conn)
         backend.seed_auth(self.conn)
         backend.ensure_allowed_edoc_users(self.conn)
+        backend.normalize_legacy_document_owners(self.conn)
+        backend.seed_department_isolation_examples(self.conn)
+        backend.seed_document_acl_examples(self.conn)
         backend.seed_jobs(self.conn)
 
     def tearDown(self) -> None:
         self.conn.close()
+
+    def login_session(self, email: str) -> dict:
+        session, status = backend.authenticate_local(
+            self.conn,
+            {"email": email, "password": "demo1234", "provider": "unittest"},
+            "127.0.0.1",
+            "unittest",
+        )
+        self.assertEqual(status, 200)
+        return session
 
     def test_role_permissions_follow_logging_module_action_codes(self) -> None:
         admin_codes = set(backend.role_permission_codes(self.conn, "行政部主任"))
@@ -39,6 +53,51 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
         self.assertIn("reports.operational_view", supervisor_codes)
         self.assertNotIn("official_documents.receive", employee_codes)
         self.assertNotIn("system_permissions.manage", general_affairs_codes)
+
+    def test_backoffice_tables_require_matching_permissions(self) -> None:
+        sales_session = self.login_session("sales-assistant@suiyuecare.com")
+        supervisor_session = self.login_session("director@suiyuecare.com")
+        admin_session = self.login_session("records@suiyuecare.com")
+
+        for session in [sales_session, supervisor_session]:
+            with self.subTest(role=session["user"]["role"]):
+                self.assertFalse(backend.can_read_table(session, "users"))
+                self.assertFalse(backend.can_read_table(session, "role_permissions"))
+                self.assertFalse(backend.can_read_table(session, "audit_logs"))
+                self.assertFalse(backend.can_write_table(session, "users"))
+
+        self.assertTrue(backend.can_read_table(admin_session, "users"))
+        self.assertTrue(backend.can_read_table(admin_session, "role_permissions"))
+        self.assertTrue(backend.can_read_table(admin_session, "audit_logs"))
+        self.assertTrue(backend.can_write_table(admin_session, "users"))
+        self.assertFalse(backend.can_read_table(None, "documents"))
+        self.assertFalse(backend.can_write_table(None, "documents"))
+
+    def test_dashboard_counts_are_scoped_to_logged_in_role(self) -> None:
+        sales_session = self.login_session("sales-assistant@suiyuecare.com")
+        supervisor_session = self.login_session("director@suiyuecare.com")
+        admin_session = self.login_session("records@suiyuecare.com")
+
+        for session in [sales_session, supervisor_session, admin_session]:
+            with self.subTest(role=session["user"]["role"]):
+                scoped_docs = backend.scoped_document_rows(self.conn, {}, session)
+                metrics = backend.dashboard(self.conn, session)
+                self.assertEqual(metrics["documents"], len(scoped_docs))
+
+        self.assertEqual(backend.dashboard(self.conn, sales_session)["auditLogs"], 0)
+        self.assertEqual(backend.dashboard(self.conn, supervisor_session)["auditLogs"], 0)
+        self.assertGreater(backend.dashboard(self.conn, admin_session)["auditLogs"], 0)
+        self.assertEqual(backend.dashboard(self.conn, None)["documents"], 0)
+
+    def test_unified_search_respects_backoffice_table_permissions(self) -> None:
+        sales_session = self.login_session("sales-assistant@suiyuecare.com")
+        admin_session = self.login_session("records@suiyuecare.com")
+
+        restricted = backend.unified_search(self.conn, {"category": ["audit_logs"], "q": ["登入"]}, sales_session)
+        allowed = backend.unified_search(self.conn, {"category": ["audit_logs"], "q": ["登入"]}, admin_session)
+
+        self.assertEqual(restricted["count"], 0)
+        self.assertGreater(allowed["count"], 0)
 
     def test_permission_change_audit_uses_logging_snapshots(self) -> None:
         backend.patch_row(self.conn, "users", "USR-007", {"role": "人資", "job_level": "課長"})

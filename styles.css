@@ -2347,6 +2347,75 @@ tr:last-child td {
   margin-top: 18px;
 }
 
+.uploaded-seal-panel {
+  margin-top: 18px;
+}
+
+.uploaded-seal-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.34fr) minmax(0, 0.66fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.uploaded-pdf-stage {
+  position: relative;
+  min-height: 560px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.uploaded-pdf-stage iframe {
+  width: 100%;
+  height: 560px;
+  border: 0;
+  background: #fff;
+}
+
+.uploaded-stamp-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.uploaded-stamp-marker {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 32px;
+  border: 2px solid #b91c1c;
+  border-radius: 8px;
+  background: rgba(254, 242, 242, 0.86);
+  color: #991b1b;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-align: center;
+  cursor: move;
+  pointer-events: auto;
+  user-select: none;
+  touch-action: none;
+}
+
+.uploaded-stamp-marker small {
+  display: block;
+  color: #7f1d1d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.uploaded-pdf-stage .empty-text {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  pointer-events: none;
+}
+
 .workflow-engine-layout {
   display: grid;
   grid-template-columns: minmax(0, 0.5fr) minmax(0, 0.5fr);
@@ -3427,6 +3496,36 @@ body[data-identity-kind="supervisor"] #notifications .reminder-lanes {
   margin-top: 18px;
 }
 
+.segment.restricted {
+  opacity: 0.58;
+}
+
+.restricted-state,
+.restricted-detail {
+  padding: 16px;
+  border: 1px solid rgba(146, 64, 14, 0.18);
+  background: rgba(255, 247, 237, 0.78);
+  color: #7c2d12;
+  border-radius: 8px;
+}
+
+.restricted-state strong,
+.restricted-detail strong {
+  display: block;
+  color: #7c2d12;
+  margin-bottom: 6px;
+}
+
+.restricted-state p,
+.restricted-detail p {
+  margin: 0;
+  color: #9a3412;
+}
+
+.restricted-detail p + p {
+  margin-top: 8px;
+}
+
 .report-chart {
   min-height: 188px;
   display: flex;
@@ -3900,6 +3999,7 @@ textarea {
   .seal-layout,
   .seal-workbench,
   .executive-admin-grid,
+  .uploaded-seal-layout,
   .pdf-stamp-layout,
   .tracking-layout,
   .tracking-workbench,
