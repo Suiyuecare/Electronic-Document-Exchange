@@ -10,6 +10,7 @@
         if (!isProductionEdoc) return;
         const params = new URLSearchParams(window.location.search);
         const hasPortalHandoff = params.has("payload") || params.has("token") || params.get("portal") === "1";
+        const requestedPortalLogin = params.get("portalLogin") === "1";
         const allowLocalLogin = params.get("localLogin") === "1";
         let hasEdocSession = false;
         try {
@@ -18,9 +19,9 @@
           hasEdocSession = false;
         }
         const hasBridgeCookie = document.cookie.includes("suiyue_hris_quick_login_user=");
-        if (hasPortalHandoff || allowLocalLogin || hasEdocSession || hasBridgeCookie) return;
+        if (!requestedPortalLogin || hasPortalHandoff || allowLocalLogin || hasEdocSession || hasBridgeCookie) return;
         const returnUrl = new URL(window.location.href);
-        ["payload", "signature", "token", "email", "role", "scope", "portal"].forEach((key) => returnUrl.searchParams.delete(key));
+        ["payload", "signature", "token", "email", "role", "scope", "portal", "portalLogin"].forEach((key) => returnUrl.searchParams.delete(key));
         const loginUrl = new URL("https://login.suiyuecare.com/portal/");
         loginUrl.searchParams.set("module", "edoc");
         loginUrl.searchParams.set("next", returnUrl.toString());
@@ -30,7 +31,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260609-sso-portal" />
+    <link rel="stylesheet" href="styles.css?v=20260614-login-fallback" />
   </head>
   <body>
     <div class="login-screen app" id="loginScreen">
@@ -75,6 +76,7 @@
           </label>
           <p class="login-hint">登入會送到後端 Auth API，建立 session、寫入登入紀錄，並依 RBAC 權限載入工作台。</p>
           <button class="primary-button" type="submit">登入系統</button>
+          <button class="secondary-button" id="portalLoginBtn" type="button">使用前台帳號登入</button>
           <button class="secondary-button" id="demoLoginBtn" type="button">使用總務測試帳號</button>
           <section class="quick-login-panel" aria-label="不同權限快速登入">
             <div>
@@ -3407,6 +3409,6 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="app.js?v=20260609-sso-portal"></script>
+    <script src="app.js?v=20260614-login-fallback"></script>
   </body>
 </html>

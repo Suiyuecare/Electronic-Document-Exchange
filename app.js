@@ -2983,7 +2983,7 @@ function portalHandoffParams() {
 
 function cleanPortalHandoffUrl() {
   const params = new URLSearchParams(window.location.search);
-  const keys = ["payload", "signature", "token", "email", "role", "scope", "portal"];
+  const keys = ["payload", "signature", "token", "email", "role", "scope", "portal", "portalLogin"];
   if (!keys.some((key) => params.has(key))) return;
   keys.forEach((key) => params.delete(key));
   const nextUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash || ""}`;
@@ -3010,7 +3010,9 @@ function redirectToLoggingPortal() {
 
 function shouldRedirectToLoggingPortal() {
   if (!isProductionEdocHost()) return false;
-  if (new URLSearchParams(window.location.search).get("localLogin") === "1") return false;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("localLogin") === "1") return false;
+  if (params.get("portalLogin") !== "1") return false;
   if (portalHandoffParams()) return false;
   if (readCookieValue(loggingQuickLoginCookieKey)) return false;
   return true;
@@ -3098,10 +3100,7 @@ function leaveApp() {
   }
   authState = null;
   localStorage.removeItem(authStorageKey);
-  if (isProductionEdocHost()) {
-    redirectToLoggingPortal();
-    return;
-  }
+  cleanPortalHandoffUrl();
   document.querySelector("#appShell").classList.add("hidden");
   document.querySelector("#loginScreen").classList.remove("hidden");
   showToast("已登出系統。");
@@ -12859,6 +12858,9 @@ document.querySelector("#demoLoginBtn").addEventListener("click", async () => {
   } catch (error) {
     showToast(error.message || "測試帳號登入失敗。");
   }
+});
+document.querySelector("#portalLoginBtn")?.addEventListener("click", () => {
+  redirectToLoggingPortal();
 });
 document.querySelectorAll("[data-quick-role]").forEach((button) => {
   button.addEventListener("click", () => quickLoginAsRole(button.dataset.quickRole));
