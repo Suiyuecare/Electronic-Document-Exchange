@@ -1830,6 +1830,150 @@ def production_readiness() -> Dict[str, Any]:
     }
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "y", "on", "enabled"}
+
+
+DEMO_LOGIN_EMAILS = {
+    "edoc@suiyuecare.com",
+    "records@suiyuecare.com",
+    "director@suiyuecare.com",
+    "ceo@suiyuecare.com",
+    "hr@suiyuecare.com",
+    "accounting@suiyuecare.com",
+    "sales-assistant@suiyuecare.com",
+    "employee@suiyuecare.com",
+}
+
+
+def demo_login_blocked(email: str, password: str) -> bool:
+    return bool(
+        is_production()
+        and env_flag("EDOC_DISABLE_DEMO_ACCOUNTS", False)
+        and email.lower() in DEMO_LOGIN_EMAILS
+        and password == "demo1234"
+    )
+
+
+def go_live_audit() -> Dict[str, Any]:
+    readiness = production_readiness()
+    storage_service = storage_service_status()
+    signing_service = signing_service_status()
+    exchange_status = exchange_gateway_status()
+    target_date = os.getenv("EDOC_TARGET_GO_LIVE_DATE", "").strip() or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    demo_accounts_disabled = env_flag("EDOC_DISABLE_DEMO_ACCOUNTS", False)
+    formal_exchange_ready = bool(exchange_status.get("formalConnection"))
+    formal_blockers = [
+        *[f"缺少正式環境變數：{name}" for name in readiness.get("missing", [])],
+        *list(readiness.get("blockers", [])),
+    ]
+    if not formal_exchange_ready:
+        formal_blockers.append("正式電子公文交換 provider 尚未開放；目前只能使用 mock provider 進行內部演練，不可送正式交換。")
+    if is_production() and not demo_accounts_disabled:
+        formal_blockers.append("正式站仍允許 demo / seed 帳號政策；上線前需設定 EDOC_DISABLE_DEMO_ACCOUNTS=true 並完成正式帳號匯入。")
+
+    formal_go = not formal_blockers
+    internal_pilot_allowed = bool(
+        not formal_go
+        and exchange_status.get("provider") == "mock"
+        and env_flag("EDOC_ALLOW_INTERNAL_PILOT", True)
+    )
+    decision = "GO" if formal_go else "NO_GO"
+    summary = (
+        "正式上線可開放。"
+        if formal_go
+        else "不可開放正式電子公文交換；僅可做內部演練、教育訓練與資料流程驗收。"
+        if internal_pilot_allowed
+        else "不可上線，且目前不建議開放內部試營運。"
+    )
+    categories = [
+        {
+            "key": "database",
+            "name": "正式資料庫",
+            "status": "pass" if readiness["checks"]["supabase"] and readiness["databaseMode"] == "supabase" else "fail",
+            "severity": "critical",
+            "evidence": f"databaseMode={readiness['databaseMode']}",
+            "action": "建立獨立 Supabase project，設定 SUPABASE_URL、SUPABASE_SERVICE_ROLE_KEY、EDOC_DB_MODE=supabase，套用 migrations 並驗證 RLS。",
+        },
+        {
+            "key": "storage_av",
+            "name": "檔案儲存與防毒",
+            "status": "pass" if storage_service["ready"] else "fail",
+            "severity": "critical",
+            "evidence": f"mode={storage_service['mode']}；missing={','.join(storage_service['missing']) or 'none'}",
+            "action": "接 private object storage、短效下載 URL、加密金鑰與正式 AV endpoint/API key。",
+        },
+        {
+            "key": "signature",
+            "name": "正式簽章與憑證合法性",
+            "status": "pass" if signing_service["ready"] else "fail",
+            "severity": "critical",
+            "evidence": f"mode={signing_service['mode']}；missing={','.join(signing_service['missing']) or 'none'}",
+            "action": "設定正式簽章 provider、HSM/KMS、信任根、TSA、OCSP、CRL 與 API key。",
+        },
+        {
+            "key": "exchange",
+            "name": "jAgent / 電子交換正式 provider",
+            "status": "pass" if formal_exchange_ready else "fail",
+            "severity": "critical",
+            "evidence": f"provider={exchange_status.get('provider')}；mode={exchange_status.get('mode')}",
+            "action": "待機關提供 jAgent/API/SDK/封包規格並經人工核准後，才可啟用 RealExchangeProvider。",
+        },
+        {
+            "key": "notifications",
+            "name": "通知通道",
+            "status": "pass" if readiness["checks"]["smtp"] and readiness["checks"]["line"] else "fail",
+            "severity": "high",
+            "evidence": f"smtp={readiness['checks']['smtp']}；line={readiness['checks']['line']}",
+            "action": "補齊 SMTP 與 LINE 正式通道，跑通知測試與失敗重送測試。",
+        },
+        {
+            "key": "monitoring",
+            "name": "監控與值班告警",
+            "status": "pass" if readiness["checks"]["monitoringWebhook"] and readiness["checks"]["cronSecret"] else "warn",
+            "severity": "high",
+            "evidence": f"monitoringWebhook={readiness['checks']['monitoringWebhook']}；cronSecret={readiness['checks']['cronSecret']}；sentry={readiness['checks']['sentry']}",
+            "action": "設定 MONITORING_WEBHOOK_URL / SENTRY_DSN，並讓 Cron 每日執行 production monitoring check。",
+        },
+        {
+            "key": "accounts",
+            "name": "正式帳號與 demo 帳號關閉",
+            "status": "pass" if demo_accounts_disabled or not is_production() else "fail",
+            "severity": "critical" if is_production() else "medium",
+            "evidence": f"EDOC_DISABLE_DEMO_ACCOUNTS={demo_accounts_disabled}",
+            "action": "正式帳號匯入後設定 EDOC_DISABLE_DEMO_ACCOUNTS=true，避免 demo1234 帳號留在公開正式站。",
+        },
+    ]
+    return {
+        "decision": decision,
+        "formalGo": formal_go,
+        "internalPilotAllowed": internal_pilot_allowed,
+        "summary": summary,
+        "targetLaunchDate": target_date,
+        "checkedAt": now(),
+        "environment": DEPLOYMENT_ENV,
+        "databaseMode": readiness["databaseMode"],
+        "formalBlockers": formal_blockers,
+        "warnings": readiness.get("warnings", []),
+        "categories": categories,
+        "readiness": readiness,
+        "exchange": exchange_status,
+        "nextActions": [
+            "先補 Supabase / Storage / AV / Signature / TSA / OCSP / CRL / Notification 正式設定。",
+            "完成正式帳號匯入並關閉 demo 帳號政策。",
+            "取得機關 jAgent/API/SDK/封包規格前，不開放正式電子交換送收。",
+            "補齊後重新打 /api/production/go-live-audit，decision 必須為 GO 才能正式上線。",
+        ] if not formal_go else [
+            "執行 production monitoring check。",
+            "執行收文、發文、簽核、用印、通知與備份還原 smoke test。",
+            "將 go-live audit 報告保存到法遵營運紀錄。",
+        ],
+    }
+
+
 def deployment_revision() -> str:
     return (
         os.getenv("VERCEL_GIT_COMMIT_SHA")
@@ -3841,6 +3985,9 @@ def authenticate_local(conn: sqlite3.Connection, payload: Dict[str, Any], ip: st
     if user["role"] not in ALLOWED_EDOC_ROLES:
         record_login_event(conn, email, provider, "失敗", "角色未授權", user["id"], ip, device)
         return {"error": "role_forbidden", "detail": "此帳號角色未授權使用電子公文系統。"}, 403
+    if demo_login_blocked(email, password):
+        record_login_event(conn, email, provider, "失敗", "正式站禁止 demo 帳號登入", user["id"], ip, device)
+        return {"error": "demo_login_disabled", "detail": "正式環境已關閉 demo 帳號，請使用正式帳號或 Logging Portal 登入。"}, 403
     if not verify_password(password, user["password_hash"]):
         record_login_event(conn, email, provider, "失敗", "密碼錯誤", user["id"], ip, device)
         return {"error": "invalid_credentials", "detail": "帳號或密碼不正確。"}, 401
@@ -6656,6 +6803,9 @@ def supabase_authenticate(payload: Dict[str, Any], ip: str, device: str) -> Tupl
     if user.get("role") not in ALLOWED_EDOC_ROLES:
         supabase_insert("login_events", {"id": f"LOGIN-{int(time.time() * 1000)}", "user_id": user["id"], "email": email, "provider": provider, "ip": ip, "device": device, "status": "失敗", "reason": "角色未授權"})
         return {"error": "role_forbidden", "detail": "此帳號角色未授權使用電子公文系統。"}, 403
+    if demo_login_blocked(email, password):
+        supabase_insert("login_events", {"id": f"LOGIN-{int(time.time() * 1000)}", "user_id": user["id"], "email": email, "provider": provider, "ip": ip, "device": device, "status": "失敗", "reason": "正式站禁止 demo 帳號登入"})
+        return {"error": "demo_login_disabled", "detail": "正式環境已關閉 demo 帳號，請使用正式帳號或 Logging Portal 登入。"}, 403
     if not verify_password(password, user.get("password_hash")):
         supabase_insert("login_events", {"id": f"LOGIN-{int(time.time() * 1000)}", "user_id": user["id"], "email": email, "provider": provider, "ip": ip, "device": device, "status": "失敗", "reason": "密碼錯誤"})
         return {"error": "invalid_credentials", "detail": "帳號或密碼不正確。"}, 401
@@ -7932,6 +8082,11 @@ class Handler(SimpleHTTPRequestHandler):
                     status = 200 if readiness["ready"] or not is_production() else 503
                     self.send_json(readiness, status)
                     return
+                if method == "GET" and parts in (["production", "go-live-audit"], ["go-live", "audit"]):
+                    audit = go_live_audit()
+                    status = 200 if audit["formalGo"] or not is_production() else 503
+                    self.send_json(audit, status)
+                    return
                 if method == "GET" and parts == ["production", "deployment"]:
                     self.send_json(deployment_report())
                     return
@@ -8261,6 +8416,11 @@ class Handler(SimpleHTTPRequestHandler):
                     readiness = production_readiness()
                     status = 200 if readiness["ready"] or not is_production() else 503
                     self.send_json(readiness, status)
+                    return
+                if method == "GET" and parts in (["production", "go-live-audit"], ["go-live", "audit"]):
+                    audit = go_live_audit()
+                    status = 200 if audit["formalGo"] or not is_production() else 503
+                    self.send_json(audit, status)
                     return
                 if method == "GET" and parts == ["production", "deployment"]:
                     self.send_json(deployment_report())

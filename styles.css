@@ -60,6 +60,10 @@ button {
   display: none !important;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -1465,6 +1469,144 @@ body[data-identity-kind="generalAffairs"] #dashboard .content-grid {
   font-size: 12px;
   font-style: normal;
   font-weight: 900;
+}
+
+.go-live-gate-panel {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 14px;
+  border-width: 2px;
+}
+
+.go-live-gate-panel.issue,
+.go-live-gate-panel.warn {
+  border-color: rgba(220, 38, 38, 0.28);
+  background: #fff8f3;
+}
+
+.go-live-gate-panel.ok {
+  border-color: rgba(56, 125, 115, 0.3);
+  background: #f6fffc;
+}
+
+.go-live-gate-head,
+.go-live-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.go-live-gate-head h3 {
+  margin: 0;
+}
+
+.go-live-gate-head p {
+  max-width: 780px;
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.go-live-gate-grid,
+.go-live-ops-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.go-live-mini-card,
+.go-live-category {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.go-live-mini-card span,
+.go-live-category span,
+.go-live-ops-summary span,
+.go-live-ops-summary small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.go-live-mini-card strong {
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.go-live-mini-card p,
+.go-live-category p,
+.go-live-category small,
+.go-live-ops-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.go-live-ops-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.go-live-ops-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.go-live-ops-summary.issue,
+.go-live-ops-summary.warn {
+  border-color: rgba(220, 38, 38, 0.25);
+  background: #fff8f3;
+}
+
+.go-live-ops-summary.ok {
+  border-color: rgba(56, 125, 115, 0.3);
+  background: #f6fffc;
+}
+
+.go-live-ops-summary strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 22px;
+}
+
+.go-live-category.fail {
+  border-color: rgba(220, 38, 38, 0.24);
+  background: #fff8f3;
+}
+
+.go-live-category.warn {
+  border-color: rgba(217, 119, 6, 0.28);
+  background: #fffaf2;
+}
+
+.go-live-category.pass {
+  border-color: rgba(56, 125, 115, 0.24);
+  background: #f6fffc;
+}
+
+.go-live-category > div {
+  display: grid;
+  gap: 4px;
+}
+
+.go-live-category strong {
+  color: var(--ink);
+  font-size: 15px;
 }
 
 body[data-identity-kind="generalAffairs"] .identity-workbench {
@@ -4755,6 +4897,8 @@ textarea {
   .daily-action-grid,
   .perspective-grid,
   .unit-handoff-grid,
+  .go-live-gate-grid,
+  .go-live-ops-grid,
   .dispatch-board,
   .feature-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4880,6 +5024,8 @@ textarea {
   .daily-action-grid,
   .perspective-grid,
   .unit-handoff-grid,
+  .go-live-gate-grid,
+  .go-live-ops-grid,
   .next-stepper,
   .reminder-lanes,
   .pipeline,

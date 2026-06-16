@@ -179,6 +179,22 @@
             <span class="status-pill" id="dashboardRoleScope">依登入身份載入</span>
           </div>
 
+          <section class="panel go-live-gate-panel" id="goLiveGatePanel" hidden>
+            <div class="go-live-gate-head">
+              <div>
+                <p class="eyebrow">Go / No-Go</p>
+                <h3 id="goLiveDecisionTitle">明日上線判定</h3>
+                <p id="goLiveDecisionSummary">尚未讀取正式部署檢查。</p>
+              </div>
+              <span class="status-pill" id="goLiveDecisionBadge">未檢查</span>
+            </div>
+            <div class="go-live-gate-grid" id="goLiveGateGrid"></div>
+            <div class="go-live-actions">
+              <button class="primary-button" id="goLiveRefreshBtn" type="button">重新檢查</button>
+              <button class="secondary-button" data-target="ops" type="button">開啟維運中心</button>
+            </div>
+          </section>
+
           <section class="panel daily-action-center" id="dailyActionCenter">
             <div class="panel-heading">
               <div>
@@ -3131,6 +3147,18 @@
               <small id="opsEnvironmentNote">可切換正式環境</small>
             </article>
           </div>
+
+          <section class="panel go-live-ops-panel">
+            <div class="panel-heading">
+              <div>
+                <h3>上線 Go / No-Go 判定</h3>
+                <p>整合 readiness、正式交換、簽章、儲存、防毒、通知、監控與 demo 帳號政策</p>
+              </div>
+              <button class="text-button" id="opsGoLiveAuditBtn" type="button">重新判定</button>
+            </div>
+            <div class="go-live-ops-summary" id="opsGoLiveSummary"></div>
+            <div class="go-live-ops-grid" id="opsGoLiveGrid"></div>
+          </section>
 
           <section class="panel">
             <div class="panel-heading">

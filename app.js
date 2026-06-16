@@ -559,6 +559,7 @@ const opsState = {
   monitoring: null,
   lastMonitorCheck: ""
 };
+let goLiveAuditState = null;
 
 const opsApiLogs = [
   { time: "11:50:21", service: "jAgent", api: "POST /exchange/send", status: 200, duration: "186ms", code: "OK", message: "交換封包送出成功" },
@@ -2629,6 +2630,7 @@ function renderRoleDashboard() {
   `).join("");
   renderDailyActionCenter();
   renderRolePerspectiveReview();
+  renderGoLiveGate();
   renderDashboardApprovalProgress();
   renderSupervisorCommandDashboard();
 }
@@ -3290,6 +3292,7 @@ function enterApp(message = "登入成功，已進入電子公文交換系統。
   renderDispatchDetail();
   renderApprovalLog();
   applyComposeContactDefaults(true);
+  void syncGoLiveAuditFromBackend(true);
   void syncDashboardFromBackend(true);
   void syncDatabaseFromBackend(true);
   showToast(message);
@@ -8500,6 +8503,108 @@ async function fetchOpsJson(path, options = {}) {
   return { ok: response.ok, status: response.status, data };
 }
 
+function goLiveTone(audit = goLiveAuditState) {
+  if (!audit) return "idle";
+  if (audit.formalGo) return "ok";
+  if (audit.internalPilotAllowed) return "warn";
+  return "issue";
+}
+
+function goLiveDecisionText(audit = goLiveAuditState) {
+  if (!audit) return "未檢查";
+  if (audit.formalGo) return "GO";
+  if (audit.internalPilotAllowed) return "NO-GO · 僅內部演練";
+  return "NO-GO";
+}
+
+function renderGoLiveGate() {
+  const panel = document.querySelector("#goLiveGatePanel");
+  if (!panel) return;
+  panel.hidden = !canSeeCompanyWideDocs(activeRole());
+  if (panel.hidden) return;
+  const audit = goLiveAuditState;
+  const tone = goLiveTone(audit);
+  panel.className = `panel go-live-gate-panel ${tone}`;
+  document.querySelector("#goLiveDecisionBadge").textContent = goLiveDecisionText(audit);
+  document.querySelector("#goLiveDecisionTitle").textContent = audit?.targetLaunchDate
+    ? `${audit.targetLaunchDate} 上線判定`
+    : "明日上線判定";
+  document.querySelector("#goLiveDecisionSummary").textContent = audit?.summary || "尚未讀取正式部署檢查。";
+  const blockers = audit?.formalBlockers || [];
+  const categories = audit?.categories || [];
+  document.querySelector("#goLiveGateGrid").innerHTML = audit ? [
+    ["正式判定", goLiveDecisionText(audit), audit.environment || "未檢查"],
+    ["正式資料庫", audit.databaseMode || "未檢查", categories.find((item) => item.key === "database")?.status || "未檢查"],
+    ["阻塞項", blockers.length, blockers[0] || "目前沒有 formal blocker"],
+    ["內部演練", audit.internalPilotAllowed ? "可開" : "不建議", audit.internalPilotAllowed ? "不得正式交換" : "需先處理 blocker"]
+  ].map(([label, value, note]) => `
+    <article class="go-live-mini-card">
+      <span>${label}</span>
+      <strong>${value}</strong>
+      <p>${note}</p>
+    </article>
+  `).join("") : `
+    <article class="go-live-mini-card">
+      <span>狀態</span>
+      <strong>未檢查</strong>
+      <p>請按重新檢查。</p>
+    </article>
+  `;
+}
+
+function renderOpsGoLiveAudit() {
+  const summary = document.querySelector("#opsGoLiveSummary");
+  const grid = document.querySelector("#opsGoLiveGrid");
+  if (!summary || !grid) return;
+  const audit = goLiveAuditState;
+  const tone = goLiveTone(audit);
+  summary.className = `go-live-ops-summary ${tone}`;
+  summary.innerHTML = audit ? `
+    <div>
+      <span>${audit.targetLaunchDate || "上線日未設定"}</span>
+      <strong>${goLiveDecisionText(audit)}</strong>
+      <p>${audit.summary}</p>
+    </div>
+    <small>${audit.checkedAt || "尚未檢查"} · ${audit.environment || "unknown"} · formal blockers ${audit.formalBlockers?.length || 0}</small>
+  ` : `
+    <div>
+      <span>尚未檢查</span>
+      <strong>等待 Go / No-Go</strong>
+      <p>請執行重新判定，系統會讀取正式部署與外部服務設定。</p>
+    </div>
+  `;
+  grid.innerHTML = (audit?.categories || []).map((item) => `
+    <article class="go-live-category ${item.status}">
+      <div>
+        <span>${item.severity}</span>
+        <strong>${item.name}</strong>
+      </div>
+      <p>${item.evidence}</p>
+      <small>${item.action}</small>
+    </article>
+  `).join("") || `<article class="go-live-category warn"><strong>尚未取得檢查資料</strong><p>請重新判定。</p></article>`;
+}
+
+function renderGoLiveAuditViews() {
+  renderGoLiveGate();
+  renderOpsGoLiveAudit();
+}
+
+async function syncGoLiveAuditFromBackend(silent = false) {
+  try {
+    const result = await fetchOpsJson("/production/go-live-audit");
+    goLiveAuditState = result.data;
+    renderGoLiveAuditViews();
+    if (!silent) {
+      showToast(result.data.formalGo ? "Go / No-Go 判定通過。" : "Go / No-Go 判定未通過，請查看阻塞項。");
+    }
+    return result.data;
+  } catch (error) {
+    if (!silent) showToast(error.message || "無法讀取 Go / No-Go 判定。");
+    return null;
+  }
+}
+
 function renderOpsDeploymentMonitoring() {
   const deployment = opsState.deployment || {};
   const readiness = opsState.readiness || {};
@@ -8547,6 +8652,7 @@ function renderOpsDeploymentMonitoring() {
 
 function renderOps() {
   renderOpsSummary();
+  renderOpsGoLiveAudit();
   renderOpsDeploymentMonitoring();
   renderOpsApiLogs();
   renderOpsConfigList();
@@ -8594,6 +8700,24 @@ async function runOpsReadinessCheck() {
   renderOps();
   addOpsAudit("正式部署檢查", readiness.data.ready ? "Production readiness 通過。" : `尚需補齊：${(readiness.data.missing || []).join("、") || "blockers / warnings"}`);
   showToast("部署檢查完成。");
+}
+
+async function runOpsGoLiveAudit() {
+  const started = performance.now();
+  const audit = await syncGoLiveAuditFromBackend(true);
+  if (!audit) return;
+  opsApiLogs.unshift({
+    time: nowTime(),
+    service: "GoLive",
+    api: "GET /production/go-live-audit",
+    status: audit.formalGo ? 200 : 503,
+    duration: `${Math.round(performance.now() - started)}ms`,
+    code: audit.decision || "GO-LIVE",
+    message: `${goLiveDecisionText(audit)} · ${audit.formalBlockers?.length || 0} blockers`
+  });
+  renderOps();
+  addOpsAudit("上線 Go / No-Go 判定", `${goLiveDecisionText(audit)}：${audit.summary}`);
+  showToast(audit.formalGo ? "上線判定：GO。" : "上線判定：NO-GO，請查看阻塞項。");
 }
 
 async function runOpsMonitoringCheck() {
@@ -14167,7 +14291,9 @@ document.querySelector("#opsLogSearch").addEventListener("input", (event) => {
 });
 document.querySelector("#opsHealthBtn").addEventListener("click", runOpsHealthCheck);
 document.querySelector("#opsReadinessBtn").addEventListener("click", runOpsReadinessCheck);
+document.querySelector("#opsGoLiveAuditBtn").addEventListener("click", runOpsGoLiveAudit);
 document.querySelector("#opsMonitoringBtn").addEventListener("click", runOpsMonitoringCheck);
+document.querySelector("#goLiveRefreshBtn").addEventListener("click", runOpsGoLiveAudit);
 document.querySelector("#opsLookupErrorBtn").addEventListener("click", () => lookupOpsErrorCode());
 document.querySelector("#opsErrorForm").addEventListener("submit", (event) => {
   event.preventDefault();

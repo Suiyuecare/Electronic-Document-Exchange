@@ -10,6 +10,7 @@
 | 獨立 eDoc Supabase project 已建立 | 待確認 |
 | 所有 migration 已套用 | 待確認 |
 | Vercel production env 已設定 | 待確認 |
+| `/api/production/go-live-audit` 回傳 `decision=GO` | 待確認 |
 | `/api/production/readiness` 回傳 ready | 待確認 |
 | jAgent 正式 API URL 已設定 | 待確認 |
 | 機關代碼與交換中心已確認 | 待確認 |
@@ -53,4 +54,4 @@
 2. 保留所有未完成交換任務。
 3. 匯出保存包與 audit log。
 4. 通知總務、行政部主任、主任與執行長。
-5. 復原後重新執行 readiness 與交換測試。
+5. 復原後重新執行 Go / No-Go、readiness 與交換測試。
