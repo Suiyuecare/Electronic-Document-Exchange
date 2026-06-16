@@ -31,7 +31,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260614-login-fallback" />
+    <link rel="stylesheet" href="styles.css?v=20260614-compose-single-page" />
   </head>
   <body>
     <div class="login-screen app" id="loginScreen">
@@ -179,6 +179,38 @@
             <span class="status-pill" id="dashboardRoleScope">依登入身份載入</span>
           </div>
 
+          <section class="panel daily-action-center" id="dailyActionCenter">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Next Actions</p>
+                <h3>今天先做這三件事</h3>
+              </div>
+              <span class="status-pill" id="dailyActionCount">0 件</span>
+            </div>
+            <div class="daily-action-grid" id="dailyActionGrid"></div>
+          </section>
+
+          <section class="panel role-perspective-review" id="rolePerspectiveReview">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Four-Angle Review</p>
+                <h3>四角色上線問題檢視</h3>
+              </div>
+              <span class="status-pill" id="rolePerspectiveStatus">依角色與單位載入</span>
+            </div>
+            <div class="perspective-grid" id="rolePerspectiveGrid"></div>
+            <section class="unit-handoff-panel" aria-label="收件單位承接狀態">
+              <div class="panel-heading tight">
+                <div>
+                  <p class="eyebrow">Receiving Units</p>
+                  <h3>收到公文或合約的單位</h3>
+                </div>
+                <span class="status-pill" id="unitHandoffStatus">0 單位</span>
+              </div>
+              <div class="unit-handoff-grid" id="unitHandoffGrid"></div>
+            </section>
+          </section>
+
           <section class="identity-workbench" id="identityWorkbench">
             <div class="panel-heading">
               <div>
@@ -208,17 +240,6 @@
                 <div class="identity-list" id="identityAlerts"></div>
               </section>
             </div>
-          </section>
-
-          <section class="panel daily-action-center" id="dailyActionCenter">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Next Actions</p>
-                <h3>今日下一步</h3>
-              </div>
-              <span class="status-pill" id="dailyActionCount">0 件</span>
-            </div>
-            <div class="daily-action-grid" id="dailyActionGrid"></div>
           </section>
 
           <div class="metrics-grid" id="dashboardMetricGrid">
@@ -818,17 +839,17 @@
               <p class="eyebrow">Compose</p>
               <h3>建立電子公文</h3>
             </div>
-            <span class="status-pill" id="composeStepStatus">1 / 5 填寫</span>
+            <span class="status-pill" id="composeStepStatus">填寫、附件與預覽同頁</span>
           </div>
 
-          <div class="next-stepper compose-stepper" id="composeStepper" aria-label="撰寫公文步驟"></div>
+          <div class="compose-progress-strip" id="composeStepper" aria-label="撰寫公文單頁進度"></div>
           <div class="next-action-card" id="composeNextAction"></div>
 
           <div class="compose-layout">
             <form class="form-panel" id="composeForm">
               <section class="compose-step-panel active" data-compose-pane="fill">
                 <div class="panel-heading tight">
-                  <h3>填寫基本內容</h3>
+                  <h3>填寫公文內容</h3>
                   <span class="status-pill">必要欄位</span>
                 </div>
                 <label>
@@ -865,22 +886,25 @@
                 </label>
                 <label>
                   受文者
-                  <input id="recipient" value="臺北市政府社會局" />
+                  <input id="recipient" value="臺北市政府社會局" aria-describedby="recipientHint" />
+                  <span class="field-hint" id="recipientHint"></span>
                 </label>
                 <label>
                   主旨
-                  <input id="subject" value="檢送本公司日間照顧中心設立許可補正資料，請查照。" />
+                  <input id="subject" value="檢送本公司日間照顧中心設立許可補正資料，請查照。" aria-describedby="subjectHint" />
+                  <span class="field-hint" id="subjectHint"></span>
                 </label>
                 <label>
                   說明
-                  <textarea id="bodyText" rows="7">依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。</textarea>
+                  <textarea id="bodyText" rows="7" aria-describedby="bodyTextHint">依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。</textarea>
+                  <span class="field-hint" id="bodyTextHint"></span>
                 </label>
               </section>
 
               <section class="compose-step-panel" data-compose-pane="preview">
                 <div class="panel-heading tight">
                   <h3>附件、寄件資料與用印</h3>
-                  <span class="status-pill">可調整</span>
+                  <span class="status-pill">同頁設定</span>
                 </div>
                 <div class="form-section-note">
                   <strong>寄件人／發文單位資料</strong>
@@ -948,12 +972,12 @@
                   <span class="status-pill" id="composeConfirmHint">尚未確認</span>
                 </div>
                 <div class="next-action-card">
-                  <strong>先看下方即時函稿預覽</strong>
+                  <strong>先看右側即時函稿預覽</strong>
                   <p>確認文號、受文者、主旨、說明、附件與用印位置後，按「確認函稿」，才可以送清稿簽核。</p>
                 </div>
                 <div class="form-actions">
                   <button class="secondary-button" id="saveDispatchDraftBtn" type="button">儲存草稿</button>
-                  <button class="secondary-button" id="previewDraftBtn" type="button">預覽函稿</button>
+                  <button class="secondary-button" id="previewDraftBtn" type="button">回到填寫與預覽</button>
                   <button class="primary-button" id="submitDispatchBtn" type="submit" disabled>清稿並加入發文佇列</button>
                 </div>
               </section>
@@ -964,55 +988,57 @@
               </div>
             </form>
 
-            <aside class="panel flow-panel ai-compose-panel">
-              <div class="panel-heading">
-                <div>
-                  <p class="eyebrow">AI Writer</p>
-                  <h3>AI 公文助理</h3>
+            <div class="compose-support-stack">
+              <section class="panel draft-preview-panel">
+                <div class="panel-heading">
+                  <h3>即時函稿預覽</h3>
+                  <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
                 </div>
-                <span class="status-pill" id="aiDraftStatus">待輸入</span>
-              </div>
-              <label>
-                白話文撰寫內容
-                <textarea id="aiPlainText" rows="8" placeholder="例如：請衛福部協助確認本公司日照中心設立許可補正資料，附件包含清冊、證明文件，請對方查照。"></textarea>
-              </label>
-              <div class="form-actions">
-                <button class="primary-button" id="aiGenerateDraftBtn" type="button">AI 生成主旨與內文</button>
-                <button class="secondary-button" id="aiClearDraftBtn" type="button">清除</button>
-              </div>
-              <label>
-                自動生成主旨
-                <input id="aiGeneratedSubject" placeholder="AI 生成後顯示，可自行編輯" />
-              </label>
-              <label>
-                自動生成內文
-                <textarea id="aiGeneratedBody" rows="8" placeholder="AI 生成後顯示，可自行編輯"></textarea>
-              </label>
-              <button class="secondary-button full-width" id="aiApplyDraftBtn" type="button">套用到左側主旨與說明</button>
-              <h3>送出前檢核</h3>
-              <ol class="precheck-list" id="precheckList"></ol>
-              <div class="summary-box">
-                <span>交換格式</span>
-                <strong>標準封裝資料 + 附件 + 交換事件</strong>
-              </div>
-              <div class="summary-box">
-                <span>後端動作</span>
-                <strong>validate → jAgent send → status sync</strong>
-              </div>
-            </aside>
-          </div>
+                <article class="official-draft-preview" id="draftPreview"></article>
+                <div class="form-actions">
+                  <button class="primary-button" id="confirmDraftBtn" type="button">確認函稿</button>
+                  <button class="secondary-button" id="resetDraftConfirmBtn" type="button">取消確認</button>
+                </div>
+              </section>
 
-          <section class="panel draft-preview-panel">
-            <div class="panel-heading">
-              <h3>即時函稿預覽</h3>
-              <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
+              <aside class="panel flow-panel ai-compose-panel">
+                <div class="panel-heading">
+                  <div>
+                    <p class="eyebrow">AI Writer</p>
+                    <h3>AI 公文助理</h3>
+                  </div>
+                  <span class="status-pill" id="aiDraftStatus">待輸入</span>
+                </div>
+                <label>
+                  白話文撰寫內容
+                  <textarea id="aiPlainText" rows="8" placeholder="例如：請衛福部協助確認本公司日照中心設立許可補正資料，附件包含清冊、證明文件，請對方查照。"></textarea>
+                </label>
+                <div class="form-actions">
+                  <button class="primary-button" id="aiGenerateDraftBtn" type="button">AI 生成主旨與內文</button>
+                  <button class="secondary-button" id="aiClearDraftBtn" type="button">清除</button>
+                </div>
+                <label>
+                  自動生成主旨
+                  <input id="aiGeneratedSubject" placeholder="AI 生成後顯示，可自行編輯" />
+                </label>
+                <label>
+                  自動生成內文
+                  <textarea id="aiGeneratedBody" rows="8" placeholder="AI 生成後顯示，可自行編輯"></textarea>
+                </label>
+                <button class="secondary-button full-width" id="aiApplyDraftBtn" type="button">套用到左側主旨與說明</button>
+                <h3>送出前檢核</h3>
+                <ol class="precheck-list" id="precheckList"></ol>
+                <div class="summary-box">
+                  <span>交換格式</span>
+                  <strong>標準封裝資料 + 附件 + 交換事件</strong>
+                </div>
+                <div class="summary-box">
+                  <span>後端動作</span>
+                  <strong>validate → jAgent send → status sync</strong>
+                </div>
+              </aside>
             </div>
-            <article class="official-draft-preview" id="draftPreview"></article>
-            <div class="form-actions">
-              <button class="primary-button" id="confirmDraftBtn" type="button">確認函稿</button>
-              <button class="secondary-button" id="resetDraftConfirmBtn" type="button">取消確認</button>
-            </div>
-          </section>
+          </div>
         </section>
 
         <section class="view" id="format">
@@ -3409,6 +3435,6 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="app.js?v=20260614-login-fallback"></script>
+    <script src="app.js?v=20260614-compose-single-page"></script>
   </body>
 </html>

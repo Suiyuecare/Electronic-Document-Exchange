@@ -11,6 +11,7 @@ const localBackendOrigin = "http://127.0.0.1:5174";
 const backendOrigin = window.location.protocol === "file:" ? localBackendOrigin : window.location.origin;
 const backendApiBase = `${backendOrigin}/api`;
 const authStorageKey = "suiyuecare-edoc-session";
+const composeAutosaveStorageKey = "suiyuecare-edoc-compose-autosave";
 const loggingPortalUrl = "https://login.suiyuecare.com/portal/";
 const loggingBridgeStorageKeys = [
   "suiyue-hris-quick-login-user",
@@ -969,6 +970,12 @@ let workflowRole = "總務";
 let draftConfirmed = false;
 let draftSigned = false;
 let activeComposeStep = "fill";
+let currentComposeDraftId = "";
+let composeSaveState = {
+  tone: "idle",
+  title: "尚未暫存",
+  detail: "輸入內容會先保護在此瀏覽器；按暫存草稿後會出現在發文清單。"
+};
 let approvalLogFilter = "all";
 let approvalLogSearchTerm = "";
 const composeSealTypes = ["無", "一般章", "公司設立章", "銀行印鑑章", "圖記章"];
@@ -2104,7 +2111,7 @@ function simpleRouteTitle(target, role = activeRole()) {
 function simpleRouteEyebrow(target, role = activeRole()) {
   const kind = identityKindForRole(role);
   if (target === "dashboard" && canSeeCompanyWideDocs(role)) return "全公司公文、合約、交換與風險儀表板";
-  if (target === "compose") return "填寫 -> 預覽 -> 確認 -> 送簽";
+  if (target === "compose") return "填寫與預覽 -> 確認 -> 送簽";
   if (target === "notifications") return "今天要處理、即將逾期、已退回與交換失敗";
   if (target === "contracts") return "本單位合約台帳與簽核";
   if (target === "contractSeal") return "總務合約用印、退回補正與用印紀錄";
@@ -2376,7 +2383,14 @@ function dailyActionItems() {
   }
   return unique
     .sort((a, b) => b.priority - a.priority || String(a.meta).localeCompare(String(b.meta), "zh-Hant"))
-    .slice(0, 6);
+    .slice(0, 3);
+}
+
+function dailyActionReason(item, index) {
+  if (item.tone === "issue") return "有逾期、退回或交換異常，建議優先處理。";
+  if (item.priority >= 2) return "今天若未處理，流程會卡在目前關卡。";
+  if (index === 0) return "這是目前最接近你角色職責的下一步。";
+  return "可在主要急件完成後接著處理。";
 }
 
 function openDailyAction(index) {
@@ -2404,19 +2418,22 @@ function renderDailyActionCenter() {
   const count = document.querySelector("#dailyActionCount");
   if (!grid || !count) return;
   dailyActionCache = dailyActionItems();
-  count.textContent = `${dailyActionCache.length} 件`;
+  const issueCount = dailyActionCache.filter((item) => item.tone === "issue").length;
+  count.textContent = issueCount ? `先處理 ${dailyActionCache.length} 件 · ${issueCount} 急` : `先處理 ${dailyActionCache.length} 件`;
   grid.innerHTML = dailyActionCache.length ? dailyActionCache.map((item, index) => `
     <button class="daily-action-item ${item.tone === "issue" ? "issue" : ""}" type="button" data-daily-action="${index}">
+      <span class="daily-action-rank">${index + 1}</span>
       <span class="identity-item-badge">${item.badge}</span>
       <strong>${item.title}</strong>
       <small>${item.meta}</small>
       <p>${item.body}</p>
+      <span class="daily-action-reason">${dailyActionReason(item, index)}</span>
       <em>${item.action}</em>
     </button>
   `).join("") : `
     <article class="daily-action-empty">
       <strong>目前沒有急件</strong>
-      <p>你可以先撰寫新公文，或查詢部門公文紀錄。</p>
+      <p>可以先撰寫新公文、查詢公文紀錄，或確認通知中心沒有補件提醒。</p>
       <button class="secondary-button" type="button" data-daily-action-empty="compose">撰寫公文</button>
     </article>
   `;
@@ -2611,6 +2628,7 @@ function renderRoleDashboard() {
     </article>
   `).join("");
   renderDailyActionCenter();
+  renderRolePerspectiveReview();
   renderDashboardApprovalProgress();
   renderSupervisorCommandDashboard();
 }
@@ -2723,6 +2741,189 @@ function renderSupervisorCommandDashboard() {
   `).join("") || `<article class="identity-item"><strong>沒有部門負載資料</strong><p>目前沒有需調度案件。</p></article>`;
   document.querySelectorAll("[data-dashboard-action-target]").forEach((button) => {
     button.addEventListener("click", () => setView(button.dataset.dashboardActionTarget));
+  });
+}
+
+function isOpenOperationalStatus(status = "") {
+  const text = String(status || "");
+  if (/交換完成|已入案|已結案|完成歸檔|已歸檔|已簽署|已完成/.test(text)) return false;
+  return /待|草稿|退回|補正|失敗|異常|確認|用印|簽核|審核|清稿|分派|登錄|處理/.test(text);
+}
+
+function receivingUnitHandoffRows() {
+  const units = [...new Set([
+    ...inboundDocs.map((doc) => doc.dept || doc.owner),
+    ...dispatchDocs.map((doc) => doc.dept || doc.owner),
+    ...contractRecords.map((contract) => contract.dept || contract.owner),
+    activeUnit()
+  ])].filter(Boolean);
+  return units.map((unit) => {
+    const inbound = inboundDocs.filter((doc) => doc.dept === unit || doc.owner === unit);
+    const dispatch = dispatchDocs.filter((doc) => doc.dept === unit || doc.owner === unit);
+    const contracts = contractRecords.filter((contract) => contract.dept === unit || contract.owner === unit);
+    const pendingDocs = [...inbound, ...dispatch].filter((doc) => isOpenOperationalStatus(doc.status)).length;
+    const pendingContracts = contracts.filter((contract) => isOpenOperationalStatus(contract.status)).length;
+    const issueDocs = [...inbound, ...dispatch].filter((doc) => isUnifiedFlowIssue(`${doc.status || ""} ${doc.note || ""} ${doc.lastReply || ""}`));
+    const issueContracts = contracts.filter((contract) => isUnifiedFlowIssue(`${contract.status || ""} ${contract.riskNote || ""}`));
+    const owners = [...new Set([
+      ...inbound.map((doc) => doc.owner),
+      ...dispatch.map((doc) => doc.owner),
+      ...contracts.map((contract) => currentContractApproval(contract)?.role || contract.owner)
+    ])].filter(Boolean).slice(0, 3);
+    const issueCount = issueDocs.length + issueContracts.length;
+    const pending = pendingDocs + pendingContracts;
+    const nextAction = issueCount
+      ? "先處理退回、失敗或異常"
+      : pendingDocs
+        ? "確認承辦人與期限"
+        : pendingContracts
+          ? "確認合約簽核與用印"
+          : "維持追蹤與歸檔";
+    const sample = issueDocs[0]?.subject || issueContracts[0]?.title || inbound[0]?.subject || contracts[0]?.title || dispatch[0]?.subject || "暫無案件";
+    return {
+      unit,
+      docs: inbound.length + dispatch.length,
+      contracts: contracts.length,
+      pending,
+      issueCount,
+      owners,
+      nextAction,
+      sample,
+      tone: issueCount ? "issue" : pending ? "wait" : "ok"
+    };
+  }).filter((row) => row.docs || row.contracts || row.unit === activeUnit())
+    .sort((a, b) => Number(b.unit === activeUnit()) - Number(a.unit === activeUnit()) || b.issueCount - a.issueCount || b.pending - a.pending || a.unit.localeCompare(b.unit, "zh-Hant"));
+}
+
+function rolePerspectiveReviews() {
+  const stats = reportStats();
+  const employeeRoles = ["員工", "業務助理", "人資", "會計"];
+  const supervisorRoles = ["主管", "主任"];
+  const employeeDrafts = dispatchDocs.filter((doc) => employeeRoles.includes(doc.owner) && isOpenOperationalStatus(doc.status));
+  const employeeContracts = contractRecords.filter((contract) => employeeRoles.includes(contract.owner) && isOpenOperationalStatus(contract.status));
+  const employeeReturns = trackingCases.filter((item) => employeeRoles.includes(item.owner) && /退回|補正|逾期/.test(item.status));
+  const supervisorTasks = workflowTasks.filter((task) => supervisorRoles.includes(task.role) && isOpenOperationalStatus(task.status));
+  const supervisorRisks = stats.overdueItems.filter((item) => supervisorRoles.includes(item.owner) || /主管|主任/.test(item.status + item.title));
+  const generalAffairsInbound = inboundDocs.filter((doc) => ["待登錄", "待分派", "異常待處理"].includes(doc.status));
+  const generalAffairsExchange = dispatchDocs.filter((doc) => /交換失敗|等待確認|已封裝/.test(doc.status));
+  const generalAffairsSeals = sealRequests.filter((request) => /待|退回/.test(request.status));
+  const unitRows = receivingUnitHandoffRows();
+  const unitRiskRows = unitRows.filter((row) => row.issueCount || row.pending);
+  const activeUnitRow = unitRows.find((row) => row.unit === activeUnit()) || unitRows[0];
+
+  return [
+    {
+      key: "employee",
+      title: "員工 / 申請人",
+      badge: "Employee",
+      tone: employeeReturns.length ? "issue" : employeeDrafts.length + employeeContracts.length ? "wait" : "ok",
+      problem: "最容易卡在不知道缺哪個欄位、送簽前沒確認預覽，或離開頁面後草稿遺失。",
+      evidence: [
+        `${employeeDrafts.length} 件員工函稿仍在草稿、待清稿或退回狀態`,
+        `${employeeContracts.length} 件員工合約仍在簽核或用印前`,
+        employeeReturns.length ? `${employeeReturns.length} 件退回、補正或逾期提醒` : "目前沒有員工退回補正提醒"
+      ],
+      fix: "已補上單頁填寫與預覽、必要欄位檢查、本機草稿保護與今天前三件事。",
+      action: "檢查撰寫",
+      target: "compose"
+    },
+    {
+      key: "supervisor",
+      title: "主管 / 簽核者",
+      badge: "Supervisor",
+      tone: supervisorRisks.length ? "issue" : supervisorTasks.length ? "wait" : "ok",
+      problem: "主管若只看到待簽核清單，容易漏掉逾期、退回、交換異常與用印後果。",
+      evidence: [
+        `${supervisorTasks.length} 件主管或主任待簽核/待查核`,
+        `${supervisorRisks.length} 件主管風險或逾期項目`,
+        `目前全站 SLA ${stats.slaRate}%、交換成功率 ${stats.successRate}%`
+      ],
+      fix: "已補上主管決策面板、風險排序、部門負載與簽核進度快照。",
+      action: "看簽核",
+      target: "approvalLog"
+    },
+    {
+      key: "generalAffairs",
+      title: "總務 / 收發用印",
+      badge: "General Affairs",
+      tone: generalAffairsExchange.some((doc) => /失敗/.test(doc.status)) ? "issue" : generalAffairsInbound.length + generalAffairsExchange.length + generalAffairsSeals.length ? "wait" : "ok",
+      problem: "總務同時負責收文、發文、交換狀態、用印與憑證，若沒有排序會先處理到低風險案件。",
+      evidence: [
+        `${generalAffairsInbound.length} 件待登錄、待分派或收文異常`,
+        `${generalAffairsExchange.length} 件待封裝、等待確認或交換失敗`,
+        `${generalAffairsSeals.length} 件用印申請需簽核或處理`
+      ],
+      fix: "已補上總務今日優先順序、交換異常入口、Token 提醒與用印/合約佇列。",
+      action: "公文收發",
+      target: "inbound"
+    },
+    {
+      key: "receivingUnit",
+      title: "收到公文或合約的單位",
+      badge: "Receiving Unit",
+      tone: unitRiskRows.some((row) => row.issueCount) ? "issue" : unitRiskRows.length ? "wait" : "ok",
+      problem: "部門收到來文或合約後，常不清楚目前在誰手上、下一步是辦理、簽核、補件還是用印。",
+      evidence: [
+        `${unitRows.length} 個單位有公文或合約承接資料`,
+        `${unitRiskRows.length} 個單位仍有待辦或風險`,
+        activeUnitRow ? `${activeUnitRow.unit} 目前 ${activeUnitRow.pending} 件待辦、${activeUnitRow.issueCount} 件風險` : "目前沒有單位承接資料"
+      ],
+      fix: "已補上收件單位承接表，將公文與合約一起顯示下一步與風險。",
+      action: "查承接",
+      target: "search"
+    }
+  ];
+}
+
+function renderRolePerspectiveReview() {
+  const grid = document.querySelector("#rolePerspectiveGrid");
+  const status = document.querySelector("#rolePerspectiveStatus");
+  const unitGrid = document.querySelector("#unitHandoffGrid");
+  const unitStatus = document.querySelector("#unitHandoffStatus");
+  if (!grid || !status || !unitGrid || !unitStatus) return;
+  const reviews = rolePerspectiveReviews();
+  const unitRows = receivingUnitHandoffRows();
+  const riskCount = reviews.filter((item) => item.tone === "issue").length;
+  status.textContent = riskCount ? `${activeRole()} · ${riskCount} 類高風險` : `${activeRole()} · 可上線觀察`;
+  grid.innerHTML = reviews.map((item) => `
+    <article class="perspective-item ${item.tone}">
+      <div class="perspective-head">
+        <span>${item.badge}</span>
+        <strong>${item.title}</strong>
+      </div>
+      <p class="perspective-problem">${item.problem}</p>
+      <div class="perspective-evidence">
+        ${item.evidence.map((line) => `<span>${line}</span>`).join("")}
+      </div>
+      <div class="perspective-fix">
+        <span>改善狀態</span>
+        <strong>${item.fix}</strong>
+      </div>
+      <button class="${item.tone === "issue" ? "primary-button" : "secondary-button"}" type="button" data-perspective-target="${item.target}">${item.action}</button>
+    </article>
+  `).join("");
+  unitStatus.textContent = `${unitRows.length} 單位 · ${unitRows.filter((row) => row.issueCount).length} 風險`;
+  unitGrid.innerHTML = unitRows.slice(0, 6).map((row) => `
+    <article class="unit-handoff-item ${row.tone}">
+      <div>
+        <span>${row.unit}</span>
+        <strong>${row.pending} 件待辦</strong>
+      </div>
+      <p>${row.sample}</p>
+      <dl>
+        <div><dt>公文</dt><dd>${row.docs}</dd></div>
+        <div><dt>合約</dt><dd>${row.contracts}</dd></div>
+        <div><dt>風險</dt><dd>${row.issueCount}</dd></div>
+      </dl>
+      <small>${row.owners.length ? `目前關卡：${row.owners.join("、")}` : "目前沒有指定承辦"}</small>
+      <em>${row.nextAction}</em>
+    </article>
+  `).join("") || `<article class="unit-handoff-item ok"><strong>目前沒有單位承接資料</strong><p>收文分派或合約起案後會在這裡彙整。</p></article>`;
+  document.querySelectorAll("[data-perspective-target]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const target = button.dataset.perspectiveTarget;
+      setView(isRouteAllowed(target) ? target : "notifications");
+    });
   });
 }
 
@@ -3560,6 +3761,168 @@ function composePayload() {
   };
 }
 
+const composeAutosaveSelectors = [
+  "#composeCompanySelect",
+  "#docType",
+  "#priority",
+  "#dispatchNo",
+  "#recipient",
+  "#contactAddress",
+  "#contactOwner",
+  "#contactPhone",
+  "#contactFax",
+  "#contactEmail",
+  "#largeSealType",
+  "#smallSealType",
+  "#subject",
+  "#bodyText"
+];
+
+function composeRawSnapshot() {
+  const values = {};
+  composeAutosaveSelectors.forEach((selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return;
+    values[selector] = element.value;
+  });
+  return {
+    values,
+    sealPlacements: {
+      large: { ...composeSealPlacements.large },
+      small: { ...composeSealPlacements.small }
+    },
+    currentComposeDraftId,
+    role: activeRole()
+  };
+}
+
+function composeSnapshotHasMeaningfulContent(snapshot) {
+  const values = snapshot?.values || {};
+  return Boolean(
+    String(values["#recipient"] || "").trim() ||
+    String(values["#subject"] || "").trim() ||
+    String(values["#bodyText"] || "").trim()
+  );
+}
+
+function formatComposeSaveTime(isoText) {
+  if (!isoText) return "";
+  const date = new Date(isoText);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function readComposeAutosave() {
+  const saved = readJsonStorage(composeAutosaveStorageKey);
+  if (!saved?.snapshot || !composeSnapshotHasMeaningfulContent(saved.snapshot)) return null;
+  return saved;
+}
+
+function writeComposeAutosave() {
+  const snapshot = composeRawSnapshot();
+  if (!composeSnapshotHasMeaningfulContent(snapshot)) return;
+  const saved = {
+    updatedAt: new Date().toISOString(),
+    snapshot
+  };
+  try {
+    localStorage.setItem(composeAutosaveStorageKey, JSON.stringify(saved));
+  } catch (error) {
+    composeSaveState = {
+      tone: "idle",
+      title: "尚未暫存",
+      detail: "瀏覽器目前無法使用本機保護，請按暫存草稿保存到發文清單。"
+    };
+    return;
+  }
+  composeSaveState = {
+    tone: "local",
+    title: "此瀏覽器已保護",
+    detail: `${formatComposeSaveTime(saved.updatedAt)} 已保留目前輸入，按暫存草稿後才會進發文清單。`
+  };
+}
+
+function clearComposeAutosave() {
+  try {
+    localStorage.removeItem(composeAutosaveStorageKey);
+  } catch (error) {
+    // Ignore storage cleanup failures; the saved draft in the document list is authoritative.
+  }
+}
+
+function applyComposeAutosave(saved = readComposeAutosave()) {
+  if (!saved?.snapshot) return showToast("目前沒有可載回的本機草稿。");
+  Object.entries(saved.snapshot.values || {}).forEach(([selector, value]) => {
+    if (selector === "#dispatchNo") return;
+    const element = document.querySelector(selector);
+    if (element) element.value = value;
+  });
+  if (saved.snapshot.sealPlacements?.large) composeSealPlacements.large = { ...saved.snapshot.sealPlacements.large };
+  if (saved.snapshot.sealPlacements?.small) composeSealPlacements.small = { ...saved.snapshot.sealPlacements.small };
+  const existingDraft = dispatchDocs.find((item) => item.id === saved.snapshot.currentComposeDraftId && item.status === "草稿");
+  currentComposeDraftId = existingDraft?.id || "";
+  draftConfirmed = false;
+  draftSigned = false;
+  activeComposeStep = "fill";
+  composeSaveState = {
+    tone: "local",
+    title: "已載回本機草稿",
+    detail: `${formatComposeSaveTime(saved.updatedAt)} 的內容已放回表單，確認無誤後請暫存草稿。`
+  };
+  renderDraftPreview();
+  showToast("已載回本機保護的草稿內容。");
+}
+
+function discardComposeAutosave() {
+  clearComposeAutosave();
+  composeSaveState = {
+    tone: currentComposeDraftId ? "saved" : "idle",
+    title: currentComposeDraftId ? "已連結草稿" : "尚未暫存",
+    detail: currentComposeDraftId ? "這份內容已在發文清單中有草稿紀錄。" : "已清除本機保護內容。"
+  };
+  renderComposeStepper();
+  showToast("已清除本機保護內容。");
+}
+
+function composeSaveStatusView() {
+  const saved = readComposeAutosave();
+  const activeDraft = dispatchDocs.find((item) => item.id === currentComposeDraftId && item.status === "草稿");
+  if (composeSaveState.tone === "saving") return composeSaveState;
+  if (activeDraft && composeSaveState.tone !== "local") {
+    return {
+      tone: "saved",
+      title: `正在編輯草稿 ${activeDraft.no}`,
+      detail: "這份內容已出現在發文清單；後續修改可再按暫存草稿更新。"
+    };
+  }
+  if (saved && composeSaveState.tone === "idle") {
+    return {
+      tone: "local",
+      title: "本機有未送出的內容",
+      detail: `${formatComposeSaveTime(saved.updatedAt)} 自動保護，必要時可載回表單。`,
+      canLoad: true,
+      canDiscard: true
+    };
+  }
+  return composeSaveState;
+}
+
+function renderComposeSaveStatus() {
+  const target = document.querySelector("#composeDraftStatus");
+  if (!target) return;
+  const view = composeSaveStatusView();
+  target.className = `compose-draft-status ${view.tone || "idle"}`;
+  target.innerHTML = `
+    <span class="compose-draft-dot" aria-hidden="true"></span>
+    <div>
+      <strong>${view.title}</strong>
+      <p>${view.detail}</p>
+    </div>
+    ${view.canLoad ? `<button class="text-button" type="button" data-compose-action="load-local">載回</button>` : ""}
+    ${view.canDiscard ? `<button class="text-button muted" type="button" data-compose-action="discard-local">忽略</button>` : ""}
+  `;
+}
+
 function renderComposeCompanyOptions() {
   const select = document.querySelector("#composeCompanySelect");
   if (!select) return;
@@ -3838,15 +4201,15 @@ function markDraftDirty() {
   draftConfirmed = false;
   draftSigned = false;
   activeComposeStep = "fill";
+  writeComposeAutosave();
   renderDraftPreview();
 }
 
 function composeStepState() {
-  const data = composePayload();
-  const filled = Boolean(data.no && data.recipient && data.subject.length >= 8 && data.body.length >= 8);
+  const state = composeInputState();
+  const filled = Boolean(state.recipient && state.subject.length >= 8 && state.body.length >= 8);
   return [
-    { key: "fill", label: "填寫", body: "文號、受文者、主旨、說明", done: filled },
-    { key: "preview", label: "預覽", body: "附件、用印與即時函稿", done: filled },
+    { key: "fill", label: "填寫與預覽", body: "文號、受文者、主旨、附件、用印", done: filled },
     { key: "confirm", label: "確認", body: "撰寫者確認內容", done: draftConfirmed },
     { key: "sign", label: "送簽", body: "送主管清稿簽核", done: draftSigned },
     { key: "send", label: "送出", body: "進入發文佇列", done: false }
@@ -3861,17 +4224,140 @@ function composeStepIndex(key = activeComposeStep) {
   return Math.max(0, composeStepKeys().indexOf(key));
 }
 
+function composeInputState() {
+  return {
+    recipient: document.querySelector("#recipient")?.value.trim() || "",
+    subject: document.querySelector("#subject")?.value.trim() || "",
+    body: document.querySelector("#bodyText")?.value.trim() || "",
+    attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name),
+    largeSealType: document.querySelector("#largeSealType")?.value || "無",
+    smallSealType: document.querySelector("#smallSealType")?.value || "無"
+  };
+}
+
+function composeReadinessChecks() {
+  const state = composeInputState();
+  const sealTypes = [state.largeSealType, state.smallSealType].filter((item) => item && item !== "無");
+  return [
+    {
+      key: "recipient",
+      label: "受文者",
+      target: "recipient",
+      required: true,
+      done: Boolean(state.recipient),
+      detail: state.recipient ? "已填寫受文機關或單位。" : "請填寫要發給哪個機關或單位。"
+    },
+    {
+      key: "subject",
+      label: "主旨",
+      target: "subject",
+      required: true,
+      done: state.subject.length >= 8,
+      detail: state.subject.length >= 8 ? "主旨長度足夠。" : `至少 8 個字，目前 ${state.subject.length} 個字。`
+    },
+    {
+      key: "body",
+      label: "說明",
+      target: "body",
+      required: true,
+      done: state.body.length >= 8,
+      detail: state.body.length >= 8 ? "說明長度足夠。" : `至少 8 個字，目前 ${state.body.length} 個字。`
+    },
+    {
+      key: "attachments",
+      label: "附件",
+      target: "attachments",
+      required: false,
+      done: state.attachments.length > 0,
+      detail: state.attachments.length ? `已選 ${state.attachments.length} 個附件。` : "沒有附件也可先送，但請確認函稿本文與附件清冊。"
+    },
+    {
+      key: "seal",
+      label: "用印",
+      target: "seal",
+      required: false,
+      done: true,
+      detail: sealTypes.length ? `已選 ${sealTypes.join("、")}，可在右側預覽拖曳位置。` : "目前不使用印章。"
+    },
+    {
+      key: "confirm",
+      label: "函稿確認",
+      target: "confirm",
+      required: activeComposeStep !== "fill",
+      done: draftConfirmed,
+      detail: draftConfirmed ? "已確認右側函稿預覽。" : "送簽前請先在右側按「確認函稿」。"
+    }
+  ];
+}
+
+function composeBasicBlockers() {
+  return composeReadinessChecks().filter((item) => item.required && item.key !== "confirm" && !item.done);
+}
+
+function renderComposeFieldHints() {
+  const checks = Object.fromEntries(composeReadinessChecks().map((item) => [item.key, item]));
+  [
+    ["recipient", "#recipient", "#recipientHint"],
+    ["subject", "#subject", "#subjectHint"],
+    ["body", "#bodyText", "#bodyTextHint"]
+  ].forEach(([key, inputSelector, hintSelector]) => {
+    const check = checks[key];
+    const input = document.querySelector(inputSelector);
+    const hint = document.querySelector(hintSelector);
+    if (!check || !input || !hint) return;
+    input.dataset.validity = check.done ? "ok" : "needs";
+    hint.dataset.validity = check.done ? "ok" : "needs";
+    hint.textContent = check.detail;
+  });
+}
+
+function focusComposeReadinessTarget(target) {
+  const selectorMap = {
+    recipient: "#recipient",
+    subject: "#subject",
+    body: "#bodyText",
+    attachments: "#attachments",
+    seal: "#largeSealType",
+    confirm: ".draft-preview-panel"
+  };
+  const selector = selectorMap[target];
+  if (!selector) return;
+  const focusTarget = () => {
+    const element = document.querySelector(selector);
+    if (!element) return;
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (typeof element.focus === "function" && !element.classList.contains("draft-preview-panel")) {
+      element.focus({ preventScroll: true });
+    }
+    element.classList.add("attention-pulse");
+    if (target === "confirm") element.classList.add("preview-attention");
+    window.setTimeout(() => {
+      element.classList.remove("attention-pulse");
+      element.classList.remove("preview-attention");
+    }, 1400);
+  };
+  if (target !== "confirm" && activeComposeStep !== "fill") {
+    setComposeStep("fill", { force: true });
+    window.setTimeout(focusTarget, 0);
+    return;
+  }
+  focusTarget();
+}
+
 function composePaneForStep(key = activeComposeStep) {
   if (key === "fill") return "fill";
-  if (key === "preview") return "preview";
   return "confirm";
 }
 
+function composePanesForStep(key = activeComposeStep) {
+  return ["fill", "preview", "confirm"];
+}
+
 function validateComposeStep(step = activeComposeStep) {
-  const data = composePayload();
   if (["fill", "preview", "confirm", "sign"].includes(step)) {
-    if (!data.recipient || data.subject.length < 8 || data.body.length < 8) {
-      return blockOperation("請先補齊受文者、至少 8 個字的主旨與說明，再進入下一步。", addDispatchAudit, "撰寫流程防呆");
+    const blockers = composeBasicBlockers();
+    if (blockers.length) {
+      return blockOperation(`請先補齊：${blockers.map((item) => item.label).join("、")}。`, addDispatchAudit, "撰寫流程防呆");
     }
   }
   if (["sign", "send"].includes(step) && !draftConfirmed) {
@@ -3881,13 +4367,14 @@ function validateComposeStep(step = activeComposeStep) {
 }
 
 function setComposeStep(key, options = {}) {
+  if (key === "preview") key = "fill";
   const steps = composeStepKeys();
   if (!steps.includes(key)) return;
   const currentIndex = composeStepIndex();
   const nextIndex = steps.indexOf(key);
   if (!options.force && nextIndex > currentIndex && !validateComposeStep(activeComposeStep)) return;
   activeComposeStep = key;
-  if (["preview", "confirm", "sign"].includes(key)) renderDraftPreview();
+  if (["fill", "confirm", "sign"].includes(key)) renderDraftPreview();
   renderComposeStepper();
 }
 
@@ -3896,7 +4383,7 @@ function advanceComposeStep() {
   const currentIndex = composeStepIndex();
   const current = steps[currentIndex];
   if (!validateComposeStep(current)) return;
-  if (current === "preview") renderDraftPreview();
+  if (current === "fill") renderDraftPreview();
   if (current === "confirm" && !draftConfirmed) {
     draftConfirmed = true;
     addDispatchAudit("確認函稿", "撰寫者已確認函稿預覽、附件與用印位置。");
@@ -3917,32 +4404,86 @@ function retreatComposeStep() {
   setComposeStep(previous, { force: true });
 }
 
+function composeNextControlState() {
+  const disabled = activeComposeStep === "send" || (activeComposeStep === "fill" && composeBasicBlockers().length > 0);
+  const text = activeComposeStep === "confirm" && !draftConfirmed
+    ? "確認函稿"
+    : activeComposeStep === "sign"
+      ? "送簽並加入佇列"
+      : activeComposeStep === "send"
+        ? "已加入佇列"
+        : "前往確認函稿";
+  return { disabled, text };
+}
+
 function renderComposeStepper() {
   const stepper = document.querySelector("#composeStepper");
   const action = document.querySelector("#composeNextAction");
   if (!stepper || !action) return;
+  renderComposeFieldHints();
   const steps = composeStepState();
   const activeIndex = composeStepIndex();
-  stepper.innerHTML = steps.map((step, index) => `
-    <button class="next-step ${step.done ? "done" : ""} ${index === activeIndex ? "active" : ""}" type="button" data-compose-step="${step.key}">
-      <strong>${index + 1}. ${step.label}</strong>
-      <span>${step.body}</span>
-    </button>
-  `).join("");
+  const onePageItems = [
+    { key: "content", label: "填寫", body: "文號、受文者、主旨、說明", done: composeBasicBlockers().length === 0 },
+    { key: "package", label: "附件與用印", body: "寄件資料、附件、大章小章", done: true },
+    { key: "preview", label: "右側預覽", body: draftConfirmed ? "函稿已確認" : "確認後才能送簽", done: draftConfirmed }
+  ];
+  stepper.innerHTML = `
+    <div class="compose-one-page-note">
+      <strong>同一頁完成</strong>
+      <span>填寫內容、附件用印與函稿預覽會同步顯示，不需要切換頁籤。</span>
+    </div>
+    <div class="compose-one-page-checks">
+      ${onePageItems.map((item) => `
+        <button class="compose-progress-step ${item.done ? "done" : ""} ${item.key === "content" && activeComposeStep === "fill" ? "active" : ""}" type="button" data-compose-focus="${item.key === "preview" ? "confirm" : item.key === "package" ? "attachments" : "recipient"}">
+          <span>${item.done ? "✓" : "!"}</span>
+          <strong>${item.label}</strong>
+          <small>${item.body}</small>
+        </button>
+      `).join("")}
+    </div>
+  `;
   const next = steps[activeIndex] || steps[steps.length - 1];
   const nextMessages = {
-    fill: ["先完成填寫", "補齊受文者、主旨與說明，系統會同步更新下方函稿。"],
-    preview: ["檢視函稿預覽", "確認寄件資料、附件、用印位置與函稿版面是否正確。"],
+    fill: ["填寫與預覽同頁", "在左側補齊公文內容、附件與用印設定；右側即時函稿會同步更新。"],
     confirm: ["確認函稿", "按下一步會確認目前版本；內容一修改就會重新要求確認。"],
     sign: ["送主管清稿", "按下清稿並加入發文佇列，系統會建立待清稿案件。"],
     send: ["等待送出", "主管清稿與封裝完成後，再由發文管理送交 jAgent。"]
   };
   const [title, body] = nextMessages[next.key] || nextMessages.send;
-  action.innerHTML = `<strong>${title}</strong><p>${body}</p>`;
-  document.querySelector("#composeStepStatus").textContent = `${activeIndex + 1} / ${steps.length} ${next.label}`;
+  const checks = composeReadinessChecks();
+  const nextControl = composeNextControlState();
+  action.innerHTML = `
+    <div class="compose-action-head">
+      <div>
+        <strong>${title}</strong>
+        <p>${body}</p>
+      </div>
+      <div class="compose-action-controls">
+        <span class="status-pill">${composeBasicBlockers().length ? "尚有必填未完成" : "可以進入確認"}</span>
+        <button class="secondary-button compose-inline-save" id="composeInlineSaveDraftBtn" type="button">暫存草稿</button>
+        <button class="secondary-button compose-inline-preview" type="button" data-compose-focus="confirm">看右側預覽</button>
+        <button class="primary-button compose-inline-next" id="composeInlineNextBtn" type="button" ${nextControl.disabled ? "disabled" : ""}>${nextControl.text}</button>
+      </div>
+    </div>
+    <div class="compose-draft-status idle" id="composeDraftStatus" aria-live="polite"></div>
+    <div class="compose-readiness-list" aria-label="撰寫送出檢查">
+      ${checks.map((item) => `
+        <button class="compose-readiness-item ${item.done ? "done" : "pending"} ${item.required ? "required" : "optional"}" type="button" data-compose-focus="${item.target}" aria-label="前往${item.label}">
+          <span>${item.done ? "✓" : item.required ? "!" : "•"}</span>
+          <div>
+            <strong>${item.label}${item.required ? "＊" : ""}</strong>
+            <p>${item.detail}</p>
+          </div>
+        </button>
+      `).join("")}
+    </div>
+  `;
+  document.querySelector("#composeStepStatus").textContent = "填寫、附件與預覽同頁";
   document.querySelector("#composeConfirmHint").textContent = draftConfirmed ? "已確認" : "尚未確認";
+  const activePanes = composePanesForStep();
   document.querySelectorAll("[data-compose-pane]").forEach((panel) => {
-    panel.classList.toggle("active", panel.dataset.composePane === composePaneForStep());
+    panel.classList.toggle("active", activePanes.includes(panel.dataset.composePane));
   });
   const composeView = document.querySelector("#compose");
   composeView?.classList.remove("compose-step-mode-fill", "compose-step-mode-preview", "compose-step-mode-confirm", "compose-step-mode-sign", "compose-step-mode-send");
@@ -3951,17 +4492,12 @@ function renderComposeStepper() {
   const nextButton = document.querySelector("#composeNextBtn");
   if (previousButton) previousButton.disabled = activeIndex === 0;
   if (nextButton) {
-    nextButton.disabled = activeComposeStep === "send";
-    nextButton.textContent = activeComposeStep === "confirm" && !draftConfirmed
-      ? "確認函稿"
-      : activeComposeStep === "sign"
-        ? "送簽並加入佇列"
-        : activeComposeStep === "send"
-          ? "已加入佇列"
-          : "下一步";
+    nextButton.disabled = nextControl.disabled;
+    nextButton.textContent = nextControl.text;
   }
-  document.querySelectorAll("[data-compose-step]").forEach((button) => {
-    button.addEventListener("click", () => setComposeStep(button.dataset.composeStep));
+  renderComposeSaveStatus();
+  document.querySelectorAll("[data-compose-focus]").forEach((button) => {
+    button.addEventListener("click", () => focusComposeReadinessTarget(button.dataset.composeFocus));
   });
 }
 
@@ -4355,11 +4891,15 @@ async function createDispatchFromForm(status = "草稿") {
   }
   if (status !== "草稿") draftSigned = true;
   const data = composePayload();
-  const no = assignNextDispatchNo();
-  const doc = {
+  const existingComposeDraft = dispatchDocs.find((item) => item.id === currentComposeDraftId && item.status === "草稿");
+  const existingDoc = existingComposeDraft || null;
+  const no = existingDoc?.no || assignNextDispatchNo();
+  const doc = existingDoc || {
     id: `OUT-${Date.now()}`,
     no,
-    exchangeNo: `EX-OUT-${Date.now().toString().slice(-8)}`,
+    exchangeNo: `EX-OUT-${Date.now().toString().slice(-8)}`
+  };
+  Object.assign(doc, {
     companyName: data.companyName,
     type: data.type,
     priority: data.priority,
@@ -4387,7 +4927,7 @@ async function createDispatchFromForm(status = "草稿") {
     owner: "總務",
     attachments: ["函稿本文.pdf", "附件清冊.xml"],
     packageId: "",
-    lastReply: status === "草稿" ? "草稿已建立，尚未清稿。" : "已建立函稿並進入清稿檢核。",
+    lastReply: status === "草稿" ? (existingDoc ? "草稿已更新，尚未清稿。" : "草稿已建立，尚未清稿。") : "已建立函稿並進入清稿檢核。",
     checks: { format: status !== "草稿", recipient: true, attachments: true, certificate: true, package: false },
     lockedAt: "",
     lockedBy: "",
@@ -4395,18 +4935,33 @@ async function createDispatchFromForm(status = "草稿") {
     lockedAttachmentHash: "",
     versionStatus: "草稿可編修",
     requiresReapproval: false
-  };
-  dispatchDocs.unshift(doc);
-  await persistToBackend("/documents", backendDocumentPayload(doc));
-  upsertDocumentAcl(doc, activeRole(), { view: true, sign: false, download: false, seal: false, delegate: false, reason: "撰寫者建立函稿，可檢視與補正內容。" });
-  upsertDocumentAcl(doc, "行政部主任", { view: true, sign: true, download: true, seal: true, delegate: true, reason: "送簽清稿與用印前核准。" });
-  upsertDocumentAcl(doc, "總務", { view: true, sign: false, download: true, seal: true, delegate: false, reason: "清稿後封裝、用印與送交 jAgent。" });
+  });
+  if (!existingDoc) dispatchDocs.unshift(doc);
+  const docPath = `/documents/${doc.id.startsWith("DOC-") ? doc.id : `DOC-${doc.id}`}`;
+  await persistToBackend(existingDoc ? docPath : "/documents", backendDocumentPayload(doc), existingDoc ? "PATCH" : "POST");
+  if (!existingDoc) {
+    upsertDocumentAcl(doc, activeRole(), { view: true, sign: false, download: false, seal: false, delegate: false, reason: "撰寫者建立函稿，可檢視與補正內容。" });
+    upsertDocumentAcl(doc, "行政部主任", { view: true, sign: true, download: true, seal: true, delegate: true, reason: "送簽清稿與用印前核准。" });
+    upsertDocumentAcl(doc, "總務", { view: true, sign: false, download: true, seal: true, delegate: false, reason: "清稿後封裝、用印與送交 jAgent。" });
+  }
   selectedDispatchId = doc.id;
+  if (status === "草稿") currentComposeDraftId = doc.id;
   createWorkflowTaskForDispatch(doc, status);
-  assignNextDispatchNo(true);
-  setDraftConfirmed(false);
-  draftSigned = false;
-  addDispatchAudit(status === "草稿" ? "建立發文草稿" : "建立函稿", `${doc.no} 已建立，受文者：${doc.to}。`);
+  if (status !== "草稿") {
+    currentComposeDraftId = "";
+    assignNextDispatchNo(true);
+    setDraftConfirmed(false);
+    draftSigned = false;
+  } else {
+    draftConfirmed = false;
+    draftSigned = false;
+    activeComposeStep = "fill";
+    renderDraftPreview();
+  }
+  const auditTitle = status === "草稿"
+    ? (existingDoc ? "更新發文草稿" : "建立發文草稿")
+    : (existingDoc ? "草稿送出清稿" : "建立函稿");
+  addDispatchAudit(auditTitle, `${doc.no} 已${existingDoc ? "更新" : "建立"}，受文者：${doc.to}。`);
   renderDispatchBoard();
   renderDispatchDetail();
   renderWorkflowTasks();
@@ -4414,6 +4969,35 @@ async function createDispatchFromForm(status = "草稿") {
   renderApprovalLog();
   renderDashboardApprovalProgress();
   return doc;
+}
+
+async function saveComposeDraft() {
+  const activeButton = document.activeElement?.matches?.("#saveDispatchDraftBtn, #composeInlineSaveDraftBtn")
+    ? document.activeElement
+    : null;
+  if (activeButton) activeButton.disabled = true;
+  composeSaveState = {
+    tone: "saving",
+    title: "正在暫存草稿",
+    detail: "系統正在保存目前表單內容，請稍候。"
+  };
+  renderComposeSaveStatus();
+  try {
+    const existingDraft = dispatchDocs.find((item) => item.id === currentComposeDraftId && item.status === "草稿");
+    const doc = await createDispatchFromForm("草稿");
+    if (doc) {
+      clearComposeAutosave();
+      composeSaveState = {
+        tone: "saved",
+        title: existingDraft ? `草稿已更新 ${doc.no}` : `草稿已儲存 ${doc.no}`,
+        detail: `${nowTime()} 已保存到發文清單，畫面會停留在填寫與預覽同頁。`
+      };
+      renderComposeStepper();
+      showToast(existingDraft ? `發文草稿已更新：${doc.no}` : `發文草稿已儲存：${doc.no}`);
+    }
+  } finally {
+    if (activeButton) activeButton.disabled = false;
+  }
 }
 
 function addContractAudit(title, body) {
@@ -12982,10 +13566,7 @@ document.querySelector("#previewPackageBtn").addEventListener("click", () => {
 document.querySelector("#clearDispatchLogBtn").addEventListener("click", () => {
   clearLogWithConfirm(dispatchAuditLog, renderDispatchAuditLog, "發文操作紀錄");
 });
-document.querySelector("#saveDispatchDraftBtn").addEventListener("click", async () => {
-  await createDispatchFromForm("草稿");
-  showToast("發文草稿已儲存。");
-});
+document.querySelector("#saveDispatchDraftBtn").addEventListener("click", saveComposeDraft);
 document.querySelector("#generateDispatchNoBtn").addEventListener("click", () => {
   const no = assignNextDispatchNo(true);
   setDraftConfirmed(false);
@@ -13011,10 +13592,30 @@ document.querySelector("#resetDraftConfirmBtn").addEventListener("click", () => 
 });
 document.querySelector("#composePrevBtn").addEventListener("click", retreatComposeStep);
 document.querySelector("#composeNextBtn").addEventListener("click", advanceComposeStep);
+document.querySelector("#composeNextAction").addEventListener("click", (event) => {
+  const composeAction = event.target.closest("[data-compose-action]");
+  if (composeAction?.dataset.composeAction === "load-local") {
+    applyComposeAutosave();
+    return;
+  }
+  if (composeAction?.dataset.composeAction === "discard-local") {
+    discardComposeAutosave();
+    return;
+  }
+  const saveButton = event.target.closest("#composeInlineSaveDraftBtn");
+  if (saveButton) {
+    void saveComposeDraft();
+    return;
+  }
+  const nextButton = event.target.closest("#composeInlineNextBtn");
+  if (nextButton && !nextButton.disabled) advanceComposeStep();
+});
 ["#composeCompanySelect", "#docType", "#priority", "#recipient", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);
-  element?.addEventListener("change", markDraftDirty);
+  if (!["INPUT", "TEXTAREA"].includes(element?.tagName) || element?.type === "file") {
+    element?.addEventListener("change", markDraftDirty);
+  }
 });
 document.querySelector("#sendQueueBtn")?.addEventListener("click", () => {
   const queued = dispatchDocs.filter((doc) => ["已封裝", "已清稿", "待清稿"].includes(doc.status)).map((doc) => doc.id);
