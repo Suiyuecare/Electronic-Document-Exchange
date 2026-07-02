@@ -3826,7 +3826,8 @@ function composePayload() {
     },
     subject: document.querySelector("#subject")?.value.trim() || "未填主旨",
     body: document.querySelector("#bodyText")?.value.trim() || "",
-    attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name)
+    attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name),
+    attachmentDetails: document.querySelector("#attachmentDetails")?.value.trim() || ""
   };
 }
 
@@ -3844,7 +3845,8 @@ const composeAutosaveSelectors = [
   "#largeSealType",
   "#smallSealType",
   "#subject",
-  "#bodyText"
+  "#bodyText",
+  "#attachmentDetails"
 ];
 
 function composeRawSnapshot() {
@@ -3870,7 +3872,8 @@ function composeSnapshotHasMeaningfulContent(snapshot) {
   return Boolean(
     String(values["#recipient"] || "").trim() ||
     String(values["#subject"] || "").trim() ||
-    String(values["#bodyText"] || "").trim()
+    String(values["#bodyText"] || "").trim() ||
+    String(values["#attachmentDetails"] || "").trim()
   );
 }
 
@@ -3940,6 +3943,87 @@ function renderDraftSealPlaceholder(kind, label, sealType, sizeClass) {
   `;
 }
 
+const draftMeasurePageWidthPx = 794;
+let draftMeasurePreviewElement = null;
+
+function escapeDraftHtml(value = "") {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
+function draftBodySource(text) {
+  return (text || "尚未填寫說明內容。").trim() || "尚未填寫說明內容。";
+}
+
+function draftAttachmentText(data) {
+  const fileText = data.attachments?.length ? data.attachments.join("、") : "";
+  const detailText = data.attachmentDetails?.trim() || "";
+  if (fileText && detailText) return `${fileText}；${detailText}`;
+  return detailText || fileText || "函稿本文、附件清冊";
+}
+
+function ensureDraftMeasurePreview() {
+  if (!document.body) return null;
+  if (draftMeasurePreviewElement?.isConnected) return draftMeasurePreviewElement;
+  draftMeasurePreviewElement = document.createElement("article");
+  draftMeasurePreviewElement.className = "official-draft-preview draft-measure-preview";
+  draftMeasurePreviewElement.setAttribute("aria-hidden", "true");
+  draftMeasurePreviewElement.style.width = `${draftMeasurePageWidthPx}px`;
+  document.body.appendChild(draftMeasurePreviewElement);
+  return draftMeasurePreviewElement;
+}
+
+function draftPageMainFits(data, body, pageNumber, attachmentsText) {
+  const measure = ensureDraftMeasurePreview();
+  if (!measure) return true;
+  measure.innerHTML = renderOfficialDraftPageHtml(data, body, pageNumber, 99, attachmentsText);
+  const main = measure.querySelector(".draft-main");
+  const pageNumberNode = measure.querySelector(".draft-page-number");
+  if (!main || !pageNumberNode) return true;
+  const mainRect = main.getBoundingClientRect();
+  const pageNumberRect = pageNumberNode.getBoundingClientRect();
+  return mainRect.bottom <= pageNumberRect.top - 18;
+}
+
+function preferredDraftBreak(text, limit) {
+  const bounded = Math.max(1, Math.min(limit, text.length));
+  if (bounded >= text.length) return text.length;
+  const windowText = text.slice(0, bounded);
+  const minBreak = Math.max(1, Math.floor(bounded * 0.55));
+  let bestIndex = -1;
+  let bestLength = 0;
+  ["\n\n", "\n", "。", "；", "，", ".", ";", " "].forEach((token) => {
+    const index = windowText.lastIndexOf(token);
+    if (index > bestIndex) {
+      bestIndex = index;
+      bestLength = token.length;
+    }
+  });
+  return bestIndex >= minBreak ? bestIndex + bestLength : bounded;
+}
+
+function draftFitLength(data, text, pageNumber, attachmentsText) {
+  let low = 1;
+  let high = text.length;
+  let best = 0;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = text.slice(0, mid).trim();
+    if (candidate && draftPageMainFits(data, candidate, pageNumber, attachmentsText)) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+
 function chunkTextByLength(text, firstLimit = 235, nextLimit = 390) {
   const source = (text || "尚未填寫說明內容。").trim();
   const chunks = [];
@@ -3960,6 +4044,38 @@ function chunkTextByLength(text, firstLimit = 235, nextLimit = 390) {
   }
   chunks.push(remaining || "尚未填寫說明內容。");
   return chunks;
+}
+
+function splitDraftBodyIntoPages(data, attachmentsText) {
+  const source = draftBodySource(data.body);
+  if (!ensureDraftMeasurePreview()) return chunkTextByLength(source);
+  const pages = [];
+  let remaining = source;
+  let pageNumber = 1;
+  const maxPages = 30;
+  while (remaining && pages.length < maxPages) {
+    if (draftPageMainFits(data, remaining, pageNumber, attachmentsText)) {
+      pages.push(remaining);
+      remaining = "";
+      break;
+    }
+    const fitLength = draftFitLength(data, remaining, pageNumber, attachmentsText);
+    let cut = fitLength > 0 ? preferredDraftBreak(remaining, fitLength) : Math.min(remaining.length, 20);
+    let pageText = remaining.slice(0, cut).trim();
+    if (pageText && !draftPageMainFits(data, pageText, pageNumber, attachmentsText) && fitLength > 0) {
+      cut = fitLength;
+      pageText = remaining.slice(0, cut).trim();
+    }
+    if (!pageText) {
+      cut = Math.min(remaining.length, 1);
+      pageText = remaining.slice(0, cut);
+    }
+    pages.push(pageText);
+    remaining = remaining.slice(cut).trim();
+    pageNumber += 1;
+  }
+  if (remaining) pages.push(remaining);
+  return pages.length ? pages : ["尚未填寫說明內容。"];
 }
 
 function normalizeSealPlacementPages(pageCount) {
@@ -4112,6 +4228,7 @@ async function generateAiDraft() {
         priority: data.priority,
         recipient: data.recipient,
         attachments: data.attachments,
+        attachmentDetails: data.attachmentDetails,
         role: activeRole()
       })
     });
@@ -4150,60 +4267,64 @@ function clearAiDraft() {
   showToast("AI 公文助理欄位已清除。");
 }
 
-function renderOfficialDraftPagesHtml(data = composePayload()) {
+function renderOfficialDraftPageHtml(data, body, pageNumber, totalPages, attachmentsText) {
   const today = new Date();
   const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
-  const attachmentsText = data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊";
-  const bodyPages = chunkTextByLength(data.body);
+  const isFirstPage = pageNumber === 1;
+  return `
+    <section class="draft-page" data-page-number="${pageNumber}" aria-label="函稿第 ${pageNumber} 頁">
+      ${isFirstPage ? `
+        <section class="draft-file-meta" aria-label="檔案資訊">
+          <span>檔　號：</span>
+          <span>保存年限：</span>
+        </section>
+        <header class="draft-official-head">
+          <h1>
+            <span>${escapeDraftHtml(data.companyName)}</span>
+            <strong>${escapeDraftHtml(data.type)}</strong>
+          </h1>
+          <section class="draft-contact-block">
+            <span>地址：${escapeDraftHtml(data.contactAddress)}</span>
+            <span>承辦人：${escapeDraftHtml(data.contactOwner)}</span>
+            <span>電話：${escapeDraftHtml(data.contactPhone)}</span>
+            <span>傳真：${escapeDraftHtml(data.contactFax)}</span>
+            <span>電子信箱：${escapeDraftHtml(data.contactEmail)}</span>
+          </section>
+        </header>
+        <section class="draft-recipient-line">受文者：${escapeDraftHtml(data.recipient)}</section>
+        <section class="draft-official-meta">
+          <div><span>發文日期：</span><strong>${escapeDraftHtml(rocDate)}</strong></div>
+          <div><span>發文字號：</span><strong>${escapeDraftHtml(data.no || "系統產生中")}</strong></div>
+          <div><span>速別：</span><strong>${escapeDraftHtml(data.priority)}</strong></div>
+          <div><span>密等及解密條件或保密期限：</span><strong>普通</strong></div>
+          <div><span>附件：</span><strong>${escapeDraftHtml(attachmentsText)}</strong></div>
+        </section>
+      ` : `
+        <section class="draft-continuation-head">
+          <span>${escapeDraftHtml(data.no || "系統產生中")}</span>
+          <strong>續頁 · 第 ${pageNumber} 頁</strong>
+        </section>
+      `}
+      <section class="draft-main ${isFirstPage ? "" : "continued"}">
+        ${isFirstPage ? `<div class="draft-content-row draft-subject"><span>主旨：</span><strong>${escapeDraftHtml(data.subject)}</strong></div>` : ""}
+        <div class="draft-content-row draft-description">
+          <span>${isFirstPage ? "說明：" : "續："}</span>
+          <div class="draft-body">${escapeDraftHtml(body)}</div>
+        </div>
+      </section>
+      <div class="draft-page-number">第 ${pageNumber} 頁 / 共 ${totalPages} 頁</div>
+      ${renderDraftSealLayer(data, pageNumber)}
+    </section>
+  `;
+}
+
+function renderOfficialDraftPagesHtml(data = composePayload()) {
+  const attachmentsText = draftAttachmentText(data);
+  const bodyPages = splitDraftBodyIntoPages(data, attachmentsText);
   normalizeSealPlacementPages(bodyPages.length);
   return bodyPages.map((body, index) => {
     const pageNumber = index + 1;
-    const isFirstPage = pageNumber === 1;
-    return `
-      <section class="draft-page" data-page-number="${pageNumber}" aria-label="函稿第 ${pageNumber} 頁">
-        ${isFirstPage ? `
-          <section class="draft-file-meta" aria-label="檔案資訊">
-            <span>檔　號：</span>
-            <span>保存年限：</span>
-          </section>
-          <header class="draft-official-head">
-            <h1>
-              <span>${data.companyName}</span>
-              <strong>${data.type}</strong>
-            </h1>
-            <section class="draft-contact-block">
-              <span>地址：${data.contactAddress}</span>
-              <span>承辦人：${data.contactOwner}</span>
-              <span>電話：${data.contactPhone}</span>
-              <span>傳真：${data.contactFax}</span>
-              <span>電子信箱：${data.contactEmail}</span>
-            </section>
-          </header>
-          <section class="draft-recipient-line">受文者：${data.recipient}</section>
-          <section class="draft-official-meta">
-            <div><span>發文日期：</span><strong>${rocDate}</strong></div>
-            <div><span>發文字號：</span><strong>${data.no || "系統產生中"}</strong></div>
-            <div><span>速別：</span><strong>${data.priority}</strong></div>
-            <div><span>密等及解密條件或保密期限：</span><strong>普通</strong></div>
-            <div><span>附件：</span><strong>${attachmentsText}</strong></div>
-          </section>
-        ` : `
-          <section class="draft-continuation-head">
-            <span>${data.no || "系統產生中"}</span>
-            <strong>第 ${pageNumber} 頁</strong>
-          </section>
-        `}
-        <section class="draft-main ${isFirstPage ? "" : "continued"}">
-          ${isFirstPage ? `<div class="draft-content-row draft-subject"><span>主旨：</span><strong>${data.subject}</strong></div>` : ""}
-          <div class="draft-content-row draft-description">
-            <span>${isFirstPage ? "說明：" : "續："}</span>
-            <div class="draft-body">${body}</div>
-          </div>
-        </section>
-        <div class="draft-page-number">第 ${pageNumber} 頁 / 共 ${bodyPages.length} 頁</div>
-        ${renderDraftSealLayer(data, pageNumber)}
-      </section>
-    `;
+    return renderOfficialDraftPageHtml(data, body, pageNumber, bodyPages.length, attachmentsText);
   }).join("");
 }
 
@@ -4264,6 +4385,7 @@ function composeInputState() {
     subject: document.querySelector("#subject")?.value.trim() || "",
     body: document.querySelector("#bodyText")?.value.trim() || "",
     attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name),
+    attachmentDetails: document.querySelector("#attachmentDetails")?.value.trim() || "",
     largeSealType: document.querySelector("#largeSealType")?.value || "無",
     smallSealType: document.querySelector("#smallSealType")?.value || "無"
   };
@@ -4302,8 +4424,10 @@ function composeReadinessChecks() {
       label: "附件",
       target: "attachments",
       required: false,
-      done: state.attachments.length > 0,
-      detail: state.attachments.length ? `已選 ${state.attachments.length} 個附件。` : "沒有附件也可先送，但請確認函稿本文與附件清冊。"
+      done: state.attachments.length > 0 || Boolean(state.attachmentDetails),
+      detail: state.attachments.length || state.attachmentDetails
+        ? `已建立附件資訊${state.attachments.length ? `，檔案 ${state.attachments.length} 個` : ""}${state.attachmentDetails ? "，含文字內容" : ""}。`
+        : "沒有附件也可先送，但請確認函稿本文與附件清冊。"
     },
     {
       key: "seal",
@@ -4332,7 +4456,8 @@ function renderComposeFieldHints() {
   [
     ["#recipient", "#recipientHint"],
     ["#subject", "#subjectHint"],
-    ["#bodyText", "#bodyTextHint"]
+    ["#bodyText", "#bodyTextHint"],
+    ["#attachmentDetails", "#attachmentDetailsHint"]
   ].forEach(([inputSelector, hintSelector]) => {
     const input = document.querySelector(inputSelector);
     const hint = document.querySelector(hintSelector);
@@ -4350,6 +4475,7 @@ function focusComposeReadinessTarget(target) {
     subject: "#subject",
     body: "#bodyText",
     attachments: "#attachments",
+    attachmentDetails: "#attachmentDetails",
     seal: "#largeSealType",
     confirm: "#draftPreviewPanel"
   };
@@ -5381,6 +5507,7 @@ async function createDispatchFromForm(status = "草稿") {
   const existingComposeDraft = dispatchDocs.find((item) => item.id === currentComposeDraftId && item.status === "草稿");
   const existingDoc = existingComposeDraft || null;
   const no = existingDoc?.no || assignNextDispatchNo();
+  const attachmentManifest = [...new Set(["函稿本文.pdf", "附件清冊.xml", ...data.attachments])];
   const doc = existingDoc || {
     id: `OUT-${Date.now()}`,
     no,
@@ -5395,6 +5522,7 @@ async function createDispatchFromForm(status = "草稿") {
     agencyCode: "待查詢",
     subject: data.subject,
     body: data.body,
+    attachmentDetails: data.attachmentDetails,
     contactAddress: data.contactAddress,
     contactOwner: data.contactOwner,
     contactPhone: data.contactPhone,
@@ -5412,7 +5540,7 @@ async function createDispatchFromForm(status = "草稿") {
     },
     status,
     owner: "總務",
-    attachments: ["函稿本文.pdf", "附件清冊.xml"],
+    attachments: attachmentManifest,
     packageId: "",
     lastReply: status === "草稿" ? (existingDoc ? "草稿已更新，尚未清稿。" : "草稿已建立，尚未清稿。") : "已建立函稿並進入清稿檢核。",
     checks: { format: status !== "草稿", recipient: true, attachments: true, certificate: true, package: false },
@@ -6285,6 +6413,7 @@ function linkContractToOfficialDoc(contract = currentContract()) {
   document.querySelector("#recipient").value = contract.counterparty;
   document.querySelector("#subject").value = `檢送${contract.title}簽署資料，請查照。`;
   document.querySelector("#bodyText").value = `一、檢送${contract.title}相關文件，請惠予確認。\n二、本合約相對人為${contract.counterparty}，合約期間為${contract.startDate || "未定"}至${contract.endDate || "未定"}。\n三、如需補充資料，請洽本公司承辦窗口。`;
+  document.querySelector("#attachmentDetails").value = contract.attachments?.length ? `附件：${contract.attachments.join("、")}` : "";
   markDraftDirty();
   addContractAudit("轉成發文草稿", `${contract.contractNo} 已帶入公文撰寫欄位。`);
   setView("compose");
@@ -10625,6 +10754,8 @@ function backendDocumentPayload(doc) {
       lockedBy: doc.lockedBy || "",
       lockedHash: doc.lockedHash || "",
       lockedAttachmentHash: doc.lockedAttachmentHash || "",
+      attachmentDetails: doc.attachmentDetails || "",
+      attachmentManifest: doc.attachments || [],
       versionStatus: doc.versionStatus || "",
       requiresReapproval: Boolean(doc.requiresReapproval),
       contact: {
@@ -10927,6 +11058,7 @@ function applyPersistentDocuments(rows = []) {
       agencyCode: row.agency_code || "待查詢",
       subject: row.subject,
       body: row.body || "",
+      attachmentDetails: metadata.attachmentDetails || "",
       status: row.status,
       owner: row.owner,
       dept: row.department || row.owner,
@@ -10945,7 +11077,7 @@ function applyPersistentDocuments(rows = []) {
       lockedAttachmentHash: metadata.lockedAttachmentHash || "",
       versionStatus: metadata.versionStatus || "",
       requiresReapproval: Boolean(metadata.requiresReapproval),
-      attachments: ["函稿本文.pdf", "附件清冊.xml"]
+      attachments: metadata.attachmentManifest || ["函稿本文.pdf", "附件清冊.xml"]
     };
   });
   if (backendInbound.length) inboundDocs.splice(0, inboundDocs.length, ...backendInbound);
@@ -14706,7 +14838,7 @@ document.querySelector("#composeNextAction").addEventListener("click", (event) =
   const nextButton = event.target.closest("#composeInlineNextBtn");
   if (nextButton && !nextButton.disabled) advanceComposeStep();
 });
-["#composeCompanySelect", "#docType", "#priority", "#recipient", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachments"].forEach((selector) => {
+["#composeCompanySelect", "#docType", "#priority", "#recipient", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);
   if (!["INPUT", "TEXTAREA"].includes(element?.tagName) || element?.type === "file") {
