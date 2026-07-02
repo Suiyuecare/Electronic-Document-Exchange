@@ -37,10 +37,15 @@ jobs:
         run: |
           python backend.py --host 127.0.0.1 --port 5174 &
           SERVER_PID=$!
+          trap 'kill $SERVER_PID' EXIT
           sleep 2
           curl --fail http://127.0.0.1:5174/api/health
           curl --fail http://127.0.0.1:5174/api/production/readiness
           curl --fail http://127.0.0.1:5174/api/cron/run-due
           curl --fail http://127.0.0.1:5174/api/dashboard
-          curl --fail http://127.0.0.1:5174/api/documents
-          kill $SERVER_PID
+          TOKEN="$(curl --fail --silent --show-error \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"records@suiyuecare.com","password":"demo1234","provider":"CI smoke"}' \
+            http://127.0.0.1:5174/api/auth/login \
+            | python -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+          curl --fail -H "Authorization: Bearer $TOKEN" http://127.0.0.1:5174/api/documents
