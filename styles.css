@@ -1786,11 +1786,14 @@ body[data-identity-kind="generalAffairs"] .identity-item {
 
 .official-draft-preview .draft-page-number {
   position: absolute;
-  right: 42px;
+  left: 50%;
   bottom: 22px;
+  width: max-content;
+  transform: translateX(-50%);
   color: #111;
   font-size: 14px;
   font-weight: 700;
+  text-align: center;
 }
 
 .official-draft-preview .draft-footer {
