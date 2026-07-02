@@ -1593,37 +1593,6 @@ body[data-identity-kind="generalAffairs"] .identity-item {
   margin-bottom: 10px;
 }
 
-.draft-preview-summary {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.draft-preview-summary-item {
-  display: grid;
-  gap: 4px;
-  min-height: 58px;
-  padding: 10px 12px;
-  border: 1px solid rgba(148, 117, 82, 0.22);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.74);
-}
-
-.draft-preview-summary-item span {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 900;
-}
-
-.draft-preview-summary-item strong {
-  overflow: hidden;
-  color: var(--ink);
-  font-size: 13px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .draft-preview-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -5295,10 +5264,6 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .draft-preview-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .compose-one-page-checks {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -5399,10 +5364,6 @@ textarea {
 
   #composeNextAction .compose-readiness-list,
   .compose-progress-strip {
-    grid-template-columns: 1fr;
-  }
-
-  .draft-preview-summary {
     grid-template-columns: 1fr;
   }
 

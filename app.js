@@ -3933,32 +3933,12 @@ function renderDraftSealLayer(data, pageNumber) {
   `;
 }
 
-function renderDraftPreviewSummary(data = composePayload()) {
-  const summary = document.querySelector("#draftPreviewSummary");
-  if (!summary) return;
-  const sealTypes = [data.largeSealType, data.smallSealType].filter((item) => item && item !== "無");
-  const attachmentsText = data.attachments.length ? `${data.attachments.length} 個附件` : "尚未選附件";
-  const items = [
-    ["受文者", data.recipient || "未指定"],
-    ["主旨", data.subject || "未填主旨"],
-    ["附件", attachmentsText],
-    ["用印", sealTypes.length ? sealTypes.join("、") : "不使用印章"]
-  ];
-  summary.innerHTML = items.map(([label, value]) => `
-    <div class="draft-preview-summary-item">
-      <span>${label}</span>
-      <strong>${value}</strong>
-    </div>
-  `).join("");
-}
-
 function syncDraftPreviewChrome(data = composePayload()) {
   const panel = document.querySelector("#draftPreviewPanel");
   const body = document.querySelector("#draftPreviewBody");
   const toggle = document.querySelector("#toggleDraftPreviewBtn");
   const status = document.querySelector("#draftConfirmStatus");
   const submit = document.querySelector("#submitDispatchBtn");
-  renderDraftPreviewSummary(data);
   if (status) status.textContent = draftConfirmed ? "已確認" : "尚未確認";
   if (submit) submit.disabled = !draftConfirmed;
   if (panel) panel.classList.remove("is-collapsed");
