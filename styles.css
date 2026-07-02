@@ -886,89 +886,6 @@ body[data-identity-kind="generalAffairs"] #dashboard .content-grid {
   justify-content: flex-end;
 }
 
-.compose-draft-status {
-  display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto auto;
-  gap: 8px;
-  align-items: center;
-  padding: 10px 12px;
-  border: 1px solid rgba(148, 117, 82, 0.2);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.74);
-}
-
-.compose-draft-status strong {
-  display: block;
-  color: var(--ink);
-  font-size: 13px;
-}
-
-.compose-draft-status p {
-  margin-top: 2px;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.compose-draft-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: #a8a29e;
-}
-
-.compose-draft-status.local {
-  border-color: rgba(217, 119, 6, 0.34);
-  background: #fffaf1;
-}
-
-.compose-draft-status.local .compose-draft-dot {
-  background: #d97706;
-  box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.12);
-}
-
-.compose-draft-status.saving {
-  border-color: rgba(14, 116, 144, 0.32);
-  background: #f0fdfa;
-}
-
-.compose-draft-status.saving .compose-draft-dot {
-  background: #0e7490;
-  animation: composeStatusPulse 1s ease-in-out infinite;
-}
-
-.compose-draft-status.saved {
-  border-color: rgba(4, 120, 87, 0.3);
-  background: #f0fdf4;
-}
-
-.compose-draft-status.saved .compose-draft-dot {
-  background: #047857;
-}
-
-.compose-draft-status .text-button {
-  white-space: nowrap;
-}
-
-.compose-draft-status .text-button.muted {
-  color: var(--muted);
-}
-
-#composeNextAction .compose-draft-status {
-  min-height: 40px;
-  padding: 8px 10px;
-}
-
-#composeNextAction .compose-draft-status p {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-@keyframes composeStatusPulse {
-  0%, 100% { transform: scale(0.9); opacity: 0.72; }
-  50% { transform: scale(1.18); opacity: 1; }
-}
-
 .compose-inline-next {
   min-width: 150px;
 }
@@ -5398,15 +5315,6 @@ textarea {
 
   .compose-action-controls {
     justify-content: flex-start;
-  }
-
-  .compose-draft-status {
-    grid-template-columns: 12px minmax(0, 1fr);
-  }
-
-  .compose-draft-status .text-button {
-    grid-column: 2;
-    justify-self: start;
   }
 
   .topbar {

@@ -3837,12 +3837,6 @@ function formatComposeSaveTime(isoText) {
   return date.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-function readComposeAutosave() {
-  const saved = readJsonStorage(composeAutosaveStorageKey);
-  if (!saved?.snapshot || !composeSnapshotHasMeaningfulContent(saved.snapshot)) return null;
-  return saved;
-}
-
 function writeComposeAutosave() {
   const snapshot = composeRawSnapshot();
   if (!composeSnapshotHasMeaningfulContent(snapshot)) return;
@@ -3875,77 +3869,8 @@ function clearComposeAutosave() {
   }
 }
 
-function applyComposeAutosave(saved = readComposeAutosave()) {
-  if (!saved?.snapshot) return showToast("目前沒有可載回的本機草稿。");
-  Object.entries(saved.snapshot.values || {}).forEach(([selector, value]) => {
-    if (selector === "#dispatchNo") return;
-    const element = document.querySelector(selector);
-    if (element) element.value = value;
-  });
-  if (saved.snapshot.sealPlacements?.large) composeSealPlacements.large = { ...saved.snapshot.sealPlacements.large };
-  if (saved.snapshot.sealPlacements?.small) composeSealPlacements.small = { ...saved.snapshot.sealPlacements.small };
-  const existingDraft = dispatchDocs.find((item) => item.id === saved.snapshot.currentComposeDraftId && item.status === "草稿");
-  currentComposeDraftId = existingDraft?.id || "";
-  draftConfirmed = false;
-  draftSigned = false;
-  activeComposeStep = "fill";
-  composeSaveState = {
-    tone: "local",
-    title: "已載回本機草稿",
-    detail: `${formatComposeSaveTime(saved.updatedAt)} 的內容已放回表單，確認無誤後請暫存草稿。`
-  };
-  renderDraftPreview();
-  showToast("已載回本機保護的草稿內容。");
-}
-
-function discardComposeAutosave() {
-  clearComposeAutosave();
-  composeSaveState = {
-    tone: currentComposeDraftId ? "saved" : "idle",
-    title: currentComposeDraftId ? "已連結草稿" : "尚未暫存",
-    detail: currentComposeDraftId ? "這份內容已在發文清單中有草稿紀錄。" : "已清除本機保護內容。"
-  };
-  renderComposeStepper();
-  showToast("已清除本機保護內容。");
-}
-
-function composeSaveStatusView() {
-  const saved = readComposeAutosave();
-  const activeDraft = dispatchDocs.find((item) => item.id === currentComposeDraftId && item.status === "草稿");
-  if (composeSaveState.tone === "saving") return composeSaveState;
-  if (activeDraft && composeSaveState.tone !== "local") {
-    return {
-      tone: "saved",
-      title: `正在編輯草稿 ${activeDraft.no}`,
-      detail: "這份內容已出現在發文清單；後續修改可再按暫存草稿更新。"
-    };
-  }
-  if (saved && composeSaveState.tone === "idle") {
-    return {
-      tone: "local",
-      title: "本機有未送出的內容",
-      detail: `${formatComposeSaveTime(saved.updatedAt)} 自動保護，必要時可載回表單。`,
-      canLoad: true,
-      canDiscard: true
-    };
-  }
-  return composeSaveState;
-}
-
 function renderComposeSaveStatus() {
-  const target = document.querySelector("#composeDraftStatus");
-  if (!target) return;
-  const view = composeSaveStatusView();
-  target.className = `compose-draft-status ${view.tone || "idle"}`;
-  target.innerHTML = `
-    <span class="compose-draft-dot" aria-hidden="true"></span>
-    <div>
-      <strong>${view.title}</strong>
-      <p>${view.detail}</p>
-    </div>
-    ${view.canLoad ? `<button class="text-button" type="button" data-compose-action="load-local">載回</button>` : ""}
-    ${view.canDiscard ? `<button class="text-button muted" type="button" data-compose-action="discard-local">忽略</button>` : ""}
-  `;
+  // Local autosave is intentionally silent; the compose page should stay focused on the document.
 }
 
 function renderComposeCompanyOptions() {
@@ -14749,15 +14674,6 @@ document.querySelector("#resetDraftConfirmBtn").addEventListener("click", () => 
 document.querySelector("#composePrevBtn").addEventListener("click", retreatComposeStep);
 document.querySelector("#composeNextBtn").addEventListener("click", advanceComposeStep);
 document.querySelector("#composeNextAction").addEventListener("click", (event) => {
-  const composeAction = event.target.closest("[data-compose-action]");
-  if (composeAction?.dataset.composeAction === "load-local") {
-    applyComposeAutosave();
-    return;
-  }
-  if (composeAction?.dataset.composeAction === "discard-local") {
-    discardComposeAutosave();
-    return;
-  }
   const saveButton = event.target.closest("#composeInlineSaveDraftBtn");
   if (saveButton) {
     void saveComposeDraft();
