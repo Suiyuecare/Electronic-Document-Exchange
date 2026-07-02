@@ -4279,8 +4279,10 @@ function renderDraftPreview(options = {}) {
 function setDraftConfirmed(value) {
   draftConfirmed = value;
   if (!value) draftSigned = false;
-  if (value) draftPreviewExpanded = true;
-  activeComposeStep = "confirm";
+  if (value) {
+    draftPreviewExpanded = true;
+    activeComposeStep = "confirm";
+  }
   renderDraftPreview({ force: true });
 }
 
