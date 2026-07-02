@@ -1709,6 +1709,7 @@ body[data-identity-kind="generalAffairs"] .identity-item {
   width: min(420px, 100%);
   margin-top: 20px;
   margin-left: auto;
+  transform: translateX(32px);
   color: #111;
   font-size: 18px;
   font-weight: 700;
@@ -2898,6 +2899,7 @@ tr:last-child td {
 .draft-preview-panel.live .official-draft-preview .draft-contact-block {
   width: min(320px, 100%);
   margin-top: 12px;
+  transform: translateX(20px);
   font-size: 13px;
 }
 
