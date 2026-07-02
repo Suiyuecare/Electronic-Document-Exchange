@@ -1884,6 +1884,7 @@ function setView(target) {
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.target === target));
   document.querySelector("#pageTitle").textContent = simpleRouteTitle(target);
   document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(target);
+  updateHeaderStatus();
   if (location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
 }
 
@@ -1899,6 +1900,48 @@ function activeRole() {
 function activeUnit() {
   if (authState?.user?.role === activeRole()) return authState?.user?.unit || roleDataScopes[activeRole()]?.departments?.[0] || "";
   return roleDataScopes[activeRole()]?.departments?.[0] || authState?.user?.unit || "";
+}
+
+function headerClockTime() {
+  return new Date().toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+function headerTodoCount() {
+  return notificationItems.filter((item) => item.status !== "已讀").length;
+}
+
+function updateHeaderStatus() {
+  const role = activeRole();
+  const user = authState?.user;
+  const displayName = user?.name || role;
+  const title = user?.title || user?.role || role;
+  const topInfo = document.querySelector("#topInfo");
+  if (topInfo) topInfo.textContent = `${displayName} · ${title} · 即時同步 · ${headerClockTime()}`;
+
+  const todoCount = headerTodoCount();
+  const notificationBadge = document.querySelector("#headerNotificationBadge");
+  if (notificationBadge) notificationBadge.toggleAttribute("hidden", todoCount <= 0);
+
+  const moduleBadge = document.querySelector("#moduleTodoBadge");
+  if (moduleBadge) {
+    moduleBadge.textContent = todoCount > 99 ? "99+" : String(todoCount);
+    moduleBadge.toggleAttribute("hidden", todoCount <= 0);
+  }
+}
+
+function refreshCurrentWorkspace() {
+  applyRoleNavigation();
+  renderIdentityWorkbench();
+  renderScopeZone();
+  renderRoleDashboard();
+  renderInboundRows();
+  renderInboundDetail();
+  renderDispatchBoard();
+  renderDispatchDetail();
+  renderApprovalLog();
+  renderNotifications();
+  updateHeaderStatus();
+  showToast("已重新整理目前資料。");
 }
 
 function documentAclKeys(doc = {}) {
@@ -2170,6 +2213,7 @@ function applyRoleNavigation() {
   const active = document.querySelector(".view.active")?.id || "dashboard";
   document.querySelector("#pageTitle").textContent = simpleRouteTitle(active);
   document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(active);
+  updateHeaderStatus();
   document.querySelectorAll("[data-target]").forEach((control) => {
     if (control.classList.contains("nav-item")) return;
     const target = control.dataset.target;
@@ -14361,9 +14405,9 @@ document.querySelectorAll("[data-target]").forEach((control) => {
   });
 });
 
-document.querySelector("#globalSearchForm").addEventListener("submit", (event) => {
+document.querySelector("#globalSearchForm")?.addEventListener("submit", (event) => {
   event.preventDefault();
-  const value = document.querySelector("#globalSearchInput").value.trim();
+  const value = document.querySelector("#globalSearchInput")?.value.trim() || "";
   document.querySelector("#searchQuery").value = value;
   document.querySelector("#searchCategory").value = "all";
   document.querySelector("#searchStatus").value = "";
@@ -15343,7 +15387,14 @@ document.querySelector("#settingsBackupBtn").addEventListener("click", () => {
 document.querySelector("#settingsClearLogBtn").addEventListener("click", () => {
   clearLogWithConfirm(settingsAuditLog, renderSettingsAuditLog, "設定操作紀錄");
 });
-document.querySelector("#logoutBtn").addEventListener("click", leaveApp);
+document.querySelector("#headerNotificationBtn")?.addEventListener("click", () => {
+  setView(isRouteAllowed("notifications") ? "notifications" : "dashboard");
+});
+document.querySelector("#headerRefreshBtn")?.addEventListener("click", refreshCurrentWorkspace);
+document.querySelector("#returnPortalBtn")?.addEventListener("click", () => {
+  window.location.href = buildLoggingPortalUrl();
+});
+document.querySelector("#logoutBtn")?.addEventListener("click", leaveApp);
 document.querySelector("#identityWorkbench").addEventListener("click", (event) => {
   const button = event.target.closest("[data-identity-target]");
   if (!button) return;
@@ -15427,4 +15478,6 @@ renderFeatureGrid();
 renderSettings();
 renderSearch();
 setView(location.hash?.slice(1) && titles[location.hash.slice(1)] ? location.hash.slice(1) : "dashboard");
+updateHeaderStatus();
+window.setInterval(updateHeaderStatus, 1000);
 tryResumePlatformSession();

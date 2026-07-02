@@ -112,31 +112,31 @@
         </div>
 
         <nav class="nav-list" aria-label="電子公文交換功能">
-          <button class="nav-item active" data-target="dashboard">總覽</button>
-          <button class="nav-item" data-target="search">查詢搜尋</button>
-          <button class="nav-item" data-target="approvalLog">簽核紀錄</button>
-          <button class="nav-item" data-target="contracts">合約管理</button>
-          <button class="nav-item" data-target="contractSeal">合約用印</button>
-          <button class="nav-item" data-target="inbound">收文管理</button>
-          <button class="nav-item" data-target="dispatch">發文管理</button>
-          <button class="nav-item" data-target="compose">建立公文</button>
-          <button class="nav-item" data-target="format">文書格式</button>
-          <button class="nav-item" data-target="workflow">流程控管</button>
-          <button class="nav-item" data-target="seals">印鑑管理</button>
-          <button class="nav-item" data-target="tracking">稽催追蹤</button>
-          <button class="nav-item" data-target="exchange">jAgent 介接</button>
-          <button class="nav-item" data-target="archive">歸檔保存</button>
-          <button class="nav-item" data-target="security">資安控管</button>
-          <button class="nav-item" data-target="fileSecurity">檔案資安</button>
-          <button class="nav-item" data-target="accounts">帳號權限</button>
-          <button class="nav-item" data-target="reports">報表統計</button>
-          <button class="nav-item" data-target="notifications">通知中心</button>
-          <button class="nav-item" data-target="jobs">背景任務</button>
-          <button class="nav-item" data-target="database">後端資料庫</button>
-          <button class="nav-item" data-target="ops">維運中心</button>
-          <button class="nav-item" data-target="complianceOps">法遵營運</button>
-          <button class="nav-item" data-target="features">功能總表</button>
-          <button class="nav-item" data-target="settings">系統設定</button>
+          <button class="nav-item active" data-target="dashboard" data-icon="總">總覽</button>
+          <button class="nav-item" data-target="search" data-icon="搜">查詢搜尋</button>
+          <button class="nav-item" data-target="approvalLog" data-icon="簽">簽核紀錄</button>
+          <button class="nav-item" data-target="contracts" data-icon="約">合約管理</button>
+          <button class="nav-item" data-target="contractSeal" data-icon="印">合約用印</button>
+          <button class="nav-item" data-target="inbound" data-icon="收">收文管理</button>
+          <button class="nav-item" data-target="dispatch" data-icon="發">發文管理</button>
+          <button class="nav-item" data-target="compose" data-icon="寫">建立公文</button>
+          <button class="nav-item" data-target="format" data-icon="格">文書格式</button>
+          <button class="nav-item" data-target="workflow" data-icon="流">流程控管</button>
+          <button class="nav-item" data-target="seals" data-icon="章">印鑑管理</button>
+          <button class="nav-item" data-target="tracking" data-icon="催">稽催追蹤</button>
+          <button class="nav-item" data-target="exchange" data-icon="介">jAgent 介接</button>
+          <button class="nav-item" data-target="archive" data-icon="檔">歸檔保存</button>
+          <button class="nav-item" data-target="security" data-icon="安">資安控管</button>
+          <button class="nav-item" data-target="fileSecurity" data-icon="鎖">檔案資安</button>
+          <button class="nav-item" data-target="accounts" data-icon="帳">帳號權限</button>
+          <button class="nav-item" data-target="reports" data-icon="報">報表統計</button>
+          <button class="nav-item" data-target="notifications" data-icon="通">通知中心</button>
+          <button class="nav-item" data-target="jobs" data-icon="任">背景任務</button>
+          <button class="nav-item" data-target="database" data-icon="庫">後端資料庫</button>
+          <button class="nav-item" data-target="ops" data-icon="維">維運中心</button>
+          <button class="nav-item" data-target="complianceOps" data-icon="法">法遵營運</button>
+          <button class="nav-item" data-target="features" data-icon="表">功能總表</button>
+          <button class="nav-item" data-target="settings" data-icon="設">系統設定</button>
         </nav>
 
         <section class="profile-card">
@@ -162,12 +162,21 @@
             <p class="eyebrow" id="pageEyebrow">機關層公文收發模組 jAgent 介接作業台</p>
             <h2 id="pageTitle">交換總覽</h2>
           </div>
-          <div class="quick-actions">
-            <form class="global-search" id="globalSearchForm">
-              <input id="globalSearchInput" type="search" placeholder="文號、合約、機關、附件、通知" />
-              <button class="secondary-button" type="submit">搜尋</button>
-            </form>
-            <button class="primary-button" id="logoutBtn" type="button">登出</button>
+          <div class="quick-actions module-switch-actions" aria-label="頁首操作">
+            <button class="topbar-notification-button" id="headerNotificationBtn" type="button" aria-label="通知中心">
+              <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+              </svg>
+              <span class="header-notification-dot" id="headerNotificationBadge" hidden></span>
+            </button>
+            <button class="module-switch-button" id="headerRefreshBtn" type="button">重新整理</button>
+            <button class="module-switch-button" id="returnPortalBtn" type="button">
+              回模組頁
+              <span class="module-todo-badge" id="moduleTodoBadge" hidden></span>
+            </button>
+            <button class="module-switch-button primary" id="logoutBtn" type="button">登出</button>
+            <span class="top-info" id="topInfo">即時同步</span>
           </div>
         </header>
 
