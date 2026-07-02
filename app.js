@@ -222,6 +222,12 @@ const dispatchDocs = [
 let selectedDispatchId = dispatchDocs[0].id;
 let dispatchFilter = "all";
 let dispatchSearchTerm = "";
+let officialWorkflowItems = [];
+let selectedOfficialDocumentId = "";
+let officialWorkflowScope = "all";
+let officialWorkflowSearchTerm = "";
+let officialWorkflowStatusFilter = "";
+let officialSealOptions = [];
 const dispatchAuditLog = [
   ["10:12", "系統初始化", "載入既有發文與交換紀錄。"]
 ];
@@ -970,6 +976,8 @@ alignRolePermissionsWithLogging();
 let workflowRole = "總務";
 let draftConfirmed = false;
 let draftSigned = false;
+let draftPreviewExpanded = false;
+let draftPreviewRenderTimer = null;
 let activeComposeStep = "fill";
 let currentComposeDraftId = "";
 let composeSaveState = {
@@ -1210,6 +1218,18 @@ const sealAuditLog = [
 let uploadedSealPdf = null;
 let uploadedSealObjectUrl = "";
 let uploadedSealStampPositions = [];
+let companySealModuleLoaded = false;
+let companySealCompanies = [];
+let companySealReferences = { grouped: {} };
+let companySealLibrary = [];
+let companySealFiles = [];
+let companySealRequests = [];
+let companySealLogs = [];
+let selectedCompanySealCompanyId = "";
+let selectedCompanySealId = "";
+let companySealStampPositions = [
+  { page: 1, x: 420, y: 130, w: 85, h: 85, label: "用印", type: "general_seal" }
+];
 
 const pdfPointsPerMm = 72 / 25.4;
 
@@ -3290,6 +3310,8 @@ function enterApp(message = "登入成功，已進入電子公文交換系統。
   renderInboundDetail();
   renderDispatchBoard();
   renderDispatchDetail();
+  void loadOfficialWorkflow("all");
+  void loadOfficialSealOptions();
   renderApprovalLog();
   applyComposeContactDefaults(true);
   void syncGoLiveAuditFromBackend(true);
@@ -3986,6 +4008,61 @@ function renderDraftSealLayer(data, pageNumber) {
   `;
 }
 
+function renderDraftPreviewSummary(data = composePayload()) {
+  const summary = document.querySelector("#draftPreviewSummary");
+  if (!summary) return;
+  const sealTypes = [data.largeSealType, data.smallSealType].filter((item) => item && item !== "無");
+  const attachmentsText = data.attachments.length ? `${data.attachments.length} 個附件` : "尚未選附件";
+  const items = [
+    ["受文者", data.recipient || "未指定"],
+    ["主旨", data.subject || "未填主旨"],
+    ["附件", attachmentsText],
+    ["用印", sealTypes.length ? sealTypes.join("、") : "不使用印章"]
+  ];
+  summary.innerHTML = items.map(([label, value]) => `
+    <div class="draft-preview-summary-item">
+      <span>${label}</span>
+      <strong>${value}</strong>
+    </div>
+  `).join("");
+}
+
+function syncDraftPreviewChrome(data = composePayload()) {
+  const panel = document.querySelector("#draftPreviewPanel");
+  const body = document.querySelector("#draftPreviewBody");
+  const toggle = document.querySelector("#toggleDraftPreviewBtn");
+  const status = document.querySelector("#draftConfirmStatus");
+  const submit = document.querySelector("#submitDispatchBtn");
+  renderDraftPreviewSummary(data);
+  if (status) status.textContent = draftConfirmed ? "已確認" : "尚未確認";
+  if (submit) submit.disabled = !draftConfirmed;
+  if (panel) panel.classList.toggle("is-collapsed", !draftPreviewExpanded);
+  if (body) body.hidden = !draftPreviewExpanded;
+  if (toggle) {
+    toggle.textContent = draftPreviewExpanded ? "收合預覽" : "展開預覽";
+    toggle.setAttribute("aria-expanded", String(draftPreviewExpanded));
+  }
+}
+
+function setDraftPreviewExpanded(value, options = {}) {
+  draftPreviewExpanded = Boolean(value);
+  renderDraftPreview({ force: draftPreviewExpanded });
+  if (options.scroll) {
+    document.querySelector("#draftPreviewPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+function scheduleDraftPreviewRender(delay = 220) {
+  if (draftPreviewRenderTimer) window.clearTimeout(draftPreviewRenderTimer);
+  renderComposeCompanyOptions();
+  syncDraftPreviewChrome();
+  renderComposeStepper();
+  draftPreviewRenderTimer = window.setTimeout(() => {
+    draftPreviewRenderTimer = null;
+    renderDraftPreview({ force: draftPreviewExpanded });
+  }, delay);
+}
+
 function bindDraftSealDrag() {
   const preview = document.querySelector("#draftPreview");
   if (!preview) return;
@@ -4112,7 +4189,7 @@ function applyAiDraftToCompose() {
   document.querySelector("#bodyText").value = body;
   markDraftDirty();
   addDispatchAudit("套用 AI 函稿", "AI 生成內容已帶入主旨與說明欄位。");
-  showToast("已套用到左側主旨與說明。");
+  showToast("已套用到公文主旨與說明。");
 }
 
 function clearAiDraft() {
@@ -4124,13 +4201,21 @@ function clearAiDraft() {
   showToast("AI 公文助理欄位已清除。");
 }
 
-function renderDraftPreview() {
+function renderDraftPreview(options = {}) {
+  const force = Boolean(options.force);
+  if (draftPreviewRenderTimer) {
+    window.clearTimeout(draftPreviewRenderTimer);
+    draftPreviewRenderTimer = null;
+  }
   renderComposeCompanyOptions();
   const data = composePayload();
   const preview = document.querySelector("#draftPreview");
-  const status = document.querySelector("#draftConfirmStatus");
-  const submit = document.querySelector("#submitDispatchBtn");
+  syncDraftPreviewChrome(data);
   if (!preview) return;
+  if (!draftPreviewExpanded && !force) {
+    renderComposeStepper();
+    return;
+  }
   const today = new Date();
   const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
   const attachmentsText = data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊";
@@ -4188,16 +4273,15 @@ function renderDraftPreview() {
     }).join("")}
   `;
   bindDraftSealDrag();
-  if (status) status.textContent = draftConfirmed ? "已確認" : "尚未確認";
-  if (submit) submit.disabled = !draftConfirmed;
   renderComposeStepper();
 }
 
 function setDraftConfirmed(value) {
   draftConfirmed = value;
   if (!value) draftSigned = false;
+  if (value) draftPreviewExpanded = true;
   activeComposeStep = value ? "sign" : "confirm";
-  renderDraftPreview();
+  renderDraftPreview({ force: draftPreviewExpanded });
 }
 
 function markDraftDirty() {
@@ -4205,14 +4289,14 @@ function markDraftDirty() {
   draftSigned = false;
   activeComposeStep = "fill";
   writeComposeAutosave();
-  renderDraftPreview();
+  scheduleDraftPreviewRender();
 }
 
 function composeStepState() {
   const state = composeInputState();
   const filled = Boolean(state.recipient && state.subject.length >= 8 && state.body.length >= 8);
   return [
-    { key: "fill", label: "填寫與預覽", body: "文號、受文者、主旨、附件、用印", done: filled },
+    { key: "fill", label: "填寫資料", body: "文號、受文者、主旨、附件、用印", done: filled },
     { key: "confirm", label: "確認", body: "撰寫者確認內容", done: draftConfirmed },
     { key: "sign", label: "送簽", body: "送主管清稿簽核", done: draftSigned },
     { key: "send", label: "送出", body: "進入發文佇列", done: false }
@@ -4280,7 +4364,7 @@ function composeReadinessChecks() {
       target: "seal",
       required: false,
       done: true,
-      detail: sealTypes.length ? `已選 ${sealTypes.join("、")}，可在右側預覽拖曳位置。` : "目前不使用印章。"
+      detail: sealTypes.length ? `已選 ${sealTypes.join("、")}，可在下方預覽拖曳位置。` : "目前不使用印章。"
     },
     {
       key: "confirm",
@@ -4288,7 +4372,7 @@ function composeReadinessChecks() {
       target: "confirm",
       required: activeComposeStep !== "fill",
       done: draftConfirmed,
-      detail: draftConfirmed ? "已確認右側函稿預覽。" : "送簽前請先在右側按「確認函稿」。"
+      detail: draftConfirmed ? "已確認函稿預覽。" : "送簽前請先展開預覽並按「確認函稿」。"
     }
   ];
 }
@@ -4321,10 +4405,13 @@ function focusComposeReadinessTarget(target) {
     body: "#bodyText",
     attachments: "#attachments",
     seal: "#largeSealType",
-    confirm: ".draft-preview-panel"
+    confirm: "#draftPreviewPanel"
   };
   const selector = selectorMap[target];
   if (!selector) return;
+  if (target === "confirm") {
+    setDraftPreviewExpanded(true, { scroll: true });
+  }
   const focusTarget = () => {
     const element = document.querySelector(selector);
     if (!element) return;
@@ -4388,6 +4475,11 @@ function advanceComposeStep() {
   if (!validateComposeStep(current)) return;
   if (current === "fill") renderDraftPreview();
   if (current === "confirm" && !draftConfirmed) {
+    if (!draftPreviewExpanded) {
+      setDraftPreviewExpanded(true, { scroll: true });
+      showToast("請先檢視下方函稿預覽，再確認送簽。");
+      return;
+    }
     draftConfirmed = true;
     addDispatchAudit("確認函稿", "撰寫者已確認函稿預覽、附件與用印位置。");
     showToast("函稿已確認，可以送清稿簽核。");
@@ -4410,7 +4502,7 @@ function retreatComposeStep() {
 function composeNextControlState() {
   const disabled = activeComposeStep === "send" || (activeComposeStep === "fill" && composeBasicBlockers().length > 0);
   const text = activeComposeStep === "confirm" && !draftConfirmed
-    ? "確認函稿"
+    ? (draftPreviewExpanded ? "確認函稿" : "前往預覽確認")
     : activeComposeStep === "sign"
       ? "送簽並加入佇列"
       : activeComposeStep === "send"
@@ -4429,12 +4521,12 @@ function renderComposeStepper() {
   const onePageItems = [
     { key: "content", label: "填寫", body: "文號、受文者、主旨、說明", done: composeBasicBlockers().length === 0 },
     { key: "package", label: "附件與用印", body: "寄件資料、附件、大章小章", done: true },
-    { key: "preview", label: "右側預覽", body: draftConfirmed ? "函稿已確認" : "確認後才能送簽", done: draftConfirmed }
+    { key: "preview", label: "預覽確認", body: draftConfirmed ? "函稿已確認" : "確認後才能送簽", done: draftConfirmed }
   ];
   stepper.innerHTML = `
     <div class="compose-one-page-note">
       <strong>同一頁完成</strong>
-      <span>填寫內容、附件用印與函稿預覽會同步顯示，不需要切換頁籤。</span>
+      <span>填寫內容與附件用印集中處理；需要確認時再展開下方函稿預覽。</span>
     </div>
     <div class="compose-one-page-checks">
       ${onePageItems.map((item) => `
@@ -4448,8 +4540,8 @@ function renderComposeStepper() {
   `;
   const next = steps[activeIndex] || steps[steps.length - 1];
   const nextMessages = {
-    fill: ["填寫與預覽同頁", "在左側補齊公文內容、附件與用印設定；右側即時函稿會同步更新。"],
-    confirm: ["確認函稿", "按下一步會確認目前版本；內容一修改就會重新要求確認。"],
+    fill: ["填寫公文資料", "補齊公文內容、附件與用印設定；下方預覽會在展開時更新成最新版本。"],
+    confirm: ["確認函稿", draftPreviewExpanded ? "確認下方函稿預覽後，按下一步會確認目前版本。" : "按下一步會先展開下方函稿預覽，內容一修改就會重新要求確認。"],
     sign: ["送主管清稿", "按下清稿並加入發文佇列，系統會建立待清稿案件。"],
     send: ["等待送出", "主管清稿與封裝完成後，再由發文管理送交 jAgent。"]
   };
@@ -4465,7 +4557,7 @@ function renderComposeStepper() {
       <div class="compose-action-controls">
         <span class="status-pill">${composeBasicBlockers().length ? "尚有必填未完成" : "可以進入確認"}</span>
         <button class="secondary-button compose-inline-save" id="composeInlineSaveDraftBtn" type="button">暫存草稿</button>
-        <button class="secondary-button compose-inline-preview" type="button" data-compose-focus="confirm">看右側預覽</button>
+        <button class="secondary-button compose-inline-preview" type="button" data-compose-focus="confirm">預覽函稿</button>
         <button class="primary-button compose-inline-next" id="composeInlineNextBtn" type="button" ${nextControl.disabled ? "disabled" : ""}>${nextControl.text}</button>
       </div>
     </div>
@@ -4684,6 +4776,499 @@ function renderDispatchDetail() {
   bindDocumentAclButtons(doc, renderDispatchDetail);
   renderDispatchChecks(doc);
   renderPackagePanel(doc);
+}
+
+const officialStatusLabels = {
+  draft: "草稿",
+  pending_applicant_manager: "申請人主管",
+  pending_department_head: "部門主管",
+  pending_admin_director: "行政部門主任",
+  pending_general_affairs_review: "總務審核",
+  pending_ceo: "執行長",
+  approved: "已核准",
+  stamping: "用印中",
+  stamped: "已完成用印",
+  pending_general_affairs_dispatch: "等待總務寄發",
+  returned_to_applicant_for_send: "回申請人自行寄發",
+  dispatched: "已由總務正式發文",
+  sent_by_applicant: "已由申請人自行寄出",
+  closed: "已結案歸檔",
+  rejected: "已駁回",
+  cancelled: "已取消",
+  stamping_failed: "用印失敗"
+};
+
+function officialStatusLabel(status = "") {
+  return officialStatusLabels[status] || status || "未設定";
+}
+
+const officialFileTypeLabels = {
+  original_pdf: "原始上傳 PDF",
+  generated_pdf: "系統產生公文 PDF",
+  stamped_pdf: "已用印版本",
+  attachment: "補充附件",
+  dispatch_proof: "寄發證明"
+};
+
+const officialDispatchMethodLabels = {
+  electronic_official_document_by_general_affairs: "總務電子公文系統發文",
+  return_to_applicant_for_manual_send: "回申請人自行寄發",
+  email_by_general_affairs: "總務 Email 寄出",
+  physical_mail_by_general_affairs: "總務紙本郵寄",
+  no_dispatch_required: "僅用印歸檔"
+};
+
+const officialDispatchStatusLabels = {
+  pending: "待寄發",
+  dispatched: "總務已寄發",
+  sent_by_applicant: "申請人已寄出",
+  failed: "寄發失敗",
+  cancelled: "已取消"
+};
+
+function officialFileTypeLabel(type = "") {
+  return officialFileTypeLabels[type] || type || "文件";
+}
+
+function officialApplicationSummary(item = {}) {
+  const summary = item.application_package?.summary || {};
+  const files = item.application_package?.all_files || item.files || [];
+  const versions = item.application_package?.document_versions || item.document_versions || files.filter((file) => ["original_pdf", "generated_pdf", "stamped_pdf"].includes(file.file_type));
+  const attachments = item.application_package?.attachments || item.attachments || files.filter((file) => file.file_type === "attachment");
+  const downloadLogs = item.application_package?.download_logs || item.download_logs || (item.logs || []).filter((log) => log.action === "download_file");
+  return {
+    versionCount: summary.version_count ?? versions.length,
+    attachmentCount: summary.attachment_count ?? attachments.length,
+    approvalStepCount: summary.approval_step_count ?? (item.approval_steps || []).length,
+    downloadCount: summary.download_count ?? downloadLogs.length,
+    hasStampedPdf: summary.has_stamped_pdf ?? versions.some((file) => file.file_type === "stamped_pdf")
+  };
+}
+
+function officialApplicationFiles(item = {}) {
+  const packagedFiles = item.application_package?.all_files || [
+    ...(item.application_package?.document_versions || item.document_versions || []),
+    ...(item.application_package?.attachments || item.attachments || [])
+  ];
+  return packagedFiles.length ? packagedFiles : item.files || [];
+}
+
+function officialProcessLogs(item = {}) {
+  return item.application_package?.process_logs || item.process_logs || (item.logs || []).filter((log) => log.action !== "download_file");
+}
+
+function officialDownloadLogs(item = {}) {
+  return item.application_package?.download_logs || item.download_logs || (item.logs || []).filter((log) => log.action === "download_file");
+}
+
+function officialDispatchRecord(item = {}) {
+  return item.application_package?.dispatch_record || item.dispatch_record || null;
+}
+
+function officialCurrentItem() {
+  return officialWorkflowItems.find((item) => item.id === selectedOfficialDocumentId) || officialWorkflowItems[0] || null;
+}
+
+function officialWorkflowEndpoint(scope = officialWorkflowScope) {
+  if (scope === "todo") return "/official-documents/my-tasks";
+  if (scope === "mine") return "/official-documents/my-requests";
+  return "/official-documents";
+}
+
+async function loadOfficialWorkflow(scope = officialWorkflowScope) {
+  officialWorkflowScope = scope;
+  if (scope === "new") {
+    renderOfficialWorkflow();
+    return;
+  }
+  const params = new URLSearchParams();
+  if (officialWorkflowStatusFilter) params.set("status", officialWorkflowStatusFilter);
+  try {
+    officialWorkflowItems = await backendRequest(`${officialWorkflowEndpoint(scope)}${params.toString() ? `?${params}` : ""}`);
+    if (!officialWorkflowItems.some((item) => item.id === selectedOfficialDocumentId)) selectedOfficialDocumentId = officialWorkflowItems[0]?.id || "";
+  } catch (error) {
+    officialWorkflowItems = [];
+    showToast(`發文簽核載入失敗：${error.message}`);
+  }
+  renderOfficialWorkflow();
+}
+
+function renderOfficialCompanyOptions() {
+  const select = document.querySelector("#officialCompanySelect");
+  if (!select) return;
+  const previousValue = select.value;
+  const companies = companySealCompanies.length ? companySealCompanies : companySealFallbackCompanies();
+  select.innerHTML = companies.map((item) => `<option value="${item.id}">${item.name}</option>`).join("");
+  if (companies.some((item) => item.id === previousValue)) select.value = previousValue;
+  if (!select.value && companies[0]) select.value = companies[0].id;
+}
+
+async function loadOfficialSealOptions(companyId = document.querySelector("#officialCompanySelect")?.value || "CO-001") {
+  try {
+    const result = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals`);
+    officialSealOptions = Array.isArray(result) ? result.filter((item) => item.is_active !== 0 && item.is_active !== false) : [];
+  } catch (error) {
+    officialSealOptions = [];
+  }
+  renderOfficialSealOptions();
+}
+
+function renderOfficialSealOptions() {
+  const select = document.querySelector("#officialSealSelect");
+  if (!select) return;
+  const previousValue = select.value;
+  if (!officialSealOptions.length) {
+    select.innerHTML = `<option value="">請先建立並上傳印章版本</option>`;
+    return;
+  }
+  select.innerHTML = officialSealOptions.map((item) => `<option value="${item.id}">${item.seal_name || item.id}${item.current_file ? "" : "（尚無版本）"}</option>`).join("");
+  if (officialSealOptions.some((item) => item.id === previousValue)) select.value = previousValue;
+}
+
+function filteredOfficialWorkflowItems() {
+  const keyword = officialWorkflowSearchTerm.trim().toLowerCase();
+  if (!keyword) return officialWorkflowItems;
+  return officialWorkflowItems.filter((item) => [item.title, item.subject, item.recipient, item.applicant_name, item.current_status, item.current_step_name].some((value) => String(value || "").toLowerCase().includes(keyword)));
+}
+
+function renderOfficialWorkflowList() {
+  const target = document.querySelector("#officialWorkflowList");
+  if (!target) return;
+  const items = filteredOfficialWorkflowItems();
+  if (officialWorkflowScope === "new") {
+    target.innerHTML = `<p class="empty-text">請在右側建立一張發文申請單；PDF 只是申請單底下的文件版本。</p>`;
+    return;
+  }
+  if (!items.length) {
+    target.innerHTML = `<p class="empty-text">目前沒有符合條件的發文申請單。</p>`;
+    return;
+  }
+  target.innerHTML = items.map((item) => `
+    <button class="official-workflow-item ${item.id === selectedOfficialDocumentId ? "active" : ""}" type="button" data-official-id="${item.id}">
+      <strong>${item.title || item.subject || item.id}</strong>
+      <span>${officialStatusLabel(item.current_status)} · ${item.current_step_name || item.current_step || "未送出"}</span>
+      <small>${item.applicant_name || "申請人"} · ${item.recipient || "未指定受文者"} · ${item.created_at || ""}</small>
+    </button>
+  `).join("");
+  target.querySelectorAll("[data-official-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      selectedOfficialDocumentId = button.dataset.officialId;
+      await loadOfficialDocumentDetail(selectedOfficialDocumentId);
+    });
+  });
+}
+
+async function loadOfficialDocumentDetail(documentId) {
+  try {
+    const detail = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
+    const index = officialWorkflowItems.findIndex((item) => item.id === documentId);
+    if (index >= 0) officialWorkflowItems[index] = detail;
+    else officialWorkflowItems.unshift(detail);
+  } catch (error) {
+    showToast(`發文詳情載入失敗：${error.message}`);
+  }
+  renderOfficialWorkflow();
+}
+
+function renderOfficialFiles(files = [], documentId = "") {
+  if (!files.length) return `<p class="empty-text">尚無文件版本或附件。</p>`;
+  return `<div class="official-file-list">${files.map((file) => `
+    <article class="official-file-row ${file.is_stamped ? "stamped" : ""}">
+      <div>
+        <strong>${file.display_label || officialFileTypeLabel(file.file_type)} · ${file.file_name}</strong>
+        <span>${officialFileTypeLabel(file.file_type)} · v${file.version} · ${file.uploaded_by || "系統"} · ${file.created_at || ""}</span>
+      </div>
+      <button class="secondary-button" type="button" data-official-download="${file.id}" data-document-id="${documentId}">下載</button>
+    </article>
+  `).join("")}</div>`;
+}
+
+function renderOfficialSteps(item) {
+  const steps = item?.approval_steps || [];
+  if (!steps.length) return `<p class="empty-text">尚未建立簽核節點。</p>`;
+  return `<div class="official-step-list">${steps.map((step) => `
+    <article class="official-step-row ${step.status || "pending"} ${step.step_key === item.current_step ? "current" : ""}">
+      <time>${step.step_order}</time>
+      <div>
+        <strong>${step.step_name}</strong>
+        <span>${step.approver_name || step.approver_role || "未指定"} · ${step.status}</span>
+        ${step.comment ? `<small>${step.comment}</small>` : ""}
+      </div>
+      <span>${step.approved_at || ""}</span>
+    </article>
+  `).join("")}</div>`;
+}
+
+function renderOfficialLogs(logs = [], emptyText = "尚無紀錄。") {
+  if (!logs.length) return `<p class="empty-text">${emptyText}</p>`;
+  return `<div class="timeline">${logs.map((log) => `
+    <article class="timeline-item">
+      <time>${(log.created_at || "").slice(11, 16)}</time>
+      <div>
+        <strong>${log.action} · ${log.actor_name || ""}</strong>
+        <p>${log.comment || log.file_id || ""}</p>
+      </div>
+    </article>
+  `).join("")}</div>`;
+}
+
+function renderOfficialApplicationSummary(item = {}) {
+  const summary = officialApplicationSummary(item);
+  return `
+    <div class="official-package-summary">
+      <span>文件版本 <strong>${summary.versionCount}</strong></span>
+      <span>補充附件 <strong>${summary.attachmentCount}</strong></span>
+      <span>簽核節點 <strong>${summary.approvalStepCount}</strong></span>
+      <span>下載紀錄 <strong>${summary.downloadCount}</strong></span>
+      <span>${summary.hasStampedPdf ? "已有已用印版本" : "尚未產生已用印版本"}</span>
+    </div>
+  `;
+}
+
+function renderOfficialDispatchInfo(item = {}) {
+  const record = officialDispatchRecord(item) || {};
+  const method = record.dispatch_method || item.dispatch_method || "electronic_official_document_by_general_affairs";
+  const canManage = Boolean(item.can_manage_dispatch);
+  const needsGeneralAffairs = item.current_status === "pending_general_affairs_dispatch";
+  const needsApplicant = item.current_status === "returned_to_applicant_for_send";
+  const canComplete = canManage && (needsGeneralAffairs || needsApplicant);
+  const proof = record.proof_file;
+  return `
+    <section class="official-dispatch-box">
+      <div class="panel-heading tight">
+        <h4>寄發資訊</h4>
+        <span class="status-pill">${officialDispatchStatusLabels[record.dispatch_status] || officialStatusLabel(item.current_status)}</span>
+      </div>
+      <div class="official-detail-grid">
+        <div><dt>寄發方式</dt><dd>${record.dispatch_method_label || officialDispatchMethodLabels[method] || method}</dd></div>
+        <div><dt>寄發負責人</dt><dd>${record.dispatch_owner_name || record.dispatch_owner_user_id || (method === "no_dispatch_required" ? "系統" : "尚未指派")}</dd></div>
+        <div><dt>發文字號</dt><dd>${record.external_official_document_number || "尚未回填"}</dd></div>
+        <div><dt>寄發日期</dt><dd>${record.dispatch_date || "尚未回填"}</dd></div>
+        <div><dt>收文對象</dt><dd>${record.recipient || item.recipient || "未指定"}</dd></div>
+        <div><dt>聯絡資訊</dt><dd>${record.recipient_contact || "未填寫"}</dd></div>
+        <div><dt>寄發備註</dt><dd>${record.dispatch_note || "未填寫"}</dd></div>
+        <div><dt>完成時間</dt><dd>${record.completed_at || "尚未完成"}</dd></div>
+      </div>
+      ${proof ? `<div class="official-file-list"><article class="official-file-row"><div><strong>${proof.display_label || "寄發證明"} · ${proof.file_name}</strong><span>${officialFileTypeLabel(proof.file_type)} · v${proof.version} · ${proof.created_at || ""}</span></div><button class="secondary-button" type="button" data-official-download="${proof.id}" data-document-id="${item.id}">下載</button></article></div>` : `<p class="empty-text">尚未上傳寄發證明。</p>`}
+      ${canComplete ? `
+        <div class="official-dispatch-form">
+          ${needsGeneralAffairs ? `<label>外部發文字號<input id="officialDispatchNumberInput" value="${record.external_official_document_number || ""}" placeholder="外部電子公文發文字號" /></label>` : ""}
+          <label>寄發日期<input id="officialDispatchDateInput" type="date" value="${(record.dispatch_date || "").slice(0, 10)}" /></label>
+          <label>收件人<input id="officialDispatchRecipientInput" value="${record.recipient || item.recipient || ""}" /></label>
+          <label>聯絡資訊<input id="officialDispatchContactInput" value="${record.recipient_contact || ""}" placeholder="Email、地址或聯絡窗口" /></label>
+          <label>寄發備註<textarea id="officialDispatchNoteInput" rows="3">${record.dispatch_note || ""}</textarea></label>
+          <label>寄發證明<input id="officialDispatchProofInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" /></label>
+          <button class="primary-button" type="button" id="officialCompleteDispatchBtn">${needsGeneralAffairs ? "完成發文" : "已自行寄出"}</button>
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderOfficialWorkflowDetail() {
+  const target = document.querySelector("#officialWorkflowDetail");
+  const form = document.querySelector("#officialWorkflowForm");
+  if (!target || !form) return;
+  form.classList.toggle("hidden", officialWorkflowScope !== "new");
+  if (officialWorkflowScope === "new") {
+    target.innerHTML = `
+      <div class="doc-detail">
+        <strong>發文申請單是主檔</strong>
+        <p>這裡建立的是一張發文申請單；空白撰寫或上傳 PDF 只是來源版本。送出後，PDF、已用印版本、補充附件、簽核歷程與下載紀錄都會掛在同一張申請單底下。</p>
+      </div>
+    `;
+    updateOfficialStampPreview();
+    return;
+  }
+  const item = officialCurrentItem();
+  if (!item) {
+    target.innerHTML = `<p class="empty-text">請選擇一筆發文申請單。</p>`;
+    return;
+  }
+  const summary = officialApplicationSummary(item);
+  const files = officialApplicationFiles(item);
+  target.innerHTML = `
+    <div class="doc-detail">
+      <strong>發文申請單 · ${item.title || item.subject || item.id}</strong>
+      <div class="official-detail-grid">
+        <div><dt>申請單編號</dt><dd>${item.id}</dd></div>
+        <div><dt>狀態</dt><dd>${officialStatusLabel(item.current_status)}</dd></div>
+        <div><dt>目前關卡</dt><dd>${item.current_step_name || item.current_step || "未送出"}</dd></div>
+        <div><dt>申請人</dt><dd>${item.applicant_name || item.applicant_id}</dd></div>
+        <div><dt>受文者</dt><dd>${item.recipient || "未指定"}</dd></div>
+        <div><dt>來源</dt><dd>${item.source_type === "uploaded_pdf" ? "上傳 PDF" : "空白公文撰寫"}</dd></div>
+        <div><dt>用印原因</dt><dd>${item.request_reason || "未填寫"}</dd></div>
+        <div><dt>文件版本</dt><dd>${summary.versionCount} 版${summary.hasStampedPdf ? " · 已用印" : ""}</dd></div>
+        <div><dt>下載紀錄</dt><dd>${summary.downloadCount} 筆</dd></div>
+      </div>
+      ${renderOfficialApplicationSummary(item)}
+      <p>${item.description || item.subject || ""}</p>
+      <div class="official-action-bar">
+        ${item.can_act ? `<button class="primary-button" type="button" id="officialApproveBtn">核准</button><button class="secondary-button" type="button" id="officialRejectBtn">駁回</button>` : ""}
+        ${item.current_status === "draft" ? `<button class="primary-button" type="button" id="officialSubmitDraftBtn">送出簽核</button>` : ""}
+      </div>
+      ${renderOfficialDispatchInfo(item)}
+      <h4>文件版本與附件</h4>
+      ${renderOfficialFiles(files, item.id)}
+      <h4>簽核流程</h4>
+      ${renderOfficialSteps(item)}
+      <h4>簽核與用印歷程</h4>
+      ${renderOfficialLogs(officialProcessLogs(item), "尚無簽核或用印紀錄。")}
+      <h4>下載紀錄</h4>
+      ${renderOfficialLogs(officialDownloadLogs(item), "尚無下載紀錄。")}
+    </div>
+  `;
+  document.querySelector("#officialApproveBtn")?.addEventListener("click", () => mutateOfficialDocument("approve"));
+  document.querySelector("#officialRejectBtn")?.addEventListener("click", () => mutateOfficialDocument("reject"));
+  document.querySelector("#officialSubmitDraftBtn")?.addEventListener("click", () => mutateOfficialDocument("submit"));
+  document.querySelector("#officialCompleteDispatchBtn")?.addEventListener("click", () => completeOfficialDispatch(item.id));
+  target.querySelectorAll("[data-official-download]").forEach((button) => {
+    button.addEventListener("click", () => downloadOfficialWorkflowFile(button.dataset.documentId, button.dataset.officialDownload));
+  });
+}
+
+function renderOfficialWorkflow() {
+  document.querySelectorAll("[data-official-scope]").forEach((button) => button.classList.toggle("active", button.dataset.officialScope === officialWorkflowScope));
+  renderOfficialCompanyOptions();
+  renderOfficialSealOptions();
+  renderOfficialWorkflowList();
+  renderOfficialWorkflowDetail();
+}
+
+function updateOfficialStampPreview() {
+  const box = document.querySelector("#officialStampBox");
+  const preview = document.querySelector("#officialStampPreview");
+  if (!box || !preview) return;
+  const x = Number(document.querySelector("#officialStampXInput")?.value || 420);
+  const y = Number(document.querySelector("#officialStampYInput")?.value || 130);
+  const w = Number(document.querySelector("#officialStampWidthInput")?.value || 85);
+  const h = Number(document.querySelector("#officialStampHeightInput")?.value || 85);
+  box.style.left = `${Math.min(88, Math.max(0, x / 6))}%`;
+  box.style.top = `${Math.min(82, Math.max(0, y / 5))}%`;
+  box.style.width = `${Math.max(36, Math.min(140, w))}px`;
+  box.style.height = `${Math.max(36, Math.min(140, h))}px`;
+}
+
+async function officialFormPayload(submit = true) {
+  const sourceType = document.querySelector("#officialSourceType").value;
+  const payload = {
+    source_type: sourceType,
+    company_id: document.querySelector("#officialCompanySelect").value,
+    seal_id: document.querySelector("#officialSealSelect").value,
+    dispatch_method: document.querySelector("#officialDispatchMethodSelect").value,
+    title: document.querySelector("#officialSubjectInput").value.trim() || "未命名發文申請",
+    subject: document.querySelector("#officialSubjectInput").value.trim(),
+    description: document.querySelector("#officialDescriptionInput").value.trim(),
+    method: document.querySelector("#officialMethodInput").value.trim(),
+    recipient: document.querySelector("#officialRecipientInput").value.trim(),
+    dispatch_unit: document.querySelector("#officialDispatchUnitInput").value.trim() || activeUnit(),
+    handler_name: document.querySelector("#officialHandlerInput").value.trim() || authState?.user?.name || activeRole(),
+    request_reason: document.querySelector("#officialReasonInput").value.trim(),
+    submit,
+    stamp_position: {
+      page: Number(document.querySelector("#officialStampPageInput").value || 1),
+      x: Number(document.querySelector("#officialStampXInput").value || 420),
+      y: Number(document.querySelector("#officialStampYInput").value || 130),
+      width: Number(document.querySelector("#officialStampWidthInput").value || 85),
+      height: Number(document.querySelector("#officialStampHeightInput").value || 85)
+    }
+  };
+  if (sourceType === "uploaded_pdf") {
+    const file = document.querySelector("#officialPdfInput").files?.[0];
+    if (!file) throw new Error("請選擇要上傳用印的 PDF。");
+    payload.file_name = file.name;
+    payload.content_base64 = await fileToBase64(file);
+  }
+  return payload;
+}
+
+async function createOfficialWorkflow(submit = true) {
+  try {
+    const payload = await officialFormPayload(submit);
+    const result = await backendRequest("/official-documents", { method: "POST", body: JSON.stringify(payload) });
+    selectedOfficialDocumentId = result.id;
+    officialWorkflowScope = "mine";
+    await loadOfficialWorkflow("mine");
+    showToast(submit ? "已送出發文用印簽核。" : "已建立發文草稿。");
+  } catch (error) {
+    showToast(error.message || "建立發文失敗。");
+  }
+}
+
+async function mutateOfficialDocument(action) {
+  const item = officialCurrentItem();
+  if (!item) return showToast("請先選擇發文申請單。");
+  const comment = action === "reject" ? prompt("請輸入駁回原因") : "";
+  if (action === "reject" && !comment) return;
+  try {
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}/${action}`, { method: "POST", body: JSON.stringify({ comment }) });
+    selectedOfficialDocumentId = result.id;
+    const index = officialWorkflowItems.findIndex((entry) => entry.id === result.id);
+    if (index >= 0) officialWorkflowItems[index] = result;
+    else officialWorkflowItems.unshift(result);
+    renderOfficialWorkflow();
+    showToast("發文簽核狀態已更新。");
+  } catch (error) {
+    showToast(error.message || "簽核操作失敗。");
+  }
+}
+
+async function completeOfficialDispatch(documentId) {
+  try {
+    const file = document.querySelector("#officialDispatchProofInput")?.files?.[0];
+    let proofFileId = officialDispatchRecord(officialCurrentItem() || {})?.proof_file_id || "";
+    if (file) {
+      const upload = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/dispatch/proof-files`, {
+        method: "POST",
+        body: JSON.stringify({
+          file_name: file.name,
+          file_mime_type: file.type || "application/pdf",
+          content_base64: await fileToBase64(file)
+        })
+      });
+      proofFileId = upload.file?.id || upload.dispatch_record?.proof_file_id || proofFileId;
+    }
+    const payload = {
+      external_official_document_number: document.querySelector("#officialDispatchNumberInput")?.value?.trim() || "",
+      dispatch_date: document.querySelector("#officialDispatchDateInput")?.value || "",
+      recipient: document.querySelector("#officialDispatchRecipientInput")?.value?.trim() || "",
+      recipient_contact: document.querySelector("#officialDispatchContactInput")?.value?.trim() || "",
+      dispatch_note: document.querySelector("#officialDispatchNoteInput")?.value?.trim() || "",
+      proof_file_id: proofFileId
+    };
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/dispatch/complete`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    selectedOfficialDocumentId = result.id;
+    const index = officialWorkflowItems.findIndex((entry) => entry.id === result.id);
+    if (index >= 0) officialWorkflowItems[index] = result;
+    else officialWorkflowItems.unshift(result);
+    renderOfficialWorkflow();
+    showToast("寄發資訊已完成並寫入申請單紀錄。");
+  } catch (error) {
+    showToast(`完成寄發失敗：${error.message}`);
+  }
+}
+
+async function downloadOfficialWorkflowFile(documentId, fileId) {
+  try {
+    const response = await fetch(`${backendApiBase}/official-documents/${encodeURIComponent(documentId)}/files/${encodeURIComponent(fileId)}/download`, {
+      headers: isHeaderSafeToken(authState?.token) ? { Authorization: `Bearer ${authState.token}` } : {}
+    });
+    if (!response.ok) throw new Error((await response.text()).slice(0, 160) || `HTTP ${response.status}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = response.headers.get("Content-Disposition")?.match(/filename=\"?([^\";]+)/)?.[1] || "official-document.pdf";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    showToast(`下載失敗：${error.message}`);
+  }
 }
 
 function renderDispatchAuditLog() {
@@ -11977,6 +12562,480 @@ function addSealAudit(title, body) {
   renderSealAuditLog();
 }
 
+function companySealFallbackCompanies() {
+  return companyRegistry.map((item) => ({
+    id: item.id,
+    name: item.name,
+    tax_id: item.tax_id || item.taxId || "待設定",
+    status: item.status === "啟用" ? "active" : item.status
+  }));
+}
+
+function companySealRefOptions(type) {
+  const grouped = companySealReferences?.grouped || {};
+  const fallback = {
+    category: [
+      { code: "establishment_seal", name: "公司設立印鑑" },
+      { code: "bank_seal", name: "銀行印鑑章" },
+      { code: "general_seal", name: "便章" },
+      { code: "other", name: "其他章" }
+    ],
+    size: [
+      { code: "large_seal", name: "大章" },
+      { code: "small_seal", name: "小章" }
+    ],
+    usage_type: [
+      { code: "official_document", name: "公文" },
+      { code: "contract", name: "合約" },
+      { code: "bank_document", name: "銀行文件" },
+      { code: "government_application", name: "政府申請文件" },
+      { code: "internal_document", name: "內部文件" }
+    ],
+    request_status: [
+      { code: "draft", name: "草稿" },
+      { code: "pending", name: "待簽核" },
+      { code: "approved", name: "已核准" },
+      { code: "rejected", name: "已駁回" },
+      { code: "stamped", name: "已用印" },
+      { code: "cancelled", name: "已取消" }
+    ]
+  };
+  return (grouped[type] && grouped[type].length ? grouped[type] : fallback[type] || []).filter((item) => !item.status || item.status === "active");
+}
+
+function companySealRefName(type, code) {
+  return companySealRefOptions(type).find((item) => item.code === code)?.name || code || "-";
+}
+
+function companySealStatusName(status) {
+  return companySealRefName("request_status", status) || status || "-";
+}
+
+function companySealOptionTags(items, selectedValue, valueKey = "id", labelKey = "name") {
+  return items.map((item) => {
+    const value = item[valueKey];
+    const label = item[labelKey] || value;
+    return `<option value="${value}"${value === selectedValue ? " selected" : ""}>${label}</option>`;
+  }).join("");
+}
+
+function companySealDocuments() {
+  const dispatchOptions = dispatchDocs.map((doc) => ({
+    id: doc.id,
+    label: `${doc.no || doc.id}｜${doc.subject || "未命名公文"}`,
+    source: "dispatch",
+    record: doc
+  }));
+  const contractOptions = contractRecords.map((contract) => ({
+    id: contract.id,
+    label: `${contract.contractNo || contract.id}｜${contract.title}`,
+    source: "contract",
+    record: contract
+  }));
+  return [...dispatchOptions, ...contractOptions];
+}
+
+function companySealDocumentPayload(documentId) {
+  const dispatch = dispatchDocs.find((doc) => doc.id === documentId);
+  if (dispatch) {
+    return {
+      document_id: dispatch.id,
+      doc_no: dispatch.no || dispatch.id,
+      doc_type: dispatch.type || "函",
+      company_name: dispatch.companyName || document.querySelector("#composeCompanySelect")?.value || "歲悅長照股份有限公司",
+      subject: dispatch.subject || "用印公文",
+      body: dispatch.description || dispatch.body || "用印申請關聯公文。",
+      owner: dispatch.owner || activeRole(),
+      department: dispatch.department || "行政部",
+      agency_name: dispatch.to || dispatch.agency || "未指定機關",
+      status: dispatch.status || "待用印"
+    };
+  }
+  const contract = contractRecords.find((item) => item.id === documentId);
+  if (contract) {
+    return {
+      document_id: contract.id,
+      doc_no: contract.contractNo || contract.id,
+      doc_type: "合約用印",
+      company_name: contract.companyName,
+      subject: contract.title,
+      body: contract.summary || "合約用印申請。",
+      owner: contract.owner || activeRole(),
+      department: contract.dept || "行政部",
+      agency_name: contract.counterparty || "合約相對人",
+      status: contract.status || "待用印"
+    };
+  }
+  return {
+    document_id: documentId || `DOC-SEAL-${Date.now()}`,
+    doc_no: documentId || `DOC-SEAL-${Date.now()}`,
+    doc_type: "用印文件",
+    subject: "用印文件",
+    body: "用印申請關聯文件。",
+    owner: activeRole(),
+    department: "行政部",
+    agency_name: "未指定",
+    status: "待用印"
+  };
+}
+
+function currentCompanySealCompany() {
+  const companies = companySealCompanies.length ? companySealCompanies : companySealFallbackCompanies();
+  return companies.find((item) => item.id === selectedCompanySealCompanyId) || companies[0] || null;
+}
+
+function currentCompanySeal() {
+  return companySealLibrary.find((item) => item.id === selectedCompanySealId) || companySealLibrary[0] || null;
+}
+
+async function loadCompanySealModule(silent = false) {
+  try {
+    const [companiesResult, referencesResult] = await Promise.all([
+      backendRequest("/companies").catch(() => []),
+      backendRequest("/seal-reference-options").catch(() => ({ grouped: {} }))
+    ]);
+    companySealCompanies = (Array.isArray(companiesResult) ? companiesResult : []).map((item) => ({
+      ...item,
+      tax_id: item.tax_id || item.taxId || "待設定"
+    }));
+    companySealReferences = referencesResult || { grouped: {} };
+    if (!companySealCompanies.length) companySealCompanies = companySealFallbackCompanies();
+    if (!selectedCompanySealCompanyId) selectedCompanySealCompanyId = companySealCompanies[0]?.id || "";
+    companySealModuleLoaded = true;
+    await loadCompanySealCompanyData(silent);
+  } catch (error) {
+    companySealCompanies = companySealFallbackCompanies();
+    companySealModuleLoaded = false;
+    renderCompanySealModule();
+    if (!silent) showToast(`公司印章模組載入失敗：${error.message}`);
+  }
+}
+
+async function loadCompanySealCompanyData(silent = false) {
+  if (!selectedCompanySealCompanyId) {
+    renderCompanySealModule();
+    return;
+  }
+  try {
+    const [seals, requests, logs] = await Promise.all([
+      backendRequest(`/companies/${encodeURIComponent(selectedCompanySealCompanyId)}/seals`),
+      backendRequest(`/seal-requests?company_id=${encodeURIComponent(selectedCompanySealCompanyId)}`).catch(() => []),
+      backendRequest("/seal-usage-logs").catch(() => [])
+    ]);
+    companySealLibrary = Array.isArray(seals) ? seals : [];
+    companySealRequests = Array.isArray(requests) ? requests : [];
+    companySealLogs = Array.isArray(logs) ? logs : [];
+    if (!companySealLibrary.some((item) => item.id === selectedCompanySealId)) selectedCompanySealId = companySealLibrary[0]?.id || "";
+    companySealFiles = selectedCompanySealId ? await backendRequest(`/seals/${encodeURIComponent(selectedCompanySealId)}/files`).catch(() => []) : [];
+    renderCompanySealModule();
+    if (!silent) addSealAudit("同步公司印章庫", `${currentCompanySealCompany()?.name || "公司"} 已載入 ${companySealLibrary.length} 顆印章。`);
+  } catch (error) {
+    companySealLibrary = [];
+    companySealRequests = [];
+    companySealLogs = [];
+    renderCompanySealModule();
+    if (!silent) showToast(`公司印章庫同步失敗：${error.message}`);
+  }
+}
+
+function renderCompanySealModule() {
+  if (!document.querySelector("#companySealModule")) return;
+  const companies = companySealCompanies.length ? companySealCompanies : companySealFallbackCompanies();
+  if (!selectedCompanySealCompanyId) selectedCompanySealCompanyId = companies[0]?.id || "";
+  const selectedSeal = currentCompanySeal();
+  document.querySelector("#companySealCompanySelect").innerHTML = companySealOptionTags(companies, selectedCompanySealCompanyId);
+  document.querySelector("#sealUsageCompanySelect").innerHTML = companySealOptionTags(companies, selectedCompanySealCompanyId);
+  document.querySelector("#companySealCategorySelect").innerHTML = companySealOptionTags(companySealRefOptions("category"), "general_seal", "code", "name");
+  document.querySelector("#companySealSizeSelect").innerHTML = companySealOptionTags(companySealRefOptions("size"), "large_seal", "code", "name");
+  document.querySelector("#sealUsageTypeSelect").innerHTML = companySealOptionTags(companySealRefOptions("usage_type"), "official_document", "code", "name");
+  document.querySelector("#companySealLibraryStatus").textContent = `${companySealLibrary.length} 枚`;
+
+  const activeSeals = companySealLibrary.filter((seal) => seal.is_active || seal.is_active === 1);
+  const selectedUsageSealId = document.querySelector("#sealUsageSealSelect")?.value || selectedCompanySealId;
+  document.querySelector("#sealUsageSealSelect").innerHTML = activeSeals.map((seal) => `
+    <option value="${seal.id}"${seal.id === selectedUsageSealId ? " selected" : ""}>${seal.seal_name}｜${companySealRefName("category", seal.seal_category)}｜${companySealRefName("size", seal.seal_size_type)}</option>
+  `).join("");
+  const docs = companySealDocuments();
+  const currentDoc = document.querySelector("#sealUsageDocumentSelect")?.value || docs[0]?.id || "";
+  document.querySelector("#sealUsageDocumentSelect").innerHTML = companySealOptionTags(docs, currentDoc, "id", "label");
+  document.querySelector("#sealStampRequestSelect").innerHTML = companySealRequests
+    .filter((request) => request.status === "approved")
+    .map((request) => `<option value="${request.id}">${request.id}｜${request.seal_name || request.seal_id}｜${request.request_reason || "待套印"}</option>`)
+    .join("");
+
+  document.querySelector("#companySealLibraryRows").innerHTML = companySealLibrary.map((seal) => {
+    const currentFile = seal.current_file;
+    return `
+      <tr class="${seal.id === selectedCompanySealId ? "selected-row" : ""}">
+        <td><button class="text-button row-select" type="button" data-company-seal-select="${seal.id}">${seal.seal_name}</button><small>${seal.company_name || currentCompanySealCompany()?.name || ""}</small></td>
+        <td>${companySealRefName("category", seal.seal_category)}</td>
+        <td>${companySealRefName("size", seal.seal_size_type)}</td>
+        <td><span class="badge ${seal.is_active || seal.is_active === 1 ? "ok" : "issue"}">${seal.is_active || seal.is_active === 1 ? "啟用" : "停用"}</span></td>
+        <td>${currentFile ? `v${currentFile.version}` : "未上傳"}<small>${currentFile?.uploaded_at || seal.updated_at || ""}</small></td>
+        <td><div class="row-actions"><button class="segment" type="button" data-company-seal-select="${seal.id}">檢視</button><button class="segment" type="button" data-company-seal-disable="${seal.id}">停用</button></div></td>
+      </tr>
+    `;
+  }).join("") || `<tr><td colspan="6">尚無印章資料。</td></tr>`;
+
+  document.querySelector("#companySealSafePreview").innerHTML = selectedSeal ? `
+    <strong>${selectedSeal.seal_name}</strong>
+    <small>${companySealRefName("category", selectedSeal.seal_category)} / ${companySealRefName("size", selectedSeal.seal_size_type)} / ${selectedSeal.purpose_description || "未填用途"}</small>
+    <small>原始圖檔不提供前端 URL；目前僅顯示 metadata 與浮水印安全預覽。</small>
+    <div class="watermark-preview">安全預覽<br />非原章檔</div>
+  ` : `<strong>未選取印章</strong><small>請先選取公司印章。</small>`;
+
+  document.querySelector("#companySealFilesList").innerHTML = companySealFiles.map((file) => `
+    <article class="address-card">
+      <strong>${file.file_name} ${file.is_current || file.is_current === 1 ? "（目前）" : ""}</strong>
+      <p>v${file.version} · ${file.file_mime_type} · ${Math.round(Number(file.file_size || 0) / 1024)} KB</p>
+      <p>hash ${String(file.file_hash || "").slice(0, 18)}… · ${file.uploaded_at || ""}</p>
+      <div class="row-actions"><button class="segment" type="button" data-company-seal-current-file="${file.id}">設為目前版本</button></div>
+    </article>
+  `).join("") || `<p class="empty-text">尚未上傳印章版本；不會顯示原始章圖 URL。</p>`;
+
+  document.querySelector("#sealUsagePositionsGrid").innerHTML = companySealStampPositions.map((position, index) => `
+    <article class="archive-card">
+      <span>章位 ${index + 1}</span>
+      <strong>第 ${position.page} 頁 / ${position.w}×${position.h}</strong>
+      <p>x ${position.x} · y ${position.y} · ${position.label}</p>
+    </article>
+  `).join("");
+
+  document.querySelector("#sealUsageApprovalStatus").textContent = `${companySealRequests.length} 件`;
+  document.querySelector("#sealUsageApprovalList").innerHTML = companySealRequests.map((request) => `
+    <article class="timeline-item">
+      <time>${companySealStatusName(request.status)}</time>
+      <div>
+        <strong>${request.seal_name || request.seal_id}</strong>
+        <p>${request.company_name || ""} · ${request.requested_by || "申請人"} · ${request.request_reason || "未填原因"}</p>
+        <p>${request.document_id} · ${companySealRefName("usage_type", request.usage_type)}</p>
+        <div class="row-actions">
+          <button class="segment" type="button" data-company-seal-approve-request="${request.id}" ${!["pending", "draft"].includes(request.status) ? "disabled" : ""}>核准並套印</button>
+          <button class="segment" type="button" data-company-seal-reject-request="${request.id}" ${["stamped", "cancelled", "rejected"].includes(request.status) ? "disabled" : ""}>駁回</button>
+        </div>
+      </div>
+    </article>
+  `).join("") || `<p class="empty-text">尚無用印申請。</p>`;
+
+  document.querySelector("#sealUsageLogList").innerHTML = companySealLogs.slice(0, 30).map((log) => `
+    <article class="timeline-item">
+      <time>${log.created_at || ""}</time>
+      <div>
+        <strong>${log.action}</strong>
+        <p>${log.actor_id || "API"} · ${log.detail || ""}</p>
+        <p>${log.usage_request_id || ""} ${log.document_id || ""}</p>
+      </div>
+    </article>
+  `).join("") || `<p class="empty-text">尚無用印紀錄。</p>`;
+
+  document.querySelectorAll("[data-company-seal-select]").forEach((button) => {
+    button.addEventListener("click", () => selectCompanySeal(button.dataset.companySealSelect));
+  });
+  document.querySelectorAll("[data-company-seal-disable]").forEach((button) => {
+    button.addEventListener("click", () => deactivateCompanySeal(button.dataset.companySealDisable));
+  });
+  document.querySelectorAll("[data-company-seal-current-file]").forEach((button) => {
+    button.addEventListener("click", () => setCompanySealCurrentFile(button.dataset.companySealCurrentFile));
+  });
+  document.querySelectorAll("[data-company-seal-approve-request]").forEach((button) => {
+    button.addEventListener("click", () => approveCompanySealUsageRequest(button.dataset.companySealApproveRequest));
+  });
+  document.querySelectorAll("[data-company-seal-reject-request]").forEach((button) => {
+    button.addEventListener("click", () => rejectCompanySealUsageRequest(button.dataset.companySealRejectRequest));
+  });
+}
+
+async function selectCompanySeal(id) {
+  selectedCompanySealId = id;
+  companySealFiles = await backendRequest(`/seals/${encodeURIComponent(id)}/files`).catch((error) => {
+    showToast(`印章版本讀取失敗：${error.message}`);
+    return [];
+  });
+  renderCompanySealModule();
+}
+
+async function createCompanySealFromForm() {
+  const companyId = selectedCompanySealCompanyId || document.querySelector("#companySealCompanySelect")?.value;
+  if (!companyId) return showToast("請先選擇公司。");
+  try {
+    const result = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals`, {
+      method: "POST",
+      body: JSON.stringify({
+        seal_name: document.querySelector("#companySealNameInput")?.value.trim() || "未命名印章",
+        seal_category: document.querySelector("#companySealCategorySelect")?.value || "other",
+        seal_size_type: document.querySelector("#companySealSizeSelect")?.value || "large_seal",
+        purpose_description: document.querySelector("#companySealPurposeInput")?.value.trim() || "",
+        actor: authState?.user?.name || activeRole()
+      })
+    });
+    selectedCompanySealId = result.id;
+    await loadCompanySealCompanyData(true);
+    addSealAudit("新增公司印章", `${result.seal_name} 已建立，等待上傳私有印章檔版本。`);
+    showToast("公司印章已新增。");
+  } catch (error) {
+    showToast(`新增印章失敗：${error.message}`);
+  }
+}
+
+async function deactivateCompanySeal(id) {
+  const seal = companySealLibrary.find((item) => item.id === id);
+  if (!seal) return;
+  if (!confirmOperation("確認停用印章", `停用 ${seal.seal_name} 後不可再建立新用印申請，但歷史紀錄會保留。`)) return;
+  try {
+    await backendRequest(`/seals/${encodeURIComponent(id)}`, { method: "DELETE" });
+    await loadCompanySealCompanyData(true);
+    addSealAudit("停用公司印章", `${seal.seal_name} 已停用。`);
+    showToast("印章已停用。");
+  } catch (error) {
+    showToast(`停用印章失敗：${error.message}`);
+  }
+}
+
+async function uploadCompanySealVersion() {
+  const file = document.querySelector("#companySealFileInput")?.files?.[0];
+  const seal = currentCompanySeal();
+  if (!seal) return showToast("請先選取印章。");
+  if (!file) return showToast("請選擇新版印章檔。");
+  try {
+    const contentBase64 = await fileToBase64(file);
+    const result = await backendRequest(`/seals/${encodeURIComponent(seal.id)}/files`, {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: file.name,
+        file_mime_type: file.type || "image/png",
+        content_base64: contentBase64,
+        actor: authState?.user?.name || activeRole()
+      })
+    });
+    selectedCompanySealId = result.seal?.id || seal.id;
+    document.querySelector("#companySealFileInput").value = "";
+    await selectCompanySeal(selectedCompanySealId);
+    await loadCompanySealCompanyData(true);
+    addSealAudit("上傳私有印章版本", `${seal.seal_name} 已上傳 ${file.name}，前端僅保留 metadata。`);
+    showToast("新版印章檔已上傳至私有儲存區。");
+  } catch (error) {
+    showToast(`上傳新版失敗：${error.message}`);
+  }
+}
+
+async function setCompanySealCurrentFile(fileId) {
+  try {
+    await backendRequest(`/seal-files/${encodeURIComponent(fileId)}/set-current`, { method: "PATCH" });
+    await selectCompanySeal(selectedCompanySealId);
+    await loadCompanySealCompanyData(true);
+    showToast("目前版本已更新。");
+  } catch (error) {
+    showToast(`設定版本失敗：${error.message}`);
+  }
+}
+
+function addCompanySealStampPosition() {
+  const seal = currentCompanySeal();
+  companySealStampPositions.push({
+    page: Number(document.querySelector("#sealUsagePageInput")?.value || 1),
+    x: Number(document.querySelector("#sealUsageXInput")?.value || 420),
+    y: Number(document.querySelector("#sealUsageYInput")?.value || 130),
+    w: Number(document.querySelector("#sealUsageWInput")?.value || 85),
+    h: Number(document.querySelector("#sealUsageHInput")?.value || 85),
+    label: seal?.seal_name || "用印",
+    type: seal?.seal_category || "general_seal",
+    seal_id: seal?.id || selectedCompanySealId
+  });
+  renderCompanySealModule();
+}
+
+async function submitCompanySealUsageRequest() {
+  const documentId = document.querySelector("#sealUsageDocumentSelect")?.value;
+  const sealId = document.querySelector("#sealUsageSealSelect")?.value || selectedCompanySealId;
+  const reason = document.querySelector("#sealUsageReasonInput")?.value.trim();
+  if (!documentId) return showToast("請選擇文件。");
+  if (!sealId) return showToast("請選擇印章。");
+  if (!hasMinimumText(reason, 4)) return showToast("請填寫用印原因。");
+  const positions = companySealStampPositions.length ? companySealStampPositions : [{
+    page: 1, x: 420, y: 130, w: 85, h: 85, label: "用印", type: "general_seal", seal_id: sealId
+  }];
+  try {
+    const result = await backendRequest(`/documents/${encodeURIComponent(documentId)}/seal-requests`, {
+      method: "POST",
+      body: JSON.stringify({
+        seal_id: sealId,
+        request_reason: reason,
+        usage_type: document.querySelector("#sealUsageTypeSelect")?.value || "official_document",
+        stamp_positions: positions.map((position) => ({ ...position, seal_id: sealId })),
+        actor: authState?.user?.name || activeRole(),
+        document: companySealDocumentPayload(documentId),
+        metadata: { source: "company_seal_module", approval_template: "finance_style" }
+      })
+    });
+    await loadCompanySealCompanyData(true);
+    addSealAudit("送出公司用印申請", `${result.id} 已送簽核，章位 ${positions.length} 個。`);
+    showToast("用印申請已送出簽核。");
+  } catch (error) {
+    showToast(`送出用印申請失敗：${error.message}`);
+  }
+}
+
+async function approveCompanySealUsageRequest(requestId) {
+  try {
+    const approved = await backendRequest(`/seal-requests/${encodeURIComponent(requestId)}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ actor: authState?.user?.name || activeRole(), comment: document.querySelector("#sealUsageApprovalComment")?.value || "核准用印。" })
+    });
+    addSealAudit("核准公司用印申請", `${requestId} 已核准，準備自動套印。`);
+    if (approved.status === "approved") {
+      await stampCompanySealUsageRequest(requestId, true);
+    } else {
+      await loadCompanySealCompanyData(true);
+      showToast("簽核已更新，尚有下一層簽核。");
+    }
+  } catch (error) {
+    showToast(`核准失敗：${error.message}`);
+  }
+}
+
+async function rejectCompanySealUsageRequest(requestId) {
+  try {
+    await backendRequest(`/seal-requests/${encodeURIComponent(requestId)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ actor: authState?.user?.name || activeRole(), comment: document.querySelector("#sealUsageApprovalComment")?.value || "駁回用印。" })
+    });
+    await loadCompanySealCompanyData(true);
+    addSealAudit("駁回公司用印申請", `${requestId} 已駁回。`);
+    showToast("用印申請已駁回。");
+  } catch (error) {
+    showToast(`駁回失敗：${error.message}`);
+  }
+}
+
+async function stampCompanySealUsageRequest(requestId = "", automatic = false) {
+  const targetId = requestId || document.querySelector("#sealStampRequestSelect")?.value;
+  if (!targetId) return showToast("請先選擇已核准申請。");
+  try {
+    const request = companySealRequests.find((item) => item.id === targetId);
+    const result = await backendRequest(`/seal-requests/${encodeURIComponent(targetId)}/stamp`, {
+      method: "POST",
+      body: JSON.stringify({
+        actor: authState?.user?.name || activeRole(),
+        stamp_positions: request?.stamp_positions?.length ? request.stamp_positions : companySealStampPositions,
+        template: request?.usage_type === "contract" ? "合約用印文件" : "公司用印文件"
+      })
+    });
+    document.querySelector("#sealUsageStampedResult").innerHTML = `
+      <article class="archive-card">
+        <span>已用印版本</span>
+        <strong>${result.stamped_file?.stamp_no || "STAMP"}</strong>
+        <p>PDF version ${result.stamped_file?.pdf_version_id || "-"} · hash ${String(result.stamped_file?.sha256 || "").slice(0, 18)}…</p>
+      </article>
+    `;
+    await loadCompanySealCompanyData(true);
+    addSealAudit("完成公司用印套印", `${targetId} 已產出不可覆蓋的新 PDF 用印版本。`);
+    showToast(automatic ? "核准完成，系統已自動用印。" : "文件已完成套印。");
+  } catch (error) {
+    await loadCompanySealCompanyData(true);
+    showToast(`套印失敗：${error.message}`);
+  }
+}
+
 function addCompanyRegistryItem() {
   if (activeRole() !== "執行長") return showToast("只有執行長可以新增公司。");
   const name = document.querySelector("#companyNameInput").value.trim();
@@ -13027,6 +14086,7 @@ function renderSealAuditLog() {
 
 function renderSeals() {
   renderExecutiveSealAdmin();
+  renderCompanySealModule();
   renderSealSummary();
   renderSealRegistry();
   renderSealDetail();
@@ -13224,7 +14284,7 @@ function addSealFromForm() {
     imageName: document.querySelector("#sealImageInput").files?.[0]?.name || "待上傳",
     imageDataUrl: document.querySelector("#sealImagePreview")?.dataset.image || "",
     fileObjectId: document.querySelector("#sealImagePreview")?.dataset.fileObjectId || "",
-    calibrationStatus: document.querySelector("#sealImagePreview")?.dataset.image ? "已登錄尺寸" : "待上傳圖檔",
+    calibrationStatus: document.querySelector("#sealImagePreview")?.dataset.fileObjectId ? "已登錄尺寸" : "待上傳圖檔",
     hash: `SHA256-SEAL-${Math.random().toString(16).slice(2, 8).toUpperCase()}`
   };
   sealRegistry.unshift(seal);
@@ -13243,34 +14303,11 @@ async function handleSealImageUpload() {
     input.value = "";
     return showToast("印鑑圖檔請上傳 PNG、JPG 或其他圖片格式。");
   }
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-  preview.dataset.image = dataUrl;
-  preview.innerHTML = `<img class="seal-upload-preview" src="${dataUrl}" alt="印鑑預覽" />`;
-  try {
-    const base64 = String(dataUrl).split(",")[1] || "";
-    const result = await backendRequest("/files/upload", {
-      method: "POST",
-      body: JSON.stringify({
-        document_id: "DOC-SEAL-ASSET",
-        file_name: file.name,
-        mime_type: file.type,
-        purpose: "seal-assets",
-        version_label: "original",
-        actor: activeRole(),
-        content_base64: base64
-      })
-    });
-    preview.dataset.fileObjectId = result.file?.id || "";
-    showToast("公司章圖檔已上傳並完成掃描。");
-  } catch (error) {
-    preview.dataset.fileObjectId = "";
-    showToast(`章圖已暫存於畫面，後端上傳失敗：${error.message}`);
-  }
+  input.value = "";
+  preview.dataset.image = "";
+  preview.dataset.fileObjectId = "";
+  preview.innerHTML = `<span>已選擇 ${file.name}；印章原檔不可走一般附件，請到「公司印章與用印管理」上傳至 Seal Vault。</span>`;
+  showToast("印章電子檔屬高敏感資料，請使用 Seal Vault 上傳流程。");
 }
 
 function addTrackingAudit(title, body) {
@@ -13528,6 +14565,7 @@ document.querySelector("#roleSelect").addEventListener("change", (event) => {
   renderInboundDetail();
   renderDispatchBoard();
   renderDispatchDetail();
+  void loadOfficialWorkflow(officialWorkflowScope === "new" ? "all" : officialWorkflowScope);
   renderWorkflowRole();
   renderUnifiedFlows();
   renderContracts();
@@ -13608,6 +14646,47 @@ document.querySelector("#exportDispatchBtn").addEventListener("click", () => {
 document.querySelector("#dispatchSearch").addEventListener("input", (event) => {
   dispatchSearchTerm = event.target.value;
   renderDispatchBoard();
+});
+document.querySelector("#officialWorkflowReloadBtn")?.addEventListener("click", () => {
+  void loadOfficialWorkflow(officialWorkflowScope);
+  void loadOfficialSealOptions();
+});
+document.querySelectorAll("[data-official-scope]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const scope = button.dataset.officialScope || "all";
+    if (scope === "new") {
+      officialWorkflowScope = "new";
+      selectedOfficialDocumentId = "";
+      renderOfficialWorkflow();
+      void loadOfficialSealOptions();
+      return;
+    }
+    void loadOfficialWorkflow(scope);
+  });
+});
+document.querySelector("#officialWorkflowStatusFilter")?.addEventListener("change", (event) => {
+  officialWorkflowStatusFilter = event.target.value;
+  void loadOfficialWorkflow(officialWorkflowScope === "new" ? "all" : officialWorkflowScope);
+});
+document.querySelector("#officialWorkflowSearch")?.addEventListener("input", (event) => {
+  officialWorkflowSearchTerm = event.target.value;
+  renderOfficialWorkflow();
+});
+document.querySelector("#officialCompanySelect")?.addEventListener("change", (event) => {
+  void loadOfficialSealOptions(event.target.value);
+});
+document.querySelector("#officialSourceType")?.addEventListener("change", (event) => {
+  document.querySelector("#officialPdfInput")?.toggleAttribute("required", event.target.value === "uploaded_pdf");
+});
+["#officialStampPageInput", "#officialStampXInput", "#officialStampYInput", "#officialStampWidthInput", "#officialStampHeightInput"].forEach((selector) => {
+  document.querySelector(selector)?.addEventListener("input", updateOfficialStampPreview);
+});
+document.querySelector("#officialWorkflowForm")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void createOfficialWorkflow(true);
+});
+document.querySelector("#officialSaveDraftBtn")?.addEventListener("click", () => {
+  void createOfficialWorkflow(false);
 });
 document.querySelector("#approvalLogSearch").addEventListener("input", (event) => {
   approvalLogSearchTerm = event.target.value;
@@ -13701,10 +14780,11 @@ document.querySelector("#aiGenerateDraftBtn").addEventListener("click", generate
 document.querySelector("#aiApplyDraftBtn").addEventListener("click", applyAiDraftToCompose);
 document.querySelector("#aiClearDraftBtn").addEventListener("click", clearAiDraft);
 document.querySelector("#previewDraftBtn").addEventListener("click", () => {
-  renderDraftPreview();
-  setComposeStep("preview", { force: true });
-  document.querySelector("#draftPreview")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  setDraftPreviewExpanded(true, { scroll: true });
   showToast("已更新即時函稿預覽。");
+});
+document.querySelector("#toggleDraftPreviewBtn").addEventListener("click", () => {
+  setDraftPreviewExpanded(!draftPreviewExpanded, { scroll: !draftPreviewExpanded });
 });
 document.querySelector("#confirmDraftBtn").addEventListener("click", () => {
   setDraftConfirmed(true);
@@ -13934,6 +15014,39 @@ document.querySelector("#sealExportBtn").addEventListener("click", () => {
   addSealAudit("匯出用印紀錄", `已匯出 ${sealRequests.length} 件簽核用印與 ${sealAuditLog.length} 筆軌跡。`);
   showToast("用印紀錄已匯出。");
 });
+document.querySelector("#companySealCompanySelect").addEventListener("change", (event) => {
+  selectedCompanySealCompanyId = event.target.value;
+  selectedCompanySealId = "";
+  loadCompanySealCompanyData();
+});
+document.querySelector("#sealUsageCompanySelect").addEventListener("change", (event) => {
+  selectedCompanySealCompanyId = event.target.value;
+  document.querySelector("#companySealCompanySelect").value = selectedCompanySealCompanyId;
+  selectedCompanySealId = "";
+  loadCompanySealCompanyData();
+});
+document.querySelector("#companySealReloadBtn").addEventListener("click", () => loadCompanySealModule());
+document.querySelector("#companySealCreateBtn").addEventListener("click", createCompanySealFromForm);
+document.querySelector("#companySealCreateForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  createCompanySealFromForm();
+});
+document.querySelector("#companySealUploadBtn").addEventListener("click", uploadCompanySealVersion);
+document.querySelector("#companySealUploadForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  uploadCompanySealVersion();
+});
+document.querySelector("#sealUsageAddPositionBtn").addEventListener("click", addCompanySealStampPosition);
+document.querySelector("#sealUsageClearPositionsBtn").addEventListener("click", () => {
+  companySealStampPositions = [];
+  renderCompanySealModule();
+});
+document.querySelector("#sealUsageSubmitBtn").addEventListener("click", submitCompanySealUsageRequest);
+document.querySelector("#sealUsageRequestForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitCompanySealUsageRequest();
+});
+document.querySelector("#sealUsageStampBtn").addEventListener("click", () => stampCompanySealUsageRequest());
 document.querySelector("#sealAddBtn").addEventListener("click", addSealFromForm);
 document.querySelector("#sealImageInput").addEventListener("change", handleSealImageUpload);
 document.querySelector("#sealForm").addEventListener("submit", (event) => {
@@ -14431,6 +15544,7 @@ renderContracts();
 renderContractSeal();
 fillContractForm();
 renderSeals();
+loadCompanySealModule(true);
 renderTrackingSummary();
 renderTrackingRows();
 renderTrackingDetail();

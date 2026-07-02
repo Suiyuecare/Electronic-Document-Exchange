@@ -19,6 +19,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
                 "SUPABASE_SERVICE_ROLE_KEY",
                 "EDOC_STORAGE_PROVIDER",
                 "EDOC_STORAGE_BUCKET",
+                "EDOC_SEAL_STORAGE_BUCKET",
                 "EDOC_OBJECT_STORAGE_URL",
                 "EDOC_STORAGE_ACCESS_MODE",
                 "EDOC_FILE_ENCRYPTION_ENABLED",
@@ -62,6 +63,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
             "INBOX_SIGNING_KEY_EXPIRES_AT": "2026-12-31",
             "EDOC_STORAGE_PROVIDER": "supabase",
             "EDOC_STORAGE_BUCKET": "edoc-private",
+            "EDOC_SEAL_STORAGE_BUCKET": "edoc-seal-vault",
             "EDOC_OBJECT_STORAGE_URL": "https://project.supabase.co/storage/v1",
             "EDOC_STORAGE_ACCESS_MODE": "server-signed-url",
             "EDOC_FILE_ENCRYPTION_KEY": "file-key",
@@ -93,6 +95,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
         backend.SUPABASE_SERVICE_ROLE_KEY = values["SUPABASE_SERVICE_ROLE_KEY"]
         backend.EDOC_STORAGE_PROVIDER = "supabase"
         backend.EDOC_STORAGE_BUCKET = "edoc-private"
+        backend.EDOC_SEAL_STORAGE_BUCKET = "edoc-seal-vault"
         backend.EDOC_OBJECT_STORAGE_URL = values["EDOC_OBJECT_STORAGE_URL"]
         backend.EDOC_STORAGE_ACCESS_MODE = "server-signed-url"
         backend.EDOC_FILE_ENCRYPTION_ENABLED = True

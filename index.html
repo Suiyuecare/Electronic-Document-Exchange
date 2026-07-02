@@ -31,7 +31,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260614-compose-single-page" />
+    <link rel="stylesheet" href="styles.css?v=20260702-compose-preview-bottom" />
   </head>
   <body>
     <div class="login-screen app" id="loginScreen">
@@ -824,6 +824,93 @@
             </aside>
           </div>
 
+          <section class="panel official-workflow-panel">
+            <div class="panel-heading">
+              <div>
+                <h3>發文申請單</h3>
+                <small>以申請單為主體管理公文內容、PDF 版本、附件、簽核、用印與下載紀錄。</small>
+              </div>
+              <button class="secondary-button" id="officialWorkflowReloadBtn" type="button">重新整理</button>
+            </div>
+
+            <div class="official-workflow-tabs" role="tablist" aria-label="發文簽核視圖">
+              <button class="flow-step-chip active" type="button" data-official-scope="all">全部申請單</button>
+              <button class="flow-step-chip" type="button" data-official-scope="todo">我的待簽核</button>
+              <button class="flow-step-chip" type="button" data-official-scope="mine">我的申請</button>
+              <button class="flow-step-chip" type="button" data-official-scope="new">新增申請單</button>
+            </div>
+
+            <div class="official-workflow-layout">
+              <section class="official-workflow-list">
+                <div class="inline-fields">
+                  <label>狀態<select id="officialWorkflowStatusFilter">
+                    <option value="">全部</option>
+                    <option value="draft">draft</option>
+                    <option value="pending_applicant_manager">申請人主管</option>
+                    <option value="pending_department_head">部門主管</option>
+                    <option value="pending_admin_director">行政部門主任</option>
+                    <option value="pending_general_affairs_review">總務審核</option>
+                    <option value="pending_ceo">執行長</option>
+                    <option value="pending_general_affairs_dispatch">總務寄發</option>
+                    <option value="returned_to_applicant_for_send">申請人寄發</option>
+                    <option value="closed">已結案</option>
+                    <option value="stamping_failed">用印失敗</option>
+                  </select></label>
+                  <label>搜尋<input id="officialWorkflowSearch" type="search" placeholder="主旨、申請人、受文者" /></label>
+                </div>
+                <div class="address-results" id="officialWorkflowList"></div>
+              </section>
+
+              <section class="official-workflow-detail" id="officialWorkflowDetail"></section>
+            </div>
+
+            <form class="official-workflow-form hidden" id="officialWorkflowForm">
+              <div class="panel-heading tight">
+                <h3>新增發文申請單</h3>
+                <span class="status-pill">兩種來源</span>
+              </div>
+              <div class="inline-fields">
+                <label>申請來源<select id="officialSourceType">
+                  <option value="blank_editor">空白公文從頭撰寫</option>
+                  <option value="uploaded_pdf">上傳既有 PDF 作為申請單版本</option>
+                </select></label>
+                <label>公司<select id="officialCompanySelect"></select></label>
+                <label>印章<select id="officialSealSelect"></select></label>
+                <label>寄發方式<select id="officialDispatchMethodSelect">
+                  <option value="electronic_official_document_by_general_affairs">總務電子公文系統發文</option>
+                  <option value="return_to_applicant_for_manual_send">回申請人自行寄發</option>
+                  <option value="email_by_general_affairs">總務 Email 寄出</option>
+                  <option value="physical_mail_by_general_affairs">總務紙本郵寄</option>
+                  <option value="no_dispatch_required">僅用印歸檔</option>
+                </select></label>
+              </div>
+              <div class="inline-fields">
+                <label>受文者<input id="officialRecipientInput" placeholder="臺北市政府社會局" /></label>
+                <label>發文單位<input id="officialDispatchUnitInput" placeholder="居家照顧部" /></label>
+                <label>承辦人<input id="officialHandlerInput" placeholder="承辦人" /></label>
+              </div>
+              <label>主旨<input id="officialSubjectInput" placeholder="請輸入發文主旨" /></label>
+              <label>說明<textarea id="officialDescriptionInput" rows="4" placeholder="說明內容"></textarea></label>
+              <label>辦法<textarea id="officialMethodInput" rows="3" placeholder="辦法內容"></textarea></label>
+              <label>用印原因<input id="officialReasonInput" placeholder="請填寫用印原因" /></label>
+              <div class="inline-fields">
+                <label>PDF 檔案<input id="officialPdfInput" type="file" accept="application/pdf" /></label>
+                <label>頁碼<input id="officialStampPageInput" type="number" min="1" value="1" /></label>
+                <label>X<input id="officialStampXInput" type="number" min="0" value="420" /></label>
+                <label>Y<input id="officialStampYInput" type="number" min="0" value="130" /></label>
+                <label>寬<input id="officialStampWidthInput" type="number" min="1" value="85" /></label>
+                <label>高<input id="officialStampHeightInput" type="number" min="1" value="85" /></label>
+              </div>
+              <div class="official-stamp-preview" id="officialStampPreview">
+                <div class="official-stamp-box" id="officialStampBox">用印位置</div>
+              </div>
+              <div class="form-actions">
+                <button class="primary-button" id="officialSubmitBtn" type="submit">送出簽核</button>
+                <button class="secondary-button" id="officialSaveDraftBtn" type="button">建立草稿</button>
+              </div>
+            </form>
+          </section>
+
           <div class="dispatch-workbench">
             <section class="panel">
               <div class="panel-heading">
@@ -988,12 +1075,12 @@
                   <span class="status-pill" id="composeConfirmHint">尚未確認</span>
                 </div>
                 <div class="next-action-card">
-                  <strong>先看右側即時函稿預覽</strong>
+                  <strong>先展開函稿預覽</strong>
                   <p>確認文號、受文者、主旨、說明、附件與用印位置後，按「確認函稿」，才可以送清稿簽核。</p>
                 </div>
                 <div class="form-actions">
                   <button class="secondary-button" id="saveDispatchDraftBtn" type="button">儲存草稿</button>
-                  <button class="secondary-button" id="previewDraftBtn" type="button">回到填寫與預覽</button>
+                  <button class="secondary-button" id="previewDraftBtn" type="button">展開函稿預覽</button>
                   <button class="primary-button" id="submitDispatchBtn" type="submit" disabled>清稿並加入發文佇列</button>
                 </div>
               </section>
@@ -1005,18 +1092,6 @@
             </form>
 
             <div class="compose-support-stack">
-              <section class="panel draft-preview-panel">
-                <div class="panel-heading">
-                  <h3>即時函稿預覽</h3>
-                  <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
-                </div>
-                <article class="official-draft-preview" id="draftPreview"></article>
-                <div class="form-actions">
-                  <button class="primary-button" id="confirmDraftBtn" type="button">確認函稿</button>
-                  <button class="secondary-button" id="resetDraftConfirmBtn" type="button">取消確認</button>
-                </div>
-              </section>
-
               <aside class="panel flow-panel ai-compose-panel">
                 <div class="panel-heading">
                   <div>
@@ -1041,7 +1116,7 @@
                   自動生成內文
                   <textarea id="aiGeneratedBody" rows="8" placeholder="AI 生成後顯示，可自行編輯"></textarea>
                 </label>
-                <button class="secondary-button full-width" id="aiApplyDraftBtn" type="button">套用到左側主旨與說明</button>
+                <button class="secondary-button full-width" id="aiApplyDraftBtn" type="button">套用到公文主旨與說明</button>
                 <h3>送出前檢核</h3>
                 <ol class="precheck-list" id="precheckList"></ol>
                 <div class="summary-box">
@@ -1053,6 +1128,27 @@
                   <strong>validate → jAgent send → status sync</strong>
                 </div>
               </aside>
+
+              <section class="panel draft-preview-panel is-collapsed" id="draftPreviewPanel">
+                <div class="panel-heading draft-preview-heading">
+                  <div>
+                    <p class="eyebrow">Draft Preview</p>
+                    <h3>即時函稿預覽</h3>
+                  </div>
+                  <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
+                </div>
+                <div class="draft-preview-summary" id="draftPreviewSummary"></div>
+                <div class="draft-preview-toolbar">
+                  <button class="secondary-button" id="toggleDraftPreviewBtn" type="button" aria-expanded="false" aria-controls="draftPreviewBody">展開預覽</button>
+                </div>
+                <div class="draft-preview-body" id="draftPreviewBody" hidden>
+                  <article class="official-draft-preview" id="draftPreview"></article>
+                  <div class="form-actions draft-preview-actions">
+                    <button class="primary-button" id="confirmDraftBtn" type="button">確認函稿</button>
+                    <button class="secondary-button" id="resetDraftConfirmBtn" type="button">取消確認</button>
+                  </div>
+                </div>
+              </section>
             </div>
           </div>
         </section>
@@ -1396,6 +1492,120 @@
               <small>不可否認操作紀錄</small>
             </article>
           </div>
+
+          <section class="panel company-seal-module-panel" id="companySealModule">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Company Seal Library</p>
+                <h3>公司印章與用印管理</h3>
+              </div>
+              <div class="detail-actions">
+                <label class="inline-select-label">公司<select id="companySealCompanySelect"></select></label>
+                <button class="secondary-button" id="companySealReloadBtn" type="button">重新整理</button>
+              </div>
+            </div>
+            <div class="company-seal-module-grid">
+              <section class="company-seal-library">
+                <div class="panel-heading tight">
+                  <h3>公司印章庫</h3>
+                  <span class="status-pill" id="companySealLibraryStatus">載入中</span>
+                </div>
+                <div class="table-wrap">
+                  <table class="company-seal-table">
+                    <thead>
+                      <tr>
+                        <th>印章名稱</th>
+                        <th>類型</th>
+                        <th>大小</th>
+                        <th>狀態</th>
+                        <th>版本</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="companySealLibraryRows"></tbody>
+                  </table>
+                </div>
+                <div class="seal-safe-preview" id="companySealSafePreview"></div>
+              </section>
+
+              <section>
+                <div class="panel-heading tight">
+                  <h3>新增與版本</h3>
+                  <span class="status-pill" id="companySealFileStatus">metadata only</span>
+                </div>
+                <form class="compact-form" id="companySealCreateForm">
+                  <label>印章名稱<input id="companySealNameInput" value="公司便章－大章" /></label>
+                  <label>印章類型<select id="companySealCategorySelect"></select></label>
+                  <label>大章/小章<select id="companySealSizeSelect"></select></label>
+                  <label>用途說明<input id="companySealPurposeInput" value="一般公文、合約與行政文件用印" /></label>
+                  <button class="secondary-button" id="companySealCreateBtn" type="button">新增印章</button>
+                </form>
+                <form class="compact-form" id="companySealUploadForm">
+                  <label>新版印章檔<input id="companySealFileInput" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.png,.jpg,.jpeg,.webp,.svg" /></label>
+                  <button class="primary-button" id="companySealUploadBtn" type="button">上傳新版</button>
+                </form>
+                <div class="address-results compact-list" id="companySealFilesList"></div>
+              </section>
+
+              <section>
+                <div class="panel-heading tight">
+                  <h3>用印申請</h3>
+                  <span class="status-pill" id="sealUsageRequestStatus">待填寫</span>
+                </div>
+                <form class="compact-form" id="sealUsageRequestForm">
+                  <label>公司<select id="sealUsageCompanySelect"></select></label>
+                  <label>文件<select id="sealUsageDocumentSelect"></select></label>
+                  <label>印章<select id="sealUsageSealSelect"></select></label>
+                  <label>用印類型<select id="sealUsageTypeSelect"></select></label>
+                  <label>用印原因<textarea id="sealUsageReasonInput" rows="3">公文或合約核准後用印。</textarea></label>
+                  <div class="inline-fields">
+                    <label>頁碼<input id="sealUsagePageInput" type="number" min="1" value="1" /></label>
+                    <label>X<input id="sealUsageXInput" type="number" value="420" /></label>
+                    <label>Y<input id="sealUsageYInput" type="number" value="130" /></label>
+                  </div>
+                  <div class="inline-fields">
+                    <label>寬<input id="sealUsageWInput" type="number" value="85" /></label>
+                    <label>高<input id="sealUsageHInput" type="number" value="85" /></label>
+                  </div>
+                  <div class="detail-actions">
+                    <button class="secondary-button" id="sealUsageAddPositionBtn" type="button">加入章位</button>
+                    <button class="secondary-button" id="sealUsageClearPositionsBtn" type="button">清除章位</button>
+                    <button class="primary-button" id="sealUsageSubmitBtn" type="button">送出簽核</button>
+                  </div>
+                </form>
+                <div class="archive-grid" id="sealUsagePositionsGrid"></div>
+              </section>
+
+              <section>
+                <div class="panel-heading tight">
+                  <h3>用印簽核</h3>
+                  <span class="status-pill" id="sealUsageApprovalStatus">0 件</span>
+                </div>
+                <label>簽核意見<textarea id="sealUsageApprovalComment" rows="3">核准用印。</textarea></label>
+                <div class="timeline" id="sealUsageApprovalList"></div>
+              </section>
+
+              <section>
+                <div class="panel-heading tight">
+                  <h3>文件套印</h3>
+                  <span class="status-pill" id="sealUsageStampStatus">需先核准</span>
+                </div>
+                <form class="compact-form" id="sealUsageStampForm">
+                  <label>核准申請<select id="sealStampRequestSelect"></select></label>
+                  <button class="primary-button" id="sealUsageStampBtn" type="button">執行用印</button>
+                </form>
+                <div class="archive-grid" id="sealUsageStampedResult"></div>
+              </section>
+
+              <section>
+                <div class="panel-heading tight">
+                  <h3>用印紀錄查詢</h3>
+                  <span class="status-pill" id="sealUsageLogStatus">最近 300 筆</span>
+                </div>
+                <div class="timeline" id="sealUsageLogList"></div>
+              </section>
+            </div>
+          </section>
 
           <section class="panel executive-seal-admin" id="executiveSealAdmin">
             <div class="panel-heading">
@@ -3463,6 +3673,6 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="app.js?v=20260614-compose-single-page"></script>
+    <script src="app.js?v=20260702-compose-preview-bottom"></script>
   </body>
 </html>

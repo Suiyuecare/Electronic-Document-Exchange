@@ -42,6 +42,9 @@ WRITABLE_ROOT = Path(os.getenv("EDOC_WRITABLE_DIR", "/tmp/edoc" if RUNNING_ON_VE
 DATA_DIR = WRITABLE_ROOT / "data"
 BACKUP_DIR = WRITABLE_ROOT / "backups"
 STORAGE_DIR = WRITABLE_ROOT / "storage"
+PRIVATE_SEAL_STORAGE_DIR = STORAGE_DIR / "seal-vault" / "seals"
+SEAL_VAULT_DOCUMENT_ID = "SEAL-VAULT"
+SEAL_VAULT_PURPOSE_PREFIX = "seal-vault"
 DB_PATH = DATA_DIR / "edoc.sqlite3"
 DEPLOYMENT_ENV = os.getenv("EDOC_DEPLOYMENT_ENV", os.getenv("VERCEL_ENV", "development")).lower()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -49,6 +52,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
 USE_SUPABASE = os.getenv("EDOC_DB_MODE", "").lower() == "supabase" or bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 EDOC_STORAGE_PROVIDER = os.getenv("EDOC_STORAGE_PROVIDER", "local").lower()
 EDOC_STORAGE_BUCKET = os.getenv("EDOC_STORAGE_BUCKET", "edoc-private")
+EDOC_SEAL_STORAGE_BUCKET = os.getenv("EDOC_SEAL_STORAGE_BUCKET", "edoc-seal-vault")
 EDOC_OBJECT_STORAGE_URL = os.getenv("EDOC_OBJECT_STORAGE_URL", (f"{SUPABASE_URL}/storage/v1" if SUPABASE_URL else "")).rstrip("/")
 EDOC_STORAGE_ACCESS_MODE = os.getenv("EDOC_STORAGE_ACCESS_MODE", "server-signed-url")
 EDOC_SIGNED_URL_TTL_SECONDS = int(os.getenv("EDOC_SIGNED_URL_TTL_SECONDS", "300"))
@@ -59,6 +63,8 @@ EDOC_AV_PROVIDER = os.getenv("EDOC_AV_PROVIDER", EDOC_SCAN_ENGINE)
 EDOC_AV_ENDPOINT = os.getenv("EDOC_AV_ENDPOINT", "")
 EDOC_MAX_FILE_SIZE_MB = int(os.getenv("EDOC_MAX_FILE_SIZE_MB", "100"))
 EDOC_ALLOWED_MIME_TYPES = os.getenv("EDOC_ALLOWED_MIME_TYPES", "application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream")
+EDOC_SEAL_FILE_MAX_SIZE_MB = int(os.getenv("EDOC_SEAL_FILE_MAX_SIZE_MB", "5"))
+EDOC_SEAL_ALLOWED_MIME_TYPES = os.getenv("EDOC_SEAL_ALLOWED_MIME_TYPES", "image/png,image/jpeg,image/webp,image/svg+xml")
 EDOC_PUBLIC_BASE_URL = os.getenv("EDOC_PUBLIC_BASE_URL", os.getenv("PRODUCTION_BASE_URL", "")).rstrip("/")
 MONITORING_WEBHOOK_URL = os.getenv("MONITORING_WEBHOOK_URL", "")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
@@ -649,6 +655,20 @@ def authenticate_logging_bridge(conn: sqlite3.Connection, payload: Dict[str, Any
 
 TABLES = {
     "documents": "documents",
+    "companies": "companies",
+    "seal_reference_options": "seal_reference_options",
+    "company_seals": "company_seals",
+    "company_seal_files": "company_seal_files",
+    "seal_permissions": "seal_permissions",
+    "seal_usage_requests": "seal_usage_requests",
+    "seal_usage_approvals": "seal_usage_approvals",
+    "seal_usage_logs": "seal_usage_logs",
+    "official_documents": "official_documents",
+    "official_document_files": "official_document_files",
+    "official_document_approval_steps": "official_document_approval_steps",
+    "official_document_approval_logs": "official_document_approval_logs",
+    "official_document_stamp_requests": "official_document_stamp_requests",
+    "official_document_dispatch_records": "official_document_dispatch_records",
     "company_registry": "company_registry",
     "department_registry": "department_registry",
     "seal_type_registry": "seal_type_registry",
@@ -738,6 +758,241 @@ CREATE TABLE IF NOT EXISTS company_registry (
   status TEXT NOT NULL DEFAULT '啟用',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS companies (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  tax_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS seal_reference_options (
+  id TEXT PRIMARY KEY,
+  option_type TEXT NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(option_type, code)
+);
+
+CREATE TABLE IF NOT EXISTS company_seals (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  seal_name TEXT NOT NULL,
+  seal_category TEXT NOT NULL,
+  seal_size_type TEXT NOT NULL,
+  purpose_description TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deactivated_at TEXT,
+  FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS company_seal_files (
+  id TEXT PRIMARY KEY,
+  seal_id TEXT NOT NULL,
+  file_object_id TEXT,
+  file_storage_key TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  file_mime_type TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_hash TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  is_current INTEGER NOT NULL DEFAULT 1,
+  uploaded_by TEXT,
+  uploaded_at TEXT NOT NULL,
+  FOREIGN KEY(seal_id) REFERENCES company_seals(id) ON DELETE CASCADE,
+  FOREIGN KEY(file_object_id) REFERENCES file_objects(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS seal_permissions (
+  id TEXT PRIMARY KEY,
+  seal_id TEXT NOT NULL,
+  user_id TEXT,
+  role TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(seal_id) REFERENCES company_seals(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS seal_usage_requests (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  company_id TEXT NOT NULL,
+  seal_id TEXT NOT NULL,
+  requested_by TEXT,
+  request_reason TEXT,
+  usage_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  stamp_positions_json TEXT NOT NULL DEFAULT '[]',
+  stamped_pdf_version_id TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  requested_at TEXT NOT NULL,
+  approved_at TEXT,
+  stamped_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
+  FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE RESTRICT,
+  FOREIGN KEY(seal_id) REFERENCES company_seals(id) ON DELETE RESTRICT,
+  FOREIGN KEY(stamped_pdf_version_id) REFERENCES pdf_versions(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS seal_usage_approvals (
+  id TEXT PRIMARY KEY,
+  usage_request_id TEXT NOT NULL,
+  approver_id TEXT,
+  approval_order INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'pending',
+  comment TEXT,
+  approved_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(usage_request_id) REFERENCES seal_usage_requests(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS seal_usage_logs (
+  id TEXT PRIMARY KEY,
+  usage_request_id TEXT,
+  seal_id TEXT,
+  document_id TEXT,
+  action TEXT NOT NULL,
+  actor_id TEXT,
+  ip_address TEXT,
+  user_agent TEXT,
+  detail TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(usage_request_id) REFERENCES seal_usage_requests(id) ON DELETE SET NULL,
+  FOREIGN KEY(seal_id) REFERENCES company_seals(id) ON DELETE SET NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_documents (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  document_type TEXT NOT NULL DEFAULT 'outgoing_official_document',
+  source_type TEXT NOT NULL CHECK(source_type IN ('blank_editor','uploaded_pdf')),
+  title TEXT NOT NULL,
+  subject TEXT,
+  description TEXT,
+  method TEXT,
+  recipient TEXT,
+  dispatch_unit TEXT,
+  handler_name TEXT,
+  applicant_id TEXT NOT NULL,
+  applicant_name TEXT,
+  applicant_department_id TEXT,
+  applicant_department_name TEXT,
+  dispatch_method TEXT NOT NULL DEFAULT 'electronic_official_document_by_general_affairs',
+  current_status TEXT NOT NULL DEFAULT 'draft',
+  current_step TEXT,
+  request_reason TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS official_document_files (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  file_object_id TEXT,
+  file_type TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  file_storage_key TEXT NOT NULL,
+  file_mime_type TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_hash TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  uploaded_by TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE CASCADE,
+  FOREIGN KEY(file_object_id) REFERENCES file_objects(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_document_approval_steps (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  step_order INTEGER NOT NULL,
+  step_key TEXT NOT NULL,
+  step_name TEXT NOT NULL,
+  approver_user_id TEXT,
+  approver_name TEXT,
+  approver_role TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  comment TEXT,
+  approved_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS official_document_approval_logs (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  step_id TEXT,
+  file_id TEXT,
+  actor_id TEXT,
+  actor_name TEXT,
+  action TEXT NOT NULL,
+  comment TEXT,
+  ip_address TEXT,
+  user_agent TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE CASCADE,
+  FOREIGN KEY(step_id) REFERENCES official_document_approval_steps(id) ON DELETE SET NULL,
+  FOREIGN KEY(file_id) REFERENCES official_document_files(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_document_stamp_requests (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  company_id TEXT NOT NULL,
+  seal_id TEXT NOT NULL,
+  requested_by TEXT,
+  stamp_page INTEGER NOT NULL DEFAULT 1,
+  stamp_x REAL NOT NULL DEFAULT 420,
+  stamp_y REAL NOT NULL DEFAULT 130,
+  stamp_width REAL NOT NULL DEFAULT 85,
+  stamp_height REAL NOT NULL DEFAULT 85,
+  status TEXT NOT NULL DEFAULT 'pending',
+  stamped_file_id TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  stamped_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE CASCADE,
+  FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE RESTRICT,
+  FOREIGN KEY(seal_id) REFERENCES company_seals(id) ON DELETE RESTRICT,
+  FOREIGN KEY(stamped_file_id) REFERENCES official_document_files(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_document_dispatch_records (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  dispatch_method TEXT NOT NULL,
+  dispatch_owner_type TEXT NOT NULL,
+  dispatch_owner_user_id TEXT,
+  dispatch_status TEXT NOT NULL DEFAULT 'pending',
+  external_official_document_number TEXT,
+  dispatch_date TEXT,
+  recipient TEXT,
+  recipient_contact TEXT,
+  dispatch_note TEXT,
+  proof_file_id TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE CASCADE,
+  FOREIGN KEY(proof_file_id) REFERENCES official_document_files(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS department_registry (
@@ -1593,6 +1848,27 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
 CREATE INDEX IF NOT EXISTS idx_documents_direction ON documents(direction);
+CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status);
+CREATE INDEX IF NOT EXISTS idx_seal_reference_options_type ON seal_reference_options(option_type, status);
+CREATE INDEX IF NOT EXISTS idx_company_seals_company ON company_seals(company_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_company_seals_category ON company_seals(seal_category, seal_size_type);
+CREATE INDEX IF NOT EXISTS idx_company_seal_files_seal ON company_seal_files(seal_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_seal_permissions_seal ON seal_permissions(seal_id);
+CREATE INDEX IF NOT EXISTS idx_seal_usage_requests_document ON seal_usage_requests(document_id);
+CREATE INDEX IF NOT EXISTS idx_seal_usage_requests_status ON seal_usage_requests(status);
+CREATE INDEX IF NOT EXISTS idx_seal_usage_requests_company ON seal_usage_requests(company_id);
+CREATE INDEX IF NOT EXISTS idx_seal_usage_approvals_request ON seal_usage_approvals(usage_request_id, approval_order);
+CREATE INDEX IF NOT EXISTS idx_seal_usage_logs_request ON seal_usage_logs(usage_request_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_official_documents_status ON official_documents(current_status, current_step);
+CREATE INDEX IF NOT EXISTS idx_official_documents_applicant ON official_documents(applicant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_official_documents_company ON official_documents(company_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_official_document_files_document ON official_document_files(document_id, file_type, version);
+CREATE INDEX IF NOT EXISTS idx_official_document_steps_document ON official_document_approval_steps(document_id, step_order);
+CREATE INDEX IF NOT EXISTS idx_official_document_steps_approver ON official_document_approval_steps(approver_user_id, status);
+CREATE INDEX IF NOT EXISTS idx_official_document_logs_document ON official_document_approval_logs(document_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_official_stamp_requests_document ON official_document_stamp_requests(document_id, status);
+CREATE INDEX IF NOT EXISTS idx_official_dispatch_records_document ON official_document_dispatch_records(document_id, dispatch_status);
+CREATE INDEX IF NOT EXISTS idx_official_dispatch_records_owner ON official_document_dispatch_records(dispatch_owner_user_id, dispatch_status);
 CREATE INDEX IF NOT EXISTS idx_company_registry_status ON company_registry(status);
 CREATE INDEX IF NOT EXISTS idx_department_registry_company ON department_registry(company_name);
 CREATE INDEX IF NOT EXISTS idx_seal_type_registry_status ON seal_type_registry(status);
@@ -1750,6 +2026,7 @@ def production_readiness() -> Dict[str, Any]:
         "INBOX_SIGNING_KEY_EXPIRES_AT",
         "EDOC_STORAGE_PROVIDER",
         "EDOC_STORAGE_BUCKET",
+        "EDOC_SEAL_STORAGE_BUCKET",
         "EDOC_OBJECT_STORAGE_URL",
         "EDOC_STORAGE_ACCESS_MODE",
         "EDOC_FILE_ENCRYPTION_KEY",
@@ -2074,6 +2351,7 @@ def storage_service_status() -> Dict[str, Any]:
     services = {
         "provider": {"configured": EDOC_STORAGE_PROVIDER in {"supabase", "s3", "gcs", "azure"}, "value": EDOC_STORAGE_PROVIDER or "未設定"},
         "bucket": {"configured": bool(EDOC_STORAGE_BUCKET), "value": EDOC_STORAGE_BUCKET or "未設定"},
+        "sealBucket": {"configured": bool(EDOC_SEAL_STORAGE_BUCKET), "value": EDOC_SEAL_STORAGE_BUCKET or "未設定"},
         "objectEndpoint": {"configured": bool(EDOC_OBJECT_STORAGE_URL), "value": EDOC_OBJECT_STORAGE_URL or "未設定"},
         "accessMode": {"configured": EDOC_STORAGE_ACCESS_MODE == "server-signed-url", "value": EDOC_STORAGE_ACCESS_MODE},
         "encryption": {"configured": EDOC_FILE_ENCRYPTION_ENABLED and env_present("EDOC_FILE_ENCRYPTION_KEY"), "value": "已啟用" if EDOC_FILE_ENCRYPTION_ENABLED else "未啟用", "keyId": file_key_id() if env_present("EDOC_FILE_ENCRYPTION_KEY") else "未設定"},
@@ -2095,6 +2373,7 @@ def storage_service_status() -> Dict[str, Any]:
         "policy": {
             "provider": EDOC_STORAGE_PROVIDER,
             "bucket": EDOC_STORAGE_BUCKET,
+            "sealBucket": EDOC_SEAL_STORAGE_BUCKET,
             "objectEndpoint": EDOC_OBJECT_STORAGE_URL or "未設定",
             "accessMode": EDOC_STORAGE_ACCESS_MODE,
             "signedUrlTtlSeconds": EDOC_SIGNED_URL_TTL_SECONDS,
@@ -2503,6 +2782,7 @@ def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    PRIVATE_SEAL_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 LOCAL_SCHEMA_READY = False
@@ -2681,6 +2961,9 @@ def migrate() -> None:
         ensure_column(conn, "users", "last_synced_from_logging_at", "TEXT")
         ensure_column(conn, "users", "password_hash", "TEXT")
         ensure_column(conn, "users", "job_level", "TEXT NOT NULL DEFAULT '職員'")
+        ensure_column(conn, "official_documents", "dispatch_method", "TEXT NOT NULL DEFAULT 'electronic_official_document_by_general_affairs'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_official_dispatch_records_document ON official_document_dispatch_records(document_id, dispatch_status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_official_dispatch_records_owner ON official_document_dispatch_records(dispatch_owner_user_id, dispatch_status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_logging_account ON users(logging_account_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_module_account_links_source ON module_account_links(source_system, source_account_id, target_module)")
         conn.execute(
@@ -2815,6 +3098,7 @@ def migrate() -> None:
         seed_document_acl_examples(conn)
         seed_certificate_authorities(conn)
         seed_signing_certificates(conn)
+        seed_company_seal_module(conn)
         seed_seal_assets(conn)
         seed_notification_credentials(conn)
         seed_attachment_security(conn)
@@ -3334,6 +3618,87 @@ def mm_to_pdf_points(value: Any, fallback: float = 20.0) -> float:
     return round(number * 72 / 25.4, 2)
 
 
+def seed_company_seal_module(conn: sqlite3.Connection) -> None:
+    ts = now()
+    reference_rows = [
+        ("category", "establishment_seal", "公司設立印鑑", "公司設立、變更、重大治理文件", 10),
+        ("category", "bank_seal", "銀行印鑑章", "銀行開戶、授權、往來文件", 20),
+        ("category", "general_seal", "便章", "日常公文、一般函稿、例行文件", 30),
+        ("category", "other", "其他章", "使用者自行新增或特殊用途印章", 90),
+        ("size", "large_seal", "大章", "公司或組織大章", 10),
+        ("size", "small_seal", "小章", "負責人章、授權小章", 20),
+        ("usage_type", "official_document", "公文", "電子公文發文或回覆", 10),
+        ("usage_type", "contract", "合約", "電子合約或契約文件", 20),
+        ("usage_type", "bank_document", "銀行文件", "銀行帳戶、授權、付款相關文件", 30),
+        ("usage_type", "government_application", "政府申請文件", "政府機關申請、補正、許可文件", 40),
+        ("usage_type", "internal_document", "內部文件", "內部簽呈、公告、作業文件", 50),
+        ("request_status", "draft", "草稿", "尚未送出", 10),
+        ("request_status", "pending", "待簽核", "等待權責人核准", 20),
+        ("request_status", "approved", "已核准", "可執行套印", 30),
+        ("request_status", "rejected", "已駁回", "不可用印", 40),
+        ("request_status", "stamped", "已用印", "已產出用印文件版本", 50),
+        ("request_status", "cancelled", "已取消", "申請取消或作廢", 60),
+        ("permission_role", "viewer", "檢視者", "僅可查看授權紀錄", 10),
+        ("permission_role", "requester", "申請者", "可提出用印申請", 20),
+        ("permission_role", "approver", "簽核者", "可核准或駁回用印", 30),
+        ("permission_role", "seal_admin", "印章管理者", "可上傳、停用、更新印章檔案", 40),
+    ]
+    for option_type, code, name, description, sort_order in reference_rows:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO seal_reference_options (
+              id, option_type, code, name, description, sort_order, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (f"SOPT-{option_type}-{code}", option_type, code, name, description, sort_order, ts, ts),
+        )
+
+    registry_rows = conn.execute("SELECT * FROM company_registry").fetchall()
+    if not registry_rows:
+        registry_rows = [{"id": "CO-001", "name": "歲悅長照股份有限公司", "tax_id": "待設定", "status": "啟用"}]
+    for row in registry_rows:
+        company_id = row["id"] if isinstance(row, sqlite3.Row) else row["id"]
+        name = row["name"] if isinstance(row, sqlite3.Row) else row["name"]
+        tax_id = row["tax_id"] if isinstance(row, sqlite3.Row) else row["tax_id"]
+        status = row["status"] if isinstance(row, sqlite3.Row) else row["status"]
+        normalized_status = "active" if status in {"啟用", "active"} else "inactive"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO companies (id, name, tax_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (company_id, name, tax_id, normalized_status, ts, ts),
+        )
+        seed_rows = [
+            ("establishment_seal", "large_seal", "公司設立印鑑－大章", "設立登記、公司變更、重大申請"),
+            ("establishment_seal", "small_seal", "公司設立印鑑－小章", "設立登記、負責人或授權小章"),
+            ("bank_seal", "large_seal", "銀行印鑑章－大章", "銀行往來、帳戶與付款授權"),
+            ("bank_seal", "small_seal", "銀行印鑑章－小章", "銀行往來小章或負責人小章"),
+            ("general_seal", "large_seal", "便章－大章", "日常公文、一般函稿"),
+            ("general_seal", "small_seal", "便章－小章", "一般函稿、內部文件"),
+            ("other", "large_seal", "其他章", "特殊用途，可由印章管理者調整"),
+        ]
+        for category, size, seal_name, purpose in seed_rows:
+            seal_id = f"CSEAL-{company_id}-{category}-{size}".replace(" ", "-")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO company_seals (
+                  id, company_id, seal_name, seal_category, seal_size_type, purpose_description,
+                  is_active, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, 'system-seed', ?, ?)
+                """,
+                (seal_id, company_id, seal_name, category, size, purpose, ts, ts),
+            )
+            for role in ["viewer", "requester", "approver", "seal_admin"]:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO seal_permissions (id, seal_id, user_id, role, created_at)
+                    VALUES (?, ?, '', ?, ?)
+                    """,
+                    (f"SPERM-{seal_id}-{role}", seal_id, role, ts),
+                )
+
+
 def seed_seal_assets(conn: sqlite3.Connection) -> None:
     ts = now()
     seals = [
@@ -3603,11 +3968,11 @@ def insert_row(conn: sqlite3.Connection, table: str, payload: Dict[str, Any]) ->
         apply_user_permission_defaults(payload)
     if table == "documents" and payload.get("direction") == "發文" and not payload.get("doc_no"):
         payload["doc_no"] = next_dispatch_no(conn)
-    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications"}:
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "companies", "seal_reference_options", "company_seals", "seal_usage_requests", "seal_usage_approvals", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications", "official_documents", "official_document_approval_steps", "official_document_stamp_requests", "official_document_dispatch_records"}:
         payload.setdefault("updated_at", now())
-    if table in {"documents", "attachments", "exchange_events", "exchange_outbox", "exchange_inbox", "exchange_log", "exchange_attachment", "exchange_status_history", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "file_objects", "file_download_tokens", "virus_scan_jobs", "compliance_attestations", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications", "signature_provider_events"}:
+    if table in {"documents", "attachments", "exchange_events", "exchange_outbox", "exchange_inbox", "exchange_log", "exchange_attachment", "exchange_status_history", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "file_objects", "file_download_tokens", "virus_scan_jobs", "compliance_attestations", "company_registry", "department_registry", "seal_type_registry", "companies", "seal_reference_options", "company_seals", "seal_permissions", "seal_usage_approvals", "seal_usage_logs", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications", "signature_provider_events", "official_documents", "official_document_files", "official_document_approval_steps", "official_document_approval_logs", "official_document_stamp_requests", "official_document_dispatch_records"}:
         payload.setdefault("created_at", now())
-    if table in {"documents", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_approvals", "seal_applications", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs"}:
+    if table in {"documents", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_approvals", "seal_applications", "seal_usage_requests", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs", "official_documents"}:
         for key, value in list(payload.items()):
             if key.endswith("_json") and not isinstance(value, str):
                 payload[key] = json.dumps(value, ensure_ascii=False)
@@ -3645,9 +4010,9 @@ def patch_row(conn: sqlite3.Connection, table: str, row_id: str, payload: Dict[s
             payload["job_level"] = profile["job_level"]
         if permission_inputs.intersection(payload) and (not payload.get("role") or payload.get("role") not in ALLOWED_EDOC_ROLES):
             payload["role"] = profile["role"]
-    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "background_jobs", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications"}:
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "background_jobs", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "companies", "seal_reference_options", "company_seals", "seal_usage_requests", "seal_usage_approvals", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_parties", "contract_approvals", "seal_applications", "official_documents", "official_document_approval_steps", "official_document_stamp_requests", "official_document_dispatch_records"}:
         payload["updated_at"] = now()
-    if table in {"documents", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_approvals", "seal_applications", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs"}:
+    if table in {"documents", "workflow_tasks", "approval_step_actor_snapshots", "contracts", "contract_approvals", "seal_applications", "seal_usage_requests", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs", "official_documents"}:
         for key, value in list(payload.items()):
             if key.endswith("_json") and not isinstance(value, str):
                 payload[key] = json.dumps(value, ensure_ascii=False)
@@ -3727,6 +4092,20 @@ TABLE_READ_PERMISSIONS: Dict[str, List[str]] = {
     "exchange_status_history": ["exchange.view", "exchange.manage"],
     "signature_provider_events": ["seals.manage", "audit_logs.view"],
     "file_download_tokens": ["files.manage", "audit_logs.view"],
+    "companies": ["seals.manage", "contracts.seal", "official_documents.compose"],
+    "seal_reference_options": ["seals.manage", "contracts.seal", "official_documents.compose"],
+    "company_seals": ["seals.manage", "contracts.seal", "official_documents.compose"],
+    "company_seal_files": ["seals.manage", "audit_logs.view"],
+    "seal_permissions": ["seals.manage", "system_permissions.view"],
+    "seal_usage_requests": ["seals.manage", "contracts.seal", "official_documents.todo", "official_documents.compose"],
+    "seal_usage_approvals": ["seals.manage", "contracts.seal", "official_documents.todo"],
+    "seal_usage_logs": ["seals.manage", "audit_logs.view"],
+    "official_documents": ["official_documents.compose", "official_documents.todo", "official_documents.records", "official_documents.all_records", "official_documents.all_todo"],
+    "official_document_files": ["official_documents.compose", "official_documents.todo", "official_documents.records", "official_documents.all_records"],
+    "official_document_approval_steps": ["official_documents.todo", "official_documents.records", "official_documents.all_records"],
+    "official_document_approval_logs": ["official_documents.todo", "official_documents.records", "official_documents.all_records", "audit_logs.view"],
+    "official_document_stamp_requests": ["official_documents.compose", "official_documents.todo", "official_documents.records", "official_documents.all_records"],
+    "official_document_dispatch_records": ["official_documents.compose", "official_documents.todo", "official_documents.records", "official_documents.all_records", "official_documents.all_todo"],
 }
 
 
@@ -3753,6 +4132,20 @@ TABLE_WRITE_PERMISSIONS: Dict[str, List[str]] = {
     "exchange_status_history": ["exchange.manage"],
     "signature_provider_events": ["seals.manage"],
     "file_download_tokens": ["files.manage"],
+    "companies": ["seals.manage"],
+    "seal_reference_options": ["seals.manage"],
+    "company_seals": ["seals.manage"],
+    "company_seal_files": ["seals.manage"],
+    "seal_permissions": ["seals.manage", "system_permissions.manage"],
+    "seal_usage_requests": ["seals.manage", "contracts.seal", "official_documents.compose"],
+    "seal_usage_approvals": ["seals.manage", "contracts.seal", "official_documents.todo"],
+    "seal_usage_logs": ["seals.manage"],
+    "official_documents": ["official_documents.compose"],
+    "official_document_files": ["official_documents.compose", "official_documents.todo"],
+    "official_document_approval_steps": ["official_documents.compose", "official_documents.todo"],
+    "official_document_approval_logs": ["official_documents.compose", "official_documents.todo"],
+    "official_document_stamp_requests": ["official_documents.compose", "official_documents.todo"],
+    "official_document_dispatch_records": ["official_documents.compose", "official_documents.todo"],
 }
 
 
@@ -4224,11 +4617,14 @@ def record_file_access(
     detail: str = "",
     watermark_text: str = "",
 ) -> Dict[str, Any]:
+    document_log_id = document_id or ""
+    if document_log_id and not conn.execute("SELECT 1 FROM documents WHERE id = ?", (document_log_id,)).fetchone():
+        document_log_id = ""
     row = {
         "id": f"FLOG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
         "attachment_id": attachment_id or None,
         "file_object_id": file_object_id or None,
-        "document_id": document_id or None,
+        "document_id": document_log_id or None,
         "actor": actor,
         "action": action,
         "ip": "",
@@ -4243,11 +4639,55 @@ def record_file_access(
     return row
 
 
+def is_seal_vault_file(item: Dict[str, Any] | sqlite3.Row | None) -> bool:
+    if not item:
+        return False
+    data = row_to_dict(item) if isinstance(item, sqlite3.Row) else item
+    purpose = str(data.get("purpose") or "")
+    storage_key = str(data.get("storage_key") or "")
+    document_id = str(data.get("document_id") or "")
+    return (
+        purpose.startswith(SEAL_VAULT_PURPOSE_PREFIX)
+        or storage_key.startswith("seal-vault/")
+        or storage_key.startswith("private/seals/")
+        or document_id == SEAL_VAULT_DOCUMENT_ID
+    )
+
+
+def seal_file_row_for_file_object(conn: sqlite3.Connection, file_id: str) -> Dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM company_seal_files WHERE file_object_id = ? ORDER BY uploaded_at DESC LIMIT 1", (file_id,)).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def audit_seal_vault_access(
+    conn: sqlite3.Connection,
+    *,
+    file_id: str,
+    actor: str,
+    action: str,
+    result: str,
+    detail: str = "",
+    document_id: str = "",
+) -> None:
+    seal_file = seal_file_row_for_file_object(conn, file_id)
+    log_seal_usage(
+        conn,
+        action=action,
+        actor_id=actor,
+        seal_id=seal_file.get("seal_id", "") if seal_file else "",
+        document_id=document_id,
+        detail=f"{result}: {detail or file_id}",
+    )
+
+
 def create_file_signed_url(conn: sqlite3.Connection, file_id: str, actor: str = "API", ttl_seconds: int | None = None, purpose: str = "download") -> Dict[str, Any]:
     row = conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_id,)).fetchone()
     if not row:
         return {"error": "file_not_found"}
     item = row_to_dict(row)
+    if is_seal_vault_file(item):
+        audit_seal_vault_access(conn, file_id=file_id, actor=actor, action="block_seal_vault_signed_url", result="denied", detail="seal_original_never_gets_download_url")
+        return {"error": "seal_vault_download_forbidden", "detail": "seal_original_files_must_be_accessed_only_by_authorized_backend_seal_workflows"}
     expires_at = signed_url_expiry(ttl_seconds)
     token = secrets.token_urlsafe(32)
     token_id = f"FDL-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
@@ -4329,6 +4769,14 @@ def upload_file_object(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dic
     storage_service = storage_service_status()
     if storage_service["productionBlocked"]:
         return {"ok": False, "error": "formal_storage_av_not_ready", "missing": storage_service["missing"], "service": storage_service}
+    purpose = payload.get("purpose") or "attachment"
+    document_id = payload.get("document_id") or "DOC-UPLOAD-MANUAL"
+    if (
+        str(purpose).startswith(("seal", "private/seals", SEAL_VAULT_PURPOSE_PREFIX))
+        or str(document_id) in {"DOC-SEAL-ASSET", SEAL_VAULT_DOCUMENT_ID}
+    ):
+        log_audit(conn, payload.get("actor") or "API", "阻擋一般附件 API 上傳印章原檔", "seal_vault", str(document_id), "seal_original_must_use_seal_vault_api", event_type="seal_vault_upload_blocked", module_code="seals", result="denied")
+        return {"ok": False, "error": "seal_vault_upload_required", "detail": "印章電子檔不得透過一般附件 API 上傳，請使用 /api/seals/{sealId}/files。"}
     content = payload.get("content_base64") or payload.get("content") or ""
     if payload.get("content_base64"):
         import base64
@@ -4342,7 +4790,6 @@ def upload_file_object(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dic
     allowed_mime_types = {item.strip().lower() for item in EDOC_ALLOWED_MIME_TYPES.split(",") if item.strip()}
     if allowed_mime_types and mime_type.lower() not in allowed_mime_types:
         return {"ok": False, "error": "mime_type_not_allowed", "mime_type": mime_type, "allowed": sorted(allowed_mime_types)}
-    document_id = payload.get("document_id") or "DOC-UPLOAD-MANUAL"
     if not conn.execute("SELECT 1 FROM documents WHERE id = ?", (document_id,)).fetchone():
         ts = now()
         conn.execute(
@@ -4356,7 +4803,6 @@ def upload_file_object(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dic
             (document_id, document_id, ts, ts),
         )
     file_name = payload.get("file_name") or f"upload-{int(time.time())}.bin"
-    purpose = payload.get("purpose") or "attachment"
     actor = payload.get("actor") or "API"
     file_row = store_file_object(conn, document_id, file_name, data, purpose, payload.get("version_label") or "v1", actor)
     conn.execute("UPDATE file_objects SET mime_type = ? WHERE id = ?", (mime_type, file_row["id"]))
@@ -4619,6 +5065,1393 @@ def read_file_object_bytes(conn: sqlite3.Connection, file_id: str) -> Tuple[Dict
     if actual != item["sha256"]:
         raise ValueError("file_hash_mismatch")
     return item, data
+
+
+def seal_actor(session: Dict[str, Any] | None, payload: Dict[str, Any] | None = None) -> str:
+    user = current_user_from_session(session)
+    payload = payload or {}
+    return user.get("id") or user.get("email") or user.get("name") or payload.get("actor_id") or payload.get("actor") or "API"
+
+
+def seal_reference_codes(conn: sqlite3.Connection, option_type: str) -> set[str]:
+    rows = conn.execute(
+        "SELECT code FROM seal_reference_options WHERE option_type = ? AND status = 'active'",
+        (option_type,),
+    ).fetchall()
+    return {row["code"] for row in rows}
+
+
+def company_seal_row(conn: sqlite3.Connection, seal_id: str) -> Dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT s.*, c.name AS company_name, c.tax_id AS company_tax_id
+        FROM company_seals s
+        JOIN companies c ON c.id = s.company_id
+        WHERE s.id = ?
+        """,
+        (seal_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError("seal_not_found")
+    data = row_to_dict(row)
+    current_file = conn.execute(
+        """
+        SELECT *
+        FROM company_seal_files
+        WHERE seal_id = ? AND is_current = 1
+        ORDER BY version DESC
+        LIMIT 1
+        """,
+        (seal_id,),
+    ).fetchone()
+    data["current_file"] = seal_file_metadata(row_to_dict(current_file)) if current_file else None
+    return data
+
+
+def seal_file_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {
+        "id", "seal_id", "file_object_id", "file_name", "file_mime_type", "file_size",
+        "file_hash", "version", "is_current", "uploaded_by", "uploaded_at"
+    }
+    return {key: row.get(key) for key in allowed if key in row}
+
+
+def log_seal_usage(
+    conn: sqlite3.Connection,
+    *,
+    action: str,
+    actor_id: str = "API",
+    usage_request_id: str = "",
+    seal_id: str = "",
+    document_id: str = "",
+    detail: str = "",
+    ip_address: str = "",
+    user_agent: str = "",
+) -> Dict[str, Any]:
+    row = {
+        "id": f"SLOG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "usage_request_id": usage_request_id or None,
+        "seal_id": seal_id or None,
+        "document_id": document_id or None,
+        "action": action,
+        "actor_id": actor_id,
+        "ip_address": ip_address,
+        "user_agent": user_agent,
+        "detail": detail,
+        "created_at": now(),
+    }
+    insert_row(conn, "seal_usage_logs", row)
+    log_audit(conn, actor_id, action, "seal_usage", usage_request_id or seal_id or document_id, detail, event_type=action, module_code="seals")
+    return row
+
+
+def list_company_seals(conn: sqlite3.Connection, company_id: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT s.*, c.name AS company_name, c.tax_id AS company_tax_id
+        FROM company_seals s
+        JOIN companies c ON c.id = s.company_id
+        WHERE s.company_id = ?
+        ORDER BY s.is_active DESC, s.seal_category, s.seal_size_type, s.created_at DESC
+        """,
+        (company_id,),
+    ).fetchall()
+    return [company_seal_row(conn, row["id"]) for row in rows]
+
+
+def create_company_seal(conn: sqlite3.Connection, company_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    if not conn.execute("SELECT 1 FROM companies WHERE id = ?", (company_id,)).fetchone():
+        raise ValueError("company_not_found")
+    category = payload.get("seal_category") or payload.get("category") or "other"
+    size_type = payload.get("seal_size_type") or payload.get("size_type") or "large_seal"
+    if category not in seal_reference_codes(conn, "category"):
+        raise ValueError("invalid_seal_category")
+    if size_type not in seal_reference_codes(conn, "size"):
+        raise ValueError("invalid_seal_size_type")
+    actor = seal_actor(session, payload)
+    seal_id = payload.get("id") or f"CSEAL-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    row = {
+        "id": seal_id,
+        "company_id": company_id,
+        "seal_name": payload.get("seal_name") or payload.get("name") or "未命名印章",
+        "seal_category": category,
+        "seal_size_type": size_type,
+        "purpose_description": payload.get("purpose_description") or payload.get("purpose") or "",
+        "is_active": 1 if payload.get("is_active", True) else 0,
+        "created_by": actor,
+        "created_at": now(),
+        "updated_at": now(),
+        "deactivated_at": "",
+    }
+    insert_row(conn, "company_seals", row)
+    for role in payload.get("default_permission_roles") or ["viewer", "requester", "approver", "seal_admin"]:
+        if role not in seal_reference_codes(conn, "permission_role"):
+            continue
+        insert_row(conn, "seal_permissions", {
+            "id": f"SPERM-{seal_id}-{role}",
+            "seal_id": seal_id,
+            "user_id": payload.get("user_id") or "",
+            "role": role,
+            "created_at": now(),
+        })
+    log_seal_usage(conn, action="create_seal", actor_id=actor, seal_id=seal_id, detail=row["seal_name"])
+    return company_seal_row(conn, seal_id)
+
+
+def patch_company_seal(conn: sqlite3.Connection, seal_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    company_seal_row(conn, seal_id)
+    update: Dict[str, Any] = {}
+    for source_key, target_key in [
+        ("seal_name", "seal_name"),
+        ("seal_category", "seal_category"),
+        ("seal_size_type", "seal_size_type"),
+        ("purpose_description", "purpose_description"),
+        ("is_active", "is_active"),
+    ]:
+        if source_key in payload:
+            update[target_key] = payload[source_key]
+    if "seal_category" in update and update["seal_category"] not in seal_reference_codes(conn, "category"):
+        raise ValueError("invalid_seal_category")
+    if "seal_size_type" in update and update["seal_size_type"] not in seal_reference_codes(conn, "size"):
+        raise ValueError("invalid_seal_size_type")
+    if "is_active" in update:
+        update["is_active"] = 1 if update["is_active"] else 0
+        update["deactivated_at"] = "" if update["is_active"] else now()
+    update["updated_at"] = now()
+    conn.execute(
+        f"UPDATE company_seals SET {', '.join(f'{key} = ?' for key in update)} WHERE id = ?",
+        [*update.values(), seal_id],
+    )
+    log_seal_usage(conn, action="update_seal", actor_id=seal_actor(session, payload), seal_id=seal_id, detail=json.dumps(update, ensure_ascii=False))
+    return company_seal_row(conn, seal_id)
+
+
+def deactivate_company_seal(conn: sqlite3.Connection, seal_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    row = patch_company_seal(conn, seal_id, {"is_active": False}, session)
+    log_seal_usage(conn, action="deactivate_seal", actor_id=seal_actor(session), seal_id=seal_id, detail="soft_delete_only")
+    return row
+
+
+def validate_seal_file_upload(file_name: str, mime_type: str, data: bytes) -> None:
+    allowed_mime_types = {item.strip().lower() for item in EDOC_SEAL_ALLOWED_MIME_TYPES.split(",") if item.strip()}
+    suffix = Path(file_name).suffix.lower().lstrip(".")
+    if mime_type.lower() not in allowed_mime_types:
+        raise ValueError("seal_file_mime_type_not_allowed")
+    if suffix not in {"png", "jpg", "jpeg", "webp", "svg"}:
+        raise ValueError("seal_file_extension_not_allowed")
+    max_bytes = EDOC_SEAL_FILE_MAX_SIZE_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        raise ValueError("seal_file_too_large")
+    if suffix == "svg" or mime_type.lower() == "image/svg+xml":
+        text = data[:200000].decode("utf-8", "ignore").lower()
+        blocked_patterns = ["<script", "javascript:", "onload=", "onerror=", "foreignobject", "<iframe", "<object", "<embed"]
+        if any(pattern in text for pattern in blocked_patterns):
+            raise ValueError("unsafe_svg_rejected")
+
+
+def upload_company_seal_file(conn: sqlite3.Connection, seal_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    seal = company_seal_row(conn, seal_id)
+    if not seal.get("is_active"):
+        raise ValueError("inactive_seal_cannot_upload_new_file")
+    content = payload.get("content_base64") or ""
+    if not content:
+        raise ValueError("seal_file_content_required")
+    data = base64.b64decode(content)
+    file_name = Path(payload.get("file_name") or f"{seal_id}.png").name
+    mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "image/png"
+    validate_seal_file_upload(file_name, mime_type, data)
+    actor = seal_actor(session, payload)
+    next_version = (conn.execute("SELECT COALESCE(MAX(version), 0) + 1 AS version FROM company_seal_files WHERE seal_id = ?", (seal_id,)).fetchone()["version"])
+    file_row = store_file_object(conn, SEAL_VAULT_DOCUMENT_ID, file_name, data, f"{SEAL_VAULT_PURPOSE_PREFIX}/seals/{seal_id}", f"seal-v{next_version}", actor)
+    conn.execute("UPDATE file_objects SET mime_type = ?, storage_provider = ?, purpose = ? WHERE id = ?", (mime_type, "seal-vault", "seal-vault-original", file_row["id"]))
+    file_row = row_to_dict(conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_row["id"],)).fetchone())
+    conn.execute("UPDATE company_seal_files SET is_current = 0 WHERE seal_id = ?", (seal_id,))
+    row = {
+        "id": f"SFILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "seal_id": seal_id,
+        "file_object_id": file_row["id"],
+        "file_storage_key": file_row["storage_key"],
+        "file_name": file_name,
+        "file_mime_type": mime_type,
+        "file_size": len(data),
+        "file_hash": sha256_bytes(data),
+        "version": int(next_version),
+        "is_current": 1,
+        "uploaded_by": actor,
+        "uploaded_at": now(),
+    }
+    insert_row(conn, "company_seal_files", row)
+    log_seal_usage(conn, action="upload_seal", actor_id=actor, seal_id=seal_id, detail=f"{file_name} v{next_version} hash={row['file_hash']}")
+    return {"seal": company_seal_row(conn, seal_id), "file": seal_file_metadata(row)}
+
+
+def list_company_seal_files(conn: sqlite3.Connection, seal_id: str, session: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+    company_seal_row(conn, seal_id)
+    actor = seal_actor(session)
+    log_seal_usage(conn, action="view_seal_metadata", actor_id=actor, seal_id=seal_id, detail="metadata_only")
+    rows = conn.execute("SELECT * FROM company_seal_files WHERE seal_id = ? ORDER BY version DESC", (seal_id,)).fetchall()
+    return [seal_file_metadata(row_to_dict(row)) for row in rows]
+
+
+def set_current_seal_file(conn: sqlite3.Connection, file_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    row = conn.execute("SELECT * FROM company_seal_files WHERE id = ?", (file_id,)).fetchone()
+    if not row:
+        raise ValueError("seal_file_not_found")
+    item = row_to_dict(row)
+    conn.execute("UPDATE company_seal_files SET is_current = 0 WHERE seal_id = ?", (item["seal_id"],))
+    conn.execute("UPDATE company_seal_files SET is_current = 1 WHERE id = ?", (file_id,))
+    log_seal_usage(conn, action="set_current_seal_file", actor_id=seal_actor(session), seal_id=item["seal_id"], detail=f"version={item['version']}")
+    return company_seal_row(conn, item["seal_id"])
+
+
+def seal_usage_request_row(conn: sqlite3.Connection, request_id: str) -> Dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT r.*, c.name AS company_name, s.seal_name, s.seal_category, s.seal_size_type
+        FROM seal_usage_requests r
+        JOIN companies c ON c.id = r.company_id
+        JOIN company_seals s ON s.id = r.seal_id
+        WHERE r.id = ?
+        """,
+        (request_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError("seal_usage_request_not_found")
+    data = row_to_dict(row)
+    data["stamp_positions"] = parse_json_any(data.get("stamp_positions_json"), []) or []
+    data["metadata"] = parse_json_any(data.get("metadata_json"), {}) or {}
+    data["approvals"] = [row_to_dict(item) for item in conn.execute("SELECT * FROM seal_usage_approvals WHERE usage_request_id = ? ORDER BY approval_order", (request_id,)).fetchall()]
+    data["logs"] = [row_to_dict(item) for item in conn.execute("SELECT * FROM seal_usage_logs WHERE usage_request_id = ? ORDER BY created_at DESC LIMIT 50", (request_id,)).fetchall()]
+    return data
+
+
+def list_seal_usage_requests(conn: sqlite3.Connection, query: Dict[str, List[str]] | None = None) -> List[Dict[str, Any]]:
+    query = query or {}
+    where: List[str] = []
+    params: List[Any] = []
+    for key, column in [("company_id", "r.company_id"), ("seal_id", "r.seal_id"), ("requested_by", "r.requested_by"), ("usage_type", "r.usage_type"), ("status", "r.status")]:
+        if key in query and query[key]:
+            where.append(f"{column} = ?")
+            params.append(query[key][0])
+    if "date_from" in query and query["date_from"]:
+        where.append("r.requested_at >= ?")
+        params.append(query["date_from"][0])
+    if "date_to" in query and query["date_to"]:
+        where.append("r.requested_at <= ?")
+        params.append(query["date_to"][0])
+    sql = """
+        SELECT r.id
+        FROM seal_usage_requests r
+        JOIN company_seals s ON s.id = r.seal_id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY r.requested_at DESC LIMIT 300"
+    return [seal_usage_request_row(conn, row["id"]) for row in conn.execute(sql, params).fetchall()]
+
+
+def create_seal_usage_request(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    seal_id = payload.get("seal_id") or ""
+    if not seal_id:
+        raise ValueError("seal_id_required")
+    seal = company_seal_row(conn, seal_id)
+    if not seal.get("is_active"):
+        raise ValueError("inactive_seal_cannot_be_requested")
+    if not conn.execute("SELECT 1 FROM company_seal_files WHERE seal_id = ? AND is_current = 1", (seal_id,)).fetchone():
+        raise ValueError("current_seal_file_required")
+    usage_type = payload.get("usage_type") or "official_document"
+    if usage_type not in seal_reference_codes(conn, "usage_type"):
+        raise ValueError("invalid_usage_type")
+    document = get_or_create_pdf_document(conn, {"document_id": document_id, **(payload.get("document") or {})})
+    actor = seal_actor(session, payload)
+    request_id = payload.get("id") or f"SREQ-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    positions = payload.get("stamp_positions") or payload.get("positions") or []
+    row = {
+        "id": request_id,
+        "document_id": document["id"],
+        "company_id": seal["company_id"],
+        "seal_id": seal_id,
+        "requested_by": actor,
+        "request_reason": payload.get("request_reason") or payload.get("reason") or "",
+        "usage_type": usage_type,
+        "status": payload.get("status") or "pending",
+        "stamp_positions_json": json.dumps(positions, ensure_ascii=False),
+        "stamped_pdf_version_id": None,
+        "metadata_json": json.dumps(payload.get("metadata") or {}, ensure_ascii=False),
+        "requested_at": now(),
+        "approved_at": "",
+        "stamped_at": "",
+        "updated_at": now(),
+    }
+    insert_row(conn, "seal_usage_requests", row)
+    approvers = payload.get("approvers") or [{"approver_id": "seal_approver", "approval_order": 1}]
+    for index, approver in enumerate(approvers, start=1):
+        insert_row(conn, "seal_usage_approvals", {
+            "id": f"SAPP-{request_id}-{index}",
+            "usage_request_id": request_id,
+            "approver_id": approver.get("approver_id") or approver.get("id") or "seal_approver",
+            "approval_order": int(approver.get("approval_order") or index),
+            "status": "pending",
+            "comment": "",
+            "approved_at": "",
+            "created_at": now(),
+            "updated_at": now(),
+        })
+    log_seal_usage(conn, action="request_use", actor_id=actor, usage_request_id=request_id, seal_id=seal_id, document_id=document["id"], detail=row["request_reason"])
+    return seal_usage_request_row(conn, request_id)
+
+
+def approve_seal_usage_request(conn: sqlite3.Connection, request_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    request = seal_usage_request_row(conn, request_id)
+    if request["status"] not in {"pending", "draft"}:
+        raise ValueError("seal_request_not_pending")
+    actor = seal_actor(session, payload)
+    pending = conn.execute("SELECT * FROM seal_usage_approvals WHERE usage_request_id = ? AND status = 'pending' ORDER BY approval_order LIMIT 1", (request_id,)).fetchone()
+    if pending:
+        conn.execute(
+            "UPDATE seal_usage_approvals SET status = 'approved', approver_id = ?, comment = ?, approved_at = ?, updated_at = ? WHERE id = ?",
+            (actor, payload.get("comment") or "核准用印。", now(), now(), pending["id"]),
+        )
+    remaining = conn.execute("SELECT COUNT(*) AS count FROM seal_usage_approvals WHERE usage_request_id = ? AND status = 'pending'", (request_id,)).fetchone()["count"]
+    if remaining == 0:
+        conn.execute("UPDATE seal_usage_requests SET status = 'approved', approved_at = ?, updated_at = ? WHERE id = ?", (now(), now(), request_id))
+    log_seal_usage(conn, action="approve_use", actor_id=actor, usage_request_id=request_id, seal_id=request["seal_id"], document_id=request["document_id"], detail=payload.get("comment") or "")
+    return seal_usage_request_row(conn, request_id)
+
+
+def reject_seal_usage_request(conn: sqlite3.Connection, request_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    request = seal_usage_request_row(conn, request_id)
+    if request["status"] in {"stamped", "cancelled"}:
+        raise ValueError("seal_request_cannot_be_rejected")
+    actor = seal_actor(session, payload)
+    conn.execute("UPDATE seal_usage_approvals SET status = 'rejected', comment = ?, approved_at = ?, updated_at = ? WHERE usage_request_id = ? AND status = 'pending'", (payload.get("comment") or "駁回用印。", now(), now(), request_id))
+    conn.execute("UPDATE seal_usage_requests SET status = 'rejected', updated_at = ? WHERE id = ?", (now(), request_id))
+    log_seal_usage(conn, action="reject_use", actor_id=actor, usage_request_id=request_id, seal_id=request["seal_id"], document_id=request["document_id"], detail=payload.get("comment") or "")
+    return seal_usage_request_row(conn, request_id)
+
+
+def stamp_seal_usage_request(conn: sqlite3.Connection, request_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    request = seal_usage_request_row(conn, request_id)
+    if request["status"] != "approved":
+        raise ValueError("seal_request_must_be_approved_before_stamp")
+    seal = company_seal_row(conn, request["seal_id"])
+    if not seal.get("is_active"):
+        raise ValueError("inactive_seal_cannot_stamp")
+    file_row = conn.execute("SELECT * FROM company_seal_files WHERE seal_id = ? AND is_current = 1 ORDER BY version DESC LIMIT 1", (request["seal_id"],)).fetchone()
+    if not file_row:
+        raise ValueError("current_seal_file_required")
+    file_meta = row_to_dict(file_row)
+    if file_meta.get("file_object_id"):
+        log_seal_usage(conn, action="read_seal_vault_for_stamp", actor_id=seal_actor(session, payload), usage_request_id=request_id, seal_id=request["seal_id"], document_id=request["document_id"], detail="authorized_backend_stamp_only")
+        read_file_object_bytes(conn, file_meta["file_object_id"])
+    stamp_no = payload.get("stamp_no") or f"STAMP-{request_id}-{int(time.time())}"
+    positions = payload.get("stamp_positions") or request.get("stamp_positions") or [
+        {"page": 1, "x": 420, "y": 130, "w": 85, "h": 85, "label": seal["seal_name"], "type": seal["seal_category"], "seal_id": request["seal_id"]}
+    ]
+    result = pdf_stamp(conn, {
+        "document_id": request["document_id"],
+        "seal_id": request["seal_id"],
+        "applicant": request.get("requested_by") or "申請人",
+        "reason": request.get("request_reason") or "核准後自動用印",
+        "stamp_no": stamp_no,
+        "stamp_positions": positions,
+        "coordinates": payload.get("coordinates") or {},
+        "template": payload.get("template") or "公司用印文件",
+    })
+    conn.execute(
+        "UPDATE seal_usage_requests SET status = 'stamped', stamped_at = ?, stamped_pdf_version_id = ?, stamp_positions_json = ?, updated_at = ? WHERE id = ?",
+        (now(), result.get("pdf_version_id") or result.get("id") or "", json.dumps(positions, ensure_ascii=False), now(), request_id),
+    )
+    conn.execute("UPDATE documents SET status = '已用印', updated_at = ? WHERE id = ?", (now(), request["document_id"]))
+    actor = seal_actor(session, payload)
+    log_seal_usage(conn, action="stamp_document", actor_id=actor, usage_request_id=request_id, seal_id=request["seal_id"], document_id=request["document_id"], detail=f"{stamp_no} seal_file_hash={file_meta['file_hash']}")
+    refreshed = seal_usage_request_row(conn, request_id)
+    return {"request": refreshed, "stamped_file": {"pdf_version_id": result.get("pdf_version_id") or result.get("id"), "file_object_id": result.get("file_object_id"), "sha256": result.get("sha256"), "stamp_no": stamp_no, "download_url": result.get("download_url")}}
+
+
+OFFICIAL_DOCUMENT_WORKFLOW_STEPS = [
+    {"order": 1, "key": "applicant_manager", "name": "申請人主管", "status": "pending_applicant_manager", "role": "主管"},
+    {"order": 2, "key": "department_head", "name": "部門主管", "status": "pending_department_head", "role": "主管"},
+    {"order": 3, "key": "admin_director", "name": "行政部門主任", "status": "pending_admin_director", "role": "行政部主任"},
+    {"order": 4, "key": "general_affairs_review", "name": "總務審核", "status": "pending_general_affairs_review", "role": "總務"},
+    {"order": 5, "key": "ceo", "name": "執行長", "status": "pending_ceo", "role": "執行長"},
+]
+OFFICIAL_DOCUMENT_STEP_STATUS = {step["key"]: step["status"] for step in OFFICIAL_DOCUMENT_WORKFLOW_STEPS}
+OFFICIAL_DOCUMENT_DOWNLOAD_ROLES = {"申請人", "主管", "主任", "行政部主任", "總務", "執行長", "系統管理員"}
+OFFICIAL_DOCUMENT_FILE_LABELS = {
+    "original_pdf": "原始上傳 PDF",
+    "generated_pdf": "系統產生公文 PDF",
+    "stamped_pdf": "已用印版本",
+    "attachment": "補充附件",
+    "dispatch_proof": "寄發證明",
+}
+OFFICIAL_DISPATCH_METHODS = {
+    "electronic_official_document_by_general_affairs": {
+        "label": "總務電子公文系統發文",
+        "owner_type": "general_affairs",
+        "owner_role": "總務",
+        "next_status": "pending_general_affairs_dispatch",
+        "next_step": "general_affairs_dispatch",
+        "dispatch_status": "pending",
+    },
+    "email_by_general_affairs": {
+        "label": "總務 Email 寄出",
+        "owner_type": "general_affairs",
+        "owner_role": "總務",
+        "next_status": "pending_general_affairs_dispatch",
+        "next_step": "general_affairs_dispatch",
+        "dispatch_status": "pending",
+    },
+    "physical_mail_by_general_affairs": {
+        "label": "總務紙本郵寄",
+        "owner_type": "general_affairs",
+        "owner_role": "總務",
+        "next_status": "pending_general_affairs_dispatch",
+        "next_step": "general_affairs_dispatch",
+        "dispatch_status": "pending",
+    },
+    "return_to_applicant_for_manual_send": {
+        "label": "回申請人自行寄發",
+        "owner_type": "applicant",
+        "owner_role": "申請人",
+        "next_status": "returned_to_applicant_for_send",
+        "next_step": "applicant_dispatch",
+        "dispatch_status": "pending",
+    },
+    "no_dispatch_required": {
+        "label": "僅用印歸檔",
+        "owner_type": "system",
+        "owner_role": "system",
+        "next_status": "closed",
+        "next_step": "",
+        "dispatch_status": "dispatched",
+    },
+}
+OFFICIAL_DISPATCH_PROOF_MIME_TYPES = {"application/pdf", "image/png", "image/jpeg", "image/webp"}
+
+
+def official_session_user(session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = session.get("user") if session else None
+    if not user:
+        raise PermissionError("authentication_required")
+    return user
+
+
+def official_actor_name(user: Dict[str, Any] | None) -> str:
+    if not user:
+        return "System"
+    return user.get("name") or user.get("email") or user.get("role") or user.get("id") or "API"
+
+
+def official_company_row(conn: sqlite3.Connection, company_id: str) -> Dict[str, Any]:
+    row = conn.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
+    if not row:
+        raise ValueError("company_not_found")
+    return row_to_dict(row)
+
+
+def official_document_row(conn: sqlite3.Connection, document_id: str) -> Dict[str, Any]:
+    row = conn.execute("SELECT * FROM official_documents WHERE id = ?", (document_id,)).fetchone()
+    if not row:
+        raise ValueError("official_document_not_found")
+    return row_to_dict(row)
+
+
+def active_user_by_role(conn: sqlite3.Connection, role: str, exclude_user_id: str = "") -> Dict[str, Any] | None:
+    params: List[Any] = [role]
+    sql = "SELECT * FROM users WHERE role = ? AND status = '啟用'"
+    if exclude_user_id:
+        sql += " AND id <> ?"
+        params.append(exclude_user_id)
+    sql += " ORDER BY rowid LIMIT 1"
+    row = conn.execute(sql, params).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def active_user_by_id(conn: sqlite3.Connection, user_id: str) -> Dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM users WHERE id = ? AND status = '啟用'", (user_id,)).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def official_department_head_role(conn: sqlite3.Connection, company: Dict[str, Any], department_name: str) -> str:
+    row = conn.execute(
+        """
+        SELECT manager_role FROM department_registry
+        WHERE status = '啟用' AND company_name = ? AND name = ?
+        ORDER BY rowid LIMIT 1
+        """,
+        (company.get("name") or "", department_name or ""),
+    ).fetchone()
+    return row["manager_role"] if row else "主管"
+
+
+def resolve_official_step_approver(conn: sqlite3.Connection, step: Dict[str, Any], applicant: Dict[str, Any], company: Dict[str, Any]) -> Dict[str, Any] | None:
+    key = step["key"]
+    role = step["role"]
+    if key == "department_head":
+        role = official_department_head_role(conn, company, applicant.get("unit") or "")
+    user = active_user_by_role(conn, role, applicant.get("id") if key in {"applicant_manager", "department_head"} else "")
+    if not user and key in {"applicant_manager", "department_head"}:
+        user = active_user_by_role(conn, "行政部主任", applicant.get("id"))
+    return user
+
+
+def official_stamp_position_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    raw = payload.get("stamp_position") or {}
+    positions = payload.get("stamp_positions") or payload.get("positions")
+    if positions:
+        raw = positions[0] if isinstance(positions, list) and positions else positions
+    return {
+        "stamp_page": max(1, int(pdf_safe_float(raw.get("page", raw.get("stamp_page", payload.get("stamp_page", 1))), 1))),
+        "stamp_x": pdf_safe_float(raw.get("x", raw.get("stamp_x", payload.get("stamp_x", 420))), 420),
+        "stamp_y": pdf_safe_float(raw.get("y", raw.get("stamp_y", payload.get("stamp_y", 130))), 130),
+        "stamp_width": pdf_safe_float(raw.get("w", raw.get("width", raw.get("stamp_width", payload.get("stamp_width", 85)))), 85),
+        "stamp_height": pdf_safe_float(raw.get("h", raw.get("height", raw.get("stamp_height", payload.get("stamp_height", 85)))), 85),
+    }
+
+
+def official_stamp_positions_from_request(stamp_request: Dict[str, Any], seal: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [{
+        "page": int(stamp_request.get("stamp_page") or 1),
+        "x": pdf_safe_float(stamp_request.get("stamp_x"), 420),
+        "y": pdf_safe_float(stamp_request.get("stamp_y"), 130),
+        "w": pdf_safe_float(stamp_request.get("stamp_width"), 85),
+        "h": pdf_safe_float(stamp_request.get("stamp_height"), 85),
+        "label": seal.get("seal_name") or "公司印章",
+        "type": seal.get("seal_category") or "company_seal",
+        "seal_id": seal.get("id") or "",
+    }]
+
+
+def official_file_metadata(row: Dict[str, Any] | sqlite3.Row) -> Dict[str, Any]:
+    data = row_to_dict(row) if isinstance(row, sqlite3.Row) else dict(row)
+    data.pop("file_storage_key", None)
+    data.pop("file_object_id", None)
+    data["is_stamped"] = data.get("file_type") == "stamped_pdf"
+    data["display_label"] = OFFICIAL_DOCUMENT_FILE_LABELS.get(data.get("file_type"), data.get("file_type") or "文件")
+    return data
+
+
+def official_document_files(conn: sqlite3.Connection, document_id: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM official_document_files
+        WHERE document_id = ?
+        ORDER BY CASE WHEN file_type = 'stamped_pdf' THEN 0 ELSE 1 END, version DESC, created_at DESC
+        """,
+        (document_id,),
+    ).fetchall()
+    return [official_file_metadata(row) for row in rows]
+
+
+def official_document_steps(conn: sqlite3.Connection, document_id: str) -> List[Dict[str, Any]]:
+    return [row_to_dict(row) for row in conn.execute("SELECT * FROM official_document_approval_steps WHERE document_id = ? ORDER BY step_order", (document_id,)).fetchall()]
+
+
+def official_document_logs(conn: sqlite3.Connection, document_id: str) -> List[Dict[str, Any]]:
+    return [row_to_dict(row) for row in conn.execute("SELECT * FROM official_document_approval_logs WHERE document_id = ? ORDER BY created_at DESC", (document_id,)).fetchall()]
+
+
+def official_document_stamp_request(conn: sqlite3.Connection, document_id: str) -> Dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM official_document_stamp_requests WHERE document_id = ? ORDER BY created_at DESC LIMIT 1", (document_id,)).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def official_dispatch_method(value: str | None) -> str:
+    method = value or "electronic_official_document_by_general_affairs"
+    if method not in OFFICIAL_DISPATCH_METHODS:
+        raise ValueError("invalid_official_dispatch_method")
+    return method
+
+
+def official_dispatch_record_metadata(conn: sqlite3.Connection, row: Dict[str, Any] | sqlite3.Row | None) -> Dict[str, Any] | None:
+    if not row:
+        return None
+    data = row_to_dict(row) if isinstance(row, sqlite3.Row) else dict(row)
+    method = official_dispatch_method(data.get("dispatch_method"))
+    data["dispatch_method_label"] = OFFICIAL_DISPATCH_METHODS[method]["label"]
+    owner = active_user_by_id(conn, data.get("dispatch_owner_user_id") or "")
+    data["dispatch_owner_name"] = owner.get("name") if owner else (data.get("dispatch_owner_user_id") or data.get("dispatch_owner_type") or "")
+    proof_file_id = data.get("proof_file_id")
+    if proof_file_id:
+        proof = conn.execute("SELECT * FROM official_document_files WHERE id = ? AND document_id = ?", (proof_file_id, data["document_id"])).fetchone()
+        data["proof_file"] = official_file_metadata(proof) if proof else None
+    else:
+        data["proof_file"] = None
+    return data
+
+
+def official_dispatch_record(conn: sqlite3.Connection, document_id: str) -> Dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM official_document_dispatch_records WHERE document_id = ? ORDER BY created_at DESC LIMIT 1", (document_id,)).fetchone()
+    return official_dispatch_record_metadata(conn, row)
+
+
+def resolve_official_dispatch_owner(conn: sqlite3.Connection, document: Dict[str, Any], method: str) -> Dict[str, Any]:
+    config = OFFICIAL_DISPATCH_METHODS[method]
+    if config["owner_type"] == "general_affairs":
+        return active_user_by_role(conn, "總務") or {"id": "", "name": "總務", "role": "總務"}
+    if config["owner_type"] == "applicant":
+        return active_user_by_id(conn, document["applicant_id"]) or {"id": document["applicant_id"], "name": document.get("applicant_name") or "申請人", "role": "申請人"}
+    return {"id": "system", "name": "System", "role": "system"}
+
+
+def upsert_official_dispatch_record(
+    conn: sqlite3.Connection,
+    document: Dict[str, Any],
+    method: str | None = None,
+    actor: Dict[str, Any] | None = None,
+    payload: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    method = official_dispatch_method(method or document.get("dispatch_method"))
+    existing = conn.execute("SELECT * FROM official_document_dispatch_records WHERE document_id = ? ORDER BY created_at DESC LIMIT 1", (document["id"],)).fetchone()
+    owner = resolve_official_dispatch_owner(conn, document, method)
+    config = OFFICIAL_DISPATCH_METHODS[method]
+    payload = payload or {}
+    values = {
+        "dispatch_method": method,
+        "dispatch_owner_type": config["owner_type"],
+        "dispatch_owner_user_id": owner.get("id") or "",
+        "dispatch_status": payload.get("dispatch_status") or config["dispatch_status"],
+        "external_official_document_number": payload.get("external_official_document_number") or "",
+        "dispatch_date": payload.get("dispatch_date") or "",
+        "recipient": payload.get("recipient") or document.get("recipient") or "",
+        "recipient_contact": payload.get("recipient_contact") or "",
+        "dispatch_note": payload.get("dispatch_note") or "",
+        "proof_file_id": payload.get("proof_file_id") or None,
+        "created_by": actor.get("id") if actor else "system",
+        "completed_at": payload.get("completed_at") or (now() if config["owner_type"] == "system" else ""),
+    }
+    if existing:
+        update = {key: value for key, value in values.items() if key not in {"created_by"}}
+        update["updated_at"] = now()
+        conn.execute(
+            """
+            UPDATE official_document_dispatch_records
+            SET dispatch_method = ?, dispatch_owner_type = ?, dispatch_owner_user_id = ?, dispatch_status = ?,
+                external_official_document_number = ?, dispatch_date = ?, recipient = ?, recipient_contact = ?,
+                dispatch_note = ?, proof_file_id = ?, completed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                update["dispatch_method"],
+                update["dispatch_owner_type"],
+                update["dispatch_owner_user_id"],
+                update["dispatch_status"],
+                update["external_official_document_number"],
+                update["dispatch_date"],
+                update["recipient"],
+                update["recipient_contact"],
+                update["dispatch_note"],
+                update["proof_file_id"],
+                update["completed_at"],
+                update["updated_at"],
+                existing["id"],
+            ),
+        )
+        return official_dispatch_record(conn, document["id"]) or {}
+    row = {
+        "id": f"ODDISP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "document_id": document["id"],
+        **values,
+        "created_at": now(),
+        "updated_at": now(),
+    }
+    insert_row(conn, "official_document_dispatch_records", row)
+    return official_dispatch_record(conn, document["id"]) or row
+
+
+def can_manage_official_dispatch(user: Dict[str, Any] | None, document: Dict[str, Any], record: Dict[str, Any] | None, session: Dict[str, Any] | None = None) -> bool:
+    if not user:
+        return False
+    if user.get("role") == "系統管理員":
+        return True
+    owner_type = (record or {}).get("dispatch_owner_type")
+    if owner_type == "general_affairs":
+        return user.get("role") == "總務"
+    if owner_type == "applicant":
+        return user.get("id") == document.get("applicant_id")
+    return False
+
+
+def advance_official_dispatch_after_stamp(
+    conn: sqlite3.Connection,
+    document_id: str,
+    stamped_file: Dict[str, Any],
+    actor: Dict[str, Any] | None,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    document = official_document_row(conn, document_id)
+    method = official_dispatch_method(document.get("dispatch_method"))
+    config = OFFICIAL_DISPATCH_METHODS[method]
+    record = upsert_official_dispatch_record(conn, document, method, actor)
+    conn.execute(
+        "UPDATE official_documents SET current_status = ?, current_step = ?, updated_at = ? WHERE id = ?",
+        (config["next_status"], config["next_step"], now(), document_id),
+    )
+    insert_official_log(conn, document_id, "dispatch_route_created", actor, f"{method}:{config['label']}", file_id=stamped_file.get("id") or "", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if config["owner_type"] == "general_affairs":
+        create_notification(conn, {"type": "發文寄發待辦", "title": f"{document['title']} 待總務寄發", "target_role": "總務", "source": document_id, "priority": "高", "body": "已用印版本已產生，請下載後至外部電子公文系統、Email 或紙本郵寄完成寄發並回填證明。"})
+    elif config["owner_type"] == "applicant":
+        create_notification(conn, {"type": "發文寄發待辦", "title": f"{document['title']} 已回到申請人寄發", "target_role": "員工", "target_email": "", "source": document_id, "priority": "高", "body": "已用印版本已產生，請下載後自行寄送並回填寄送紀錄。"})
+    else:
+        insert_official_log(conn, document_id, "auto_archive_no_dispatch", actor, "no_dispatch_required", file_id=stamped_file.get("id") or "", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+        create_notification(conn, {"type": "發文結案", "title": f"{document['title']} 已用印並歸檔", "target_role": "員工", "source": document_id, "body": "寄發方式為不需寄發，系統已完成結案歸檔。"})
+    return record
+
+
+def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    steps = official_document_steps(conn, document_id)
+    if not canDownloadOfficialDocument(user, document, steps) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+        raise PermissionError("official_dispatch_access_denied")
+    record = official_dispatch_record(conn, document_id)
+    if not record:
+        method = official_dispatch_method(payload.get("dispatch_method") or document.get("dispatch_method"))
+        record = upsert_official_dispatch_record(conn, document, method, user)
+    if not can_manage_official_dispatch(user, document, record, session):
+        raise PermissionError("official_dispatch_update_forbidden")
+    allowed = {
+        "external_official_document_number",
+        "dispatch_date",
+        "recipient",
+        "recipient_contact",
+        "dispatch_note",
+        "proof_file_id",
+    }
+    update = {key: (payload.get(key) or None if key == "proof_file_id" else payload.get(key) or "") for key in allowed if key in payload}
+    if not update:
+        return official_dispatch_record(conn, document_id) or record
+    assignments = ", ".join([f"{key} = ?" for key in update])
+    conn.execute(f"UPDATE official_document_dispatch_records SET {assignments}, updated_at = ? WHERE id = ?", [*update.values(), now(), record["id"]])
+    insert_official_log(conn, document_id, "update_dispatch", user, json.dumps(update, ensure_ascii=False), ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return official_dispatch_record(conn, document_id) or {}
+
+
+def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    record = official_dispatch_record(conn, document_id)
+    if not record:
+        record = upsert_official_dispatch_record(conn, document, document.get("dispatch_method"), user)
+    if not can_manage_official_dispatch(user, document, record, session):
+        raise PermissionError("official_dispatch_complete_forbidden")
+    if record.get("dispatch_owner_type") == "general_affairs" and document.get("current_status") != "pending_general_affairs_dispatch":
+        raise ValueError("official_document_not_pending_general_affairs_dispatch")
+    if record.get("dispatch_owner_type") == "applicant" and document.get("current_status") != "returned_to_applicant_for_send":
+        raise ValueError("official_document_not_returned_to_applicant_for_send")
+    if payload:
+        record = update_official_dispatch_record(conn, document_id, payload, session)
+    final_dispatch_status = "sent_by_applicant" if record.get("dispatch_owner_type") == "applicant" else "dispatched"
+    final_document_status = "sent_by_applicant" if record.get("dispatch_owner_type") == "applicant" else "dispatched"
+    if payload.get("close", False):
+        final_document_status = "closed" if final_document_status in {"dispatched", "sent_by_applicant"} else final_document_status
+    conn.execute(
+        """
+        UPDATE official_document_dispatch_records
+        SET dispatch_status = ?, completed_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (final_dispatch_status, now(), now(), record["id"]),
+    )
+    conn.execute("UPDATE official_documents SET current_status = ?, current_step = '', updated_at = ? WHERE id = ?", (final_document_status, now(), document_id))
+    insert_official_log(conn, document_id, "complete_dispatch", user, final_dispatch_status, file_id=(payload.get("proof_file_id") or record.get("proof_file_id") or ""), ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    create_notification(conn, {"type": "發文寄發完成", "title": f"{document['title']} 已完成寄發", "target_role": "員工", "source": document_id, "body": f"寄發狀態：{final_dispatch_status}。"})
+    return official_document_detail(conn, document_id, session)
+
+
+def upload_official_dispatch_proof_file(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    record = official_dispatch_record(conn, document_id)
+    if not record:
+        record = upsert_official_dispatch_record(conn, document, document.get("dispatch_method"), user)
+    if not can_manage_official_dispatch(user, document, record, session):
+        raise PermissionError("official_dispatch_proof_upload_forbidden")
+    content = payload.get("content_base64") or ""
+    if not content:
+        raise ValueError("dispatch_proof_file_required")
+    data = base64.b64decode(content)
+    mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "application/pdf"
+    if mime_type.lower() not in OFFICIAL_DISPATCH_PROOF_MIME_TYPES:
+        raise ValueError("dispatch_proof_mime_type_not_allowed")
+    if len(data) > 10 * 1024 * 1024:
+        raise ValueError("dispatch_proof_file_too_large")
+    file_name = Path(payload.get("file_name") or f"{document_id}-dispatch-proof").name
+    file_row = store_file_object(conn, document_id, file_name, data, "official-documents", "dispatch-proof", official_actor_name(user))
+    conn.execute("UPDATE file_objects SET mime_type = ? WHERE id = ?", (mime_type, file_row["id"]))
+    file_row["mime_type"] = mime_type
+    official_file = insert_official_document_file(conn, document_id, "dispatch_proof", file_row, official_actor_name(user))
+    conn.execute("UPDATE official_document_dispatch_records SET proof_file_id = ?, updated_at = ? WHERE id = ?", (official_file["id"], now(), record["id"]))
+    insert_official_log(conn, document_id, "upload_dispatch_proof", user, official_file["file_hash"], file_id=official_file["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return {"dispatch_record": official_dispatch_record(conn, document_id), "file": official_file_metadata(official_file)}
+
+
+def insert_official_log(
+    conn: sqlite3.Connection,
+    document_id: str,
+    action: str,
+    actor: Dict[str, Any] | None,
+    comment: str = "",
+    *,
+    step_id: str = "",
+    file_id: str = "",
+    ip_address: str = "",
+    user_agent: str = "",
+) -> Dict[str, Any]:
+    row = {
+        "id": f"ODLOG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "document_id": document_id,
+        "step_id": step_id or None,
+        "file_id": file_id or None,
+        "actor_id": actor.get("id") if actor else "system",
+        "actor_name": official_actor_name(actor),
+        "action": action,
+        "comment": comment,
+        "ip_address": ip_address,
+        "user_agent": user_agent[:180] if user_agent else "",
+        "created_at": now(),
+    }
+    insert_row(conn, "official_document_approval_logs", row)
+    log_audit(conn, row["actor_name"], action, "official_documents", document_id, comment, event_type=action if action in LOGGING_AUDIT_EVENT_TYPES else None, module_code="official_documents")
+    return row
+
+
+def insert_official_document_file(conn: sqlite3.Connection, document_id: str, file_type: str, file_row: Dict[str, Any], actor: str) -> Dict[str, Any]:
+    next_version = conn.execute(
+        "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM official_document_files WHERE document_id = ? AND file_type = ?",
+        (document_id, file_type),
+    ).fetchone()["version"]
+    row = {
+        "id": f"ODFILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "document_id": document_id,
+        "file_object_id": file_row.get("id"),
+        "file_type": file_type,
+        "file_name": file_row.get("file_name") or f"{document_id}-{file_type}.pdf",
+        "file_storage_key": file_row.get("storage_key") or "",
+        "file_mime_type": file_row.get("mime_type") or "application/pdf",
+        "file_size": int(file_row.get("size_bytes") or 0),
+        "file_hash": file_row.get("sha256") or "",
+        "version": int(next_version),
+        "uploaded_by": actor,
+        "created_at": now(),
+    }
+    insert_row(conn, "official_document_files", row)
+    return row
+
+
+def store_official_pdf_file(conn: sqlite3.Connection, document_id: str, file_type: str, file_name: str, data: bytes, actor: str) -> Dict[str, Any]:
+    file_row = store_file_object(conn, document_id, file_name, data, "official-documents", f"{file_type}-v1", actor)
+    return insert_official_document_file(conn, document_id, file_type, file_row, actor)
+
+
+def official_pdf_document_payload(conn: sqlite3.Connection, document: Dict[str, Any]) -> Dict[str, Any]:
+    company = official_company_row(conn, document["company_id"])
+    body_parts = []
+    if document.get("description"):
+        body_parts.append(f"說明：\n{document['description']}")
+    if document.get("method"):
+        body_parts.append(f"辦法：\n{document['method']}")
+    return {
+        "id": document["id"],
+        "doc_no": document["id"],
+        "company_name": company.get("name") or "歲悅股份有限公司",
+        "doc_type": "函",
+        "agency_name": document.get("recipient") or "未指定受文者",
+        "subject": document.get("subject") or document.get("title") or "未命名發文",
+        "body": "\n\n".join(body_parts) or document.get("description") or "尚未填寫說明內容。",
+        "owner": document.get("handler_name") or document.get("applicant_name") or "承辦人",
+        "department": document.get("dispatch_unit") or document.get("applicant_department_name") or "",
+        "attachments": parse_json_field(document.get("metadata_json")).get("attachments", "附件詳如附件區"),
+        "created_at": document.get("created_at"),
+    }
+
+
+def ensure_official_generated_pdf(conn: sqlite3.Connection, document: Dict[str, Any], actor: str = "PDF Worker") -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT * FROM official_document_files WHERE document_id = ? AND file_type = 'generated_pdf' ORDER BY version DESC LIMIT 1",
+        (document["id"],),
+    ).fetchone()
+    if row:
+        return row_to_dict(row)
+    package = build_official_pdf_package(official_pdf_document_payload(conn, document), [], "歲悅正式函", 1)
+    file_row = store_official_pdf_file(conn, document["id"], "generated_pdf", f"{document['id']}-generated.pdf", package["data"], actor)
+    insert_official_log(conn, document["id"], "generate_pdf", {"id": "system", "name": actor, "role": "system"}, file_row["file_hash"], file_id=file_row["id"])
+    return file_row
+
+
+def official_latest_source_file(conn: sqlite3.Connection, document: Dict[str, Any]) -> Dict[str, Any]:
+    file_type = "original_pdf" if document.get("source_type") == "uploaded_pdf" else "generated_pdf"
+    if file_type == "generated_pdf":
+        ensure_official_generated_pdf(conn, document)
+    row = conn.execute(
+        "SELECT * FROM official_document_files WHERE document_id = ? AND file_type = ? ORDER BY version DESC LIMIT 1",
+        (document["id"], file_type),
+    ).fetchone()
+    if not row:
+        raise ValueError("official_document_source_pdf_required")
+    return row_to_dict(row)
+
+
+def create_official_workflow_steps(conn: sqlite3.Connection, document: Dict[str, Any], applicant: Dict[str, Any]) -> List[Dict[str, Any]]:
+    existing = official_document_steps(conn, document["id"])
+    if existing:
+        return existing
+    company = official_company_row(conn, document["company_id"])
+    created: List[Dict[str, Any]] = []
+    for step in OFFICIAL_DOCUMENT_WORKFLOW_STEPS:
+        approver = resolve_official_step_approver(conn, step, applicant, company)
+        row = {
+            "id": f"ODSTEP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "document_id": document["id"],
+            "step_order": step["order"],
+            "step_key": step["key"],
+            "step_name": step["name"],
+            "approver_user_id": approver.get("id") if approver else "",
+            "approver_name": approver.get("name") if approver else step["role"],
+            "approver_role": approver.get("role") if approver else step["role"],
+            "status": "pending",
+            "comment": "",
+            "approved_at": "",
+            "created_at": now(),
+            "updated_at": now(),
+        }
+        insert_row(conn, "official_document_approval_steps", row)
+        created.append(row)
+    return created
+
+
+def canDownloadOfficialDocument(user: Dict[str, Any] | None, document: Dict[str, Any], steps: List[Dict[str, Any]] | None = None) -> bool:
+    if not user:
+        return False
+    if user.get("id") == document.get("applicant_id"):
+        return True
+    if user.get("role") in {"執行長", "行政部主任", "總務"}:
+        return True
+    if user.get("role") == "系統管理員":
+        return True
+    if user.get("role") in OFFICIAL_DOCUMENT_DOWNLOAD_ROLES and user.get("id") in {step.get("approver_user_id") for step in steps or []}:
+        return True
+    metadata = parse_json_field(document.get("metadata_json"))
+    extra = set(metadata.get("authorized_download_user_ids") or [])
+    return user.get("id") in extra
+
+
+def official_application_package(
+    document: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    steps: List[Dict[str, Any]],
+    logs: List[Dict[str, Any]],
+    stamp_request: Dict[str, Any] | None,
+    dispatch_record: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    versions = [file for file in files if file.get("file_type") in {"original_pdf", "generated_pdf", "stamped_pdf"}]
+    attachments = [file for file in files if file.get("file_type") == "attachment"]
+    download_logs = [log for log in logs if log.get("action") == "download_file"]
+    process_logs = [log for log in logs if log.get("action") != "download_file"]
+    return {
+        "id": document.get("id"),
+        "record_type": "official_document_application",
+        "title": document.get("title") or document.get("subject") or document.get("id"),
+        "company_id": document.get("company_id"),
+        "source_type": document.get("source_type"),
+        "document_type": document.get("document_type"),
+        "current_status": document.get("current_status"),
+        "current_step": document.get("current_step"),
+        "applicant_id": document.get("applicant_id"),
+        "applicant_name": document.get("applicant_name"),
+        "all_files": files,
+        "document_versions": versions,
+        "attachments": attachments,
+        "stamped_versions": [file for file in versions if file.get("file_type") == "stamped_pdf"],
+        "approval_steps": steps,
+        "process_logs": process_logs,
+        "download_logs": download_logs,
+        "stamp_request": stamp_request,
+        "dispatch_record": dispatch_record,
+        "summary": {
+            "version_count": len(versions),
+            "attachment_count": len(attachments),
+            "approval_step_count": len(steps),
+            "download_count": len(download_logs),
+            "has_stamped_pdf": any(file.get("file_type") == "stamped_pdf" for file in versions),
+            "has_dispatch_record": bool(dispatch_record),
+        },
+    }
+
+
+def official_document_detail(conn: sqlite3.Connection, document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    document = official_document_row(conn, document_id)
+    steps = official_document_steps(conn, document_id)
+    user = session.get("user") if session else None
+    if user and not canDownloadOfficialDocument(user, document, steps) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+        raise PermissionError("official_document_access_denied")
+    current_step = next((step for step in steps if step.get("step_key") == document.get("current_step")), None)
+    files = official_document_files(conn, document_id)
+    logs = official_document_logs(conn, document_id)
+    stamp_request = official_document_stamp_request(conn, document_id)
+    dispatch_record = official_dispatch_record(conn, document_id)
+    package = official_application_package(document, files, steps, logs, stamp_request, dispatch_record)
+    return {
+        **document,
+        "metadata": parse_json_field(document.get("metadata_json")),
+        "application_package": package,
+        "document_versions": package["document_versions"],
+        "attachments": package["attachments"],
+        "download_logs": package["download_logs"],
+        "process_logs": package["process_logs"],
+        "files": files,
+        "approval_steps": steps,
+        "logs": logs,
+        "stamp_request": stamp_request,
+        "dispatch_record": dispatch_record,
+        "can_download": bool(user and canDownloadOfficialDocument(user, document, steps)),
+        "can_manage_dispatch": bool(user and can_manage_official_dispatch(user, document, dispatch_record, session)),
+        "can_act": bool(user and current_step and current_step.get("approver_user_id") == user.get("id") and current_step.get("status") == "pending"),
+    }
+
+
+def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    user = official_session_user(session)
+    query = query or {}
+    where: List[str] = []
+    params: List[Any] = []
+    if query.get("status"):
+        where.append("d.current_status = ?")
+        params.append(query["status"][0])
+    if query.get("company_id"):
+        where.append("d.company_id = ?")
+        params.append(query["company_id"][0])
+    if query.get("applicant_id"):
+        where.append("d.applicant_id = ?")
+        params.append(query["applicant_id"][0])
+    scope = (query.get("scope") or [""])[0]
+    if scope == "mine":
+        where.append("d.applicant_id = ?")
+        params.append(user["id"])
+    elif scope == "todo":
+        where.append(
+            """
+            (
+              EXISTS (
+                SELECT 1 FROM official_document_approval_steps s
+                WHERE s.document_id = d.id
+                  AND s.status = 'pending'
+                  AND s.step_key = d.current_step
+                  AND s.approver_user_id = ?
+              )
+              OR EXISTS (
+                SELECT 1 FROM official_document_dispatch_records r
+                WHERE r.document_id = d.id
+                  AND r.dispatch_status = 'pending'
+                  AND (
+                    r.dispatch_owner_user_id = ?
+                    OR (r.dispatch_owner_type = 'general_affairs' AND ? = '總務')
+                  )
+              )
+            )
+            """
+        )
+        params.extend([user["id"], user["id"], user.get("role") or ""])
+    elif not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+        where.append("(d.applicant_id = ? OR EXISTS (SELECT 1 FROM official_document_approval_steps s WHERE s.document_id = d.id AND s.approver_user_id = ?))")
+        params.extend([user["id"], user["id"]])
+    sql = "SELECT d.* FROM official_documents d"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY d.created_at DESC LIMIT 300"
+    rows = []
+    for row in conn.execute(sql, params).fetchall():
+        item = row_to_dict(row)
+        item["stamp_request"] = official_document_stamp_request(conn, item["id"])
+        item["dispatch_record"] = official_dispatch_record(conn, item["id"])
+        item["current_step_name"] = next((step["step_name"] for step in official_document_steps(conn, item["id"]) if step.get("step_key") == item.get("current_step")), "")
+        rows.append(item)
+    return rows
+
+
+def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
+        raise PermissionError("official_document_create_forbidden")
+    source_type = payload.get("source_type") or "blank_editor"
+    if source_type not in {"blank_editor", "uploaded_pdf"}:
+        raise ValueError("invalid_official_document_source_type")
+    company_id = payload.get("company_id") or "CO-001"
+    official_company_row(conn, company_id)
+    dispatch_method = official_dispatch_method(payload.get("dispatch_method"))
+    document_id = payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    ts = now()
+    metadata = {
+        "attachments": payload.get("attachments_summary") or payload.get("attachments") or "",
+        "workflow_template": "fixed_dispatch_seal_v1",
+        "future_rule_inputs": {
+            "company_id": company_id,
+            "department": user.get("unit"),
+            "document_type": payload.get("document_type"),
+            "seal_id": payload.get("seal_id"),
+            "dispatch_method": dispatch_method,
+            "amount": payload.get("amount"),
+        },
+    }
+    document = {
+        "id": document_id,
+        "company_id": company_id,
+        "document_type": payload.get("document_type") or ("uploaded_pdf_for_stamp" if source_type == "uploaded_pdf" else "outgoing_official_document"),
+        "source_type": source_type,
+        "title": payload.get("title") or payload.get("subject") or "未命名發文申請",
+        "subject": payload.get("subject") or payload.get("title") or "",
+        "description": payload.get("description") or payload.get("body") or "",
+        "method": payload.get("method") or payload.get("辦法") or "",
+        "recipient": payload.get("recipient") or payload.get("agency_name") or "",
+        "dispatch_unit": payload.get("dispatch_unit") or user.get("unit") or "",
+        "handler_name": payload.get("handler_name") or user.get("name") or "",
+        "applicant_id": user["id"],
+        "applicant_name": user.get("name") or user.get("email"),
+        "applicant_department_id": payload.get("applicant_department_id") or user.get("unit") or "",
+        "applicant_department_name": payload.get("applicant_department_name") or user.get("unit") or "",
+        "dispatch_method": dispatch_method,
+        "current_status": "draft",
+        "current_step": "",
+        "request_reason": payload.get("request_reason") or payload.get("reason") or "",
+        "metadata_json": metadata,
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    insert_row(conn, "official_documents", document)
+    if source_type == "uploaded_pdf":
+        content = payload.get("content_base64") or payload.get("file_content_base64") or ""
+        if not content:
+            raise ValueError("original_pdf_required")
+        data = base64.b64decode(content)
+        if not data.startswith(b"%PDF"):
+            raise ValueError("original_pdf_must_be_pdf")
+        file_row = store_official_pdf_file(conn, document_id, "original_pdf", Path(payload.get("file_name") or f"{document_id}.pdf").name, data, official_actor_name(user))
+        insert_official_log(conn, document_id, "upload_original_pdf", user, file_row["file_hash"], file_id=file_row["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    else:
+        ensure_official_generated_pdf(conn, document, official_actor_name(user))
+    seal_id = payload.get("seal_id")
+    if seal_id:
+        position = official_stamp_position_payload(payload)
+        stamp_request = {
+            "id": f"ODSTAMP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "document_id": document_id,
+            "company_id": company_id,
+            "seal_id": seal_id,
+            "requested_by": user["id"],
+            **position,
+            "status": "pending",
+            "stamped_file_id": None,
+            "error_message": "",
+            "created_at": ts,
+            "stamped_at": "",
+            "updated_at": ts,
+        }
+        insert_row(conn, "official_document_stamp_requests", stamp_request)
+    insert_official_log(conn, document_id, "create", user, document["request_reason"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if payload.get("submit", True):
+        return submit_official_document(conn, document_id, payload, session)
+    return official_document_detail(conn, document_id, session)
+
+
+def submit_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    if document["applicant_id"] != user["id"] and not session_has_any_permission(session, ["official_documents.all_todo"]):
+        raise PermissionError("only_applicant_can_submit")
+    if document["current_status"] not in {"draft", "rejected"}:
+        raise ValueError("official_document_not_submittable")
+    if not official_document_stamp_request(conn, document_id):
+        raise ValueError("official_document_seal_required")
+    if document["source_type"] == "blank_editor":
+        ensure_official_generated_pdf(conn, document, official_actor_name(user))
+    applicant = active_user_by_id(conn, document["applicant_id"]) or user
+    steps = create_official_workflow_steps(conn, document, applicant)
+    first = steps[0]
+    conn.execute("UPDATE official_documents SET current_status = ?, current_step = ?, updated_at = ? WHERE id = ?", (OFFICIAL_DOCUMENT_STEP_STATUS[first["step_key"]], first["step_key"], now(), document_id))
+    insert_official_log(conn, document_id, "submit", user, payload.get("comment") or "送出發文用印簽核", step_id=first["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if first.get("approver_role"):
+        create_notification(conn, {"type": "發文簽核", "title": f"{document['title']} 待{first['step_name']}簽核", "target_role": first["approver_role"], "target_email": "", "source": document_id, "body": f"{document.get('applicant_name') or '申請人'} 已送出發文用印申請。"})
+    return official_document_detail(conn, document_id, session)
+
+
+def current_official_pending_step(conn: sqlite3.Connection, document: Dict[str, Any]) -> Dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT * FROM official_document_approval_steps
+        WHERE document_id = ? AND step_key = ? AND status = 'pending'
+        ORDER BY step_order LIMIT 1
+        """,
+        (document["id"], document.get("current_step") or ""),
+    ).fetchone()
+    if not row:
+        raise ValueError("official_document_current_step_not_pending")
+    return row_to_dict(row)
+
+
+def assert_official_step_actor(user: Dict[str, Any], step: Dict[str, Any]) -> None:
+    if step.get("approver_user_id") != user.get("id"):
+        raise PermissionError("not_current_official_document_approver")
+
+
+def next_official_step(conn: sqlite3.Connection, document_id: str, step_order: int) -> Dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM official_document_approval_steps WHERE document_id = ? AND step_order > ? ORDER BY step_order LIMIT 1",
+        (document_id, step_order),
+    ).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def approve_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    if document["current_status"] in {"draft", "stamping", "stamped", "pending_general_affairs_dispatch", "returned_to_applicant_for_send", "dispatched", "sent_by_applicant", "closed", "cancelled", "rejected"}:
+        raise ValueError("official_document_not_pending_approval")
+    step = current_official_pending_step(conn, document)
+    assert_official_step_actor(user, step)
+    if step["step_key"] == "applicant_manager" and user["id"] == document["applicant_id"]:
+        raise PermissionError("applicant_cannot_self_approve_manager_step")
+    conn.execute(
+        "UPDATE official_document_approval_steps SET status = 'approved', comment = ?, approved_at = ?, updated_at = ? WHERE id = ?",
+        (payload.get("comment") or "核准", now(), now(), step["id"]),
+    )
+    insert_official_log(conn, document_id, "approve", user, payload.get("comment") or "", step_id=step["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if step["step_key"] == "ceo":
+        conn.execute("UPDATE official_documents SET current_status = 'approved', current_step = 'auto_stamp', updated_at = ? WHERE id = ?", (now(), document_id))
+        result = auto_stamp_official_document(conn, document_id, payload, user)
+        return {**official_document_detail(conn, document_id, session), "auto_stamp": result}
+    next_step = next_official_step(conn, document_id, int(step["step_order"]))
+    if not next_step:
+        raise ValueError("official_document_next_step_missing")
+    conn.execute("UPDATE official_documents SET current_status = ?, current_step = ?, updated_at = ? WHERE id = ?", (OFFICIAL_DOCUMENT_STEP_STATUS[next_step["step_key"]], next_step["step_key"], now(), document_id))
+    create_notification(conn, {"type": "發文簽核", "title": f"{document['title']} 待{next_step['step_name']}簽核", "target_role": next_step.get("approver_role") or "", "source": document_id, "body": f"{step['step_name']}已核准，請接續處理。"})
+    return official_document_detail(conn, document_id, session)
+
+
+def reject_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    step = current_official_pending_step(conn, document)
+    assert_official_step_actor(user, step)
+    comment = payload.get("comment") or "駁回"
+    conn.execute("UPDATE official_document_approval_steps SET status = 'rejected', comment = ?, approved_at = ?, updated_at = ? WHERE id = ?", (comment, now(), now(), step["id"]))
+    conn.execute("UPDATE official_documents SET current_status = 'rejected', current_step = 'applicant', updated_at = ? WHERE id = ?", (now(), document_id))
+    insert_official_log(conn, document_id, "reject", user, comment, step_id=step["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    create_notification(conn, {"type": "發文退回", "title": f"{document['title']} 已駁回", "target_role": "員工", "target_email": "", "source": document_id, "priority": "高", "body": comment})
+    return official_document_detail(conn, document_id, session)
+
+
+def cancel_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    if document["applicant_id"] != user["id"]:
+        raise PermissionError("only_applicant_can_cancel")
+    if document["current_status"] in {"stamping", "stamped", "pending_general_affairs_dispatch", "returned_to_applicant_for_send", "dispatched", "sent_by_applicant", "closed"}:
+        raise ValueError("official_document_cannot_cancel_after_stamp")
+    conn.execute("UPDATE official_documents SET current_status = 'cancelled', current_step = '', updated_at = ? WHERE id = ?", (now(), document_id))
+    insert_official_log(conn, document_id, "cancel", user, payload.get("comment") or "申請人取消", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return official_document_detail(conn, document_id, session)
+
+
+def confirm_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    if document["applicant_id"] != user["id"]:
+        raise PermissionError("only_applicant_can_confirm")
+    if document["current_status"] not in {"returned_to_applicant_for_send", "stamped"}:
+        raise ValueError("official_document_not_ready_for_applicant_confirm")
+    if document["current_status"] == "returned_to_applicant_for_send":
+        return complete_official_dispatch(conn, document_id, {**payload, "close": True}, session)
+    conn.execute("UPDATE official_documents SET current_status = 'closed', current_step = '', updated_at = ? WHERE id = ?", (now(), document_id))
+    insert_official_log(conn, document_id, "confirm", user, payload.get("comment") or "申請人確認已用印版本", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return official_document_detail(conn, document_id, session)
+
+
+def update_official_stamp_position(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    if document["applicant_id"] != user["id"]:
+        raise PermissionError("only_applicant_can_update_stamp_position")
+    if document["current_status"] != "draft":
+        raise ValueError("stamp_position_locked_after_submit")
+    position = official_stamp_position_payload(payload)
+    stamp_request = official_document_stamp_request(conn, document_id)
+    if not stamp_request:
+        raise ValueError("official_document_stamp_request_not_found")
+    conn.execute(
+        """
+        UPDATE official_document_stamp_requests
+        SET stamp_page = ?, stamp_x = ?, stamp_y = ?, stamp_width = ?, stamp_height = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (position["stamp_page"], position["stamp_x"], position["stamp_y"], position["stamp_width"], position["stamp_height"], now(), stamp_request["id"]),
+    )
+    insert_official_log(conn, document_id, "update_stamp_position", user, json.dumps(position, ensure_ascii=False), ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return official_document_detail(conn, document_id, session)
+
+
+def auto_stamp_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], actor: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    document = official_document_row(conn, document_id)
+    stamp_request = official_document_stamp_request(conn, document_id)
+    if not stamp_request:
+        raise ValueError("official_document_stamp_request_required")
+    try:
+        conn.execute("UPDATE official_documents SET current_status = 'stamping', current_step = 'auto_stamp', updated_at = ? WHERE id = ?", (now(), document_id))
+        conn.execute("UPDATE official_document_stamp_requests SET status = 'stamping', updated_at = ? WHERE id = ?", (now(), stamp_request["id"]))
+        seal = company_seal_row(conn, stamp_request["seal_id"])
+        if not seal.get("is_active"):
+            raise ValueError("inactive_seal_cannot_stamp")
+        current_file = conn.execute("SELECT * FROM company_seal_files WHERE seal_id = ? AND is_current = 1 ORDER BY version DESC LIMIT 1", (stamp_request["seal_id"],)).fetchone()
+        if not current_file:
+            raise ValueError("current_seal_file_required")
+        seal_file = row_to_dict(current_file)
+        if not seal_file.get("file_object_id"):
+            raise ValueError("seal_file_object_required")
+        insert_official_log(conn, document_id, "read_seal_vault_for_stamp", actor, "authorized_backend_stamp_only", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+        _, seal_bytes = read_file_object_bytes(conn, seal_file["file_object_id"])
+        if sha256_bytes(seal_bytes) != seal_file["file_hash"]:
+            raise ValueError("seal_file_hash_mismatch")
+        source_file = official_latest_source_file(conn, document)
+        file_object_id = source_file.get("file_object_id")
+        if not file_object_id:
+            raise ValueError("official_source_file_object_missing")
+        _, original_pdf = read_file_object_bytes(conn, file_object_id)
+        stamp_no = payload.get("stamp_no") or f"ODSTAMP-{document_id}-{int(time.time())}"
+        positions = official_stamp_positions_from_request(stamp_request, seal)
+        stamped_pdf, engine, layout = stamp_uploaded_pdf_bytes(original_pdf, [{**item, "stamp_no": stamp_no} for item in positions], stamp_no)
+        stamped_file = store_official_pdf_file(conn, document_id, "stamped_pdf", f"{document_id}-stamped.pdf", stamped_pdf, "Auto Stamp")
+        conn.execute(
+            "UPDATE official_document_stamp_requests SET status = 'stamped', stamped_file_id = ?, stamped_at = ?, updated_at = ?, error_message = '' WHERE id = ?",
+            (stamped_file["id"], now(), now(), stamp_request["id"]),
+        )
+        insert_official_log(conn, document_id, "auto_stamp", actor, f"{engine} {stamp_no} seal_hash={seal_file['file_hash']}", file_id=stamped_file["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+        dispatch_record = advance_official_dispatch_after_stamp(conn, document_id, stamped_file, actor, payload)
+        return {"ok": True, "stamped_file": official_file_metadata(stamped_file), "engine": engine, "layout": layout, "dispatch_record": dispatch_record}
+    except Exception as exc:
+        detail = str(exc)
+        conn.execute("UPDATE official_documents SET current_status = 'stamping_failed', current_step = 'general_affairs_review', updated_at = ? WHERE id = ?", (now(), document_id))
+        conn.execute("UPDATE official_document_stamp_requests SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ?", (detail, now(), stamp_request["id"]))
+        insert_official_log(conn, document_id, "auto_stamp_failed", actor, detail, ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+        create_notification(conn, {"type": "發文用印失敗", "title": f"{document['title']} 自動用印失敗", "target_role": "總務", "source": document_id, "priority": "高", "body": detail})
+        return {"ok": False, "error": "auto_stamp_failed", "detail": detail}
+
+
+def official_document_download_file(conn: sqlite3.Connection, document_id: str, file_id: str, session: Dict[str, Any] | None, ip_address: str = "", user_agent: str = "") -> Tuple[Dict[str, Any], Dict[str, Any], bytes]:
+    user = official_session_user(session)
+    document = official_document_row(conn, document_id)
+    steps = official_document_steps(conn, document_id)
+    if not canDownloadOfficialDocument(user, document, steps) and not session_has_any_permission(session, ["official_documents.all_records"]):
+        raise PermissionError("official_document_download_forbidden")
+    file_row = conn.execute("SELECT * FROM official_document_files WHERE id = ? AND document_id = ?", (file_id, document_id)).fetchone()
+    if not file_row:
+        raise ValueError("official_document_file_not_found")
+    file_meta = row_to_dict(file_row)
+    if not file_meta.get("file_object_id"):
+        raise ValueError("official_document_file_object_missing")
+    object_row, data = read_file_object_bytes(conn, file_meta["file_object_id"])
+    insert_official_log(conn, document_id, "download_file", user, file_meta["file_type"], file_id=file_id, ip_address=ip_address, user_agent=user_agent)
+    record_file_access(conn, file_object_id=file_meta["file_object_id"], document_id=document_id, actor=official_actor_name(user), action="發文附件下載", result="成功", detail=file_meta["file_type"])
+    return document, {**file_meta, "object": object_row}, data
 
 
 def canonical_json_hash(value: Any) -> str:
@@ -5678,6 +7511,30 @@ def stamp_from_percentage(placement: Dict[str, Any], width: float, height: float
 
 def pdf_stamp_definitions(payload: Dict[str, Any], document: Dict[str, Any], stamp_no: str, page_count: int) -> List[Dict[str, Any]]:
     coordinates = payload.get("coordinates") or {}
+    explicit_positions = payload.get("stamp_positions") or payload.get("stamps") or payload.get("positions")
+    if explicit_positions:
+        stamps: List[Dict[str, Any]] = []
+        for position in normalized_stamp_positions({"stamp_positions": explicit_positions, "seal_id": payload.get("seal_id") or ""}):
+            page_value = position.get("page", 1)
+            target_pages = range(1, page_count + 1) if page_value == "all" else [max(1, min(page_count, int(page_value)))]
+            for page in target_pages:
+                x, y, width, height = clamp_pdf_rect(
+                    pdf_safe_float(position.get("x"), 420.0),
+                    pdf_safe_float(position.get("y"), 120.0),
+                    pdf_safe_float(position.get("w"), 56.0),
+                    pdf_safe_float(position.get("h"), 56.0),
+                )
+                stamps.append({
+                    **position,
+                    "page": page,
+                    "x": x,
+                    "y": y,
+                    "w": width,
+                    "h": height,
+                    "stamp_no": stamp_no,
+                    "source": "stamp_positions",
+                })
+        return stamps
     seal_plan = pdf_seal_plan(payload, document)
     stamps: List[Dict[str, Any]] = []
     seal_specs = [
@@ -6662,11 +8519,11 @@ def supabase_insert(table: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if table == "documents" and payload.get("direction") == "發文" and not payload.get("doc_no"):
         payload["doc_no"] = supabase_next_dispatch_no()
     timestamp = now()
-    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "module_account_links"}:
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "companies", "seal_reference_options", "company_seals", "seal_usage_requests", "seal_usage_approvals", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "module_account_links", "official_documents", "official_document_approval_steps", "official_document_stamp_requests", "official_document_dispatch_records"}:
         payload.setdefault("updated_at", timestamp)
-    if table in {"documents", "attachments", "exchange_events", "exchange_outbox", "exchange_inbox", "exchange_log", "exchange_attachment", "exchange_status_history", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "signature_provider_events", "module_account_links"}:
+    if table in {"documents", "attachments", "exchange_events", "exchange_outbox", "exchange_inbox", "exchange_log", "exchange_attachment", "exchange_status_history", "audit_logs", "users", "notifications", "notification_deliveries", "system_inbox", "company_registry", "department_registry", "seal_type_registry", "companies", "seal_reference_options", "company_seals", "seal_permissions", "seal_usage_approvals", "seal_usage_logs", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "signature_provider_events", "module_account_links", "official_documents", "official_document_files", "official_document_approval_steps", "official_document_approval_logs", "official_document_stamp_requests", "official_document_dispatch_records"}:
         payload.setdefault("created_at", timestamp)
-    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs", "module_account_links"}:
+    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "seal_usage_requests", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs", "module_account_links", "official_documents"}:
         for key, value in list(payload.items()):
             if key.endswith("_json") and not isinstance(value, str):
                 payload[key] = json.dumps(value, ensure_ascii=False)
@@ -6732,9 +8589,9 @@ def supabase_patch(table: str, row_id: str, payload: Dict[str, Any]) -> Dict[str
             payload["job_level"] = profile["job_level"]
         if permission_inputs.intersection(payload) and (not payload.get("role") or payload.get("role") not in ALLOWED_EDOC_ROLES):
             payload["role"] = profile["role"]
-    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "background_jobs", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "module_account_links"}:
+    if table in {"documents", "recipients", "exchange_tasks", "exchange_outbox", "exchange_inbox", "settings", "background_jobs", "notification_rules", "company_registry", "department_registry", "seal_type_registry", "companies", "seal_reference_options", "company_seals", "seal_usage_requests", "seal_usage_approvals", "workflow_tasks", "contracts", "contract_parties", "contract_approvals", "module_account_links", "official_documents", "official_document_approval_steps", "official_document_stamp_requests", "official_document_dispatch_records"}:
         payload["updated_at"] = now()
-    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs", "module_account_links"}:
+    if table in {"documents", "workflow_tasks", "contracts", "contract_approvals", "seal_usage_requests", "exchange_log", "exchange_inbox", "exchange_status_history", "audit_logs", "module_account_links", "official_documents"}:
         for key, value in list(payload.items()):
             if key.endswith("_json") and not isinstance(value, str):
                 payload[key] = json.dumps(value, ensure_ascii=False)
@@ -6769,6 +8626,1173 @@ def supabase_patch(table: str, row_id: str, payload: Dict[str, Any]) -> Dict[str
             "metadata_json": {"source": "edoc_rbac_supabase"},
         })
     return updated
+
+
+def supabase_filter_rows(table: str, filters: Dict[str, Any] | None = None, *, order: str = "", limit: int = 500, select: str = "*") -> List[Dict[str, Any]]:
+    params: Dict[str, str] = {"select": select, "limit": str(limit)}
+    for key, value in (filters or {}).items():
+        if value is None:
+            continue
+        if value == "__is_null__":
+            params[key] = "is.null"
+        elif isinstance(value, bool):
+            params[key] = f"eq.{str(value).lower()}"
+        else:
+            params[key] = f"eq.{value}"
+    if order:
+        params["order"] = order
+    return supabase_request("GET", f"{table}?{urllib.parse.urlencode(params)}")
+
+
+def supabase_update_many(table: str, filters: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    params = {
+        key: (f"is.null" if value == "__is_null__" else f"eq.{str(value).lower()}" if isinstance(value, bool) else f"eq.{value}")
+        for key, value in filters.items()
+    }
+    return supabase_request("PATCH", f"{table}?{urllib.parse.urlencode(params)}", payload)
+
+
+def supabase_storage_object_url(storage_key: str, bucket: str | None = None) -> str:
+    base = EDOC_OBJECT_STORAGE_URL or (f"{SUPABASE_URL}/storage/v1" if SUPABASE_URL else "")
+    if not base:
+        raise ValueError("supabase_storage_endpoint_required")
+    storage_bucket = bucket or EDOC_STORAGE_BUCKET
+    return f"{base.rstrip('/')}/object/{urllib.parse.quote(storage_bucket, safe='')}/{urllib.parse.quote(storage_key, safe='/')}"
+
+
+def supabase_storage_upload(storage_key: str, data: bytes, mime_type: str, bucket: str | None = None) -> None:
+    url = supabase_storage_object_url(storage_key, bucket)
+    headers = supabase_headers({"Content-Type": mime_type, "x-upsert": "false"})
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")
+        raise ValueError(f"supabase_storage_upload_failed:{exc.code}:{redact_text(detail)}") from exc
+
+
+def supabase_storage_download(storage_key: str, bucket: str | None = None) -> bytes:
+    url = supabase_storage_object_url(storage_key, bucket)
+    request = urllib.request.Request(url, headers=supabase_headers(), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")
+        raise ValueError(f"supabase_storage_download_failed:{exc.code}:{redact_text(detail)}") from exc
+
+
+def supabase_store_file_object(document_id: str, file_name: str, data: bytes, purpose: str, version_label: str, actor: str, mime_type: str) -> Dict[str, Any]:
+    file_id = f"FILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    safe_name = Path(file_name).name
+    storage_key = f"{purpose}/{document_id}/{file_id}-{safe_name}"
+    is_seal_vault = purpose.startswith(SEAL_VAULT_PURPOSE_PREFIX)
+    bucket = EDOC_SEAL_STORAGE_BUCKET if is_seal_vault else EDOC_STORAGE_BUCKET
+    supabase_storage_upload(storage_key, data, mime_type, bucket)
+    row = {
+        "id": file_id,
+        "document_id": document_id,
+        "file_name": safe_name,
+        "storage_key": storage_key,
+        "bucket": bucket,
+        "storage_provider": "seal-vault" if is_seal_vault else (EDOC_STORAGE_PROVIDER or "supabase"),
+        "mime_type": mime_type,
+        "size_bytes": len(data),
+        "sha256": sha256_bytes(data),
+        "encrypted_sha256": "",
+        "encryption_status": "由物件儲存服務控管",
+        "encryption_alg": "",
+        "encryption_key_id": "",
+        "scan_status": "待掃描",
+        "scan_engine": EDOC_SCAN_ENGINE,
+        "quarantine_reason": "",
+        "signed_url_expires_at": "",
+        "last_scan_at": "",
+        "last_download_at": "",
+        "version_label": version_label,
+        "purpose": purpose,
+        "created_by": actor,
+        "created_at": now(),
+    }
+    return supabase_insert("file_objects", row)
+
+
+def supabase_reference_codes(option_type: str) -> set[str]:
+    return {row["code"] for row in supabase_filter_rows("seal_reference_options", {"option_type": option_type, "status": "active"})}
+
+
+def supabase_log_seal_usage(
+    *,
+    action: str,
+    actor_id: str = "API",
+    usage_request_id: str = "",
+    seal_id: str = "",
+    document_id: str = "",
+    detail: str = "",
+    ip_address: str = "",
+    user_agent: str = "",
+) -> Dict[str, Any]:
+    row = {
+        "id": f"SLOG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "usage_request_id": usage_request_id or None,
+        "seal_id": seal_id or None,
+        "document_id": document_id or None,
+        "action": action,
+        "actor_id": actor_id,
+        "ip_address": ip_address,
+        "user_agent": user_agent,
+        "detail": detail,
+        "created_at": now(),
+    }
+    created = supabase_insert("seal_usage_logs", row)
+    supabase_insert("audit_logs", {
+        "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "actor": actor_id,
+        "action": action,
+        "target_type": "seal_usage",
+        "target_id": usage_request_id or seal_id or document_id,
+        "detail": detail,
+        "event_type": action,
+        "module_code": "seals",
+        "resource_type": "seal_usage",
+        "resource_id": usage_request_id or seal_id or document_id,
+        "result": "success",
+        "severity": "info",
+    })
+    return created
+
+
+def supabase_company_seal_row(seal_id: str) -> Dict[str, Any]:
+    seal = supabase_get("company_seals", seal_id)
+    if not seal:
+        raise ValueError("seal_not_found")
+    company = supabase_get("companies", seal.get("company_id", "")) or {}
+    current_files = supabase_filter_rows("company_seal_files", {"seal_id": seal_id, "is_current": True}, order="version.desc", limit=1)
+    data = {**seal, "company_name": company.get("name", ""), "company_tax_id": company.get("tax_id", "")}
+    data["current_file"] = seal_file_metadata(current_files[0]) if current_files else None
+    return data
+
+
+def supabase_list_company_seals(company_id: str) -> List[Dict[str, Any]]:
+    rows = supabase_filter_rows("company_seals", {"company_id": company_id}, order="is_active.desc,seal_category.asc,seal_size_type.asc,created_at.desc", limit=500)
+    return [supabase_company_seal_row(row["id"]) for row in rows]
+
+
+def supabase_create_company_seal(company_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    if not supabase_get("companies", company_id):
+        raise ValueError("company_not_found")
+    category = payload.get("seal_category") or payload.get("category") or "other"
+    size_type = payload.get("seal_size_type") or payload.get("size_type") or "large_seal"
+    if category not in supabase_reference_codes("category"):
+        raise ValueError("invalid_seal_category")
+    if size_type not in supabase_reference_codes("size"):
+        raise ValueError("invalid_seal_size_type")
+    actor = seal_actor(session, payload)
+    seal_id = payload.get("id") or f"CSEAL-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    supabase_insert("company_seals", {
+        "id": seal_id,
+        "company_id": company_id,
+        "seal_name": payload.get("seal_name") or payload.get("name") or "未命名印章",
+        "seal_category": category,
+        "seal_size_type": size_type,
+        "purpose_description": payload.get("purpose_description") or payload.get("purpose") or "",
+        "is_active": bool(payload.get("is_active", True)),
+        "created_by": actor,
+        "created_at": now(),
+        "updated_at": now(),
+        "deactivated_at": "",
+    })
+    for role in payload.get("default_permission_roles") or ["viewer", "requester", "approver", "seal_admin"]:
+        if role in supabase_reference_codes("permission_role"):
+            supabase_insert("seal_permissions", {"id": f"SPERM-{seal_id}-{role}", "seal_id": seal_id, "user_id": payload.get("user_id") or "", "role": role, "created_at": now()})
+    supabase_log_seal_usage(action="create_seal", actor_id=actor, seal_id=seal_id, detail=payload.get("seal_name") or payload.get("name") or "")
+    return supabase_company_seal_row(seal_id)
+
+
+def supabase_patch_company_seal(seal_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    supabase_company_seal_row(seal_id)
+    update: Dict[str, Any] = {}
+    for key in ("seal_name", "seal_category", "seal_size_type", "purpose_description", "is_active"):
+        if key in payload:
+            update[key] = payload[key]
+    if "seal_category" in update and update["seal_category"] not in supabase_reference_codes("category"):
+        raise ValueError("invalid_seal_category")
+    if "seal_size_type" in update and update["seal_size_type"] not in supabase_reference_codes("size"):
+        raise ValueError("invalid_seal_size_type")
+    if "is_active" in update:
+        update["is_active"] = bool(update["is_active"])
+        update["deactivated_at"] = "" if update["is_active"] else now()
+    update["updated_at"] = now()
+    supabase_patch("company_seals", seal_id, update)
+    supabase_log_seal_usage(action="update_seal", actor_id=seal_actor(session, payload), seal_id=seal_id, detail=json.dumps(update, ensure_ascii=False))
+    return supabase_company_seal_row(seal_id)
+
+
+def supabase_deactivate_company_seal(seal_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    row = supabase_patch_company_seal(seal_id, {"is_active": False}, session)
+    supabase_log_seal_usage(action="deactivate_seal", actor_id=seal_actor(session), seal_id=seal_id, detail="soft_delete_only")
+    return row
+
+
+def supabase_upload_company_seal_file(seal_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    seal = supabase_company_seal_row(seal_id)
+    if not seal.get("is_active"):
+        raise ValueError("inactive_seal_cannot_upload_new_file")
+    content = payload.get("content_base64") or ""
+    if not content:
+        raise ValueError("seal_file_content_required")
+    data = base64.b64decode(content)
+    file_name = Path(payload.get("file_name") or f"{seal_id}.png").name
+    mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "image/png"
+    validate_seal_file_upload(file_name, mime_type, data)
+    actor = seal_actor(session, payload)
+    versions = supabase_filter_rows("company_seal_files", {"seal_id": seal_id}, order="version.desc", limit=1)
+    next_version = int((versions[0].get("version") if versions else 0) or 0) + 1
+    file_row = supabase_store_file_object(SEAL_VAULT_DOCUMENT_ID, file_name, data, f"{SEAL_VAULT_PURPOSE_PREFIX}/seals/{seal_id}", f"seal-v{next_version}", actor, mime_type)
+    supabase_update_many("company_seal_files", {"seal_id": seal_id}, {"is_current": False})
+    row = {
+        "id": f"SFILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "seal_id": seal_id,
+        "file_object_id": file_row["id"],
+        "file_storage_key": file_row["storage_key"],
+        "file_name": file_name,
+        "file_mime_type": mime_type,
+        "file_size": len(data),
+        "file_hash": sha256_bytes(data),
+        "version": next_version,
+        "is_current": True,
+        "uploaded_by": actor,
+        "uploaded_at": now(),
+    }
+    created = supabase_insert("company_seal_files", row)
+    supabase_log_seal_usage(action="upload_seal", actor_id=actor, seal_id=seal_id, detail=f"{file_name} v{next_version} hash={row['file_hash']}")
+    return {"seal": supabase_company_seal_row(seal_id), "file": seal_file_metadata(created)}
+
+
+def supabase_list_company_seal_files(seal_id: str, session: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+    supabase_company_seal_row(seal_id)
+    supabase_log_seal_usage(action="view_seal_metadata", actor_id=seal_actor(session), seal_id=seal_id, detail="metadata_only")
+    return [seal_file_metadata(row) for row in supabase_filter_rows("company_seal_files", {"seal_id": seal_id}, order="version.desc")]
+
+
+def supabase_set_current_seal_file(file_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    item = supabase_get("company_seal_files", file_id)
+    if not item:
+        raise ValueError("seal_file_not_found")
+    supabase_update_many("company_seal_files", {"seal_id": item["seal_id"]}, {"is_current": False})
+    supabase_patch("company_seal_files", file_id, {"is_current": True})
+    supabase_log_seal_usage(action="set_current_seal_file", actor_id=seal_actor(session), seal_id=item["seal_id"], detail=f"version={item.get('version')}")
+    return supabase_company_seal_row(item["seal_id"])
+
+
+def supabase_get_or_create_pdf_document(payload: Dict[str, Any]) -> Dict[str, Any]:
+    doc_payload = payload.get("document") or payload
+    doc_id = doc_payload.get("document_id") or doc_payload.get("id")
+    if doc_id:
+        existing = supabase_get("documents", str(doc_id))
+        if existing:
+            return existing
+    if doc_id and not str(doc_id).startswith("DOC-"):
+        doc_id = f"DOC-{doc_id}"
+    doc_id = str(doc_id or f"DOC-PDF-{int(time.time() * 1000)}")
+    doc = {
+        "id": doc_id,
+        "doc_no": doc_payload.get("doc_no") or doc_payload.get("no") or doc_id,
+        "direction": doc_payload.get("direction") or "發文",
+        "doc_type": doc_payload.get("doc_type") or doc_payload.get("type") or "函",
+        "priority": doc_payload.get("priority") or "普通件",
+        "security_level": doc_payload.get("security_level") or doc_payload.get("security") or "普通",
+        "agency_name": doc_payload.get("agency_name") or doc_payload.get("to") or "未指定機關",
+        "agency_code": doc_payload.get("agency_code") or doc_payload.get("agencyCode") or "",
+        "subject": doc_payload.get("subject") or "未命名公文",
+        "body": doc_payload.get("body") or "",
+        "status": doc_payload.get("status") or "PDF 已產生",
+        "owner": doc_payload.get("owner") or "總務",
+        "department": doc_payload.get("department") or doc_payload.get("dept") or "總管理處",
+        "due_date": doc_payload.get("due_date") or "",
+        "received_at": doc_payload.get("received_at") or None,
+        "company_name": doc_payload.get("company_name") or doc_payload.get("companyName") or "歲悅長照股份有限公司",
+        "seal_plan_json": doc_payload.get("seal_plan_json") or "{}",
+        "metadata_json": doc_payload.get("metadata_json") or "{}",
+        "created_at": now(),
+        "updated_at": now(),
+    }
+    return supabase_insert("documents", doc)
+
+
+def supabase_seal_usage_request_row(request_id: str) -> Dict[str, Any]:
+    request = supabase_get("seal_usage_requests", request_id)
+    if not request:
+        raise ValueError("seal_usage_request_not_found")
+    company = supabase_get("companies", request.get("company_id", "")) or {}
+    seal = supabase_get("company_seals", request.get("seal_id", "")) or {}
+    request["company_name"] = company.get("name", "")
+    request["seal_name"] = seal.get("seal_name", "")
+    request["seal_category"] = seal.get("seal_category", "")
+    request["seal_size_type"] = seal.get("seal_size_type", "")
+    request["stamp_positions"] = parse_json_any(request.get("stamp_positions_json"), []) or []
+    request["metadata"] = parse_json_any(request.get("metadata_json"), {}) or {}
+    request["approvals"] = supabase_filter_rows("seal_usage_approvals", {"usage_request_id": request_id}, order="approval_order.asc")
+    request["logs"] = supabase_filter_rows("seal_usage_logs", {"usage_request_id": request_id}, order="created_at.desc", limit=50)
+    return request
+
+
+def supabase_list_seal_usage_requests(query: Dict[str, List[str]] | None = None) -> List[Dict[str, Any]]:
+    query = query or {}
+    params: Dict[str, str] = {"select": "id", "limit": "300", "order": "requested_at.desc"}
+    for key in ("company_id", "seal_id", "requested_by", "usage_type", "status"):
+        if query.get(key):
+            params[key] = f"eq.{query[key][0]}"
+    if query.get("date_from"):
+        params["requested_at"] = f"gte.{query['date_from'][0]}"
+    if query.get("date_to"):
+        params["requested_at"] = f"lte.{query['date_to'][0]}"
+    rows = supabase_request("GET", f"seal_usage_requests?{urllib.parse.urlencode(params)}")
+    return [supabase_seal_usage_request_row(row["id"]) for row in rows]
+
+
+def supabase_create_seal_usage_request(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    seal_id = payload.get("seal_id") or ""
+    if not seal_id:
+        raise ValueError("seal_id_required")
+    seal = supabase_company_seal_row(seal_id)
+    if not seal.get("is_active"):
+        raise ValueError("inactive_seal_cannot_be_requested")
+    if not supabase_filter_rows("company_seal_files", {"seal_id": seal_id, "is_current": True}, limit=1):
+        raise ValueError("current_seal_file_required")
+    usage_type = payload.get("usage_type") or "official_document"
+    if usage_type not in supabase_reference_codes("usage_type"):
+        raise ValueError("invalid_usage_type")
+    document = supabase_get_or_create_pdf_document({"document_id": document_id, **(payload.get("document") or {})})
+    actor = seal_actor(session, payload)
+    request_id = payload.get("id") or f"SREQ-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    positions = payload.get("stamp_positions") or payload.get("positions") or []
+    supabase_insert("seal_usage_requests", {
+        "id": request_id,
+        "document_id": document["id"],
+        "company_id": seal["company_id"],
+        "seal_id": seal_id,
+        "requested_by": actor,
+        "request_reason": payload.get("request_reason") or payload.get("reason") or "",
+        "usage_type": usage_type,
+        "status": payload.get("status") or "pending",
+        "stamp_positions_json": positions,
+        "stamped_pdf_version_id": None,
+        "metadata_json": payload.get("metadata") or {},
+        "requested_at": now(),
+        "approved_at": "",
+        "stamped_at": "",
+        "updated_at": now(),
+    })
+    approvers = payload.get("approvers") or [{"approver_id": "seal_approver", "approval_order": 1}]
+    for index, approver in enumerate(approvers, start=1):
+        supabase_insert("seal_usage_approvals", {
+            "id": f"SAPP-{request_id}-{index}",
+            "usage_request_id": request_id,
+            "approver_id": approver.get("approver_id") or approver.get("id") or "seal_approver",
+            "approval_order": int(approver.get("approval_order") or index),
+            "status": "pending",
+            "comment": "",
+            "approved_at": "",
+            "created_at": now(),
+            "updated_at": now(),
+        })
+    supabase_log_seal_usage(action="request_use", actor_id=actor, usage_request_id=request_id, seal_id=seal_id, document_id=document["id"], detail=payload.get("request_reason") or payload.get("reason") or "")
+    return supabase_seal_usage_request_row(request_id)
+
+
+def supabase_approve_seal_usage_request(request_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    request = supabase_seal_usage_request_row(request_id)
+    if request["status"] not in {"pending", "draft"}:
+        raise ValueError("seal_request_not_pending")
+    actor = seal_actor(session, payload)
+    pending = supabase_filter_rows("seal_usage_approvals", {"usage_request_id": request_id, "status": "pending"}, order="approval_order.asc", limit=1)
+    if pending:
+        supabase_patch("seal_usage_approvals", pending[0]["id"], {"status": "approved", "approver_id": actor, "comment": payload.get("comment") or "核准用印。", "approved_at": now(), "updated_at": now()})
+    remaining = supabase_filter_rows("seal_usage_approvals", {"usage_request_id": request_id, "status": "pending"}, limit=1)
+    if not remaining:
+        supabase_patch("seal_usage_requests", request_id, {"status": "approved", "approved_at": now(), "updated_at": now()})
+    supabase_log_seal_usage(action="approve_use", actor_id=actor, usage_request_id=request_id, seal_id=request["seal_id"], document_id=request["document_id"], detail=payload.get("comment") or "")
+    return supabase_seal_usage_request_row(request_id)
+
+
+def supabase_reject_seal_usage_request(request_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    request = supabase_seal_usage_request_row(request_id)
+    if request["status"] in {"stamped", "cancelled"}:
+        raise ValueError("seal_request_cannot_be_rejected")
+    actor = seal_actor(session, payload)
+    pending = supabase_filter_rows("seal_usage_approvals", {"usage_request_id": request_id, "status": "pending"}, limit=50)
+    for approval in pending:
+        supabase_patch("seal_usage_approvals", approval["id"], {"status": "rejected", "comment": payload.get("comment") or "駁回用印。", "approved_at": now(), "updated_at": now()})
+    supabase_patch("seal_usage_requests", request_id, {"status": "rejected", "updated_at": now()})
+    supabase_log_seal_usage(action="reject_use", actor_id=actor, usage_request_id=request_id, seal_id=request["seal_id"], document_id=request["document_id"], detail=payload.get("comment") or "")
+    return supabase_seal_usage_request_row(request_id)
+
+
+def supabase_stamp_seal_usage_request(request_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    request = supabase_seal_usage_request_row(request_id)
+    if request["status"] != "approved":
+        raise ValueError("seal_request_must_be_approved_before_stamp")
+    seal = supabase_company_seal_row(request["seal_id"])
+    if not seal.get("is_active"):
+        raise ValueError("inactive_seal_cannot_stamp")
+    files = supabase_filter_rows("company_seal_files", {"seal_id": request["seal_id"], "is_current": True}, order="version.desc", limit=1)
+    if not files:
+        raise ValueError("current_seal_file_required")
+    file_meta = files[0]
+    file_object = supabase_get("file_objects", file_meta.get("file_object_id", "")) if file_meta.get("file_object_id") else None
+    if file_object:
+        supabase_log_seal_usage(action="read_seal_vault_for_stamp", actor_id=seal_actor(session, payload), usage_request_id=request_id, seal_id=request["seal_id"], document_id=request["document_id"], detail="authorized_backend_stamp_only")
+        seal_bytes = supabase_storage_download(file_object["storage_key"], file_object.get("bucket") or EDOC_SEAL_STORAGE_BUCKET)
+        if sha256_bytes(seal_bytes) != file_meta["file_hash"]:
+            raise ValueError("file_hash_mismatch")
+    stamp_no = payload.get("stamp_no") or f"STAMP-{request_id}-{int(time.time())}"
+    positions = payload.get("stamp_positions") or request.get("stamp_positions") or [
+        {"page": 1, "x": 420, "y": 130, "w": 85, "h": 85, "label": seal["seal_name"], "type": seal["seal_category"], "seal_id": request["seal_id"]}
+    ]
+    document = supabase_get("documents", request["document_id"]) or {"id": request["document_id"], "doc_no": request["document_id"], "subject": "用印文件", "body": ""}
+    template = payload.get("template") or "公司用印文件"
+    dry_package = build_official_pdf_package(pdf_render_document(document, payload), [], template, 1)
+    stamps = pdf_stamp_definitions({"stamp_positions": positions, "seal_id": request["seal_id"]}, document, stamp_no, int(dry_package["layout"]["page_count"]))
+    package = build_official_pdf_package(pdf_render_document(document, payload), stamps, template, 1)
+    actor = seal_actor(session, payload)
+    file_row = supabase_store_file_object(request["document_id"], f"{document.get('doc_no') or request['document_id']}-after-seal.pdf", package["data"], "pdf", "after_seal", actor, "application/pdf")
+    pdf_version_id = f"PDF-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    pdf_version = supabase_insert("pdf_versions", {
+        "id": pdf_version_id,
+        "document_id": request["document_id"],
+        "file_object_id": file_row["id"],
+        "version_type": "after_seal",
+        "template_name": template,
+        "stamp_no": stamp_no,
+        "coordinates_json": json.dumps(pdf_coordinates_with_layout(payload.get("coordinates") or {}, package, stamps), ensure_ascii=False),
+        "previous_version_id": "",
+        "sha256": file_row["sha256"],
+        "created_at": now(),
+    })
+    supabase_patch("seal_usage_requests", request_id, {"status": "stamped", "stamped_at": now(), "stamped_pdf_version_id": pdf_version_id, "stamp_positions_json": positions, "updated_at": now()})
+    supabase_patch("documents", request["document_id"], {"status": "已用印", "updated_at": now()})
+    supabase_log_seal_usage(action="stamp_document", actor_id=actor, usage_request_id=request_id, seal_id=request["seal_id"], document_id=request["document_id"], detail=f"{stamp_no} seal_file_hash={file_meta['file_hash']}")
+    return {"request": supabase_seal_usage_request_row(request_id), "stamped_file": {"pdf_version_id": pdf_version["id"], "file_object_id": file_row["id"], "sha256": file_row["sha256"], "stamp_no": stamp_no}}
+
+
+def supabase_official_session_user(session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = session.get("user") if session else None
+    if not user:
+        raise PermissionError("authentication_required")
+    return user
+
+
+def supabase_official_company_row(company_id: str) -> Dict[str, Any]:
+    row = supabase_get("companies", company_id)
+    if not row:
+        raise ValueError("company_not_found")
+    return row
+
+
+def supabase_official_document_row(document_id: str) -> Dict[str, Any]:
+    row = supabase_get("official_documents", document_id)
+    if not row:
+        raise ValueError("official_document_not_found")
+    return row
+
+
+def supabase_user_by_id(user_id: str) -> Dict[str, Any] | None:
+    row = supabase_get("users", user_id)
+    if not row or row.get("status") != "啟用":
+        return None
+    return public_user(row)
+
+
+def supabase_active_user_by_role(role: str, exclude_user_id: str = "") -> Dict[str, Any] | None:
+    rows = supabase_filter_rows("users", {"role": role, "status": "啟用"}, order="id.asc", limit=20)
+    for row in rows:
+        if row.get("id") != exclude_user_id:
+            return public_user(row)
+    return None
+
+
+def supabase_department_head_role(company: Dict[str, Any], department_name: str) -> str:
+    rows = supabase_filter_rows("department_registry", {"company_name": company.get("name") or "", "name": department_name or "", "status": "啟用"}, limit=1)
+    return rows[0].get("manager_role") if rows else "主管"
+
+
+def supabase_resolve_official_step_approver(step: Dict[str, Any], applicant: Dict[str, Any], company: Dict[str, Any]) -> Dict[str, Any] | None:
+    role = step["role"]
+    if step["key"] == "department_head":
+        role = supabase_department_head_role(company, applicant.get("unit") or "")
+    user = supabase_active_user_by_role(role, applicant.get("id") if step["key"] in {"applicant_manager", "department_head"} else "")
+    if not user and step["key"] in {"applicant_manager", "department_head"}:
+        user = supabase_active_user_by_role("行政部主任", applicant.get("id"))
+    return user
+
+
+def supabase_official_document_files(document_id: str) -> List[Dict[str, Any]]:
+    rows = supabase_filter_rows("official_document_files", {"document_id": document_id}, order="version.desc,created_at.desc", limit=500)
+    rows.sort(key=lambda item: (0 if item.get("file_type") == "stamped_pdf" else 1, -int(item.get("version") or 0), str(item.get("created_at") or "")))
+    return [official_file_metadata(row) for row in rows]
+
+
+def supabase_official_raw_document_files(document_id: str, file_type: str = "") -> List[Dict[str, Any]]:
+    filters = {"document_id": document_id}
+    if file_type:
+        filters["file_type"] = file_type
+    return supabase_filter_rows("official_document_files", filters, order="version.desc,created_at.desc", limit=500)
+
+
+def supabase_official_document_steps(document_id: str) -> List[Dict[str, Any]]:
+    return supabase_filter_rows("official_document_approval_steps", {"document_id": document_id}, order="step_order.asc", limit=50)
+
+
+def supabase_official_document_logs(document_id: str) -> List[Dict[str, Any]]:
+    return supabase_filter_rows("official_document_approval_logs", {"document_id": document_id}, order="created_at.desc", limit=200)
+
+
+def supabase_official_document_stamp_request(document_id: str) -> Dict[str, Any] | None:
+    rows = supabase_filter_rows("official_document_stamp_requests", {"document_id": document_id}, order="created_at.desc", limit=1)
+    return rows[0] if rows else None
+
+
+def supabase_official_dispatch_record_metadata(row: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    if not row:
+        return None
+    data = dict(row)
+    method = official_dispatch_method(data.get("dispatch_method"))
+    data["dispatch_method_label"] = OFFICIAL_DISPATCH_METHODS[method]["label"]
+    owner = supabase_user_by_id(data.get("dispatch_owner_user_id") or "") if data.get("dispatch_owner_user_id") else None
+    data["dispatch_owner_name"] = owner.get("name") if owner else (data.get("dispatch_owner_user_id") or data.get("dispatch_owner_type") or "")
+    proof_file_id = data.get("proof_file_id")
+    if proof_file_id:
+        proofs = supabase_filter_rows("official_document_files", {"id": proof_file_id, "document_id": data["document_id"]}, limit=1)
+        data["proof_file"] = official_file_metadata(proofs[0]) if proofs else None
+    else:
+        data["proof_file"] = None
+    return data
+
+
+def supabase_official_dispatch_record(document_id: str) -> Dict[str, Any] | None:
+    rows = supabase_filter_rows("official_document_dispatch_records", {"document_id": document_id}, order="created_at.desc", limit=1)
+    return supabase_official_dispatch_record_metadata(rows[0]) if rows else None
+
+
+def supabase_resolve_official_dispatch_owner(document: Dict[str, Any], method: str) -> Dict[str, Any]:
+    config = OFFICIAL_DISPATCH_METHODS[method]
+    if config["owner_type"] == "general_affairs":
+        return supabase_active_user_by_role("總務") or {"id": "", "name": "總務", "role": "總務"}
+    if config["owner_type"] == "applicant":
+        return supabase_user_by_id(document["applicant_id"]) or {"id": document["applicant_id"], "name": document.get("applicant_name") or "申請人", "role": "申請人"}
+    return {"id": "system", "name": "System", "role": "system"}
+
+
+def supabase_upsert_official_dispatch_record(
+    document: Dict[str, Any],
+    method: str | None = None,
+    actor: Dict[str, Any] | None = None,
+    payload: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    method = official_dispatch_method(method or document.get("dispatch_method"))
+    existing = supabase_filter_rows("official_document_dispatch_records", {"document_id": document["id"]}, order="created_at.desc", limit=1)
+    owner = supabase_resolve_official_dispatch_owner(document, method)
+    config = OFFICIAL_DISPATCH_METHODS[method]
+    payload = payload or {}
+    values = {
+        "dispatch_method": method,
+        "dispatch_owner_type": config["owner_type"],
+        "dispatch_owner_user_id": owner.get("id") or "",
+        "dispatch_status": payload.get("dispatch_status") or config["dispatch_status"],
+        "external_official_document_number": payload.get("external_official_document_number") or "",
+        "dispatch_date": payload.get("dispatch_date") or "",
+        "recipient": payload.get("recipient") or document.get("recipient") or "",
+        "recipient_contact": payload.get("recipient_contact") or "",
+        "dispatch_note": payload.get("dispatch_note") or "",
+        "proof_file_id": payload.get("proof_file_id") or None,
+        "completed_at": payload.get("completed_at") or (now() if config["owner_type"] == "system" else ""),
+    }
+    if existing:
+        updated = supabase_patch("official_document_dispatch_records", existing[0]["id"], values)
+        return supabase_official_dispatch_record(document["id"]) or updated
+    created = supabase_insert("official_document_dispatch_records", {
+        "id": f"ODDISP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "document_id": document["id"],
+        **values,
+        "created_by": actor.get("id") if actor else "system",
+        "created_at": now(),
+        "updated_at": now(),
+    })
+    return supabase_official_dispatch_record(document["id"]) or created
+
+
+def supabase_advance_official_dispatch_after_stamp(
+    document_id: str,
+    stamped_file: Dict[str, Any],
+    actor: Dict[str, Any] | None,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    document = supabase_official_document_row(document_id)
+    method = official_dispatch_method(document.get("dispatch_method"))
+    config = OFFICIAL_DISPATCH_METHODS[method]
+    record = supabase_upsert_official_dispatch_record(document, method, actor)
+    supabase_patch("official_documents", document_id, {"current_status": config["next_status"], "current_step": config["next_step"], "updated_at": now()})
+    supabase_insert_official_log(document_id, "dispatch_route_created", actor, f"{method}:{config['label']}", file_id=stamped_file.get("id") or "", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if config["owner_type"] == "general_affairs":
+        supabase_create_notification({"type": "發文寄發待辦", "title": f"{document['title']} 待總務寄發", "target_role": "總務", "source": document_id, "priority": "高", "body": "已用印版本已產生，請下載後至外部電子公文系統、Email 或紙本郵寄完成寄發並回填證明。"})
+    elif config["owner_type"] == "applicant":
+        supabase_create_notification({"type": "發文寄發待辦", "title": f"{document['title']} 已回到申請人寄發", "target_role": "員工", "source": document_id, "priority": "高", "body": "已用印版本已產生，請下載後自行寄送並回填寄送紀錄。"})
+    else:
+        supabase_insert_official_log(document_id, "auto_archive_no_dispatch", actor, "no_dispatch_required", file_id=stamped_file.get("id") or "", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+        supabase_create_notification({"type": "發文結案", "title": f"{document['title']} 已用印並歸檔", "target_role": "員工", "source": document_id, "body": "寄發方式為不需寄發，系統已完成結案歸檔。"})
+    return record
+
+
+def supabase_update_official_dispatch_record(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    steps = supabase_official_document_steps(document_id)
+    if not canDownloadOfficialDocument(user, document, steps) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+        raise PermissionError("official_dispatch_access_denied")
+    record = supabase_official_dispatch_record(document_id)
+    if not record:
+        record = supabase_upsert_official_dispatch_record(document, payload.get("dispatch_method") or document.get("dispatch_method"), user)
+    if not can_manage_official_dispatch(user, document, record, session):
+        raise PermissionError("official_dispatch_update_forbidden")
+    allowed = {"external_official_document_number", "dispatch_date", "recipient", "recipient_contact", "dispatch_note", "proof_file_id"}
+    update = {key: (payload.get(key) or None if key == "proof_file_id" else payload.get(key) or "") for key in allowed if key in payload}
+    if not update:
+        return supabase_official_dispatch_record(document_id) or record
+    supabase_patch("official_document_dispatch_records", record["id"], update)
+    supabase_insert_official_log(document_id, "update_dispatch", user, json.dumps(update, ensure_ascii=False), ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return supabase_official_dispatch_record(document_id) or {}
+
+
+def supabase_complete_official_dispatch(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    record = supabase_official_dispatch_record(document_id)
+    if not record:
+        record = supabase_upsert_official_dispatch_record(document, document.get("dispatch_method"), user)
+    if not can_manage_official_dispatch(user, document, record, session):
+        raise PermissionError("official_dispatch_complete_forbidden")
+    if record.get("dispatch_owner_type") == "general_affairs" and document.get("current_status") != "pending_general_affairs_dispatch":
+        raise ValueError("official_document_not_pending_general_affairs_dispatch")
+    if record.get("dispatch_owner_type") == "applicant" and document.get("current_status") != "returned_to_applicant_for_send":
+        raise ValueError("official_document_not_returned_to_applicant_for_send")
+    if payload:
+        record = supabase_update_official_dispatch_record(document_id, payload, session)
+    final_dispatch_status = "sent_by_applicant" if record.get("dispatch_owner_type") == "applicant" else "dispatched"
+    final_document_status = "sent_by_applicant" if record.get("dispatch_owner_type") == "applicant" else "dispatched"
+    if payload.get("close", False):
+        final_document_status = "closed" if final_document_status in {"dispatched", "sent_by_applicant"} else final_document_status
+    supabase_patch("official_document_dispatch_records", record["id"], {"dispatch_status": final_dispatch_status, "completed_at": now(), "updated_at": now()})
+    supabase_patch("official_documents", document_id, {"current_status": final_document_status, "current_step": "", "updated_at": now()})
+    supabase_insert_official_log(document_id, "complete_dispatch", user, final_dispatch_status, file_id=(payload.get("proof_file_id") or record.get("proof_file_id") or ""), ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    supabase_create_notification({"type": "發文寄發完成", "title": f"{document['title']} 已完成寄發", "target_role": "員工", "source": document_id, "body": f"寄發狀態：{final_dispatch_status}。"})
+    return supabase_official_document_detail(document_id, session)
+
+
+def supabase_upload_official_dispatch_proof_file(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    record = supabase_official_dispatch_record(document_id)
+    if not record:
+        record = supabase_upsert_official_dispatch_record(document, document.get("dispatch_method"), user)
+    if not can_manage_official_dispatch(user, document, record, session):
+        raise PermissionError("official_dispatch_proof_upload_forbidden")
+    content = payload.get("content_base64") or ""
+    if not content:
+        raise ValueError("dispatch_proof_file_required")
+    data = base64.b64decode(content)
+    mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "application/pdf"
+    if mime_type.lower() not in OFFICIAL_DISPATCH_PROOF_MIME_TYPES:
+        raise ValueError("dispatch_proof_mime_type_not_allowed")
+    if len(data) > 10 * 1024 * 1024:
+        raise ValueError("dispatch_proof_file_too_large")
+    file_name = Path(payload.get("file_name") or f"{document_id}-dispatch-proof").name
+    file_row = supabase_store_file_object(document_id, file_name, data, "official-documents", "dispatch-proof", official_actor_name(user), mime_type)
+    official_file = supabase_insert_official_document_file(document_id, "dispatch_proof", file_row, official_actor_name(user))
+    supabase_patch("official_document_dispatch_records", record["id"], {"proof_file_id": official_file["id"], "updated_at": now()})
+    supabase_insert_official_log(document_id, "upload_dispatch_proof", user, official_file["file_hash"], file_id=official_file["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return {"dispatch_record": supabase_official_dispatch_record(document_id), "file": official_file_metadata(official_file)}
+
+
+def supabase_insert_official_log(
+    document_id: str,
+    action: str,
+    actor: Dict[str, Any] | None,
+    comment: str = "",
+    *,
+    step_id: str = "",
+    file_id: str = "",
+    ip_address: str = "",
+    user_agent: str = "",
+) -> Dict[str, Any]:
+    actor_name = official_actor_name(actor)
+    row = supabase_insert("official_document_approval_logs", {
+        "id": f"ODLOG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "document_id": document_id,
+        "step_id": step_id or None,
+        "file_id": file_id or None,
+        "actor_id": actor.get("id") if actor else "system",
+        "actor_name": actor_name,
+        "action": action,
+        "comment": comment,
+        "ip_address": ip_address,
+        "user_agent": user_agent[:180] if user_agent else "",
+        "created_at": now(),
+    })
+    supabase_insert("audit_logs", {
+        "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "actor": actor_name,
+        "action": action,
+        "target_type": "official_documents",
+        "target_id": document_id,
+        "detail": comment,
+        "event_type": action if action in LOGGING_AUDIT_EVENT_TYPES else "submit",
+        "module_code": "official_documents",
+        "resource_type": "official_documents",
+        "resource_id": document_id,
+        "result": "success",
+        "severity": "info",
+    })
+    return row
+
+
+def supabase_insert_official_document_file(document_id: str, file_type: str, file_row: Dict[str, Any], actor: str) -> Dict[str, Any]:
+    versions = supabase_official_raw_document_files(document_id, file_type)
+    next_version = max([int(item.get("version") or 0) for item in versions] or [0]) + 1
+    row = {
+        "id": f"ODFILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "document_id": document_id,
+        "file_object_id": file_row.get("id"),
+        "file_type": file_type,
+        "file_name": file_row.get("file_name") or f"{document_id}-{file_type}.pdf",
+        "file_storage_key": file_row.get("storage_key") or "",
+        "file_mime_type": file_row.get("mime_type") or "application/pdf",
+        "file_size": int(file_row.get("size_bytes") or 0),
+        "file_hash": file_row.get("sha256") or "",
+        "version": next_version,
+        "uploaded_by": actor,
+        "created_at": now(),
+    }
+    return supabase_insert("official_document_files", row)
+
+
+def supabase_store_official_pdf_file(document_id: str, file_type: str, file_name: str, data: bytes, actor: str) -> Dict[str, Any]:
+    file_row = supabase_store_file_object(document_id, file_name, data, "official-documents", f"{file_type}-v1", actor, "application/pdf")
+    return supabase_insert_official_document_file(document_id, file_type, file_row, actor)
+
+
+def supabase_official_pdf_document_payload(document: Dict[str, Any]) -> Dict[str, Any]:
+    company = supabase_official_company_row(document["company_id"])
+    body_parts = []
+    if document.get("description"):
+        body_parts.append(f"說明：\n{document['description']}")
+    if document.get("method"):
+        body_parts.append(f"辦法：\n{document['method']}")
+    return {
+        "id": document["id"],
+        "doc_no": document["id"],
+        "company_name": company.get("name") or "歲悅股份有限公司",
+        "doc_type": "函",
+        "agency_name": document.get("recipient") or "未指定受文者",
+        "subject": document.get("subject") or document.get("title") or "未命名發文",
+        "body": "\n\n".join(body_parts) or document.get("description") or "尚未填寫說明內容。",
+        "owner": document.get("handler_name") or document.get("applicant_name") or "承辦人",
+        "department": document.get("dispatch_unit") or document.get("applicant_department_name") or "",
+        "attachments": parse_json_field(document.get("metadata_json")).get("attachments", "附件詳如附件區"),
+        "created_at": document.get("created_at"),
+    }
+
+
+def supabase_ensure_official_generated_pdf(document: Dict[str, Any], actor: str = "PDF Worker") -> Dict[str, Any]:
+    rows = supabase_official_raw_document_files(document["id"], "generated_pdf")
+    if rows:
+        return rows[0]
+    package = build_official_pdf_package(supabase_official_pdf_document_payload(document), [], "歲悅正式函", 1)
+    file_row = supabase_store_official_pdf_file(document["id"], "generated_pdf", f"{document['id']}-generated.pdf", package["data"], actor)
+    supabase_insert_official_log(document["id"], "generate_pdf", {"id": "system", "name": actor, "role": "system"}, file_row["file_hash"], file_id=file_row["id"])
+    return file_row
+
+
+def supabase_official_latest_source_file(document: Dict[str, Any]) -> Dict[str, Any]:
+    file_type = "original_pdf" if document.get("source_type") == "uploaded_pdf" else "generated_pdf"
+    if file_type == "generated_pdf":
+        supabase_ensure_official_generated_pdf(document)
+    rows = supabase_official_raw_document_files(document["id"], file_type)
+    if not rows:
+        raise ValueError("official_document_source_pdf_required")
+    return rows[0]
+
+
+def supabase_create_official_workflow_steps(document: Dict[str, Any], applicant: Dict[str, Any]) -> List[Dict[str, Any]]:
+    existing = supabase_official_document_steps(document["id"])
+    if existing:
+        return existing
+    company = supabase_official_company_row(document["company_id"])
+    created: List[Dict[str, Any]] = []
+    for step in OFFICIAL_DOCUMENT_WORKFLOW_STEPS:
+        approver = supabase_resolve_official_step_approver(step, applicant, company)
+        row = supabase_insert("official_document_approval_steps", {
+            "id": f"ODSTEP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "document_id": document["id"],
+            "step_order": step["order"],
+            "step_key": step["key"],
+            "step_name": step["name"],
+            "approver_user_id": approver.get("id") if approver else "",
+            "approver_name": approver.get("name") if approver else step["role"],
+            "approver_role": approver.get("role") if approver else step["role"],
+            "status": "pending",
+            "comment": "",
+            "approved_at": "",
+            "created_at": now(),
+            "updated_at": now(),
+        })
+        created.append(row)
+    return created
+
+
+def supabase_official_document_detail(document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    document = supabase_official_document_row(document_id)
+    steps = supabase_official_document_steps(document_id)
+    user = session.get("user") if session else None
+    if user and not canDownloadOfficialDocument(user, document, steps) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+        raise PermissionError("official_document_access_denied")
+    current_step = next((step for step in steps if step.get("step_key") == document.get("current_step")), None)
+    files = supabase_official_document_files(document_id)
+    logs = supabase_official_document_logs(document_id)
+    stamp_request = supabase_official_document_stamp_request(document_id)
+    dispatch_record = supabase_official_dispatch_record(document_id)
+    package = official_application_package(document, files, steps, logs, stamp_request, dispatch_record)
+    return {
+        **document,
+        "metadata": parse_json_field(document.get("metadata_json")),
+        "application_package": package,
+        "document_versions": package["document_versions"],
+        "attachments": package["attachments"],
+        "download_logs": package["download_logs"],
+        "process_logs": package["process_logs"],
+        "files": files,
+        "approval_steps": steps,
+        "logs": logs,
+        "stamp_request": stamp_request,
+        "dispatch_record": dispatch_record,
+        "can_download": bool(user and canDownloadOfficialDocument(user, document, steps)),
+        "can_manage_dispatch": bool(user and can_manage_official_dispatch(user, document, dispatch_record, session)),
+        "can_act": bool(user and current_step and current_step.get("approver_user_id") == user.get("id") and current_step.get("status") == "pending"),
+    }
+
+
+def supabase_list_official_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    user = supabase_official_session_user(session)
+    query = query or {}
+    rows = supabase_filter_rows("official_documents", {}, order="created_at.desc", limit=300)
+    status = (query.get("status") or [""])[0]
+    company_id = (query.get("company_id") or [""])[0]
+    applicant_id = (query.get("applicant_id") or [""])[0]
+    scope = (query.get("scope") or [""])[0]
+    items: List[Dict[str, Any]] = []
+    for item in rows:
+        if status and item.get("current_status") != status:
+            continue
+        if company_id and item.get("company_id") != company_id:
+            continue
+        if applicant_id and item.get("applicant_id") != applicant_id:
+            continue
+        steps = supabase_official_document_steps(item["id"])
+        dispatch_record = supabase_official_dispatch_record(item["id"])
+        is_applicant = item.get("applicant_id") == user.get("id")
+        is_participant = any(step.get("approver_user_id") == user.get("id") for step in steps)
+        is_current_todo = any(step.get("approver_user_id") == user.get("id") and step.get("status") == "pending" and step.get("step_key") == item.get("current_step") for step in steps)
+        is_dispatch_todo = bool(
+            dispatch_record
+            and dispatch_record.get("dispatch_status") == "pending"
+            and (
+                dispatch_record.get("dispatch_owner_user_id") == user.get("id")
+                or (dispatch_record.get("dispatch_owner_type") == "general_affairs" and user.get("role") == "總務")
+            )
+        )
+        if scope == "mine" and not is_applicant:
+            continue
+        if scope == "todo" and not (is_current_todo or is_dispatch_todo):
+            continue
+        if not scope and not is_applicant and not is_participant and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+            continue
+        item["stamp_request"] = supabase_official_document_stamp_request(item["id"])
+        item["dispatch_record"] = dispatch_record
+        item["current_step_name"] = next((step["step_name"] for step in steps if step.get("step_key") == item.get("current_step")), "")
+        items.append(item)
+    return items
+
+
+def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
+        raise PermissionError("official_document_create_forbidden")
+    source_type = payload.get("source_type") or "blank_editor"
+    if source_type not in {"blank_editor", "uploaded_pdf"}:
+        raise ValueError("invalid_official_document_source_type")
+    company_id = payload.get("company_id") or "CO-001"
+    supabase_official_company_row(company_id)
+    dispatch_method = official_dispatch_method(payload.get("dispatch_method"))
+    document_id = payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    ts = now()
+    metadata = {
+        "attachments": payload.get("attachments_summary") or payload.get("attachments") or "",
+        "workflow_template": "fixed_dispatch_seal_v1",
+        "future_rule_inputs": {
+            "company_id": company_id,
+            "department": user.get("unit"),
+            "document_type": payload.get("document_type"),
+            "seal_id": payload.get("seal_id"),
+            "dispatch_method": dispatch_method,
+            "amount": payload.get("amount"),
+        },
+    }
+    document = supabase_insert("official_documents", {
+        "id": document_id,
+        "company_id": company_id,
+        "document_type": payload.get("document_type") or ("uploaded_pdf_for_stamp" if source_type == "uploaded_pdf" else "outgoing_official_document"),
+        "source_type": source_type,
+        "title": payload.get("title") or payload.get("subject") or "未命名發文申請",
+        "subject": payload.get("subject") or payload.get("title") or "",
+        "description": payload.get("description") or payload.get("body") or "",
+        "method": payload.get("method") or payload.get("辦法") or "",
+        "recipient": payload.get("recipient") or payload.get("agency_name") or "",
+        "dispatch_unit": payload.get("dispatch_unit") or user.get("unit") or "",
+        "handler_name": payload.get("handler_name") or user.get("name") or "",
+        "applicant_id": user["id"],
+        "applicant_name": user.get("name") or user.get("email"),
+        "applicant_department_id": payload.get("applicant_department_id") or user.get("unit") or "",
+        "applicant_department_name": payload.get("applicant_department_name") or user.get("unit") or "",
+        "dispatch_method": dispatch_method,
+        "current_status": "draft",
+        "current_step": "",
+        "request_reason": payload.get("request_reason") or payload.get("reason") or "",
+        "metadata_json": metadata,
+        "created_at": ts,
+        "updated_at": ts,
+    })
+    if source_type == "uploaded_pdf":
+        content = payload.get("content_base64") or payload.get("file_content_base64") or ""
+        if not content:
+            raise ValueError("original_pdf_required")
+        data = base64.b64decode(content)
+        if not data.startswith(b"%PDF"):
+            raise ValueError("original_pdf_must_be_pdf")
+        file_row = supabase_store_official_pdf_file(document_id, "original_pdf", Path(payload.get("file_name") or f"{document_id}.pdf").name, data, official_actor_name(user))
+        supabase_insert_official_log(document_id, "upload_original_pdf", user, file_row["file_hash"], file_id=file_row["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    else:
+        supabase_ensure_official_generated_pdf(document, official_actor_name(user))
+    seal_id = payload.get("seal_id")
+    if seal_id:
+        position = official_stamp_position_payload(payload)
+        supabase_insert("official_document_stamp_requests", {
+            "id": f"ODSTAMP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+            "document_id": document_id,
+            "company_id": company_id,
+            "seal_id": seal_id,
+            "requested_by": user["id"],
+            **position,
+            "status": "pending",
+            "stamped_file_id": None,
+            "error_message": "",
+            "created_at": ts,
+            "stamped_at": "",
+            "updated_at": ts,
+        })
+    supabase_insert_official_log(document_id, "create", user, document["request_reason"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if payload.get("submit", True):
+        return supabase_submit_official_document(document_id, payload, session)
+    return supabase_official_document_detail(document_id, session)
+
+
+def supabase_submit_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    if document["applicant_id"] != user["id"] and not session_has_any_permission(session, ["official_documents.all_todo"]):
+        raise PermissionError("only_applicant_can_submit")
+    if document["current_status"] not in {"draft", "rejected"}:
+        raise ValueError("official_document_not_submittable")
+    if not supabase_official_document_stamp_request(document_id):
+        raise ValueError("official_document_seal_required")
+    if document["source_type"] == "blank_editor":
+        supabase_ensure_official_generated_pdf(document, official_actor_name(user))
+    applicant = supabase_user_by_id(document["applicant_id"]) or user
+    steps = supabase_create_official_workflow_steps(document, applicant)
+    first = steps[0]
+    supabase_patch("official_documents", document_id, {"current_status": OFFICIAL_DOCUMENT_STEP_STATUS[first["step_key"]], "current_step": first["step_key"], "updated_at": now()})
+    supabase_insert_official_log(document_id, "submit", user, payload.get("comment") or "送出發文用印簽核", step_id=first["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if first.get("approver_role"):
+        supabase_create_notification({"type": "發文簽核", "title": f"{document['title']} 待{first['step_name']}簽核", "target_role": first["approver_role"], "source": document_id, "body": f"{document.get('applicant_name') or '申請人'} 已送出發文用印申請。"})
+    return supabase_official_document_detail(document_id, session)
+
+
+def supabase_current_official_pending_step(document: Dict[str, Any]) -> Dict[str, Any]:
+    rows = supabase_filter_rows("official_document_approval_steps", {"document_id": document["id"], "step_key": document.get("current_step") or "", "status": "pending"}, order="step_order.asc", limit=1)
+    if not rows:
+        raise ValueError("official_document_current_step_not_pending")
+    return rows[0]
+
+
+def supabase_next_official_step(document_id: str, step_order: int) -> Dict[str, Any] | None:
+    for step in supabase_official_document_steps(document_id):
+        if int(step.get("step_order") or 0) > step_order:
+            return step
+    return None
+
+
+def supabase_approve_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    if document["current_status"] in {"draft", "stamping", "stamped", "pending_general_affairs_dispatch", "returned_to_applicant_for_send", "dispatched", "sent_by_applicant", "closed", "cancelled", "rejected"}:
+        raise ValueError("official_document_not_pending_approval")
+    step = supabase_current_official_pending_step(document)
+    assert_official_step_actor(user, step)
+    if step["step_key"] == "applicant_manager" and user["id"] == document["applicant_id"]:
+        raise PermissionError("applicant_cannot_self_approve_manager_step")
+    supabase_patch("official_document_approval_steps", step["id"], {"status": "approved", "comment": payload.get("comment") or "核准", "approved_at": now(), "updated_at": now()})
+    supabase_insert_official_log(document_id, "approve", user, payload.get("comment") or "", step_id=step["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if step["step_key"] == "ceo":
+        supabase_patch("official_documents", document_id, {"current_status": "approved", "current_step": "auto_stamp", "updated_at": now()})
+        result = supabase_auto_stamp_official_document(document_id, payload, user)
+        return {**supabase_official_document_detail(document_id, session), "auto_stamp": result}
+    next_step = supabase_next_official_step(document_id, int(step["step_order"]))
+    if not next_step:
+        raise ValueError("official_document_next_step_missing")
+    supabase_patch("official_documents", document_id, {"current_status": OFFICIAL_DOCUMENT_STEP_STATUS[next_step["step_key"]], "current_step": next_step["step_key"], "updated_at": now()})
+    supabase_create_notification({"type": "發文簽核", "title": f"{document['title']} 待{next_step['step_name']}簽核", "target_role": next_step.get("approver_role") or "", "source": document_id, "body": f"{step['step_name']}已核准，請接續處理。"})
+    return supabase_official_document_detail(document_id, session)
+
+
+def supabase_reject_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    step = supabase_current_official_pending_step(document)
+    assert_official_step_actor(user, step)
+    comment = payload.get("comment") or "駁回"
+    supabase_patch("official_document_approval_steps", step["id"], {"status": "rejected", "comment": comment, "approved_at": now(), "updated_at": now()})
+    supabase_patch("official_documents", document_id, {"current_status": "rejected", "current_step": "applicant", "updated_at": now()})
+    supabase_insert_official_log(document_id, "reject", user, comment, step_id=step["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    supabase_create_notification({"type": "發文退回", "title": f"{document['title']} 已駁回", "target_role": "員工", "source": document_id, "priority": "高", "body": comment})
+    return supabase_official_document_detail(document_id, session)
+
+
+def supabase_cancel_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    if document["applicant_id"] != user["id"]:
+        raise PermissionError("only_applicant_can_cancel")
+    if document["current_status"] in {"stamping", "stamped", "pending_general_affairs_dispatch", "returned_to_applicant_for_send", "dispatched", "sent_by_applicant", "closed"}:
+        raise ValueError("official_document_cannot_cancel_after_stamp")
+    supabase_patch("official_documents", document_id, {"current_status": "cancelled", "current_step": "", "updated_at": now()})
+    supabase_insert_official_log(document_id, "cancel", user, payload.get("comment") or "申請人取消", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return supabase_official_document_detail(document_id, session)
+
+
+def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    if document["applicant_id"] != user["id"]:
+        raise PermissionError("only_applicant_can_confirm")
+    if document["current_status"] not in {"returned_to_applicant_for_send", "stamped"}:
+        raise ValueError("official_document_not_ready_for_applicant_confirm")
+    if document["current_status"] == "returned_to_applicant_for_send":
+        return supabase_complete_official_dispatch(document_id, {**payload, "close": True}, session)
+    supabase_patch("official_documents", document_id, {"current_status": "closed", "current_step": "", "updated_at": now()})
+    supabase_insert_official_log(document_id, "confirm", user, payload.get("comment") or "申請人確認已用印版本", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return supabase_official_document_detail(document_id, session)
+
+
+def supabase_update_official_stamp_position(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    if document["applicant_id"] != user["id"]:
+        raise PermissionError("only_applicant_can_update_stamp_position")
+    if document["current_status"] != "draft":
+        raise ValueError("stamp_position_locked_after_submit")
+    position = official_stamp_position_payload(payload)
+    stamp_request = supabase_official_document_stamp_request(document_id)
+    if not stamp_request:
+        raise ValueError("official_document_stamp_request_not_found")
+    supabase_patch("official_document_stamp_requests", stamp_request["id"], {**position, "updated_at": now()})
+    supabase_insert_official_log(document_id, "update_stamp_position", user, json.dumps(position, ensure_ascii=False), ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    return supabase_official_document_detail(document_id, session)
+
+
+def supabase_auto_stamp_official_document(document_id: str, payload: Dict[str, Any], actor: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    document = supabase_official_document_row(document_id)
+    stamp_request = supabase_official_document_stamp_request(document_id)
+    if not stamp_request:
+        raise ValueError("official_document_stamp_request_required")
+    try:
+        supabase_patch("official_documents", document_id, {"current_status": "stamping", "current_step": "auto_stamp", "updated_at": now()})
+        supabase_patch("official_document_stamp_requests", stamp_request["id"], {"status": "stamping", "updated_at": now()})
+        seal = supabase_company_seal_row(stamp_request["seal_id"])
+        if not seal.get("is_active"):
+            raise ValueError("inactive_seal_cannot_stamp")
+        current_files = supabase_filter_rows("company_seal_files", {"seal_id": stamp_request["seal_id"], "is_current": True}, order="version.desc", limit=1)
+        if not current_files:
+            raise ValueError("current_seal_file_required")
+        seal_file = current_files[0]
+        file_object = supabase_get("file_objects", seal_file.get("file_object_id") or "") if seal_file.get("file_object_id") else None
+        if not file_object:
+            raise ValueError("seal_file_object_required")
+        supabase_insert_official_log(document_id, "read_seal_vault_for_stamp", actor, "authorized_backend_stamp_only", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+        seal_bytes = supabase_storage_download(file_object["storage_key"], file_object.get("bucket") or EDOC_SEAL_STORAGE_BUCKET)
+        if sha256_bytes(seal_bytes) != seal_file["file_hash"]:
+            raise ValueError("seal_file_hash_mismatch")
+        source_file = supabase_official_latest_source_file(document)
+        source_object = supabase_get("file_objects", source_file.get("file_object_id") or "") if source_file.get("file_object_id") else None
+        if not source_object:
+            raise ValueError("official_source_file_object_missing")
+        original_pdf = supabase_storage_download(source_object["storage_key"], source_object.get("bucket") or EDOC_STORAGE_BUCKET)
+        stamp_no = payload.get("stamp_no") or f"ODSTAMP-{document_id}-{int(time.time())}"
+        positions = official_stamp_positions_from_request(stamp_request, seal)
+        stamped_pdf, engine, layout = stamp_uploaded_pdf_bytes(original_pdf, [{**item, "stamp_no": stamp_no} for item in positions], stamp_no)
+        stamped_file = supabase_store_official_pdf_file(document_id, "stamped_pdf", f"{document_id}-stamped.pdf", stamped_pdf, "Auto Stamp")
+        supabase_patch("official_document_stamp_requests", stamp_request["id"], {"status": "stamped", "stamped_file_id": stamped_file["id"], "stamped_at": now(), "updated_at": now(), "error_message": ""})
+        supabase_insert_official_log(document_id, "auto_stamp", actor, f"{engine} {stamp_no} seal_hash={seal_file['file_hash']}", file_id=stamped_file["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+        dispatch_record = supabase_advance_official_dispatch_after_stamp(document_id, stamped_file, actor, payload)
+        return {"ok": True, "stamped_file": official_file_metadata(stamped_file), "engine": engine, "layout": layout, "dispatch_record": dispatch_record}
+    except Exception as exc:
+        detail = str(exc)
+        supabase_patch("official_documents", document_id, {"current_status": "stamping_failed", "current_step": "general_affairs_review", "updated_at": now()})
+        supabase_patch("official_document_stamp_requests", stamp_request["id"], {"status": "failed", "error_message": detail, "updated_at": now()})
+        supabase_insert_official_log(document_id, "auto_stamp_failed", actor, detail, ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+        supabase_create_notification({"type": "發文用印失敗", "title": f"{document['title']} 自動用印失敗", "target_role": "總務", "source": document_id, "priority": "高", "body": detail})
+        return {"ok": False, "error": "auto_stamp_failed", "detail": detail}
+
+
+def supabase_official_document_download_file(document_id: str, file_id: str, session: Dict[str, Any] | None, ip_address: str = "", user_agent: str = "") -> Tuple[Dict[str, Any], Dict[str, Any], bytes]:
+    user = supabase_official_session_user(session)
+    document = supabase_official_document_row(document_id)
+    steps = supabase_official_document_steps(document_id)
+    if not canDownloadOfficialDocument(user, document, steps) and not session_has_any_permission(session, ["official_documents.all_records"]):
+        raise PermissionError("official_document_download_forbidden")
+    rows = supabase_filter_rows("official_document_files", {"id": file_id, "document_id": document_id}, limit=1)
+    if not rows:
+        raise ValueError("official_document_file_not_found")
+    file_meta = rows[0]
+    file_object = supabase_get("file_objects", file_meta.get("file_object_id") or "") if file_meta.get("file_object_id") else None
+    if not file_object:
+        raise ValueError("official_document_file_object_missing")
+    data = supabase_storage_download(file_object["storage_key"], file_object.get("bucket") or EDOC_STORAGE_BUCKET)
+    supabase_insert_official_log(document_id, "download_file", user, file_meta["file_type"], file_id=file_id, ip_address=ip_address, user_agent=user_agent)
+    supabase_insert("file_access_logs", {
+        "id": f"FLOG-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "attachment_id": None,
+        "file_object_id": file_meta.get("file_object_id"),
+        "document_id": None,
+        "actor": official_actor_name(user),
+        "action": "發文附件下載",
+        "ip": ip_address,
+        "device": user_agent[:180] if user_agent else "",
+        "watermark_text": "",
+        "result": "成功",
+        "detail": f"official_document_id={document_id};{file_meta['file_type']}",
+        "created_at": now(),
+    })
+    return document, {**file_meta, "object": file_object}, data
 
 
 def supabase_role_permissions(role_name: str) -> List[str]:
@@ -7962,7 +10986,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         super().end_headers()
 
@@ -7982,6 +11006,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         self.handle_api("PATCH", urlparse(self.path).path, {})
+
+    def do_DELETE(self) -> None:
+        self.handle_api("DELETE", urlparse(self.path).path, {})
 
     def read_json(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -8004,6 +11031,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error": "not_found"}, 404)
             return
         item = row_to_dict(row)
+        if is_seal_vault_file(item):
+            audit_seal_vault_access(conn, file_id=file_id, actor="Download", action="block_seal_vault_download", result="denied", detail="generic_file_download_forbidden", document_id=item.get("document_id") or "")
+            conn.commit()
+            self.send_json({"error": "seal_vault_download_forbidden", "detail": "seal_original_files_are_never_downloaded_through_generic_file_api"}, 403)
+            return
         token = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
         valid, reason, token_row = validate_file_download_token(conn, file_id, token)
         if not valid:
@@ -8033,6 +11065,29 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_official_document_file(self, conn: sqlite3.Connection, document_id: str, file_id: str) -> None:
+        session = current_session(conn, self.bearer_token())
+        document, file_meta, data = official_document_download_file(conn, document_id, file_id, session, self.client_ip(), self.client_device())
+        conn.commit()
+        file_name = file_meta.get("file_name") or f"{document_id}.pdf"
+        self.send_response(200)
+        self.send_header("Content-Type", file_meta.get("file_mime_type") or "application/pdf")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f"attachment; filename=\"{urllib.parse.quote(file_name)}\"")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_supabase_official_document_file(self, document_id: str, file_id: str) -> None:
+        session = supabase_current_session(self.bearer_token())
+        document, file_meta, data = supabase_official_document_download_file(document_id, file_id, session, self.client_ip(), self.client_device())
+        file_name = file_meta.get("file_name") or f"{document.get('id') or document_id}.pdf"
+        self.send_response(200)
+        self.send_header("Content-Type", file_meta.get("file_mime_type") or "application/pdf")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f"attachment; filename=\"{urllib.parse.quote(file_name)}\"")
+        self.end_headers()
+        self.wfile.write(data)
+
     def bearer_token(self) -> str:
         header = self.headers.get("Authorization", "")
         if header.lower().startswith("bearer "):
@@ -8044,6 +11099,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     def client_device(self) -> str:
         return self.headers.get("User-Agent", "unknown")[:180]
+
+    def require_table_access(self, session: Dict[str, Any] | None, table: str, *, write: bool = False) -> bool:
+        allowed = can_write_table(session, table) if write else can_read_table(session, table)
+        if allowed:
+            return True
+        self.send_json({"error": "forbidden", "detail": f"{table}_{'write' if write else 'read'}_forbidden"}, 403)
+        return False
 
     def cron_authorized(self) -> bool:
         secret = os.getenv("CRON_SECRET", "").strip()
@@ -8349,6 +11411,208 @@ class Handler(SimpleHTTPRequestHandler):
                     results = [supabase_deliver_notification(str(notification_id), "系統通知") for notification_id in ids]
                     self.send_json({"count": len(results), "results": results}, 201)
                     return
+                if method == "GET" and parts == ["official-documents"]:
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "official_documents"):
+                        return
+                    self.send_json(supabase_list_official_documents(query, session))
+                    return
+                if method == "GET" and parts == ["official-documents", "my-tasks"]:
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "official_documents"):
+                        return
+                    scoped_query = {**query, "scope": ["todo"]}
+                    self.send_json(supabase_list_official_documents(scoped_query, session))
+                    return
+                if method == "GET" and parts == ["official-documents", "my-requests"]:
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "official_documents"):
+                        return
+                    scoped_query = {**query, "scope": ["mine"]}
+                    self.send_json(supabase_list_official_documents(scoped_query, session))
+                    return
+                if method == "POST" and parts == ["official-documents"]:
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "official_documents", write=True):
+                        return
+                    payload = self.read_json()
+                    payload["ip_address"] = self.client_ip()
+                    payload["user_agent"] = self.client_device()
+                    self.send_json(supabase_create_official_document(payload, session), 201)
+                    return
+                if method == "GET" and len(parts) == 2 and parts[0] == "official-documents":
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "official_documents"):
+                        return
+                    self.send_json(supabase_official_document_detail(parts[1], session))
+                    return
+                if len(parts) >= 3 and parts[0] == "official-documents" and parts[2] == "dispatch":
+                    session = supabase_current_session(self.bearer_token())
+                    if method == "GET" and len(parts) == 3:
+                        if not self.require_table_access(session, "official_document_dispatch_records"):
+                            return
+                        document = supabase_official_document_row(parts[1])
+                        steps = supabase_official_document_steps(parts[1])
+                        user = session.get("user") if session else None
+                        if not canDownloadOfficialDocument(user, document, steps) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+                            self.send_json({"error": "forbidden", "detail": "official_dispatch_access_denied"}, 403)
+                            return
+                        self.send_json(supabase_official_dispatch_record(parts[1]) or {})
+                        return
+                    if method == "POST" and len(parts) == 3:
+                        if not self.require_table_access(session, "official_document_dispatch_records", write=True):
+                            return
+                        payload = self.read_json()
+                        payload["ip_address"] = self.client_ip()
+                        payload["user_agent"] = self.client_device()
+                        document = supabase_official_document_row(parts[1])
+                        result = supabase_upsert_official_dispatch_record(document, payload.get("dispatch_method") or document.get("dispatch_method"), session.get("user") if session else None, payload)
+                        supabase_insert_official_log(parts[1], "create_dispatch", session.get("user") if session else None, result.get("dispatch_method") or "", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+                        self.send_json(result, 201)
+                        return
+                    if method == "PATCH" and len(parts) == 3:
+                        if not self.require_table_access(session, "official_document_dispatch_records", write=True):
+                            return
+                        payload = self.read_json()
+                        payload["ip_address"] = self.client_ip()
+                        payload["user_agent"] = self.client_device()
+                        self.send_json(supabase_update_official_dispatch_record(parts[1], payload, session))
+                        return
+                    if method == "POST" and len(parts) == 4 and parts[3] == "complete":
+                        if not self.require_table_access(session, "official_document_dispatch_records", write=True):
+                            return
+                        payload = self.read_json()
+                        payload["ip_address"] = self.client_ip()
+                        payload["user_agent"] = self.client_device()
+                        self.send_json(supabase_complete_official_dispatch(parts[1], payload, session))
+                        return
+                    if method == "POST" and len(parts) == 4 and parts[3] == "proof-files":
+                        if not self.require_table_access(session, "official_document_dispatch_records", write=True):
+                            return
+                        payload = self.read_json()
+                        payload["ip_address"] = self.client_ip()
+                        payload["user_agent"] = self.client_device()
+                        self.send_json(supabase_upload_official_dispatch_proof_file(parts[1], payload, session), 201)
+                        return
+                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position"}:
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "official_documents", write=True):
+                        return
+                    payload = self.read_json()
+                    payload["ip_address"] = self.client_ip()
+                    payload["user_agent"] = self.client_device()
+                    action = parts[2]
+                    if action == "submit":
+                        result = supabase_submit_official_document(parts[1], payload, session)
+                    elif action == "approve":
+                        result = supabase_approve_official_document(parts[1], payload, session)
+                    elif action == "reject":
+                        result = supabase_reject_official_document(parts[1], payload, session)
+                    elif action == "cancel":
+                        result = supabase_cancel_official_document(parts[1], payload, session)
+                    elif action == "confirm":
+                        result = supabase_confirm_official_document(parts[1], payload, session)
+                    else:
+                        result = supabase_update_official_stamp_position(parts[1], payload, session)
+                    self.send_json(result)
+                    return
+                if method == "GET" and len(parts) == 5 and parts[0] == "official-documents" and parts[2] == "files" and parts[4] == "download":
+                    self.send_supabase_official_document_file(parts[1], parts[3])
+                    return
+                if method == "GET" and parts == ["seal-reference-options"]:
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "seal_reference_options"):
+                        return
+                    rows = supabase_filter_rows("seal_reference_options", {}, order="option_type.asc,sort_order.asc")
+                    grouped: Dict[str, List[Dict[str, Any]]] = {}
+                    for row in rows:
+                        grouped.setdefault(row.get("option_type", ""), []).append(row)
+                    self.send_json({"options": rows, "grouped": grouped})
+                    return
+                if len(parts) == 3 and parts[0] == "companies" and parts[2] == "seals":
+                    session = supabase_current_session(self.bearer_token())
+                    if method == "GET":
+                        if not self.require_table_access(session, "company_seals"):
+                            return
+                        self.send_json(supabase_list_company_seals(parts[1]))
+                        return
+                    if method == "POST":
+                        if not self.require_table_access(session, "company_seals", write=True):
+                            return
+                        self.send_json(supabase_create_company_seal(parts[1], self.read_json(), session), 201)
+                        return
+                if len(parts) == 2 and parts[0] == "seals":
+                    session = supabase_current_session(self.bearer_token())
+                    if method == "PATCH":
+                        if not self.require_table_access(session, "company_seals", write=True):
+                            return
+                        self.send_json(supabase_patch_company_seal(parts[1], self.read_json(), session))
+                        return
+                    if method == "DELETE":
+                        if not self.require_table_access(session, "company_seals", write=True):
+                            return
+                        self.send_json(supabase_deactivate_company_seal(parts[1], session))
+                        return
+                if len(parts) == 3 and parts[0] == "seals" and parts[2] == "files":
+                    session = supabase_current_session(self.bearer_token())
+                    if method == "GET":
+                        if not self.require_table_access(session, "company_seal_files"):
+                            return
+                        self.send_json(supabase_list_company_seal_files(parts[1], session))
+                        return
+                    if method == "POST":
+                        if not self.require_table_access(session, "company_seal_files", write=True):
+                            return
+                        self.send_json(supabase_upload_company_seal_file(parts[1], self.read_json(), session), 201)
+                        return
+                if method == "PATCH" and len(parts) == 3 and parts[0] == "seal-files" and parts[2] == "set-current":
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "company_seal_files", write=True):
+                        return
+                    self.send_json(supabase_set_current_seal_file(parts[1], session))
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "documents" and parts[2] == "seal-requests":
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_requests", write=True):
+                        return
+                    self.send_json(supabase_create_seal_usage_request(parts[1], self.read_json(), session), 201)
+                    return
+                if method == "GET" and parts == ["seal-requests"]:
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_requests"):
+                        return
+                    self.send_json(supabase_list_seal_usage_requests(query))
+                    return
+                if len(parts) == 2 and parts[0] == "seal-requests" and method == "GET":
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_requests"):
+                        return
+                    self.send_json(supabase_seal_usage_request_row(parts[1]))
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "seal-requests" and parts[2] == "approve":
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_approvals", write=True):
+                        return
+                    self.send_json(supabase_approve_seal_usage_request(parts[1], self.read_json(), session))
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "seal-requests" and parts[2] == "reject":
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_approvals", write=True):
+                        return
+                    self.send_json(supabase_reject_seal_usage_request(parts[1], self.read_json(), session))
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "seal-requests" and parts[2] == "stamp":
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "company_seal_files", write=True):
+                        return
+                    self.send_json(supabase_stamp_seal_usage_request(parts[1], self.read_json(), session), 201)
+                    return
+                if method == "GET" and parts == ["seal-usage-logs"]:
+                    session = supabase_current_session(self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_logs"):
+                        return
+                    self.send_json(supabase_filter_rows("seal_usage_logs", {}, order="created_at.desc", limit=300))
+                    return
                 if parts and parts[0] in TABLES:
                     table = TABLES[parts[0]]
                     if method == "GET" and len(parts) == 1:
@@ -8624,6 +11888,236 @@ class Handler(SimpleHTTPRequestHandler):
                     conn.commit()
                     self.send_json(result, 201)
                     return
+                if method == "GET" and parts == ["seal-reference-options"]:
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "seal_reference_options"):
+                        return
+                    rows = list_rows(conn, "seal_reference_options", query)
+                    grouped: Dict[str, List[Dict[str, Any]]] = {}
+                    for row in rows:
+                        grouped.setdefault(row.get("option_type", ""), []).append(row)
+                    self.send_json({"options": rows, "grouped": grouped})
+                    return
+                if len(parts) == 3 and parts[0] == "companies" and parts[2] == "seals":
+                    session = current_session(conn, self.bearer_token())
+                    if method == "GET":
+                        if not self.require_table_access(session, "company_seals"):
+                            return
+                        self.send_json(list_company_seals(conn, parts[1]))
+                        return
+                    if method == "POST":
+                        if not self.require_table_access(session, "company_seals", write=True):
+                            return
+                        result = create_company_seal(conn, parts[1], self.read_json(), session)
+                        conn.commit()
+                        self.send_json(result, 201)
+                        return
+                if len(parts) == 2 and parts[0] == "seals":
+                    session = current_session(conn, self.bearer_token())
+                    if method == "PATCH":
+                        if not self.require_table_access(session, "company_seals", write=True):
+                            return
+                        result = patch_company_seal(conn, parts[1], self.read_json(), session)
+                        conn.commit()
+                        self.send_json(result)
+                        return
+                    if method == "DELETE":
+                        if not self.require_table_access(session, "company_seals", write=True):
+                            return
+                        result = deactivate_company_seal(conn, parts[1], session)
+                        conn.commit()
+                        self.send_json(result)
+                        return
+                if len(parts) == 3 and parts[0] == "seals" and parts[2] == "files":
+                    session = current_session(conn, self.bearer_token())
+                    if method == "GET":
+                        if not self.require_table_access(session, "company_seal_files"):
+                            return
+                        result = list_company_seal_files(conn, parts[1], session)
+                        conn.commit()
+                        self.send_json(result)
+                        return
+                    if method == "POST":
+                        if not self.require_table_access(session, "company_seal_files", write=True):
+                            return
+                        result = upload_company_seal_file(conn, parts[1], self.read_json(), session)
+                        conn.commit()
+                        self.send_json(result, 201)
+                        return
+                if method == "PATCH" and len(parts) == 3 and parts[0] == "seal-files" and parts[2] == "set-current":
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "company_seal_files", write=True):
+                        return
+                    result = set_current_seal_file(conn, parts[1], session)
+                    conn.commit()
+                    self.send_json(result)
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "documents" and parts[2] == "seal-requests":
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_requests", write=True):
+                        return
+                    result = create_seal_usage_request(conn, parts[1], self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "GET" and parts == ["seal-requests"]:
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_requests"):
+                        return
+                    self.send_json(list_seal_usage_requests(conn, query))
+                    return
+                if len(parts) == 2 and parts[0] == "seal-requests" and method == "GET":
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_requests"):
+                        return
+                    self.send_json(seal_usage_request_row(conn, parts[1]))
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "seal-requests" and parts[2] == "approve":
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_approvals", write=True):
+                        return
+                    result = approve_seal_usage_request(conn, parts[1], self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result)
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "seal-requests" and parts[2] == "reject":
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_approvals", write=True):
+                        return
+                    result = reject_seal_usage_request(conn, parts[1], self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result)
+                    return
+                if method == "POST" and len(parts) == 3 and parts[0] == "seal-requests" and parts[2] == "stamp":
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "company_seal_files", write=True):
+                        return
+                    result = stamp_seal_usage_request(conn, parts[1], self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "GET" and parts == ["seal-usage-logs"]:
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "seal_usage_logs"):
+                        return
+                    rows = list_rows(conn, "seal_usage_logs", query)
+                    self.send_json(rows)
+                    return
+                if method == "GET" and parts == ["official-documents"]:
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "official_documents"):
+                        return
+                    self.send_json(list_official_documents(conn, query, session))
+                    return
+                if method == "GET" and parts == ["official-documents", "my-tasks"]:
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "official_document_approval_steps"):
+                        return
+                    scoped_query = {**query, "scope": ["todo"]}
+                    self.send_json(list_official_documents(conn, scoped_query, session))
+                    return
+                if method == "GET" and parts == ["official-documents", "my-requests"]:
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "official_documents"):
+                        return
+                    scoped_query = {**query, "scope": ["mine"]}
+                    self.send_json(list_official_documents(conn, scoped_query, session))
+                    return
+                if method == "POST" and parts == ["official-documents"]:
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "official_documents", write=True):
+                        return
+                    payload = self.read_json()
+                    payload.setdefault("ip_address", self.client_ip())
+                    payload.setdefault("user_agent", self.client_device())
+                    result = create_official_document(conn, payload, session)
+                    conn.commit()
+                    self.send_json(result, 201)
+                    return
+                if method == "GET" and len(parts) == 2 and parts[0] == "official-documents":
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_table_access(session, "official_documents"):
+                        return
+                    self.send_json(official_document_detail(conn, parts[1], session))
+                    return
+                if len(parts) >= 3 and parts[0] == "official-documents" and parts[2] == "dispatch":
+                    session = current_session(conn, self.bearer_token())
+                    if method == "GET" and len(parts) == 3:
+                        if not self.require_table_access(session, "official_document_dispatch_records"):
+                            return
+                        document = official_document_row(conn, parts[1])
+                        steps = official_document_steps(conn, parts[1])
+                        user = session.get("user") if session else None
+                        if not canDownloadOfficialDocument(user, document, steps) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+                            self.send_json({"error": "forbidden", "detail": "official_dispatch_access_denied"}, 403)
+                            return
+                        self.send_json(official_dispatch_record(conn, parts[1]) or {})
+                        return
+                    if method == "POST" and len(parts) == 3:
+                        if not self.require_table_access(session, "official_document_dispatch_records", write=True):
+                            return
+                        payload = self.read_json()
+                        payload.setdefault("ip_address", self.client_ip())
+                        payload.setdefault("user_agent", self.client_device())
+                        document = official_document_row(conn, parts[1])
+                        result = upsert_official_dispatch_record(conn, document, payload.get("dispatch_method") or document.get("dispatch_method"), session.get("user") if session else None, payload)
+                        insert_official_log(conn, parts[1], "create_dispatch", session.get("user") if session else None, result.get("dispatch_method") or "", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+                        conn.commit()
+                        self.send_json(result, 201)
+                        return
+                    if method == "PATCH" and len(parts) == 3:
+                        if not self.require_table_access(session, "official_document_dispatch_records", write=True):
+                            return
+                        payload = self.read_json()
+                        payload.setdefault("ip_address", self.client_ip())
+                        payload.setdefault("user_agent", self.client_device())
+                        result = update_official_dispatch_record(conn, parts[1], payload, session)
+                        conn.commit()
+                        self.send_json(result)
+                        return
+                    if method == "POST" and len(parts) == 4 and parts[3] == "complete":
+                        if not self.require_table_access(session, "official_document_dispatch_records", write=True):
+                            return
+                        payload = self.read_json()
+                        payload.setdefault("ip_address", self.client_ip())
+                        payload.setdefault("user_agent", self.client_device())
+                        result = complete_official_dispatch(conn, parts[1], payload, session)
+                        conn.commit()
+                        self.send_json(result)
+                        return
+                    if method == "POST" and len(parts) == 4 and parts[3] == "proof-files":
+                        if not self.require_table_access(session, "official_document_dispatch_records", write=True):
+                            return
+                        payload = self.read_json()
+                        payload.setdefault("ip_address", self.client_ip())
+                        payload.setdefault("user_agent", self.client_device())
+                        result = upload_official_dispatch_proof_file(conn, parts[1], payload, session)
+                        conn.commit()
+                        self.send_json(result, 201)
+                        return
+                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position"}:
+                    session = current_session(conn, self.bearer_token())
+                    payload = self.read_json()
+                    payload.setdefault("ip_address", self.client_ip())
+                    payload.setdefault("user_agent", self.client_device())
+                    if parts[2] == "submit":
+                        result = submit_official_document(conn, parts[1], payload, session)
+                    elif parts[2] == "approve":
+                        result = approve_official_document(conn, parts[1], payload, session)
+                    elif parts[2] == "reject":
+                        result = reject_official_document(conn, parts[1], payload, session)
+                    elif parts[2] == "cancel":
+                        result = cancel_official_document(conn, parts[1], payload, session)
+                    elif parts[2] == "confirm":
+                        result = confirm_official_document(conn, parts[1], payload, session)
+                    else:
+                        result = update_official_stamp_position(conn, parts[1], payload, session)
+                    conn.commit()
+                    self.send_json(result)
+                    return
+                if method == "GET" and len(parts) == 5 and parts[0] == "official-documents" and parts[2] == "files" and parts[4] == "download":
+                    self.send_official_document_file(conn, parts[1], parts[3])
+                    return
                 if method == "POST" and parts == ["ai", "compose"]:
                     result = ai_compose_official_draft(conn, self.read_json())
                     conn.commit()
@@ -8645,7 +12139,8 @@ class Handler(SimpleHTTPRequestHandler):
                     payload = self.read_json()
                     result = create_file_signed_url(conn, parts[1], payload.get("actor") or "API", int(payload.get("ttl_seconds") or EDOC_SIGNED_URL_TTL_SECONDS), payload.get("purpose") or "download")
                     conn.commit()
-                    self.send_json(result, 201 if not result.get("error") else 404)
+                    status = 403 if result.get("error") == "seal_vault_download_forbidden" else 404
+                    self.send_json(result, 201 if not result.get("error") else status)
                     return
                 if method == "POST" and len(parts) == 3 and parts[0] == "files" and parts[2] == "scan":
                     result = scan_file_object(conn, parts[1], "AV Worker")
@@ -8721,6 +12216,10 @@ class Handler(SimpleHTTPRequestHandler):
             status = 503 if detail.startswith(("formal_signing_service_not_ready", "formal_signature_provider", "formal_tsa")) else 422
             log_structured("warning", "api_request_rejected", path=path, method=method, error=detail)
             self.send_json({"error": "request_rejected", "detail": detail}, status)
+        except PermissionError as exc:
+            detail = str(exc) or "forbidden"
+            log_structured("warning", "api_request_forbidden", path=path, method=method, error=detail)
+            self.send_json({"error": "forbidden", "detail": detail}, 403)
         except SignatureProviderError as exc:
             detail = str(exc)
             log_structured("warning", "signature_provider_failed", path=path, method=method, error=detail)
