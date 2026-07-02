@@ -4036,8 +4036,8 @@ function syncDraftPreviewChrome(data = composePayload()) {
   renderDraftPreviewSummary(data);
   if (status) status.textContent = draftConfirmed ? "已確認" : "尚未確認";
   if (submit) submit.disabled = !draftConfirmed;
-  if (panel) panel.classList.toggle("is-collapsed", !draftPreviewExpanded);
-  if (body) body.hidden = !draftPreviewExpanded;
+  if (panel) panel.classList.remove("is-collapsed");
+  if (body) body.hidden = false;
   if (toggle) {
     toggle.textContent = draftPreviewExpanded ? "收合預覽" : "展開預覽";
     toggle.setAttribute("aria-expanded", String(draftPreviewExpanded));
@@ -4059,14 +4059,13 @@ function scheduleDraftPreviewRender(delay = 220) {
   renderComposeStepper();
   draftPreviewRenderTimer = window.setTimeout(() => {
     draftPreviewRenderTimer = null;
-    renderDraftPreview({ force: draftPreviewExpanded });
+    renderDraftPreview({ force: true });
   }, delay);
 }
 
 function bindDraftSealDrag() {
-  const preview = document.querySelector("#draftPreview");
-  if (!preview) return;
-  preview.querySelectorAll("[data-compose-seal]").forEach((seal) => {
+  document.querySelectorAll("[data-draft-preview]").forEach((preview) => {
+    preview.querySelectorAll("[data-compose-seal]").forEach((seal) => {
     seal.addEventListener("pointerdown", (event) => {
       event.preventDefault();
       seal.setPointerCapture(event.pointerId);
@@ -4100,13 +4099,14 @@ function bindDraftSealDrag() {
         seal.removeEventListener("pointermove", moveSeal);
         seal.removeEventListener("pointerup", stopDrag);
         seal.removeEventListener("pointercancel", stopDrag);
-        markDraftDirty();
+        markDraftDirty({ keepStep: true });
         showToast(`${seal.textContent.trim()}用印位置已更新。`);
       };
       seal.addEventListener("pointermove", moveSeal);
       seal.addEventListener("pointerup", stopDrag);
       seal.addEventListener("pointercancel", stopDrag);
     });
+  });
   });
 }
 
@@ -4201,77 +4201,77 @@ function clearAiDraft() {
   showToast("AI 公文助理欄位已清除。");
 }
 
+function renderOfficialDraftPagesHtml(data = composePayload()) {
+  const today = new Date();
+  const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
+  const attachmentsText = data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊";
+  const bodyPages = chunkTextByLength(data.body);
+  normalizeSealPlacementPages(bodyPages.length);
+  return bodyPages.map((body, index) => {
+    const pageNumber = index + 1;
+    const isFirstPage = pageNumber === 1;
+    return `
+      <section class="draft-page" data-page-number="${pageNumber}" aria-label="函稿第 ${pageNumber} 頁">
+        ${isFirstPage ? `
+          <section class="draft-file-meta" aria-label="檔案資訊">
+            <span>檔　號：</span>
+            <span>保存年限：</span>
+          </section>
+          <header class="draft-official-head">
+            <h1>
+              <span>${data.companyName}</span>
+              <strong>${data.type}</strong>
+            </h1>
+            <section class="draft-contact-block">
+              <span>地址：${data.contactAddress}</span>
+              <span>承辦人：${data.contactOwner}</span>
+              <span>電話：${data.contactPhone}</span>
+              <span>傳真：${data.contactFax}</span>
+              <span>電子信箱：${data.contactEmail}</span>
+            </section>
+          </header>
+          <section class="draft-recipient-line">受文者：${data.recipient}</section>
+          <section class="draft-official-meta">
+            <div><span>發文日期：</span><strong>${rocDate}</strong></div>
+            <div><span>發文字號：</span><strong>${data.no || "系統產生中"}</strong></div>
+            <div><span>速別：</span><strong>${data.priority}</strong></div>
+            <div><span>密等及解密條件或保密期限：</span><strong>普通</strong></div>
+            <div><span>附件：</span><strong>${attachmentsText}</strong></div>
+          </section>
+        ` : `
+          <section class="draft-continuation-head">
+            <span>${data.no || "系統產生中"}</span>
+            <strong>第 ${pageNumber} 頁</strong>
+          </section>
+        `}
+        <section class="draft-main ${isFirstPage ? "" : "continued"}">
+          ${isFirstPage ? `<div class="draft-content-row draft-subject"><span>主旨：</span><strong>${data.subject}</strong></div>` : ""}
+          <div class="draft-content-row draft-description">
+            <span>${isFirstPage ? "說明：" : "續："}</span>
+            <div class="draft-body">${body}</div>
+          </div>
+        </section>
+        <div class="draft-page-number">第 ${pageNumber} 頁 / 共 ${bodyPages.length} 頁</div>
+        ${renderDraftSealLayer(data, pageNumber)}
+      </section>
+    `;
+  }).join("");
+}
+
 function renderDraftPreview(options = {}) {
-  const force = Boolean(options.force);
   if (draftPreviewRenderTimer) {
     window.clearTimeout(draftPreviewRenderTimer);
     draftPreviewRenderTimer = null;
   }
   renderComposeCompanyOptions();
   const data = composePayload();
-  const preview = document.querySelector("#draftPreview");
+  const previews = document.querySelectorAll("[data-draft-preview]");
   syncDraftPreviewChrome(data);
-  if (!preview) return;
-  if (!draftPreviewExpanded && !force) {
-    renderComposeStepper();
-    return;
-  }
-  const today = new Date();
-  const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
-  const attachmentsText = data.attachments.length ? data.attachments.join("、") : "函稿本文、附件清冊";
-  const bodyPages = chunkTextByLength(data.body);
-  normalizeSealPlacementPages(bodyPages.length);
-  preview.innerHTML = `
-    ${bodyPages.map((body, index) => {
-      const pageNumber = index + 1;
-      const isFirstPage = pageNumber === 1;
-      return `
-        <section class="draft-page" data-page-number="${pageNumber}" aria-label="函稿第 ${pageNumber} 頁">
-          ${isFirstPage ? `
-            <section class="draft-file-meta" aria-label="檔案資訊">
-              <span>檔　號：</span>
-              <span>保存年限：</span>
-            </section>
-            <header class="draft-official-head">
-              <h1>
-                <span>${data.companyName}</span>
-                <strong>${data.type}</strong>
-              </h1>
-              <section class="draft-contact-block">
-                <span>地址：${data.contactAddress}</span>
-                <span>承辦人：${data.contactOwner}</span>
-                <span>電話：${data.contactPhone}</span>
-                <span>傳真：${data.contactFax}</span>
-                <span>電子信箱：${data.contactEmail}</span>
-              </section>
-            </header>
-            <section class="draft-recipient-line">受文者：${data.recipient}</section>
-            <section class="draft-official-meta">
-              <div><span>發文日期：</span><strong>${rocDate}</strong></div>
-              <div><span>發文字號：</span><strong>${data.no || "系統產生中"}</strong></div>
-              <div><span>速別：</span><strong>${data.priority}</strong></div>
-              <div><span>密等及解密條件或保密期限：</span><strong>普通</strong></div>
-              <div><span>附件：</span><strong>${attachmentsText}</strong></div>
-            </section>
-          ` : `
-            <section class="draft-continuation-head">
-              <span>${data.no || "系統產生中"}</span>
-              <strong>第 ${pageNumber} 頁</strong>
-            </section>
-          `}
-          <section class="draft-main ${isFirstPage ? "" : "continued"}">
-            ${isFirstPage ? `<div class="draft-content-row draft-subject"><span>主旨：</span><strong>${data.subject}</strong></div>` : ""}
-            <div class="draft-content-row draft-description">
-              <span>${isFirstPage ? "說明：" : "續："}</span>
-              <div class="draft-body">${body}</div>
-            </div>
-          </section>
-          <div class="draft-page-number">第 ${pageNumber} 頁 / 共 ${bodyPages.length} 頁</div>
-          ${renderDraftSealLayer(data, pageNumber)}
-        </section>
-      `;
-    }).join("")}
-  `;
+  if (!previews.length) return;
+  const html = renderOfficialDraftPagesHtml(data);
+  previews.forEach((preview) => {
+    preview.innerHTML = html;
+  });
   bindDraftSealDrag();
   renderComposeStepper();
 }
@@ -4280,26 +4280,22 @@ function setDraftConfirmed(value) {
   draftConfirmed = value;
   if (!value) draftSigned = false;
   if (value) draftPreviewExpanded = true;
-  activeComposeStep = value ? "sign" : "confirm";
-  renderDraftPreview({ force: draftPreviewExpanded });
+  activeComposeStep = "confirm";
+  renderDraftPreview({ force: true });
 }
 
-function markDraftDirty() {
+function markDraftDirty(options = {}) {
   draftConfirmed = false;
   draftSigned = false;
-  activeComposeStep = "fill";
+  if (!options.keepStep) activeComposeStep = "fill";
   writeComposeAutosave();
   scheduleDraftPreviewRender();
 }
 
 function composeStepState() {
-  const state = composeInputState();
-  const filled = Boolean(state.recipient && state.subject.length >= 8 && state.body.length >= 8);
   return [
-    { key: "fill", label: "填寫資料", body: "文號、受文者、主旨、附件、用印", done: filled },
-    { key: "confirm", label: "確認", body: "撰寫者確認內容", done: draftConfirmed },
-    { key: "sign", label: "送簽", body: "送主管清稿簽核", done: draftSigned },
-    { key: "send", label: "送出", body: "進入發文佇列", done: false }
+    { key: "fill", label: "填寫資料", body: "表單與即時預覽", done: activeComposeStep !== "fill" || draftConfirmed },
+    { key: "confirm", label: "確認送出", body: "函稿預覽與簽核流程", done: draftConfirmed }
   ];
 }
 
@@ -4382,19 +4378,18 @@ function composeBasicBlockers() {
 }
 
 function renderComposeFieldHints() {
-  const checks = Object.fromEntries(composeReadinessChecks().map((item) => [item.key, item]));
   [
-    ["recipient", "#recipient", "#recipientHint"],
-    ["subject", "#subject", "#subjectHint"],
-    ["body", "#bodyText", "#bodyTextHint"]
-  ].forEach(([key, inputSelector, hintSelector]) => {
-    const check = checks[key];
+    ["#recipient", "#recipientHint"],
+    ["#subject", "#subjectHint"],
+    ["#bodyText", "#bodyTextHint"]
+  ].forEach(([inputSelector, hintSelector]) => {
     const input = document.querySelector(inputSelector);
     const hint = document.querySelector(hintSelector);
-    if (!check || !input || !hint) return;
-    input.dataset.validity = check.done ? "ok" : "needs";
-    hint.dataset.validity = check.done ? "ok" : "needs";
-    hint.textContent = check.detail;
+    if (input) delete input.dataset.validity;
+    if (hint) {
+      delete hint.dataset.validity;
+      hint.textContent = "";
+    }
   });
 }
 
@@ -4440,19 +4435,10 @@ function composePaneForStep(key = activeComposeStep) {
 }
 
 function composePanesForStep(key = activeComposeStep) {
-  return ["fill", "preview", "confirm"];
+  return [composePaneForStep(key)];
 }
 
 function validateComposeStep(step = activeComposeStep) {
-  if (["fill", "preview", "confirm", "sign"].includes(step)) {
-    const blockers = composeBasicBlockers();
-    if (blockers.length) {
-      return blockOperation(`請先補齊：${blockers.map((item) => item.label).join("、")}。`, addDispatchAudit, "撰寫流程防呆");
-    }
-  }
-  if (["sign", "send"].includes(step) && !draftConfirmed) {
-    return blockOperation("請先確認函稿預覽，再送清稿簽核。", addDispatchAudit, "撰寫流程防呆");
-  }
   return true;
 }
 
@@ -4464,7 +4450,7 @@ function setComposeStep(key, options = {}) {
   const nextIndex = steps.indexOf(key);
   if (!options.force && nextIndex > currentIndex && !validateComposeStep(activeComposeStep)) return;
   activeComposeStep = key;
-  if (["fill", "confirm", "sign"].includes(key)) renderDraftPreview();
+  renderDraftPreview({ force: true });
   renderComposeStepper();
 }
 
@@ -4473,23 +4459,20 @@ function advanceComposeStep() {
   const currentIndex = composeStepIndex();
   const current = steps[currentIndex];
   if (!validateComposeStep(current)) return;
-  if (current === "fill") renderDraftPreview();
-  if (current === "confirm" && !draftConfirmed) {
-    if (!draftPreviewExpanded) {
-      setDraftPreviewExpanded(true, { scroll: true });
-      showToast("請先檢視下方函稿預覽，再確認送簽。");
-      return;
-    }
-    draftConfirmed = true;
-    addDispatchAudit("確認函稿", "撰寫者已確認函稿預覽、附件與用印位置。");
-    showToast("函稿已確認，可以送清稿簽核。");
-  }
-  if (current === "sign") {
-    document.querySelector("#composeForm")?.requestSubmit();
+  if (current === "fill") {
+    draftPreviewExpanded = true;
+    setComposeStep("confirm", { force: true });
     return;
   }
-  const next = steps[Math.min(currentIndex + 1, steps.length - 1)];
-  setComposeStep(next, { force: true });
+  if (current === "confirm") {
+    if (!draftConfirmed) {
+      setDraftConfirmed(true);
+      addDispatchAudit("確認函稿", "撰寫者已確認函稿預覽、附件與用印位置。");
+      showToast("函稿已確認。");
+      return;
+    }
+    document.querySelector("#composeForm")?.requestSubmit();
+  }
 }
 
 function retreatComposeStep() {
@@ -4500,82 +4483,37 @@ function retreatComposeStep() {
 }
 
 function composeNextControlState() {
-  const disabled = activeComposeStep === "send" || (activeComposeStep === "fill" && composeBasicBlockers().length > 0);
-  const text = activeComposeStep === "confirm" && !draftConfirmed
-    ? (draftPreviewExpanded ? "確認函稿" : "前往預覽確認")
-    : activeComposeStep === "sign"
-      ? "送簽並加入佇列"
-      : activeComposeStep === "send"
-        ? "已加入佇列"
-        : "前往確認函稿";
+  const disabled = false;
+  const text = activeComposeStep === "confirm"
+    ? (draftConfirmed ? "送出簽核" : "確認內容無誤")
+    : "前往確認";
   return { disabled, text };
 }
 
 function renderComposeStepper() {
   const stepper = document.querySelector("#composeStepper");
   const action = document.querySelector("#composeNextAction");
-  if (!stepper || !action) return;
+  if (!stepper) return;
   renderComposeFieldHints();
   const steps = composeStepState();
   const activeIndex = composeStepIndex();
-  const onePageItems = [
-    { key: "content", label: "填寫", body: "文號、受文者、主旨、說明", done: composeBasicBlockers().length === 0 },
-    { key: "package", label: "附件與用印", body: "寄件資料、附件、大章小章", done: true },
-    { key: "preview", label: "預覽確認", body: draftConfirmed ? "函稿已確認" : "確認後才能送簽", done: draftConfirmed }
-  ];
   stepper.innerHTML = `
-    <div class="compose-one-page-note">
-      <strong>同一頁完成</strong>
-      <span>填寫內容與附件用印集中處理；需要確認時再展開下方函稿預覽。</span>
-    </div>
-    <div class="compose-one-page-checks">
-      ${onePageItems.map((item) => `
-        <button class="compose-progress-step ${item.done ? "done" : ""} ${item.key === "content" && activeComposeStep === "fill" ? "active" : ""}" type="button" data-compose-focus="${item.key === "preview" ? "confirm" : item.key === "package" ? "attachments" : "recipient"}">
-          <span>${item.done ? "✓" : "!"}</span>
+    <div class="compose-page-tabs">
+      ${steps.map((item, index) => `
+        <button class="compose-progress-step ${item.done ? "done" : ""} ${index === activeIndex ? "active" : ""}" type="button" data-compose-step="${item.key}">
+          <span>${index + 1}</span>
           <strong>${item.label}</strong>
           <small>${item.body}</small>
         </button>
       `).join("")}
     </div>
   `;
-  const next = steps[activeIndex] || steps[steps.length - 1];
-  const nextMessages = {
-    fill: ["填寫公文資料", "補齊公文內容、附件與用印設定；下方預覽會在展開時更新成最新版本。"],
-    confirm: ["確認函稿", draftPreviewExpanded ? "確認下方函稿預覽後，按下一步會確認目前版本。" : "按下一步會先展開下方函稿預覽，內容一修改就會重新要求確認。"],
-    sign: ["送主管清稿", "按下清稿並加入發文佇列，系統會建立待清稿案件。"],
-    send: ["等待送出", "主管清稿與封裝完成後，再由發文管理送交 jAgent。"]
-  };
-  const [title, body] = nextMessages[next.key] || nextMessages.send;
-  const checks = composeReadinessChecks();
   const nextControl = composeNextControlState();
-  action.innerHTML = `
-    <div class="compose-action-head">
-      <div>
-        <strong>${title}</strong>
-        <p>${body}</p>
-      </div>
-      <div class="compose-action-controls">
-        <span class="status-pill">${composeBasicBlockers().length ? "尚有必填未完成" : "可以進入確認"}</span>
-        <button class="secondary-button compose-inline-save" id="composeInlineSaveDraftBtn" type="button">暫存草稿</button>
-        <button class="secondary-button compose-inline-preview" type="button" data-compose-focus="confirm">預覽函稿</button>
-        <button class="primary-button compose-inline-next" id="composeInlineNextBtn" type="button" ${nextControl.disabled ? "disabled" : ""}>${nextControl.text}</button>
-      </div>
-    </div>
-    <div class="compose-draft-status idle" id="composeDraftStatus" aria-live="polite"></div>
-    <div class="compose-readiness-list" aria-label="撰寫送出檢查">
-      ${checks.map((item) => `
-        <button class="compose-readiness-item ${item.done ? "done" : "pending"} ${item.required ? "required" : "optional"}" type="button" data-compose-focus="${item.target}" aria-label="前往${item.label}">
-          <span>${item.done ? "✓" : item.required ? "!" : "•"}</span>
-          <div>
-            <strong>${item.label}${item.required ? "＊" : ""}</strong>
-            <p>${item.detail}</p>
-          </div>
-        </button>
-      `).join("")}
-    </div>
-  `;
-  document.querySelector("#composeStepStatus").textContent = "填寫、附件與預覽同頁";
-  document.querySelector("#composeConfirmHint").textContent = draftConfirmed ? "已確認" : "尚未確認";
+  if (action) action.innerHTML = "";
+  const stepStatus = document.querySelector("#composeStepStatus");
+  if (stepStatus) stepStatus.textContent = activeComposeStep === "confirm" ? "第 2 頁：確認送出" : "第 1 頁：填寫資料";
+  const confirmHint = document.querySelector("#composeConfirmHint");
+  if (confirmHint) confirmHint.textContent = draftConfirmed ? "已確認" : "尚未確認";
   const activePanes = composePanesForStep();
   document.querySelectorAll("[data-compose-pane]").forEach((panel) => {
     panel.classList.toggle("active", activePanes.includes(panel.dataset.composePane));
@@ -4585,14 +4523,24 @@ function renderComposeStepper() {
   composeView?.classList.add(`compose-step-mode-${activeComposeStep}`);
   const previousButton = document.querySelector("#composePrevBtn");
   const nextButton = document.querySelector("#composeNextBtn");
-  if (previousButton) previousButton.disabled = activeIndex === 0;
+  const confirmButton = document.querySelector("#confirmDraftBtn");
+  const resetButton = document.querySelector("#resetDraftConfirmBtn");
+  const submitButton = document.querySelector("#submitDispatchBtn");
+  if (previousButton) previousButton.hidden = activeComposeStep !== "confirm";
   if (nextButton) {
     nextButton.disabled = nextControl.disabled;
     nextButton.textContent = nextControl.text;
+    nextButton.hidden = activeComposeStep !== "fill";
+  }
+  if (confirmButton) confirmButton.hidden = activeComposeStep !== "confirm" || draftConfirmed;
+  if (resetButton) resetButton.hidden = activeComposeStep !== "confirm" || !draftConfirmed;
+  if (submitButton) {
+    submitButton.hidden = activeComposeStep !== "confirm";
+    submitButton.disabled = !draftConfirmed;
   }
   renderComposeSaveStatus();
-  document.querySelectorAll("[data-compose-focus]").forEach((button) => {
-    button.addEventListener("click", () => focusComposeReadinessTarget(button.dataset.composeFocus));
+  document.querySelectorAll("[data-compose-step]").forEach((button) => {
+    button.addEventListener("click", () => setComposeStep(button.dataset.composeStep, { force: true }));
   });
 }
 
@@ -6769,7 +6717,8 @@ function renderContracts() {
 }
 
 function renderPrechecks() {
-  document.querySelector("#precheckList").innerHTML = prechecks.map((item) => `<li>${item}</li>`).join("");
+  const list = document.querySelector("#precheckList");
+  if (list) list.innerHTML = prechecks.map((item) => `<li>${item}</li>`).join("");
   renderComposeStepper();
 }
 
@@ -14577,7 +14526,8 @@ document.querySelector("#composeForm").addEventListener("submit", async (event) 
   event.preventDefault();
   const doc = await createDispatchFromForm("待清稿");
   if (!doc) return;
-  activeComposeStep = "send";
+  activeComposeStep = "fill";
+  renderComposeStepper();
   showToast("已建立函稿並加入發文佇列。");
   setView(isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
 });
@@ -14776,14 +14726,14 @@ document.querySelector("#generateDispatchNoBtn").addEventListener("click", () =>
   addDispatchAudit("重新產生發文字號", `已產生 ${no}。`);
   showToast(`已產生發文字號：${no}`);
 });
-document.querySelector("#aiGenerateDraftBtn").addEventListener("click", generateAiDraft);
-document.querySelector("#aiApplyDraftBtn").addEventListener("click", applyAiDraftToCompose);
-document.querySelector("#aiClearDraftBtn").addEventListener("click", clearAiDraft);
-document.querySelector("#previewDraftBtn").addEventListener("click", () => {
+document.querySelector("#aiGenerateDraftBtn")?.addEventListener("click", generateAiDraft);
+document.querySelector("#aiApplyDraftBtn")?.addEventListener("click", applyAiDraftToCompose);
+document.querySelector("#aiClearDraftBtn")?.addEventListener("click", clearAiDraft);
+document.querySelector("#previewDraftBtn")?.addEventListener("click", () => {
   setDraftPreviewExpanded(true, { scroll: true });
   showToast("已更新即時函稿預覽。");
 });
-document.querySelector("#toggleDraftPreviewBtn").addEventListener("click", () => {
+document.querySelector("#toggleDraftPreviewBtn")?.addEventListener("click", () => {
   setDraftPreviewExpanded(!draftPreviewExpanded, { scroll: !draftPreviewExpanded });
 });
 document.querySelector("#confirmDraftBtn").addEventListener("click", () => {

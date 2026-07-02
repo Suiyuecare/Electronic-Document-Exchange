@@ -2895,6 +2895,200 @@ tr:last-child td {
   display: block;
 }
 
+.compose-progress-strip.compact {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.compose-page-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.compose-form-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.compose-page {
+  display: none;
+}
+
+.compose-page.active {
+  display: block;
+}
+
+.compose-two-column {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.48fr) minmax(460px, 0.52fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.compose-input-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.compose-input-panel .field-hint {
+  display: none;
+}
+
+.compose-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.compose-field-grid .span-all {
+  grid-column: 1 / -1;
+}
+
+.draft-preview-panel.live {
+  position: sticky;
+  top: 0;
+  max-height: calc(100vh - 160px);
+  overflow: auto;
+}
+
+.draft-preview-panel.live .draft-preview-body {
+  margin-top: 12px;
+}
+
+.draft-preview-panel.live .official-draft-preview {
+  gap: 14px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-page {
+  padding: 22px 28px 48px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-file-meta {
+  min-height: 48px;
+  padding-right: 78px;
+  font-size: 13px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-official-head h1 {
+  gap: 0 18px;
+  font-size: 24px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-contact-block {
+  width: min(320px, 100%);
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-recipient-line {
+  margin-top: 38px;
+  font-size: 17px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-official-meta {
+  margin-top: 18px;
+  font-size: 15px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-main {
+  padding-top: 22px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-content-row {
+  margin-bottom: 18px;
+  line-height: 1.8;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-content-row span,
+.draft-preview-panel.live .official-draft-preview .draft-subject strong,
+.draft-preview-panel.live .official-draft-preview .draft-body {
+  font-size: 17px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-seal-placeholder {
+  width: 104px;
+  height: 104px;
+}
+
+.draft-preview-panel.live .official-draft-preview .draft-seal-placeholder.small {
+  width: 70px;
+  height: 70px;
+}
+
+.compose-confirm-page.active {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.28fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.compose-review-preview {
+  min-height: calc(100vh - 260px);
+}
+
+.official-draft-preview.review {
+  max-width: min(1040px, 100%);
+}
+
+.compose-approval-panel {
+  position: sticky;
+  top: 0;
+}
+
+.compose-approval-flow {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.compose-approval-flow li {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 117, 82, 0.2);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.compose-approval-flow span {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 999px;
+  background: #fff3df;
+  color: #9a4f00;
+  font-weight: 900;
+}
+
+.compose-approval-flow strong {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.compose-bottom-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 12px;
+  border: 1px solid rgba(217, 119, 6, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.compose-bottom-actions [hidden] {
+  display: none;
+}
+
 .format-workbench {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5164,6 +5358,17 @@ textarea {
     overflow: visible;
   }
 
+  .compose-two-column,
+  .compose-confirm-page.active {
+    grid-template-columns: 1fr;
+  }
+
+  .draft-preview-panel.live,
+  .compose-approval-panel {
+    position: static;
+    max-height: none;
+  }
+
   .compose-progress-strip {
     grid-template-columns: 1fr;
   }
@@ -5290,6 +5495,20 @@ textarea {
 
   .compose-one-page-checks {
     grid-template-columns: 1fr;
+  }
+
+  .compose-page-tabs,
+  .compose-field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .compose-bottom-actions {
+    justify-content: stretch;
+  }
+
+  .compose-bottom-actions .primary-button,
+  .compose-bottom-actions .secondary-button {
+    width: 100%;
   }
 
   .app {

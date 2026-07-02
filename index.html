@@ -30,8 +30,9 @@
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d97706'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='18' font-family='serif' fill='white'%3EW%3C/text%3E%3C/svg%3E" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260702-compose-preview-bottom" />
+    <link rel="stylesheet" href="styles.css?v=20260702-compose-two-page" />
   </head>
   <body>
     <div class="login-screen app" id="loginScreen">
@@ -940,217 +941,175 @@
           <div class="section-header">
             <div>
               <p class="eyebrow">Compose</p>
-              <h3>建立電子公文</h3>
+              <h3>撰寫公文</h3>
             </div>
-            <span class="status-pill" id="composeStepStatus">填寫、附件與預覽同頁</span>
+            <span class="status-pill" id="composeStepStatus">第 1 頁：填寫資料</span>
           </div>
 
-          <div class="compose-progress-strip" id="composeStepper" aria-label="撰寫公文單頁進度"></div>
-          <div class="next-action-card" id="composeNextAction"></div>
+          <div class="compose-progress-strip compact" id="composeStepper" aria-label="撰寫公文頁面"></div>
+          <div class="next-action-card compose-hidden-action" id="composeNextAction" hidden></div>
 
-          <div class="compose-layout">
-            <form class="form-panel" id="composeForm">
-              <section class="compose-step-panel active" data-compose-pane="fill">
-                <div class="panel-heading tight">
-                  <h3>填寫公文內容</h3>
-                  <span class="status-pill">必要欄位</span>
-                </div>
-                <label>
-                  公司行號
-                  <select id="composeCompanySelect">
-                    <option>歲悅長照股份有限公司</option>
-                  </select>
-                </label>
-                <div class="inline-fields">
-                  <label>
-                    文別
-                    <select id="docType">
-                      <option>函</option>
-                      <option>開會通知單</option>
-                      <option>書函</option>
-                      <option>公告</option>
-                    </select>
-                  </label>
-                  <label>
-                    速別
-                    <select id="priority">
-                      <option>普通件</option>
-                      <option>速件</option>
-                      <option>最速件</option>
-                    </select>
-                  </label>
-                </div>
-                <label>
-                  發文字號
-                  <div class="input-action">
-                    <input id="dispatchNo" value="" readonly />
-                    <button class="secondary-button" id="generateDispatchNoBtn" type="button">重新產生</button>
+          <form class="compose-form-shell" id="composeForm">
+            <section class="compose-page compose-edit-page active" data-compose-pane="fill">
+              <div class="compose-two-column">
+                <section class="form-panel compose-input-panel">
+                  <div class="panel-heading tight">
+                    <h3>公文資料</h3>
+                    <span class="status-pill">第 1 頁</span>
                   </div>
-                </label>
-                <label>
-                  受文者
-                  <input id="recipient" value="臺北市政府社會局" aria-describedby="recipientHint" />
-                  <span class="field-hint" id="recipientHint"></span>
-                </label>
-                <label>
-                  主旨
-                  <input id="subject" value="檢送本公司日間照顧中心設立許可補正資料，請查照。" aria-describedby="subjectHint" />
-                  <span class="field-hint" id="subjectHint"></span>
-                </label>
-                <label>
-                  說明
-                  <textarea id="bodyText" rows="7" aria-describedby="bodyTextHint">依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。</textarea>
-                  <span class="field-hint" id="bodyTextHint"></span>
-                </label>
-              </section>
-
-              <section class="compose-step-panel" data-compose-pane="preview">
-                <div class="panel-heading tight">
-                  <h3>附件、寄件資料與用印</h3>
-                  <span class="status-pill">同頁設定</span>
-                </div>
-                <div class="form-section-note">
-                  <strong>寄件人／發文單位資料</strong>
-                  <span>以下資料會顯示在函稿右上方，代表本公司發文窗口，不是受文者資料。</span>
-                </div>
-                <div class="inline-fields">
                   <label>
-                    寄件人地址
-                    <input id="contactAddress" value="220205 新北市板橋區英士路192之1號" />
-                  </label>
-                  <label>
-                    寄件承辦人
-                    <input id="contactOwner" value="業務助理" />
-                  </label>
-                </div>
-                <div class="inline-fields">
-                  <label>
-                    寄件人電話
-                    <input id="contactPhone" value="(02)2257-7155 分機3762" />
-                  </label>
-                  <label>
-                    寄件人傳真
-                    <input id="contactFax" value="(02)2254-4029" />
-                  </label>
-                </div>
-                <label>
-                  寄件人電子信箱
-                  <input id="contactEmail" value="edoc@suiyuecare.com" />
-                </label>
-                <div class="form-section-note">
-                  <strong>用印設定</strong>
-                  <span>選擇需要的大章或小章後，可在即時函稿預覽拖曳用印位置；最後停留的位置會作為正式用印處。</span>
-                </div>
-                <div class="inline-fields">
-                  <label>
-                    大章
-                    <select id="largeSealType">
-                      <option>無</option>
-                      <option selected>一般章</option>
-                      <option>公司設立章</option>
-                      <option>銀行印鑑章</option>
-                      <option>圖記章</option>
+                    公司行號
+                    <select id="composeCompanySelect">
+                      <option>歲悅長照股份有限公司</option>
                     </select>
                   </label>
+                  <div class="inline-fields">
+                    <label>
+                      文別
+                      <select id="docType">
+                        <option>函</option>
+                        <option>開會通知單</option>
+                        <option>書函</option>
+                        <option>公告</option>
+                      </select>
+                    </label>
+                    <label>
+                      速別
+                      <select id="priority">
+                        <option>普通件</option>
+                        <option>速件</option>
+                        <option>最速件</option>
+                      </select>
+                    </label>
+                  </div>
                   <label>
-                    小章
-                    <select id="smallSealType">
-                      <option selected>無</option>
-                      <option>一般章</option>
-                      <option>公司設立章</option>
-                      <option>銀行印鑑章</option>
-                      <option>圖記章</option>
-                    </select>
+                    發文字號
+                    <div class="input-action">
+                      <input id="dispatchNo" value="" readonly />
+                      <button class="secondary-button" id="generateDispatchNoBtn" type="button">重新產生</button>
+                    </div>
                   </label>
-                </div>
-                <label>
-                  附件
-                  <input id="attachments" type="file" multiple />
-                </label>
-              </section>
+                  <label>
+                    受文者
+                    <input id="recipient" value="臺北市政府社會局" />
+                    <span class="field-hint" id="recipientHint"></span>
+                  </label>
+                  <label>
+                    主旨
+                    <input id="subject" value="檢送本公司日間照顧中心設立許可補正資料，請查照。" />
+                    <span class="field-hint" id="subjectHint"></span>
+                  </label>
+                  <label>
+                    說明
+                    <textarea id="bodyText" rows="8">依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。</textarea>
+                    <span class="field-hint" id="bodyTextHint"></span>
+                  </label>
 
-              <section class="compose-step-panel" data-compose-pane="confirm">
-                <div class="panel-heading tight">
-                  <h3>確認與送簽</h3>
-                  <span class="status-pill" id="composeConfirmHint">尚未確認</span>
-                </div>
-                <div class="next-action-card">
-                  <strong>先展開函稿預覽</strong>
-                  <p>確認文號、受文者、主旨、說明、附件與用印位置後，按「確認函稿」，才可以送清稿簽核。</p>
-                </div>
-                <div class="form-actions">
-                  <button class="secondary-button" id="saveDispatchDraftBtn" type="button">儲存草稿</button>
-                  <button class="secondary-button" id="previewDraftBtn" type="button">展開函稿預覽</button>
-                  <button class="primary-button" id="submitDispatchBtn" type="submit" disabled>清稿並加入發文佇列</button>
-                </div>
-              </section>
+                  <div class="compose-field-grid">
+                    <label>
+                      寄件人地址
+                      <input id="contactAddress" value="220205 新北市板橋區英士路192之1號" />
+                    </label>
+                    <label>
+                      寄件承辦人
+                      <input id="contactOwner" value="業務助理" />
+                    </label>
+                    <label>
+                      寄件人電話
+                      <input id="contactPhone" value="(02)2257-7155 分機3762" />
+                    </label>
+                    <label>
+                      寄件人傳真
+                      <input id="contactFax" value="(02)2254-4029" />
+                    </label>
+                    <label class="span-all">
+                      寄件人電子信箱
+                      <input id="contactEmail" value="edoc@suiyuecare.com" />
+                    </label>
+                  </div>
 
-              <div class="compose-wizard-actions">
-                <button class="secondary-button" id="composePrevBtn" type="button">上一步</button>
-                <button class="primary-button" id="composeNextBtn" type="button">下一步</button>
+                  <div class="inline-fields">
+                    <label>
+                      大章
+                      <select id="largeSealType">
+                        <option>無</option>
+                        <option selected>一般章</option>
+                        <option>公司設立章</option>
+                        <option>銀行印鑑章</option>
+                        <option>圖記章</option>
+                      </select>
+                    </label>
+                    <label>
+                      小章
+                      <select id="smallSealType">
+                        <option selected>無</option>
+                        <option>一般章</option>
+                        <option>公司設立章</option>
+                        <option>銀行印鑑章</option>
+                        <option>圖記章</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label>
+                    附件
+                    <input id="attachments" type="file" multiple />
+                  </label>
+                  <div class="compose-draft-status idle" id="composeDraftStatus" aria-live="polite"></div>
+                </section>
+
+                <section class="panel draft-preview-panel live" id="draftPreviewPanel">
+                  <div class="panel-heading draft-preview-heading">
+                    <div>
+                      <p class="eyebrow">Draft Preview</p>
+                      <h3>即時函稿預覽</h3>
+                    </div>
+                    <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
+                  </div>
+                  <div class="draft-preview-summary" id="draftPreviewSummary"></div>
+                  <div class="draft-preview-body" id="draftPreviewBody">
+                    <article class="official-draft-preview" id="draftPreview" data-draft-preview></article>
+                  </div>
+                </section>
               </div>
-            </form>
+            </section>
 
-            <div class="compose-support-stack">
-              <aside class="panel flow-panel ai-compose-panel">
-                <div class="panel-heading">
-                  <div>
-                    <p class="eyebrow">AI Writer</p>
-                    <h3>AI 公文助理</h3>
-                  </div>
-                  <span class="status-pill" id="aiDraftStatus">待輸入</span>
-                </div>
-                <label>
-                  白話文撰寫內容
-                  <textarea id="aiPlainText" rows="8" placeholder="例如：請衛福部協助確認本公司日照中心設立許可補正資料，附件包含清冊、證明文件，請對方查照。"></textarea>
-                </label>
-                <div class="form-actions">
-                  <button class="primary-button" id="aiGenerateDraftBtn" type="button">AI 生成主旨與內文</button>
-                  <button class="secondary-button" id="aiClearDraftBtn" type="button">清除</button>
-                </div>
-                <label>
-                  自動生成主旨
-                  <input id="aiGeneratedSubject" placeholder="AI 生成後顯示，可自行編輯" />
-                </label>
-                <label>
-                  自動生成內文
-                  <textarea id="aiGeneratedBody" rows="8" placeholder="AI 生成後顯示，可自行編輯"></textarea>
-                </label>
-                <button class="secondary-button full-width" id="aiApplyDraftBtn" type="button">套用到公文主旨與說明</button>
-                <h3>送出前檢核</h3>
-                <ol class="precheck-list" id="precheckList"></ol>
-                <div class="summary-box">
-                  <span>交換格式</span>
-                  <strong>標準封裝資料 + 附件 + 交換事件</strong>
-                </div>
-                <div class="summary-box">
-                  <span>後端動作</span>
-                  <strong>validate → jAgent send → status sync</strong>
-                </div>
-              </aside>
-
-              <section class="panel draft-preview-panel is-collapsed" id="draftPreviewPanel">
+            <section class="compose-page compose-confirm-page" data-compose-pane="confirm">
+              <section class="panel compose-review-preview">
                 <div class="panel-heading draft-preview-heading">
                   <div>
-                    <p class="eyebrow">Draft Preview</p>
-                    <h3>即時函稿預覽</h3>
+                    <p class="eyebrow">Review</p>
+                    <h3>函稿預覽</h3>
                   </div>
-                  <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
+                  <span class="status-pill" id="composeConfirmHint">尚未確認</span>
                 </div>
-                <div class="draft-preview-summary" id="draftPreviewSummary"></div>
-                <div class="draft-preview-toolbar">
-                  <button class="secondary-button" id="toggleDraftPreviewBtn" type="button" aria-expanded="false" aria-controls="draftPreviewBody">展開預覽</button>
-                </div>
-                <div class="draft-preview-body" id="draftPreviewBody" hidden>
-                  <article class="official-draft-preview" id="draftPreview"></article>
-                  <div class="form-actions draft-preview-actions">
-                    <button class="primary-button" id="confirmDraftBtn" type="button">確認函稿</button>
-                    <button class="secondary-button" id="resetDraftConfirmBtn" type="button">取消確認</button>
-                  </div>
-                </div>
+                <article class="official-draft-preview review" id="draftReviewPreview" data-draft-preview></article>
               </section>
+
+              <aside class="panel compose-approval-panel">
+                <div class="panel-heading tight">
+                  <h3>簽核流程</h3>
+                  <span class="status-pill">送出後</span>
+                </div>
+                <ol class="compose-approval-flow" id="composeApprovalFlow">
+                  <li><span>1</span><strong>申請人主管</strong></li>
+                  <li><span>2</span><strong>部門主管</strong></li>
+                  <li><span>3</span><strong>行政部門主任</strong></li>
+                  <li><span>4</span><strong>總務審核</strong></li>
+                  <li><span>5</span><strong>執行長核准</strong></li>
+                  <li><span>6</span><strong>自動用印與寄發處理</strong></li>
+                </ol>
+              </aside>
+            </section>
+
+            <div class="compose-bottom-actions">
+              <button class="secondary-button" id="composePrevBtn" type="button">回到填寫</button>
+              <button class="secondary-button" id="saveDispatchDraftBtn" type="button">儲存草稿</button>
+              <button class="secondary-button" id="resetDraftConfirmBtn" type="button">取消確認</button>
+              <button class="secondary-button" id="confirmDraftBtn" type="button">確認內容無誤</button>
+              <button class="primary-button" id="composeNextBtn" type="button">前往確認</button>
+              <button class="primary-button" id="submitDispatchBtn" type="submit" disabled>送出簽核</button>
             </div>
-          </div>
+          </form>
         </section>
 
         <section class="view" id="format">
@@ -3673,6 +3632,6 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="app.js?v=20260702-compose-preview-bottom"></script>
+    <script src="app.js?v=20260702-compose-two-page"></script>
   </body>
 </html>
