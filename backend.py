@@ -107,7 +107,7 @@ EDOC_JOB_LEVELS = {"職員", "組長", "課長", "部長", "區經理", "執行�
 HRIS_QUICK_LOGIN_SECRET = os.getenv("HRIS_QUICK_LOGIN_SECRET", os.getenv("NEXTAUTH_SECRET", "suiyue-hris-local-quick-login-secret"))
 PORTAL_HANDOFF_SECRET = os.getenv(
     "EDOC_PORTAL_HANDOFF_SECRET",
-    os.getenv("PORTAL_HANDOFF_SIGNING_SECRET", os.getenv("APM_PORTAL_SIGNING_SECRET", "")),
+    os.getenv("PORTAL_HANDOFF_SIGNING_SECRET", ""),
 ).strip()
 PORTAL_HANDOFF_MAX_AGE_SECONDS = int(os.getenv("EDOC_PORTAL_HANDOFF_MAX_AGE_SECONDS", "600"))
 
