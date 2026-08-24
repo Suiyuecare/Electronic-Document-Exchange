@@ -1,1 +1,6 @@
 pypdf==5.4.0
+PyMuPDF==1.26.5
+Pillow==11.3.0
+reportlab==4.4.9
+svglib==1.5.1
+vercel==0.10.0

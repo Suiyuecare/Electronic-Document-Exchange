@@ -3,102 +3,36 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>歲悅電子公文交換系統</title>
-    <script>
-      (() => {
-        const isProductionEdoc = window.location.hostname === "edoc.suiyuecare.com";
-        if (!isProductionEdoc) return;
-        const params = new URLSearchParams(window.location.search);
-        const hasPortalHandoff = params.has("payload") || params.has("token") || params.get("portal") === "1";
-        const requestedPortalLogin = params.get("portalLogin") === "1";
-        const allowLocalLogin = params.get("localLogin") === "1";
-        let hasEdocSession = false;
-        try {
-          hasEdocSession = Boolean(window.localStorage?.getItem("suiyuecare-edoc-session"));
-        } catch (error) {
-          hasEdocSession = false;
-        }
-        const hasBridgeCookie = document.cookie.includes("suiyue_hris_quick_login_user=");
-        if (!requestedPortalLogin || hasPortalHandoff || allowLocalLogin || hasEdocSession || hasBridgeCookie) return;
-        const returnUrl = new URL(window.location.href);
-        ["payload", "signature", "token", "email", "role", "scope", "portal", "portalLogin"].forEach((key) => returnUrl.searchParams.delete(key));
-        const loginUrl = new URL("https://login.suiyuecare.com/portal/");
-        loginUrl.searchParams.set("module", "edoc");
-        loginUrl.searchParams.set("next", returnUrl.toString());
-        window.location.replace(loginUrl.toString());
-      })();
-    </script>
+    <title>公文收發電子用印系統</title>
+    <script src="entry-bootstrap.js?v=20260824-sso-recovery-r1"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d97706'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='18' font-family='serif' fill='white'%3EW%3C/text%3E%3C/svg%3E" />
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png?v=20260713" />
+    <link rel="icon" type="image/png" sizes="48x48" href="assets/favicon-48.png?v=20260713" />
+    <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260702-compose-two-page" />
+    <link rel="stylesheet" href="styles.css?v=20260824-uiux-r3" />
   </head>
   <body>
-    <div class="login-screen app" id="loginScreen">
-      <section class="login-left">
-        <div>
-          <div class="login-mark">
-            <div class="login-brand">文</div>
-            <div>
-              <div class="login-brand-name">歲悅電子公文</div>
-              <div class="login-brand-sub">Internal Document Exchange</div>
-            </div>
-          </div>
-          <h1 class="login-title">內部電子公文交換系統</h1>
-          <div class="login-points">
-            <div class="login-point">這裡是公文收發、撰寫、簽核與合約管理入口</div>
-            <div class="login-point">登入後依身分只顯示可作業功能</div>
-            <div class="login-point">總務統一收文，再分發給各部門主管</div>
-            <div class="login-point">此系統與公開網站完全分離</div>
-          </div>
+    <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
+      <section class="module-entry-card">
+        <img src="assets/suiyue-milk-favicon.png" alt="" width="64" height="64" />
+        <p class="eyebrow">公文收發電子用印系統</p>
+        <strong id="moduleEntryProgressTitle">正在確認公司帳號</strong>
+        <span id="moduleEntryProgressDetail">沿用會計系統登入狀態，不需要再次登入。</span>
+        <div class="module-entry-progress-track" aria-hidden="true">
+          <i id="moduleEntryProgressBar"></i>
         </div>
-        <div class="login-footnote">edoc.suiyuecare.com · jAgent Gateway · RBAC Protected</div>
+        <small id="moduleEntryProgressPercent">15%</small>
       </section>
+    </div>
 
-      <section class="login-right">
-        <form class="login-card" id="loginForm">
-          <p class="eyebrow">System Login</p>
-          <h2>登入電子公文交換</h2>
-          <label>
-            電子郵件
-            <input id="loginEmail" type="email" value="edoc@suiyuecare.com" autocomplete="username" />
-          </label>
-          <label>
-            密碼
-            <input id="loginPassword" type="password" value="demo1234" autocomplete="current-password" />
-          </label>
-          <label>
-            資料環境
-            <select id="loginEnvironment">
-              <option>測試資料</option>
-              <option>正式資料</option>
-            </select>
-          </label>
-          <p class="login-hint">登入會送到後端 Auth API，建立 session、寫入登入紀錄，並依 RBAC 權限載入工作台。</p>
-          <button class="primary-button" type="submit">登入系統</button>
-          <button class="secondary-button" id="portalLoginBtn" type="button">使用前台帳號登入</button>
-          <button class="secondary-button" id="demoLoginBtn" type="button">使用總務測試帳號</button>
-          <section class="quick-login-panel" aria-label="不同權限快速登入">
-            <div>
-              <p class="eyebrow">Quick Login</p>
-              <h3>不同權限快速登入</h3>
-            </div>
-            <div class="quick-login-grid" id="quickLoginGrid">
-              <button type="button" data-quick-role="員工">員工</button>
-              <button type="button" data-quick-role="主管">主管</button>
-              <button type="button" data-quick-role="總務">總務</button>
-              <button type="button" data-quick-role="行政部主任">行政部主任</button>
-              <button type="button" data-quick-role="主任">主任</button>
-              <button type="button" data-quick-role="執行長">執行長</button>
-              <button type="button" data-quick-role="人資">人資</button>
-              <button type="button" data-quick-role="會計">會計</button>
-              <button type="button" data-quick-role="業務助理">業務助理</button>
-            </div>
-            <p class="login-hint">用來快速檢視員工、主管、總務與行政權限，不影響正式帳號設定。</p>
-          </section>
-        </form>
-      </section>
+    <div class="auth-redirect-screen app hidden" id="loginScreen" aria-hidden="true">
+      <div class="auth-redirect-status" role="status" aria-live="polite">
+        <strong>正在沿用 Finance 公司帳號</strong>
+        <span>即將返回公司共用登入入口。</span>
+      </div>
     </div>
 
     <div class="app-shell app hidden" id="appShell">
@@ -107,24 +41,24 @@
           <div class="brand-mark">文</div>
           <div>
             <p class="eyebrow">Suiyuecare eDoc</p>
-            <h1>電子公文交換</h1>
+            <h1>公文收發電子用印系統</h1>
           </div>
         </div>
 
-        <nav class="nav-list" aria-label="電子公文交換功能">
+        <nav class="nav-list" aria-label="公文收發電子用印系統功能">
           <button class="nav-item active" data-target="dashboard" data-icon="總">總覽</button>
-          <button class="nav-item" data-target="search" data-icon="搜">查詢搜尋</button>
-          <button class="nav-item" data-target="approvalLog" data-icon="簽">簽核紀錄</button>
+          <button class="nav-item" data-target="search" data-icon="搜">公文查詢</button>
+          <button class="nav-item" data-target="approvalLog" data-icon="簽">簽核進度</button>
           <button class="nav-item" data-target="contracts" data-icon="約">合約管理</button>
           <button class="nav-item" data-target="contractSeal" data-icon="印">合約用印</button>
-          <button class="nav-item" data-target="inbound" data-icon="收">收文管理</button>
-          <button class="nav-item" data-target="dispatch" data-icon="發">發文管理</button>
+          <button class="nav-item" data-target="electronicSeal" data-icon="章">電子用印</button>
+          <button class="nav-item" data-target="inbound" data-icon="錄">公文收錄</button>
           <button class="nav-item" data-target="compose" data-icon="寫">建立公文</button>
           <button class="nav-item" data-target="format" data-icon="格">文書格式</button>
           <button class="nav-item" data-target="workflow" data-icon="流">流程控管</button>
           <button class="nav-item" data-target="seals" data-icon="章">印鑑管理</button>
           <button class="nav-item" data-target="tracking" data-icon="催">稽催追蹤</button>
-          <button class="nav-item" data-target="exchange" data-icon="介">jAgent 介接</button>
+          <button class="nav-item" data-target="exchange" data-icon="介" id="exchangeNavItem">交換介接</button>
           <button class="nav-item" data-target="archive" data-icon="檔">歸檔保存</button>
           <button class="nav-item" data-target="security" data-icon="安">資安控管</button>
           <button class="nav-item" data-target="fileSecurity" data-icon="鎖">檔案資安</button>
@@ -137,11 +71,28 @@
           <button class="nav-item" data-target="complianceOps" data-icon="法">法遵營運</button>
           <button class="nav-item" data-target="features" data-icon="表">功能總表</button>
           <button class="nav-item" data-target="settings" data-icon="設">系統設定</button>
+          <button class="nav-more-trigger" id="navMoreBtn" type="button" aria-haspopup="dialog" aria-controls="navMoreDialog" hidden>
+            <span aria-hidden="true">＋</span>
+            <strong>更多功能</strong>
+          </button>
         </nav>
+
+        <dialog class="nav-more-dialog" id="navMoreDialog" aria-labelledby="navMoreTitle">
+          <div class="nav-more-head">
+            <div>
+              <p class="eyebrow">依目前權限顯示</p>
+              <h2 id="navMoreTitle">更多功能</h2>
+            </div>
+            <button class="nav-more-close" id="navMoreCloseBtn" type="button" aria-label="關閉更多功能">關閉</button>
+          </div>
+          <p class="nav-more-intro">日常工作留在主選單；設定、報表與低頻管理集中在這裡。</p>
+          <div class="nav-more-list" id="navMoreList"></div>
+        </dialog>
 
         <section class="profile-card">
           <p class="eyebrow">目前角色</p>
-          <select id="roleSelect" aria-label="切換角色">
+          <strong id="currentRoleLabel">依 Finance 帳號載入</strong>
+          <select class="hidden" id="roleSelect" aria-hidden="true" tabindex="-1">
             <option>員工</option>
             <option>主管</option>
             <option>主任</option>
@@ -152,7 +103,7 @@
             <option selected>總務</option>
             <option>業務助理</option>
           </select>
-          <div class="role-note" id="roleNote">可登入 jAgent、執行收文、發文交換、查詢交換結果與處理異常。</div>
+          <div class="role-note" id="roleNote">目前為內部正式使用；政府電子交換未啟用。</div>
         </section>
       </aside>
 
@@ -199,16 +150,41 @@
               <span class="status-pill" id="goLiveDecisionBadge">未檢查</span>
             </div>
             <div class="go-live-gate-grid" id="goLiveGateGrid"></div>
+            <div class="launch-fix-queue" id="launchFixQueue"></div>
             <div class="go-live-actions">
               <button class="primary-button" id="goLiveRefreshBtn" type="button">重新檢查</button>
+              <button class="secondary-button" id="launchReportExportBtn" type="button">匯出走測報告</button>
+              <button class="secondary-button" id="launchCutoverExportBtn" type="button">匯出上線交接包</button>
               <button class="secondary-button" data-target="ops" type="button">開啟維運中心</button>
             </div>
+          </section>
+
+          <section class="panel launch-checklist-panel" id="launchChecklistPanel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">User Go-Live</p>
+                <h3>下週一使用者上線檢核</h3>
+              </div>
+              <span class="status-pill" id="launchChecklistStatus">待檢查</span>
+            </div>
+            <div class="launch-checklist-grid" id="launchChecklistGrid"></div>
+          </section>
+
+          <section class="panel launch-journey-attestation-panel" id="launchJourneyAttestationPanel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Smoke Test Sign-Off</p>
+                <h3>現場走測驗收紀錄</h3>
+              </div>
+              <span class="status-pill" id="launchJourneyAttestationStatus">待檢查</span>
+            </div>
+            <div class="launch-journey-attestation-list" id="launchJourneyAttestationList"></div>
           </section>
 
           <section class="panel daily-action-center" id="dailyActionCenter">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Next Actions</p>
+                <p class="eyebrow">今日待辦</p>
                 <h3>今天先做這三件事</h3>
               </div>
               <span class="status-pill" id="dailyActionCount">0 件</span>
@@ -333,7 +309,7 @@
           <section class="panel dashboard-approval-panel" id="dashboardApprovalPanel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Approval Progress</p>
+                <p class="eyebrow">簽核案件</p>
                 <h3>檢視簽核進度</h3>
               </div>
               <span class="status-pill" id="dashboardApprovalStatus">依身份載入</span>
@@ -391,67 +367,46 @@
         </section>
 
         <section class="view" id="search">
-          <div class="section-header">
-            <div>
-              <p class="eyebrow">Unified Search</p>
-              <h3>查詢與搜尋</h3>
-            </div>
-            <div class="quick-actions">
-              <button class="primary-button" id="searchRunBtn" type="button">執行查詢</button>
-              <button class="secondary-button" id="searchClearBtn" type="button">清除條件</button>
-            </div>
-          </div>
-
           <section class="panel search-panel">
-            <form class="compact-form search-form" id="searchForm">
-              <label>關鍵字<input id="searchQuery" type="search" placeholder="文號、機關、主旨、附件、雜湊、通知、操作人" /></label>
-              <label>類別<select id="searchCategory"><option value="all">全部</option><option value="documents">公文</option><option value="approval_records">簽核進度</option><option value="contracts">合約</option><option value="contract_approvals">合約簽核</option><option value="attachments">附件</option><option value="attachment_security">附件安全</option><option value="exchange_tasks">交換任務</option><option value="exchange_events">交換事件</option><option value="notifications">通知</option><option value="audit_logs">稽核紀錄</option><option value="file_access_logs">檔案存取</option></select></label>
-              <label>狀態<input id="searchStatus" placeholder="待簽核、待清稿、退回補正、交換失敗" /></label>
-              <label>筆數<select id="searchLimit"><option>30</option><option selected>80</option><option>150</option></select></label>
+            <form class="search-form" id="searchForm">
+              <label class="search-keyword-field">關鍵字<input id="searchQuery" type="search" placeholder="文號、機關、主旨或附件名稱" /></label>
+              <label>類型<select id="searchCategory"><option value="all">全部</option><option value="documents">公文</option><option value="approval_records">簽核進度</option><option value="contracts">合約</option><option value="attachments">附件</option></select></label>
+              <label>狀態<select id="searchStatus"><option value="">全部</option><option value="草稿">草稿</option><option value="待">待處理</option><option value="退回">已退回</option><option value="已寄送">已寄送</option><option value="完成">已完成</option></select></label>
+              <input id="searchLimit" type="hidden" value="80" />
+              <div class="search-form-actions">
+                <button class="primary-button" id="searchRunBtn" type="submit">查詢</button>
+                <button class="secondary-button" id="searchClearBtn" type="button">重設</button>
+              </div>
             </form>
           </section>
 
-          <div class="metrics-grid">
-            <article class="metric-card"><span>結果數</span><strong id="searchResultCount">0</strong><small id="searchResultNote">尚未查詢</small></article>
-            <article class="metric-card"><span>公文 / 合約</span><strong id="searchDocCount">0</strong><small>收發文與合約主檔</small></article>
-            <article class="metric-card"><span>附件/資安</span><strong id="searchFileCount">0</strong><small>附件、掃描、存取</small></article>
-            <article class="metric-card"><span>事件/通知</span><strong id="searchEventCount">0</strong><small>交換、通知、稽核</small></article>
-          </div>
-
-          <div class="search-layout">
-            <section class="panel">
-              <div class="panel-heading">
-                <h3>搜尋結果</h3>
-                <span class="status-pill" id="searchStatusPill">Ready</span>
+          <section class="panel search-results-panel">
+            <div class="panel-heading search-results-heading">
+              <div>
+                <h3>查詢結果</h3>
+                <span id="searchResultNote">尚未查詢</span>
               </div>
-              <div class="address-results" id="searchResults"></div>
-            </section>
-
-            <aside class="panel">
-              <div class="panel-heading">
-                <h3>結果明細</h3>
-                <span class="status-pill" id="selectedSearchStatus">未選取</span>
-              </div>
-              <div id="searchDetail"></div>
-            </aside>
-          </div>
+              <strong id="searchResultCount">0 筆</strong>
+            </div>
+            <div class="search-results" id="searchResults"></div>
+          </section>
         </section>
 
         <section class="view" id="approvalLog">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Approval Trail</p>
-              <h3>簽核流程紀錄</h3>
+              <p class="eyebrow">簽核案件</p>
+              <h3>簽核進度</h3>
             </div>
             <span class="status-pill" id="approvalLogCount">0 件</span>
           </div>
 
           <div class="inbound-toolbar panel">
-            <div class="inbound-simple-flow" role="group" aria-label="簽核紀錄篩選">
-              <button class="flow-step-chip active" type="button" data-approval-log-filter="all">全部</button>
-              <button class="flow-step-chip" type="button" data-approval-log-filter="待">待處理</button>
-              <button class="flow-step-chip" type="button" data-approval-log-filter="退回">已退回</button>
-              <button class="flow-step-chip" type="button" data-approval-log-filter="完成">已完成</button>
+            <div class="inbound-simple-flow" role="tablist" aria-label="簽核進度篩選">
+              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="unanswered">未回覆</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="draft">草稿</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="approving">簽核中</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="sent">已寄送</button>
             </div>
             <label class="toolbar-search compact">搜尋<input id="approvalLogSearch" type="search" placeholder="文號、主旨、角色、狀態" /></label>
           </div>
@@ -688,56 +643,136 @@
         <section class="view" id="inbound">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Receive</p>
-              <h3>公文收發</h3>
+              <p class="eyebrow">收文與歸檔</p>
+              <h3>公文收錄</h3>
             </div>
-            <button class="primary-button" id="pullJagentBtn" type="button">拉取 jAgent 來文</button>
+            <button class="primary-button" id="openInboundArchiveBtn" type="button">新增收錄</button>
           </div>
 
-          <div class="inbound-toolbar panel">
-            <div class="inbound-simple-flow" role="group" aria-label="收文篩選">
-              <button class="flow-step-chip active" type="button" data-inbound-filter="all">全部</button>
-              <button class="flow-step-chip" type="button" data-inbound-filter="待登錄">1 待登錄</button>
-              <button class="flow-step-chip" type="button" data-inbound-filter="待分派">2 待分派</button>
-              <button class="flow-step-chip" type="button" data-inbound-filter="已收文">3 已分派</button>
-              <button class="flow-step-chip issue" type="button" data-inbound-filter="異常待處理">異常</button>
+          <div class="inbound-workspace-tabs" role="tablist" aria-label="公文收錄工作區">
+            <button class="flow-step-chip active" type="button" role="tab" data-inbound-section="records">收錄清單</button>
+            <button class="flow-step-chip" type="button" role="tab" data-inbound-section="archive">新增收錄</button>
+            <button class="flow-step-chip" type="button" role="tab" data-inbound-section="dispatch">內部派發</button>
+          </div>
+
+          <div data-inbound-section-panel="records">
+            <div class="inbound-toolbar panel">
+              <div class="inbound-simple-flow" role="group" aria-label="收錄狀態篩選">
+                <button class="flow-step-chip active" type="button" data-inbound-filter="all">全部</button>
+                <button class="flow-step-chip" type="button" data-inbound-filter="已歸檔">已歸檔</button>
+                <button class="flow-step-chip" type="button" data-inbound-filter="待分派">待分派</button>
+                <button class="flow-step-chip" type="button" data-inbound-filter="已收文">辦理中</button>
+                <button class="flow-step-chip issue" type="button" data-inbound-filter="異常待處理">異常</button>
+              </div>
+              <label class="toolbar-search compact">搜尋<input id="inboundSearch" type="search" placeholder="搜尋來文單位、主旨或收文號" /></label>
             </div>
-            <label class="toolbar-search compact">搜尋<input id="inboundSearch" type="search" placeholder="搜尋機關、主旨或收文號" /></label>
+
+            <div class="inbound-layout">
+              <section class="panel inbound-list-panel">
+                <div class="panel-heading">
+                  <h3>收錄清單</h3>
+                  <span class="status-pill" id="inboundCount">0 筆</span>
+                </div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>收文號</th>
+                        <th>收錄來源</th>
+                        <th>來文單位</th>
+                        <th>主旨</th>
+                        <th>狀態</th>
+                        <th>承辦</th>
+                      </tr>
+                    </thead>
+                    <tbody id="inboundRows"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <span class="hidden" id="selectedInboundStatus">未選取</span>
+              <div class="hidden" id="inboundDetail"></div>
+            </div>
           </div>
 
-          <div class="inbound-layout">
-            <section class="panel inbound-list-panel">
-              <div class="panel-heading">
-                <h3>來文清單</h3>
-                <span class="status-pill" id="inboundCount">0 筆</span>
+          <section class="panel inbound-archive-panel" data-inbound-section-panel="archive" hidden>
+            <div class="panel-heading">
+              <div>
+                <h3>新增信件／公文收錄</h3>
+                <small id="inboundArchiveOwnerLabel">收錄人與單位將依目前 Finance 帳號帶入</small>
               </div>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>收文號</th>
-                      <th>來文機關</th>
-                      <th>主旨</th>
-                      <th>狀態</th>
-                      <th>承辦</th>
-                    </tr>
-                  </thead>
-                  <tbody id="inboundRows"></tbody>
-                </table>
+              <span class="status-pill">歸檔留存</span>
+            </div>
+            <form class="compact-form inbound-archive-form" id="inboundArchiveForm">
+              <div class="inline-fields">
+                <label>收錄來源<select id="inboundArchiveSourceType">
+                  <option value="general_affairs_email">總務收到 Email</option>
+                  <option value="general_affairs_physical">總務收到實體信件／公文</option>
+                  <option value="local_unit_physical">地方單位收到實體信件／公文</option>
+                </select></label>
+                <label>收到日期<input id="inboundArchiveReceivedDate" type="date" /></label>
+                <label>收件單位<input id="inboundArchiveDepartment" /></label>
               </div>
-            </section>
+              <div class="inline-fields">
+                <label>來文單位／寄件人<input id="inboundArchiveSenderName" required placeholder="請填寫來文單位或寄件人" /></label>
+                <label>聯絡方式<input id="inboundArchiveSenderContact" placeholder="Email、電話或地址" /></label>
+                <label>文別<select id="inboundArchiveDocumentType"><option>公文</option><option>信件</option><option>通知</option><option>其他</option></select></label>
+              </div>
+              <label>主旨<input id="inboundArchiveSubject" required placeholder="請填寫信件或公文主旨" /></label>
+              <label>內容摘要／備註<textarea id="inboundArchiveBody" rows="4" placeholder="填寫內容摘要、後續注意事項或紙本保管位置"></textarea></label>
+              <div class="inline-fields">
+                <label>速別<select id="inboundArchivePriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
+                <label>密等<select id="inboundArchiveSecurity"><option>普通</option><option>密</option><option>機密</option></select></label>
+                <label>附件<input id="inboundArchiveFiles" type="file" multiple /><span class="field-hint">目前一般附件以 JSON 上傳，單檔上限 3 MB。</span></label>
+              </div>
+              <button class="primary-button" id="inboundArchiveSubmitBtn" type="submit">完成收錄歸檔</button>
+            </form>
+          </section>
 
-            <span class="hidden" id="selectedInboundStatus">未選取</span>
-            <div class="hidden" id="inboundDetail"></div>
-          </div>
+          <section class="panel internal-dispatch-panel" data-inbound-section-panel="dispatch" hidden>
+            <div class="panel-heading">
+              <div>
+                <h3>內部派發</h3>
+                <small>總務、行政部門主任、執行長可建立派發。</small>
+              </div>
+              <button class="secondary-button" id="internalDispatchReloadBtn" type="button">重新整理</button>
+            </div>
+            <div class="internal-dispatch-layout">
+              <div id="internalDispatchCreateArea">
+                <form class="compact-form internal-dispatch-form" id="internalDispatchForm">
+                  <label>關聯收錄公文<select id="internalDispatchDocumentSelect"></select></label>
+                  <label>主旨<input id="internalDispatchTitleInput" placeholder="請輸入派發主旨" /></label>
+                  <label>內容<textarea id="internalDispatchBodyInput" rows="4" placeholder="請輸入辦理事項或注意內容"></textarea></label>
+                  <fieldset class="internal-dispatch-recipient-fieldset">
+                    <legend>收件人與處理要求</legend>
+                    <div class="internal-dispatch-recipient-picker" id="internalDispatchRecipientsPicker"></div>
+                  </fieldset>
+                  <label>處理期限天數<input id="internalDispatchDueDaysInput" type="number" min="1" value="3" /></label>
+                  <button class="primary-button" id="internalDispatchSubmitBtn" type="submit">送出內部派發</button>
+                </form>
+              </div>
+              <section class="internal-dispatch-board">
+                <div class="panel-heading tight">
+                  <h3>派發與處理紀錄</h3>
+                  <span class="status-pill" id="internalDispatchCount">0 件</span>
+                </div>
+                <div class="internal-dispatch-list" id="internalDispatchList"></div>
+                <div class="internal-dispatch-detail" id="internalDispatchDetail"></div>
+              </section>
+            </div>
+          </section>
 
           <details class="advanced-section inbound-advanced">
-            <summary>進階設定：登錄、分派、異常通知內容</summary>
+            <summary>既有交換收文：登錄、分派與異常處理</summary>
             <div class="inbound-workbench">
             <section class="panel">
               <div class="panel-heading">
                 <h3>登錄表單</h3>
-                <button class="text-button" id="saveRegisterDraftBtn" type="button">暫存</button>
+                <div class="panel-actions">
+                  <button class="text-button" id="pullJagentBtn" type="button">正式交換未啟用</button>
+                  <button class="text-button" id="createInboundSmokeTestBtn" type="button">建立去識別化收文走測</button>
+                  <button class="text-button" id="saveRegisterDraftBtn" type="button">暫存</button>
+                </div>
               </div>
               <form class="compact-form" id="registerForm">
                 <label>收文日期<input id="registerDate" type="date" value="2026-05-22" /></label>
@@ -809,7 +844,7 @@
             <button class="primary-button" data-target="compose" type="button">建立新發文</button>
             <button class="secondary-button" id="validateDispatchBtn" type="button">清稿檢核</button>
             <button class="secondary-button" id="packageDispatchBtn" type="button">附件封裝</button>
-            <button class="secondary-button" id="sendDispatchBtn" type="button">送交 jAgent</button>
+            <button class="secondary-button" id="sendDispatchBtn" type="button">正式交換送出</button>
             <button class="secondary-button" id="queryDispatchBtn" type="button">查詢狀態</button>
             <button class="secondary-button" id="resendDispatchBtn" type="button">重送</button>
             <button class="secondary-button" id="exportDispatchBtn" type="button">匯出發文清單</button>
@@ -850,6 +885,16 @@
               <button class="flow-step-chip" type="button" data-official-scope="new">新增申請單</button>
             </div>
 
+            <section class="official-dispatch-readiness" id="officialDispatchReadinessPanel">
+              <div>
+                <p class="eyebrow">General Affairs Dispatch</p>
+                <h3>總務寄發走測任務</h3>
+                <p id="officialDispatchReadinessSummary">請重新整理發文申請單，確認已用印後的寄發與申請人確認流程。</p>
+              </div>
+              <span class="status-pill" id="officialDispatchReadinessStatus">待檢查</span>
+              <div class="official-dispatch-readiness-grid" id="officialDispatchReadinessList"></div>
+            </section>
+
             <div class="official-workflow-layout">
               <section class="official-workflow-list">
                 <div class="inline-fields">
@@ -857,9 +902,9 @@
                     <option value="">全部</option>
                     <option value="draft">draft</option>
                     <option value="pending_applicant_manager">申請人主管</option>
-                    <option value="pending_department_head">部門主管</option>
+                    <option value="pending_department_head">部門主任</option>
                     <option value="pending_admin_director">行政部門主任</option>
-                    <option value="pending_general_affairs_review">總務審核</option>
+                    <option value="pending_general_affairs_review">總務專員</option>
                     <option value="pending_ceo">執行長</option>
                     <option value="pending_general_affairs_dispatch">總務寄發</option>
                     <option value="returned_to_applicant_for_send">申請人寄發</option>
@@ -874,10 +919,10 @@
               <section class="official-workflow-detail" id="officialWorkflowDetail"></section>
             </div>
 
-            <form class="official-workflow-form hidden" id="officialWorkflowForm">
+            <form class="official-workflow-form official-document-entry hidden" id="officialWorkflowForm">
               <div class="panel-heading tight">
-                <h3>新增發文申請單</h3>
-                <span class="status-pill">兩種來源</span>
+                <h3 id="officialWorkflowFormTitle">新增發文申請單</h3>
+                <span class="status-pill" id="officialWorkflowFormMode">兩種來源</span>
               </div>
               <div class="inline-fields">
                 <label>申請來源<select id="officialSourceType">
@@ -885,38 +930,62 @@
                   <option value="uploaded_pdf">上傳既有 PDF 作為申請單版本</option>
                 </select></label>
                 <label>公司<select id="officialCompanySelect"></select></label>
-                <label>印章<select id="officialSealSelect"></select></label>
-                <label>寄發方式<select id="officialDispatchMethodSelect">
-                  <option value="electronic_official_document_by_general_affairs">總務電子公文系統發文</option>
-                  <option value="return_to_applicant_for_manual_send">回申請人自行寄發</option>
-                  <option value="email_by_general_affairs">總務 Email 寄出</option>
-                  <option value="physical_mail_by_general_affairs">總務紙本郵寄</option>
-                  <option value="no_dispatch_required">僅用印歸檔</option>
-                </select></label>
+                <label>印章<select id="officialSealSelect"></select><span class="field-hint" id="officialSealHint"></span></label>
+                <label>寄發方式<select id="officialDispatchMethodSelect" aria-describedby="officialDispatchMethodHint" disabled>
+                  <option value="electronic_official_document_by_general_affairs">總務於本系統完成寄送節點</option>
+                  <option value="no_dispatch_required">用印完成後交申請人確認與下載</option>
+                </select><span class="field-hint" id="officialDispatchMethodHint">空白公文用印完成後由總務在本系統內寄送與回填證明；正式電子公文交換 provider 仍未啟用。</span></label>
               </div>
+              <section class="approval-route-picker" id="officialApprovalRouteSection">
+                <label>公文用印文件類型
+                  <select id="officialApprovalCategorySelect" required aria-describedby="officialApprovalCategoryHint">
+                    <option value="" selected disabled>請選擇文件細項</option>
+                  </select>
+                  <span class="field-hint" id="officialApprovalCategoryHint">四大分類僅供分組，請選擇分類下的文件細項。</span>
+                </label>
+                <div class="approval-route-summary" aria-live="polite">
+                  <div class="approval-route-heading">
+                    <span>自動判定流程</span>
+                    <strong id="officialApprovalRouteBadge">尚未選擇</strong>
+                  </div>
+                  <p id="officialApprovalRouteName">選擇文件細項後顯示 A／B／C／D 流程。</p>
+                  <ol class="compose-approval-flow compact" id="officialApprovalRoutePreview">
+                    <li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>
+                  </ol>
+                  <p class="approval-route-outcome" id="officialApprovalRouteOutcome"></p>
+                </div>
+              </section>
               <div class="inline-fields">
-                <label>受文者<input id="officialRecipientInput" placeholder="臺北市政府社會局" /></label>
+                <label>受文者<input id="officialRecipientInput" placeholder="臺北市政府社會局" /><span class="field-hint" id="officialRecipientHint"></span></label>
                 <label>發文單位<input id="officialDispatchUnitInput" placeholder="居家照顧部" /></label>
                 <label>承辦人<input id="officialHandlerInput" placeholder="承辦人" /></label>
               </div>
-              <label>主旨<input id="officialSubjectInput" placeholder="請輸入發文主旨" /></label>
-              <label>說明<textarea id="officialDescriptionInput" rows="4" placeholder="說明內容"></textarea></label>
+              <label>主旨<input id="officialSubjectInput" placeholder="請輸入發文主旨" /><span class="field-hint" id="officialSubjectHint"></span></label>
+              <label id="officialDescriptionField">說明<textarea id="officialDescriptionInput" rows="4" placeholder="說明內容"></textarea><span class="field-hint" id="officialDescriptionHint"></span></label>
               <label>辦法<textarea id="officialMethodInput" rows="3" placeholder="辦法內容"></textarea></label>
-              <label>用印原因<input id="officialReasonInput" placeholder="請填寫用印原因" /></label>
+              <label>用印原因<input id="officialReasonInput" placeholder="請填寫用印原因" /><span class="field-hint" id="officialReasonHint"></span></label>
+              <label>補充附件<input id="officialAttachmentsInput" type="file" multiple /><span class="field-hint">附件會存入這張發文申請單，後續每一位指定簽核人都可在附件區檢視與下載。目前一般附件單檔上限 3 MB；大型 PDF 請使用電子用印 PDF 編輯器的私密直傳。</span></label>
               <div class="inline-fields">
-                <label>PDF 檔案<input id="officialPdfInput" type="file" accept="application/pdf" /></label>
+                <label id="officialPdfField">PDF 檔案<input id="officialPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="officialPdfA4Rule officialPdfHint" /><span class="field-hint" id="officialPdfHint"></span><span class="pdf-a4-rule" id="officialPdfA4Rule" data-state="idle"><strong>只接受 A4</strong><span>A4 直式（210 × 297 mm）或 A4 橫式（297 × 210 mm）；多頁 PDF 每一頁都必須是 A4。</span><em id="officialPdfA4Status" role="status" aria-live="polite">尚未檢查 PDF 頁面尺寸。</em></span></label>
+                <button class="secondary-button launch-smoke-template-button" id="officialSmokePdfTemplateBtn" type="button" hidden>下載去識別化PDF範本</button>
                 <label>頁碼<input id="officialStampPageInput" type="number" min="1" value="1" /></label>
                 <label>X<input id="officialStampXInput" type="number" min="0" value="420" /></label>
                 <label>Y<input id="officialStampYInput" type="number" min="0" value="130" /></label>
-                <label>寬<input id="officialStampWidthInput" type="number" min="1" value="85" /></label>
-                <label>高<input id="officialStampHeightInput" type="number" min="1" value="85" /></label>
+                <label>寬（pt）<input id="officialStampWidthInput" type="number" step="0.01" placeholder="依印章帶入" readonly aria-readonly="true" /></label>
+                <label>高（pt）<input id="officialStampHeightInput" type="number" step="0.01" placeholder="依印章帶入" readonly aria-readonly="true" /></label>
               </div>
-              <div class="official-stamp-preview" id="officialStampPreview">
-                <div class="official-stamp-box" id="officialStampBox">用印位置</div>
+              <span class="field-hint seal-size-lock-hint" id="officialStampSizeLock">選擇印章後會顯示目前版本的實際校準尺寸；章位只能移動。</span>
+              <div class="official-stamp-toolbar">
+                <strong>用印位置</strong>
+                <button class="secondary-button" id="officialAddStampPositionBtn" type="button">新增位置</button>
               </div>
+              <span class="field-hint" id="officialStampPositionsHint"></span>
+              <div class="official-stamp-position-list" id="officialStampPositionsList"></div>
+              <div class="official-stamp-preview" id="officialStampPreview"></div>
               <div class="form-actions">
                 <button class="primary-button" id="officialSubmitBtn" type="submit">送出簽核</button>
                 <button class="secondary-button" id="officialSaveDraftBtn" type="button">建立草稿</button>
+                <button class="secondary-button" id="officialCancelCorrectionBtn" type="button" hidden>取消補正</button>
               </div>
             </form>
           </section>
@@ -949,16 +1018,20 @@
         <section class="view" id="compose">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Compose</p>
+              <p class="eyebrow">兩步完成</p>
               <h3>撰寫公文</h3>
             </div>
             <span class="status-pill" id="composeStepStatus">第 1 頁：填寫資料</span>
           </div>
 
           <div class="compose-progress-strip compact" id="composeStepper" aria-label="撰寫公文頁面"></div>
+          <div class="compose-save-status" id="composeSaveStatus" data-tone="idle" role="status" aria-live="polite">
+            <strong>尚未儲存到系統</strong>
+            <span>輸入期間會先保留在此瀏覽器；請按「暫存草稿」完成後端保存。</span>
+          </div>
           <div class="next-action-card compose-hidden-action" id="composeNextAction" hidden></div>
 
-          <form class="compose-form-shell" id="composeForm">
+          <form class="compose-form-shell official-document-entry" id="composeForm">
             <section class="compose-page compose-edit-page active" data-compose-pane="fill">
               <div class="compose-two-column">
                 <section class="form-panel compose-input-panel">
@@ -991,6 +1064,25 @@
                       </select>
                     </label>
                   </div>
+                  <section class="approval-route-picker compose-route-picker">
+                    <label>公文用印文件類型
+                      <select id="composeApprovalCategorySelect" required aria-describedby="composeApprovalCategoryHint">
+                        <option value="" selected disabled>請選擇文件細項</option>
+                      </select>
+                      <span class="field-hint" id="composeApprovalCategoryHint">四大分類僅供分組，請選擇分類下的文件細項。</span>
+                    </label>
+                    <div class="approval-route-summary" aria-live="polite">
+                      <div class="approval-route-heading">
+                        <span>自動判定流程</span>
+                        <strong id="composeApprovalRouteBadge">尚未選擇</strong>
+                      </div>
+                      <p id="composeApprovalRouteName">選擇文件細項後顯示 A／B／C／D 流程。</p>
+                      <ol class="compose-approval-flow compact" id="composeApprovalRoutePreview">
+                        <li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>
+                      </ol>
+                      <p class="approval-route-outcome" id="composeApprovalRouteOutcome"></p>
+                    </div>
+                  </section>
                   <label>
                     發文字號
                     <div class="input-action">
@@ -1000,32 +1092,38 @@
                   </label>
                   <label>
                     受文者
-                    <input id="recipient" value="臺北市政府社會局" />
+                    <input id="recipient" placeholder="例如：臺北市政府社會局" />
                     <span class="field-hint" id="recipientHint"></span>
+                  </label>
+                  <label class="compose-purpose-field">
+                    這份公文用途
+                    <textarea id="documentPurpose" rows="4" placeholder="先用自己的話寫要辦理的事情、原因、希望對方採取的行動，以及重要期限。"></textarea>
+                    <span class="field-hint" id="documentPurposeHint">內容只用來協助產生函稿，不會直接出現在正式 PDF。</span>
+                    <button class="secondary-button compose-purpose-generate" id="generateFromPurposeBtn" type="button">產生公文主旨與說明</button>
                   </label>
                   <label>
                     主旨
-                    <input id="subject" value="檢送本公司日間照顧中心設立許可補正資料，請查照。" />
+                    <input id="subject" placeholder="可自行輸入，或由上方用途產生" />
                     <span class="field-hint" id="subjectHint"></span>
                   </label>
                   <label>
                     說明
-                    <textarea id="bodyText" rows="8">依貴局通知辦理，檢附補正資料、附件清冊及相關證明文件。</textarea>
+                    <textarea id="bodyText" rows="8" placeholder="可自行輸入，或由上方用途產生"></textarea>
                     <span class="field-hint" id="bodyTextHint"></span>
                   </label>
 
                   <div class="compose-field-grid">
                     <label>
                       寄件人地址
-                      <input id="contactAddress" value="220205 新北市板橋區英士路192之1號" />
+                      <input id="contactAddress" placeholder="依登入帳號所屬公司預設，可編輯" />
                     </label>
                     <label>
                       寄件承辦人
-                      <input id="contactOwner" value="業務助理" />
+                      <input id="contactOwner" placeholder="依登入帳號姓名預設，可編輯" />
                     </label>
                     <label>
-                      寄件人電話
-                      <input id="contactPhone" value="(02)2257-7155 分機3762" />
+                      寄件人電話（請在 # 後填寫分機）
+                      <input id="contactPhone" type="tel" inputmode="tel" autocomplete="tel" maxlength="24" pattern="02-66045432\s*#\s*[0-9]+" value="02-66045432 #" />
                     </label>
                     <label>
                       寄件人傳真
@@ -1033,7 +1131,7 @@
                     </label>
                     <label class="span-all">
                       寄件人電子信箱
-                      <input id="contactEmail" value="edoc@suiyuecare.com" />
+                      <input id="contactEmail" type="email" placeholder="依登入帳號 Email 預設，可編輯" />
                     </label>
                   </div>
 
@@ -1059,9 +1157,11 @@
                       </select>
                     </label>
                   </div>
+                  <small class="field-hint" id="composeSealModeHint">所有發文均須依文件類型完成用印簽核；政府電子公文正式交換目前維持停用。</small>
                   <label>
                     附件
                     <input id="attachments" type="file" multiple />
+                    <span class="field-hint">送出後附件會保留在同一張公文申請單，後續每一位指定簽核人都可檢視與下載。</span>
                   </label>
                   <label>
                     附件文字內容
@@ -1075,10 +1175,13 @@
                     <div>
                       <h3>即時函稿預覽</h3>
                     </div>
-                    <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
+                    <div class="draft-preview-heading-actions">
+                      <button class="secondary-button draft-print-button" type="button" data-print-official-draft="#draftPreview">列印函稿</button>
+                      <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
+                    </div>
                   </div>
                   <div class="draft-preview-body" id="draftPreviewBody">
-                    <article class="official-draft-preview" id="draftPreview" data-draft-preview></article>
+                    <article class="official-draft-preview" id="draftPreview" data-draft-preview data-official-format="taiwan-letter-a4" aria-label="正式公文 A4 即時預覽"></article>
                   </div>
                 </section>
               </div>
@@ -1091,24 +1194,24 @@
                     <p class="eyebrow">Review</p>
                     <h3>函稿預覽</h3>
                   </div>
-                  <span class="status-pill" id="composeConfirmHint">尚未確認</span>
+                  <div class="draft-preview-heading-actions">
+                    <button class="secondary-button draft-print-button" type="button" data-print-official-draft="#draftReviewPreview">列印函稿</button>
+                    <span class="status-pill" id="composeConfirmHint">尚未確認</span>
+                  </div>
                 </div>
-                <article class="official-draft-preview review" id="draftReviewPreview" data-draft-preview></article>
+                <article class="official-draft-preview review" id="draftReviewPreview" data-draft-preview data-official-format="taiwan-letter-a4" aria-label="正式公文 A4 確認預覽"></article>
               </section>
 
               <aside class="panel compose-approval-panel">
                 <div class="panel-heading tight">
                   <h3>簽核流程</h3>
-                  <span class="status-pill">送出後</span>
+                  <span class="status-pill" id="composeApprovalRouteStatus">尚未選擇</span>
                 </div>
+                <p class="approval-route-confirm-name" id="composeApprovalRouteConfirmName">請先選擇公文用印文件類型。</p>
                 <ol class="compose-approval-flow" id="composeApprovalFlow">
-                  <li><span>1</span><strong>申請人主管</strong></li>
-                  <li><span>2</span><strong>部門主管</strong></li>
-                  <li><span>3</span><strong>行政部門主任</strong></li>
-                  <li><span>4</span><strong>總務審核</strong></li>
-                  <li><span>5</span><strong>執行長核准</strong></li>
-                  <li><span>6</span><strong>自動用印與寄發處理</strong></li>
+                  <li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>
                 </ol>
+                <p class="approval-route-outcome" id="composeApprovalRouteConfirmOutcome"></p>
               </aside>
             </section>
 
@@ -1123,7 +1226,7 @@
           </form>
         </section>
 
-        <section class="view" id="format">
+        <section class="view official-document-entry" id="format">
           <div class="section-header">
             <div>
               <p class="eyebrow">Document Format</p>
@@ -1207,7 +1310,7 @@
         <section class="view" id="workflow">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Workflow Control</p>
+              <p class="eyebrow">簽核設定</p>
               <h3>流程控管</h3>
             </div>
             <div class="quick-actions">
@@ -1216,6 +1319,29 @@
               <button class="secondary-button" id="workflowRejectBtn" type="button">退回所選</button>
             </div>
           </div>
+
+          <section class="panel" id="officialWorkflowConfigPanel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">固定簽核規則</p>
+                <h3>發文簽核流程設定</h3>
+              </div>
+              <div class="detail-actions">
+                <span class="status-pill" id="officialWorkflowConfigStatus">讀取中</span>
+                <button class="primary-button" id="officialWorkflowConfigSaveBtn" type="button" hidden>儲存流程</button>
+              </div>
+            </div>
+            <p class="field-hint">此流程由會計系統的即時職級與組織關係決定：一般申請人依序經申請人主管、部門主任；課長略過申請人主管；主任略過前兩關。C／D 會再加入執行長，之後一律經行政部門主任、總務專員並回到申請人收件。已在簽核中的案件不會被改動。</p>
+            <div class="workflow-config-sequence" id="officialWorkflowConfigSteps">
+              <label><input type="checkbox" data-official-workflow-step="applicant_manager" checked disabled />申請人主管</label>
+              <label><input type="checkbox" data-official-workflow-step="department_head" checked disabled />部門主任</label>
+              <label><input type="checkbox" data-official-workflow-step="ceo" disabled />執行長（僅 C／D 自動加入）</label>
+              <label><input type="checkbox" data-official-workflow-step="admin_director" checked disabled />行政部門主任</label>
+              <label><input type="checkbox" data-official-workflow-step="general_affairs_review" checked disabled />總務專員</label>
+              <label><input type="checkbox" data-official-workflow-step="applicant_confirm" checked disabled />申請人收件</label>
+            </div>
+            <div class="approval-progress-steps" id="officialWorkflowConfigPreview"></div>
+          </section>
 
           <section class="panel unified-flow-panel">
             <div class="panel-heading">
@@ -1367,7 +1493,7 @@
                     <option>官方公文（需公司最高層代表時）</option><option>授權書（授權對外正式行為）</option><option>合作聲明（涉及法律關係者）</option>
                   </optgroup>
                 </select></label>
-                <label>流程範本<select id="workflowTemplateSelect"><option value="routeA">A 行政部門用印（無需會計）</option><option value="routeB">B 行政部門用印（需會計）</option><option value="routeC" selected>C 執行長用印（無需會計）</option><option value="routeD">D 執行長用印（需會計）</option></select></label>
+                <label>流程範本<select id="workflowTemplateSelect"><option value="routeA">A 行政部門用印（統一簽核）</option><option value="routeB">B 行政部門用印（統一簽核）</option><option value="routeC" selected>C 執行長用印（統一簽核）</option><option value="routeD">D 執行長用印（統一簽核）</option></select></label>
                 <label>適用文別<select id="workflowTemplateDocType"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option><option>合約用印</option></select></label>
                 <label>簽核條件金額<input id="workflowAmountInput" type="number" value="0" /></label>
               </form>
@@ -1392,13 +1518,18 @@
             <section class="panel">
               <div class="panel-heading">
                 <h3>代理人機制</h3>
-                <button class="text-button" id="workflowProxyAddBtn" type="button">新增代理</button>
+                <button class="text-button" id="workflowProxyAddBtn" type="button">重新整理</button>
               </div>
               <form class="compact-form" id="workflowProxyForm">
-                <label>原簽核角色<select id="workflowProxyFrom"><option>行政部主任</option><option>總務</option><option>行政部主任</option><option>主任</option></select></label>
-                <label>代理角色<select id="workflowProxyTo"><option>總務</option><option>行政部主任</option><option>行政部主任</option><option>主任</option></select></label>
-                <label>代理原因<input id="workflowProxyReason" value="主管請假代理" /></label>
+                <label>原簽核人<select id="workflowProxyPrincipal" required><option value="">載入正式人員中</option></select></label>
+                <label>代理人<select id="workflowProxyDelegate" required><option value="">請先選擇原簽核人</option></select></label>
+                <label>代理開始<input id="workflowProxyStartsAt" type="datetime-local" required /></label>
+                <label>代理結束<input id="workflowProxyEndsAt" type="datetime-local" required /></label>
+                <label>代理原因<input id="workflowProxyReason" minlength="2" maxlength="500" placeholder="例如：休假期間由指定同仁代理簽核" required /></label>
+                <button class="primary-button" id="workflowProxySubmitBtn" type="submit">建立代理授權</button>
               </form>
+              <p class="field-note" id="workflowProxyPolicyNote">一般使用者只能替自己設定代理；管理權限帳號才可替同公司其他同仁設定。代理不會改寫原簽核人，所有代簽都會同時保留原簽核人與代理人紀錄。</p>
+              <p class="field-note" id="workflowProxyStatus" role="status" aria-live="polite">登入後載入代理授權。</p>
               <div class="address-results" id="workflowProxyList"></div>
             </section>
 
@@ -1425,11 +1556,247 @@
           </section>
         </section>
 
+        <section class="view" id="electronicSeal">
+          <div class="section-header electronic-seal-header">
+            <div>
+              <p class="eyebrow" id="uploadedSealHeaderEyebrow">四步完成</p>
+              <h3 id="uploadedSealHeaderTitle">電子用印</h3>
+              <p id="uploadedSealHeaderDescription">填寫申請資料、上傳 PDF，直接在文件畫面標示每一個用印位置。</p>
+            </div>
+            <span class="status-pill" id="uploadedSealPdfStatus">尚未上傳 PDF</span>
+          </div>
+
+          <div class="electronic-seal-stepper" aria-label="電子用印步驟">
+            <span class="active"><b>1</b> 填寫申請</span>
+            <span><b>2</b> 上傳 PDF</span>
+            <span><b>3</b> 標示章位或文字</span>
+            <span><b>4</b> 送出簽核</span>
+          </div>
+
+          <div class="electronic-seal-layout">
+            <aside class="panel electronic-seal-form-panel">
+              <div class="panel-heading tight">
+                <div>
+                  <p class="eyebrow">第一步</p>
+                  <h3 id="uploadedSealApplicationTitle">申請人與用印資料</h3>
+                </div>
+                <span class="status-pill">必填</span>
+              </div>
+              <form class="compact-form" id="uploadedSealForm">
+                <div class="inline-fields">
+                  <label>申請人<input id="uploadedSealApplicant" autocomplete="name" placeholder="請輸入姓名" required /></label>
+                  <label>部門<input id="uploadedSealDepartment" placeholder="請輸入部門" required /></label>
+                </div>
+                <div class="inline-fields">
+                  <label>電子郵件<input id="uploadedSealEmail" type="email" autocomplete="email" placeholder="name@suiyuecare.com" required /></label>
+                  <label>聯絡電話<input id="uploadedSealPhone" type="tel" autocomplete="tel" placeholder="分機或手機" required /></label>
+                </div>
+                <div class="inline-fields">
+                  <label id="uploadedSealTypeField">文件類型<select id="uploadedSealType">
+                    <option value="official_document">電子公文</option>
+                    <option value="contract">電子合約</option>
+                    <option value="other">其他文件</option>
+                  </select></label>
+                  <label>公司別<select id="uploadedSealCompany"></select></label>
+                </div>
+                <section class="approval-route-picker" id="uploadedSealApprovalRouteSection">
+                  <label>用印文件類型
+                    <select id="uploadedSealApprovalCategorySelect" required aria-describedby="uploadedSealApprovalCategoryHint">
+                      <option value="" selected disabled>請選擇文件細項</option>
+                    </select>
+                    <span class="field-hint" id="uploadedSealApprovalCategoryHint">合約與公文都必須選擇文件細項；系統會依 A／B／C／D 級鎖定簽核流程。</span>
+                  </label>
+                  <div class="approval-route-summary" aria-live="polite">
+                    <div class="approval-route-heading">
+                      <span>自動判定流程</span>
+                      <strong id="uploadedSealApprovalRouteBadge">尚未選擇</strong>
+                    </div>
+                    <p id="uploadedSealApprovalRouteName">選擇文件細項後顯示 A／B／C／D 流程。</p>
+                    <ol class="compose-approval-flow compact" id="uploadedSealApprovalRoutePreview">
+                      <li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>
+                    </ol>
+                    <p class="approval-route-outcome" id="uploadedSealApprovalRouteOutcome"></p>
+                  </div>
+                </section>
+                <label>申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
+                <label id="uploadedSealCounterpartyField" hidden>合約相對人<input id="uploadedSealCounterparty" placeholder="公司、機關或個人名稱" /></label>
+                <label>用印原因<textarea id="uploadedSealReason" rows="4" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
+                <label class="electronic-seal-upload-drop">PDF 文件
+                  <input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="uploadedPdfA4Rule" required />
+                  <span>選擇 PDF 後會立即顯示，支援多頁文件。</span>
+                </label>
+                <div class="pdf-a4-rule" id="uploadedPdfA4Rule" data-state="idle">
+                  <strong>公文與合約 PDF 只接受 A4</strong>
+                  <span>可使用直式 210 × 297 mm 或橫式 297 × 210 mm；多頁文件每一頁都必須是 A4。匯入或合併 PDF 也適用相同規則。</span>
+                  <em id="uploadedPdfA4Status" role="status" aria-live="polite">尚未檢查 PDF 頁面尺寸。</em>
+                </div>
+                <button class="primary-button" id="submitUploadedSealBtn" type="button">確認標記並送出簽核</button>
+              </form>
+            </aside>
+
+            <section class="panel electronic-seal-workspace-panel pdf-editor-v2" id="uploadedPdfEditor" data-editor-mode="general" data-editor-locked="false">
+              <div class="electronic-seal-toolbar pdf-editor-commandbar">
+                <div>
+                  <p class="eyebrow">PDF Editor V2</p>
+                  <h3 id="uploadedSealWorkspaceTitle">選擇印章與用印位置</h3>
+                  <p id="uploadedSealWorkspaceDescription">原稿永久保留；所有標記會建立可追蹤的新版本。</p>
+                </div>
+                <div class="pdf-editor-command-status">
+                  <div class="pdf-editor-mode-switch" role="group" aria-label="PDF 編輯模式">
+                    <button class="active" id="uploadedEditorModeGeneral" type="button" data-editor-mode="general" aria-pressed="true">一般</button>
+                    <button id="uploadedEditorModeAdvanced" type="button" data-editor-mode="advanced" aria-pressed="false">進階</button>
+                  </div>
+                  <span class="pdf-editor-save-status idle" id="uploadedEditorSaveStatus" role="status" aria-live="polite">尚未建立草稿</span>
+                  <button class="text-button pdf-editor-conflict-action" id="uploadedEditorConflictCopyBtn" type="button" hidden>複製本機版本</button>
+                  <button class="text-button pdf-editor-conflict-action" id="uploadedEditorResolveConflictBtn" type="button" hidden>重新載入伺服器版本</button>
+                </div>
+              </div>
+
+              <div class="pdf-editor-toolbar" id="uploadedEditorToolTray" role="toolbar" aria-label="PDF 編輯工具">
+                <div class="pdf-editor-tool-group" role="group" aria-label="物件工具">
+                  <button class="active" type="button" data-editor-tool="select" title="選取與移動">選取</button>
+                  <button type="button" data-editor-tool="seal" title="放置公司印章">印章</button>
+                  <button type="button" data-editor-tool="text" title="新增文字">文字</button>
+                  <button class="advanced-only" type="button" data-editor-tool="replacement" title="安全移除原文後取代">取代文字</button>
+                  <button class="advanced-only" type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
+                  <button class="advanced-only" type="button" data-editor-tool="shape" title="插入矩形或線條">形狀</button>
+                  <button class="advanced-only" type="button" data-editor-tool="checkmark" title="加入勾選記號">勾選</button>
+                  <button class="advanced-only" type="button" data-editor-tool="highlight" title="加入螢光標記">螢光</button>
+                  <button class="advanced-only danger" type="button" data-editor-tool="redaction" title="安全移除選取內容">安全遮蔽</button>
+                </div>
+                <div class="pdf-editor-tool-group editor-history-actions" role="group" aria-label="編輯歷程">
+                  <button id="uploadedEditorUndoBtn" type="button" disabled title="復原（⌘/Ctrl+Z）">復原</button>
+                  <button id="uploadedEditorRedoBtn" type="button" disabled title="重做（⌘/Ctrl+Shift+Z）">重做</button>
+                </div>
+                <div class="pdf-editor-tool-group editor-zoom-actions" role="group" aria-label="縮放">
+                  <button id="uploadedEditorZoomOutBtn" type="button" aria-label="縮小">−</button>
+                  <label class="pdf-editor-zoom-label"><span class="sr-only">縮放比例</span><input id="uploadedEditorZoom" type="range" min="25" max="300" step="5" value="100" /><output id="uploadedEditorZoomValue">100%</output></label>
+                  <button id="uploadedEditorZoomInBtn" type="button" aria-label="放大">＋</button>
+                  <button id="uploadedEditorFitBtn" type="button">符合頁面</button>
+                </div>
+                <div class="pdf-editor-mobile-actions mobile-only" role="group" aria-label="行動版面板">
+                  <button id="uploadedEditorThumbnailToggleBtn" type="button" aria-expanded="false">頁面</button>
+                  <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false">屬性</button>
+                </div>
+              </div>
+
+              <div class="electronic-seal-tools pdf-editor-general-options" id="uploadedEditorGeneralOptions">
+                <label>印章<select id="uploadedSealSealSelect"></select></label>
+                <label>套用頁面<select id="uploadedSealStampType">
+                  <option value="current_page">目前頁</option>
+                  <option value="all_pages">全部頁</option>
+                </select></label>
+                <button class="secondary-button" id="addSelectedStampBtn" type="button">加入章位</button>
+                <div class="uploaded-text-tools" id="uploadedSealTextTools" hidden>
+                  <label><span id="uploadedEditorTextInputLabel">文字</span><input id="uploadedSealTextInput" maxlength="500" placeholder="輸入要加入的文字" /></label>
+                  <label>字級<input id="uploadedSealFontSize" type="number" min="8" max="72" step="1" value="14" /></label>
+                  <button class="secondary-button" id="addUploadedTextBtn" type="button">加入文字</button>
+                </div>
+              </div>
+
+              <div class="pdf-editor-shell">
+                <aside class="pdf-editor-thumbnails" id="uploadedEditorThumbnailPane" aria-label="縮圖與頁面管理">
+                  <div class="pdf-editor-pane-heading">
+                    <strong>頁面</strong>
+                    <span id="uploadedEditorPageCount">0 頁</span>
+                  </div>
+                  <div class="pdf-editor-thumbnail-list" id="uploadedPdfThumbnailList"></div>
+                  <div class="pdf-editor-page-import advanced-only">
+                    <input id="uploadedEditorImportPdfInput" type="file" accept="application/pdf,.pdf" multiple hidden />
+                    <button class="secondary-button" id="uploadedEditorImportPdfBtn" type="button">匯入／合併 PDF</button>
+                  </div>
+                </aside>
+
+                <main class="uploaded-pdf-workspace pdf-editor-canvas-column">
+                  <div class="uploaded-pdf-navigation" aria-label="PDF 頁面切換">
+                    <button class="page-arrow" id="uploadedPdfPrevBtn" type="button" aria-label="上一頁">‹</button>
+                    <div class="uploaded-page-strip" id="uploadedPdfPageStrip"></div>
+                    <button class="page-arrow" id="uploadedPdfNextBtn" type="button" aria-label="下一頁">›</button>
+                  </div>
+                  <div class="pdf-editor-page-actions advanced-only" id="uploadedEditorPageActions" role="toolbar" aria-label="頁面整理">
+                    <button type="button" data-editor-page-action="move-up">往前</button>
+                    <button type="button" data-editor-page-action="move-down">往後</button>
+                    <button type="button" data-editor-page-action="rotate-left">左轉</button>
+                    <button type="button" data-editor-page-action="rotate-right">右轉</button>
+                    <button class="danger" type="button" data-editor-page-action="delete">刪除頁面</button>
+                  </div>
+                  <div class="pdf-editor-review-switch" id="uploadedEditorReviewSwitch" role="group" aria-label="簽核檢視版本">
+                    <button type="button" data-editor-review="original">原稿</button>
+                    <button class="active" type="button" data-editor-review="edited">編輯版</button>
+                    <button type="button" data-editor-review="prepared">送簽確認版</button>
+                    <button type="button" data-editor-review="changes">按頁變更清單</button>
+                  </div>
+                  <div class="pdf-editor-scroll" id="uploadedEditorScroll">
+                    <div class="uploaded-pdf-stage" id="uploadedPdfStage">
+                      <canvas id="uploadedPdfCanvas" aria-label="PDF 目前頁面"></canvas>
+                      <div class="uploaded-stamp-layer" id="uploadedStampLayer">
+                        <svg id="uploadedEditorSvgLayer" role="application" aria-label="PDF 編輯物件層"></svg>
+                      </div>
+                      <div class="uploaded-pdf-empty" id="uploadedPdfEmpty">
+                        <strong>先上傳 PDF 文件</strong>
+                        <span>系統完成權限、雜湊、掃毒及 PDF 預檢後才會開啟編輯。</span>
+                      </div>
+                    </div>
+                    <div class="pdf-editor-change-summary" id="uploadedEditorChangeSummaryPanel" hidden></div>
+                  </div>
+                  <div class="uploaded-page-meta">
+                    <span id="uploadedPdfPageLabel">尚未載入頁面</span>
+                    <span id="uploadedPdfGeometryLabel">等待 PDF 幾何資訊</span>
+                  </div>
+                </main>
+
+                <aside class="pdf-editor-properties" id="uploadedEditorProperties" aria-label="物件屬性">
+                  <div class="pdf-editor-pane-heading">
+                    <strong>屬性</strong>
+                    <span id="uploadedEditorSelectionCount">未選取</span>
+                  </div>
+                  <div class="pdf-editor-property-empty" id="uploadedEditorPropertyEmpty">選取物件後，可精準設定座標、尺寸、旋轉、透明度與圖層。</div>
+                  <form class="pdf-editor-property-form" id="uploadedEditorPropertyForm" hidden>
+                    <label class="editor-property-text">內容<textarea id="uploadedEditorPropertyText" rows="3" maxlength="1000"></textarea></label>
+                    <label class="editor-property-shape" hidden>形狀類型<select id="uploadedEditorPropertyShapeType"><option value="rectangle">矩形</option><option value="line">線條</option></select></label>
+                    <p class="editor-seal-size-lock" id="uploadedEditorSealSizeLock" hidden></p>
+                    <div class="editor-property-grid">
+                      <label>X（pt）<input id="uploadedEditorPropertyX" type="number" step="0.1" /></label>
+                      <label>Y（pt）<input id="uploadedEditorPropertyY" type="number" step="0.1" /></label>
+                      <label>寬（pt）<input id="uploadedEditorPropertyWidth" type="number" min="1" step="0.1" /></label>
+                      <label>高（pt）<input id="uploadedEditorPropertyHeight" type="number" min="1" step="0.1" /></label>
+                      <label>旋轉<input id="uploadedEditorPropertyRotation" type="number" min="-359" max="359" step="1" /></label>
+                      <label>透明度<input id="uploadedEditorPropertyOpacity" type="number" min="0.05" max="1" step="0.05" /></label>
+                      <label>字級<input id="uploadedEditorPropertyFontSize" type="number" min="6" max="144" step="1" /></label>
+                      <label>顏色<input id="uploadedEditorPropertyColor" type="color" value="#111827" /></label>
+                    </div>
+                    <div class="pdf-editor-property-actions">
+                      <button type="button" data-editor-layer="front">移到最上層</button>
+                      <button type="button" data-editor-layer="back">移到最下層</button>
+                      <button type="button" data-editor-copy-selected>複製</button>
+                      <button class="danger" type="button" data-editor-delete-selected>刪除</button>
+                    </div>
+                    <label class="advanced-only">複製到頁面／區間<input id="uploadedEditorCopyPages" placeholder="例如 2-4, 7" /></label>
+                    <button class="secondary-button advanced-only" id="uploadedEditorCopyPagesBtn" type="button">複製到指定頁</button>
+                  </form>
+                  <div class="pdf-editor-limits">
+                    <span>50 MB／300 頁</span>
+                    <span>每份 1,000 個物件</span>
+                    <span>圖片 10 MB</span>
+                  </div>
+                  <input id="uploadedEditorImageInput" type="file" accept="image/png,image/jpeg" hidden />
+                </aside>
+              </div>
+
+              <div class="uploaded-workspace-actions pdf-editor-footer-actions">
+                <span id="uploadedEditorPreflightStatus" class="pdf-editor-preflight-status">尚未產生送簽確認版</span>
+                <button class="text-button" id="clearUploadedStampsBtn" type="button">清除全部編輯</button>
+              </div>
+              <div class="uploaded-stamp-list" id="uploadedStampSummary"></div>
+            </section>
+          </div>
+        </section>
+
         <section class="view" id="seals">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Seal Approval</p>
-              <h3>印鑑管理</h3>
+              <p class="eyebrow">印章版本控管</p>
+              <h3>印章檔案庫</h3>
             </div>
             <div class="quick-actions">
               <button class="primary-button" id="sealApproveBtn" type="button">核准並自動押章</button>
@@ -1464,6 +1831,71 @@
           </div>
 
           <section class="panel company-seal-module-panel" id="companySealModule">
+            <section class="company-seal-simple" id="companySealSimpleUpload">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">印章版本控管</p>
+                  <h3>公司印章檔案庫</h3>
+                  <p class="company-seal-simple-intro">公司資料直接沿用會計系統。請選取既有印章上傳新版，或建立新的印章紀錄；每次上傳都會回寫同一筆後端紀錄並保留版本與 SHA-256。</p>
+                </div>
+                <span class="status-pill" id="simpleSealUploadStatus">尚未選擇檔案</span>
+              </div>
+              <form class="compact-form simple-seal-upload-form" id="simpleSealUploadForm">
+                <p class="seal-custodian-notice" data-seal-custodian-notice hidden>僅執行長／行政部門主任可變更。</p>
+                <div class="simple-seal-form-grid">
+                  <label>公司行號
+                    <select id="simpleSealCompanySelect" required></select>
+                    <small>來源：會計系統公司行號</small>
+                  </label>
+                  <label>後端印章紀錄
+                    <select id="simpleSealRecordSelect">
+                      <option value="">建立新印章</option>
+                    </select>
+                    <small>上傳新版時請選原本紀錄，避免重複建立。</small>
+                  </label>
+                  <label>印章類型
+                    <select id="simpleSealCategorySelect" required></select>
+                  </label>
+                  <label>大小章
+                    <select id="simpleSealSizeSelect" required></select>
+                  </label>
+                  <label>印章實際尺寸（mm）
+                    <input id="simpleSealRenderSizeMmInput" type="number" min="25" max="35" step="0.01" value="30.00" inputmode="decimal" aria-describedby="simpleSealCalibrationHint" required />
+                    <small>請直接輸入實際量測邊長；系統會自動套用為相同寬、高。</small>
+                  </label>
+                  <label>顯示名稱
+                    <input id="simpleSealNameInput" value="公司章" maxlength="100" required />
+                  </label>
+                  <label>用途說明
+                    <input id="simpleSealPurposeInput" value="公司正式文件用印" maxlength="300" />
+                  </label>
+                </div>
+                <p class="field-hint seal-calibration-hint" id="simpleSealCalibrationHint">大章可直接輸入 25–35 mm；系統會鎖定為正方形，不會讓印章變形。</p>
+                <fieldset class="simple-seal-type-fieldset">
+                  <legend>常用類型快速帶入</legend>
+                  <div class="segmented-control" role="group" aria-label="常用印章類型">
+                    <button class="segment active" type="button" data-simple-seal-category="establishment_seal">公司章</button>
+                    <button class="segment" type="button" data-simple-seal-category="general_seal">便章</button>
+                    <button class="segment" type="button" data-simple-seal-category="official_seal">關防印</button>
+                    <button class="segment" type="button" data-simple-seal-category="bank_seal">銀行印鑑章</button>
+                  </div>
+                </fieldset>
+                <label class="simple-seal-file-field">印章圖檔
+                  <input id="simpleSealFileInput" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" required />
+                  <small>僅接受 PNG、JPEG、WebP，單檔上限 3 MB；SVG、PDF、HTML 及可執行內容一律拒絕。</small>
+                </label>
+                <div class="simple-seal-file-summary" id="simpleSealFileSummary" role="status" aria-live="polite">
+                  <strong>尚未選擇檔案</strong>
+                  <span>選檔後會先檢查副檔名、MIME 與大小，後端仍會重新驗證檔案內容及掃毒。</span>
+                </div>
+                <div class="simple-seal-actions">
+                  <button class="primary-button" id="simpleSealUploadBtn" type="submit">上傳並建立目前版本</button>
+                  <button class="secondary-button" id="simpleSealRefreshBtn" type="button">重新讀取後端狀態</button>
+                </div>
+              </form>
+              <p class="field-hint">原始圖檔只會送進 private Seal Vault，瀏覽器不會取得 storage path、原始 URL 或 service role。畫面僅呈現可稽核的版本、掃描與雜湊 metadata。</p>
+              <div class="simple-seal-uploaded-list" id="simpleSealUploadedList"></div>
+            </section>
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">Company Seal Library</p>
@@ -1474,6 +1906,20 @@
                 <button class="secondary-button" id="companySealReloadBtn" type="button">重新整理</button>
               </div>
             </div>
+            <section class="company-seal-readiness" id="companySealReadinessPanel">
+              <div>
+                <p class="eyebrow">Seal Vault Readiness</p>
+                <h3>上線印章補件任務</h3>
+                <p id="companySealReadinessSummary">請選擇公司並重新整理，確認必要印章都有目前版本。</p>
+              </div>
+              <div class="detail-actions">
+                <button class="secondary-button" id="companySealExportMissingBtn" type="button">匯出缺章清單</button>
+                <button class="secondary-button" id="companySealExportIntakeBtn" type="button">匯出收檔範本</button>
+                <span class="status-pill" id="companySealReadinessStatus">待檢查</span>
+              </div>
+              <div class="company-seal-global-list" id="companySealGlobalReadinessList"></div>
+              <div class="company-seal-readiness-grid" id="companySealReadinessList"></div>
+            </section>
             <div class="company-seal-module-grid">
               <section class="company-seal-library">
                 <div class="panel-heading tight">
@@ -1500,8 +1946,17 @@
 
               <section>
                 <div class="panel-heading tight">
-                  <h3>新增與版本</h3>
+                  <div>
+                    <h3>印鑑管理人員檔案上傳</h3>
+                    <small>原始章檔只會送入 private Seal Vault，前端不會取得原始 URL。</small>
+                  </div>
                   <span class="status-pill" id="companySealFileStatus">metadata only</span>
+                </div>
+                <p class="seal-custodian-notice" data-seal-custodian-notice hidden>僅執行長／行政部門主任可變更。</p>
+                <div class="segmented-control" role="group" aria-label="常用印章類型">
+                  <button class="segment" type="button" data-company-seal-preset="establishment_seal">公司章</button>
+                  <button class="segment" type="button" data-company-seal-preset="general_seal">便章</button>
+                  <button class="segment" type="button" data-company-seal-preset="bank_seal">銀行印鑑章</button>
                 </div>
                 <form class="compact-form" id="companySealCreateForm">
                   <label>印章名稱<input id="companySealNameInput" value="公司便章－大章" /></label>
@@ -1511,7 +1966,11 @@
                   <button class="secondary-button" id="companySealCreateBtn" type="button">新增印章</button>
                 </form>
                 <form class="compact-form" id="companySealUploadForm">
-                  <label>新版印章檔<input id="companySealFileInput" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.png,.jpg,.jpeg,.webp,.svg" /></label>
+                  <label>新版印章檔<input id="companySealFileInput" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" /><span class="field-hint">僅接受 PNG、JPEG、WebP，單檔上限 3 MB。</span></label>
+                  <div class="inline-fields seal-calibration-fields">
+                    <label>印章實際尺寸（mm）<input id="companySealRenderSizeMmInput" type="number" min="25" max="35" step="0.01" value="30.00" inputmode="decimal" aria-describedby="companySealCalibrationHint" required /><span class="field-hint">請直接輸入實際量測邊長；寬、高會自動同步。</span></label>
+                  </div>
+                  <p class="field-hint seal-calibration-hint" id="companySealCalibrationHint">大章可直接輸入 25–35 mm；系統會鎖定為正方形，不會讓印章變形。</p>
                   <button class="primary-button" id="companySealUploadBtn" type="button">上傳新版</button>
                 </form>
                 <div class="address-results compact-list" id="companySealFilesList"></div>
@@ -1534,9 +1993,10 @@
                     <label>Y<input id="sealUsageYInput" type="number" value="130" /></label>
                   </div>
                   <div class="inline-fields">
-                    <label>寬<input id="sealUsageWInput" type="number" value="85" /></label>
-                    <label>高<input id="sealUsageHInput" type="number" value="85" /></label>
+                    <label>寬（pt）<input id="sealUsageWInput" type="number" step="0.01" placeholder="依印章帶入" readonly aria-readonly="true" /></label>
+                    <label>高（pt）<input id="sealUsageHInput" type="number" step="0.01" placeholder="依印章帶入" readonly aria-readonly="true" /></label>
                   </div>
+                  <span class="field-hint seal-size-lock-hint" id="sealUsageSizeLock">選擇印章後會顯示目前版本的實際校準尺寸。</span>
                   <div class="detail-actions">
                     <button class="secondary-button" id="sealUsageAddPositionBtn" type="button">加入章位</button>
                     <button class="secondary-button" id="sealUsageClearPositionsBtn" type="button">清除章位</button>
@@ -1641,46 +2101,6 @@
             </aside>
           </div>
 
-          <section class="panel uploaded-seal-panel">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Uploaded PDF Seal</p>
-                <h3>上傳 PDF 用印申請</h3>
-              </div>
-              <span class="status-pill" id="uploadedSealPdfStatus">尚未上傳</span>
-            </div>
-            <div class="uploaded-seal-layout">
-              <form class="compact-form" id="uploadedSealForm">
-                <label>文件類型<select id="uploadedSealType">
-                  <option value="official_document">電子公文</option>
-                  <option value="contract">電子合約</option>
-                </select></label>
-                <label>公司別<select id="uploadedSealCompany"></select></label>
-                <label>申請主旨<input id="uploadedSealTitle" value="PDF 用印申請" /></label>
-                <label>簽核路由<select id="uploadedSealRoute">
-                  <option value="A">A 行政部門用印</option>
-                  <option value="B">B 行政部門用印 + 會計</option>
-                  <option value="C">C 執行長用印</option>
-                  <option value="D">D 執行長用印 + 會計</option>
-                </select></label>
-                <label>上傳 PDF<input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" /></label>
-                <div class="form-actions">
-                  <button class="secondary-button" id="addCompanyStampBtn" type="button">加入公司章</button>
-                  <button class="secondary-button" id="addOwnerStampBtn" type="button">加入負責人章</button>
-                  <button class="secondary-button" id="addPageStampBtn" type="button">加入騎縫章</button>
-                  <button class="secondary-button" id="clearUploadedStampsBtn" type="button">清除章位</button>
-                </div>
-                <button class="primary-button" id="submitUploadedSealBtn" type="button">送出 PDF 用印簽核</button>
-              </form>
-              <div class="uploaded-pdf-stage" id="uploadedPdfStage">
-                <iframe id="uploadedPdfFrame" title="上傳 PDF 預覽"></iframe>
-                <div class="uploaded-stamp-layer" id="uploadedStampLayer"></div>
-                <p class="empty-text" id="uploadedPdfEmpty">上傳 PDF 後可拖拉多個用印處。</p>
-              </div>
-            </div>
-            <div class="archive-grid" id="uploadedStampSummary"></div>
-          </section>
-
           <div class="seal-workbench">
             <section class="panel">
               <div class="panel-heading">
@@ -1709,6 +2129,7 @@
                 <h3>新增印鑑</h3>
                 <button class="text-button" id="sealAddBtn" type="button">新增</button>
               </div>
+              <p class="seal-custodian-notice" data-seal-custodian-notice hidden>僅執行長／行政部門主任可變更。</p>
               <form class="compact-form" id="sealForm">
                 <label>印鑑名稱<input id="sealNameInput" value="歲悅長照公司章" /></label>
                 <label>所屬公司<select id="sealCompanyInput"></select></label>
@@ -1716,11 +2137,12 @@
                 <label>印鑑類型<select id="sealTypeInput"></select></label>
                 <label>保管角色<select id="sealOwnerInput"><option>行政部主任</option><option>總務</option><option>行政部主任</option></select></label>
                 <label>適用文別<select id="sealDocTypeInput"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option></select></label>
-                <label>公司章圖檔<input id="sealImageInput" type="file" accept="image/*" /></label>
+                <label>公司章圖檔<input id="sealImageInput" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" /><span class="field-hint">僅接受 PNG、JPEG、WebP，單檔上限 3 MB；原檔仍須改到 Seal Vault 上傳。</span></label>
                 <div class="inline-fields">
-                  <label>實體寬 mm<input id="sealWidthMmInput" type="number" min="1" step="0.1" value="30" /></label>
-                  <label>實體高 mm<input id="sealHeightMmInput" type="number" min="1" step="0.1" value="30" /></label>
+                  <label>實體寬 mm<input id="sealWidthMmInput" class="seal-dimension-locked" type="number" min="25" max="35" step="0.01" value="30.00" readonly aria-readonly="true" /></label>
+                  <label>實體高 mm<input id="sealHeightMmInput" class="seal-dimension-locked" type="number" min="25" max="35" step="0.01" value="30.00" readonly aria-readonly="true" /></label>
                 </div>
+                <p class="field-hint">舊版新增印鑑尺寸僅供檢視；正式校準與版本上傳請使用 Private Seal Vault。</p>
                 <div class="seal-upload-box" id="sealImagePreview" data-image="" data-file-object-id="">
                   <span>尚未上傳章圖</span>
                 </div>
@@ -2242,8 +2664,8 @@
             </article>
             <article class="metric-card">
               <span>大小限制</span>
-              <strong id="fileSizeStatus">50 MB</strong>
-              <small id="fileSizeNote">單檔上限</small>
+              <strong id="fileSizeStatus">依上傳管道</strong>
+              <small id="fileSizeNote">編輯器直傳 50 MB；一般附件 3 MB</small>
             </article>
             <article class="metric-card">
               <span>密件隔離</span>
@@ -2325,7 +2747,7 @@
                 <label>允許副檔名<input id="fileAllowedTypes" value="pdf,xml,xlsx,docx,p7m" /></label>
                 <label>敏感資料遮罩<select id="fileMaskPolicy"><option>身分證 / 電話 / Email</option><option>身分證 / 電話 / Email / 地址</option><option>全部個資欄位</option></select></label>
                 <label>密件可存取角色<input id="fileConfidentialRoles" value="行政部主任,主任,執行長" /></label>
-                <label>下載浮水印<input id="fileWatermarkText" value="歲悅長照｜電子公文交換｜限授權使用" /></label>
+                <label>下載浮水印<input id="fileWatermarkText" value="歲悅長照｜公文收發電子用印系統｜限授權使用" /></label>
                 <label>掃描引擎<select id="fileScanEngine"><option>ClamAV-compatible</option><option>Microsoft Defender</option><option>VirusTotal Gateway</option></select></label>
                 <label>超限處理<select id="fileOverLimitAction"><option>自動隔離</option><option>退回補正</option><option>主管覆核</option></select></label>
               </form>
@@ -2354,11 +2776,10 @@
           <div class="section-header">
             <div>
               <p class="eyebrow">Identity & Access</p>
-              <h3>帳號登入與權限</h3>
+              <h3>會計系統同步帳號與權限</h3>
             </div>
             <div class="quick-actions">
-              <button class="primary-button" id="accountInviteBtn" type="button">建立使用者</button>
-              <button class="secondary-button" id="accountSyncBtn" type="button">同步角色</button>
+              <button class="primary-button" id="accountRefreshBtn" type="button">重新載入同步資料</button>
               <button class="secondary-button" id="accountExportBtn" type="button">匯出權限報表</button>
             </div>
           </div>
@@ -2385,6 +2806,18 @@
               <small id="accountDeviceNote">登入裝置與限制規則</small>
             </article>
           </div>
+
+          <section class="panel account-readiness-panel" id="accountLaunchReadinessPanel">
+            <div>
+              <p class="eyebrow">Login Readiness</p>
+              <h3>Finance 人員主檔同步狀態</h3>
+              <p id="accountLaunchReadinessSummary">姓名、Email、公司、部門、職稱、職級、主管與在職狀態只需在會計系統維護，eDoc 會自動鏡像。</p>
+            </div>
+            <div class="panel-actions">
+              <span class="status-pill" id="accountLaunchReadinessStatus">待檢查</span>
+            </div>
+            <div class="account-readiness-grid" id="accountLaunchReadinessList"></div>
+          </section>
 
           <div class="account-toolbar panel">
             <div class="segmented" role="group" aria-label="帳號篩選">
@@ -2414,7 +2847,7 @@
                       <th>角色</th>
                       <th>登入方式</th>
                       <th>狀態</th>
-                      <th>操作</th>
+                      <th>資料來源</th>
                     </tr>
                   </thead>
                   <tbody id="accountRows"></tbody>
@@ -2434,34 +2867,20 @@
           <div class="account-workbench">
             <section class="panel">
               <div class="panel-heading">
-                <h3>新增 / 編輯使用者</h3>
-                <span class="status-pill">RBAC</span>
+                <h3>單一人員主檔</h3>
+                <span class="status-pill">Finance</span>
               </div>
-              <form class="compact-form" id="accountForm">
-                <label>姓名<input id="accountName" value="許品管" /></label>
-                <label>Email<input id="accountEmail" type="email" value="quality@suiyuecare.com" /></label>
-                <label>單位<input id="accountUnit" value="教育品管課" /></label>
-                <label>職稱<input id="accountTitleInput" value="品管專員" /></label>
-                <label>職等<select id="accountJobLevel"><option selected>職員</option><option>組長</option><option>課長</option><option>部長</option><option>區經理</option><option>執行長</option><option>董事會</option><option>股東</option><option>外部檢核單位</option></select></label>
-                <label>角色<select id="accountRoleSelect"><option>員工</option><option>主管</option><option>總務</option><option>業務助理</option><option>行政部主任</option><option>主任</option><option>執行長</option><option>人資</option><option>會計</option><option>董事會</option><option>股東</option><option>外部檢核單位</option></select></label>
-                <label>登入方式<select id="accountProvider"><option>Google Workspace</option><option>Microsoft Entra</option><option>本機帳號</option></select></label>
-                <label>MFA<select id="accountMfa"><option>已啟用</option><option>待設定</option><option>強制重設</option></select></label>
-              </form>
+              <div class="doc-detail">
+                <strong>人員資料不在 eDoc 重複編輯</strong>
+                <p>請在會計系統新增或修改人員。eDoc 會自動同步新增、調職、公司與主管異動，也會在離職停用後撤銷登入；已完成的歷史簽核紀錄仍會保留。</p>
+              </div>
             </section>
 
             <section class="panel">
               <div class="panel-heading">
-                <h3>SSO / MFA</h3>
-                <button class="text-button" id="mfaEnforceBtn" type="button">強制全員 MFA</button>
+                <h3>登入與簽核依據</h3>
+                <span class="status-pill">唯讀</span>
               </div>
-              <form class="compact-form" id="ssoForm">
-                <label>SSO 提供者<select id="ssoProvider"><option>Google Workspace</option><option>Microsoft Entra</option></select></label>
-                <label>網域 / Tenant<input id="ssoDomain" value="suiyuecare.com" /></label>
-                <div class="form-actions">
-                  <button class="primary-button" id="ssoConnectBtn" type="button">連線 SSO</button>
-                  <button class="secondary-button" id="ssoTestBtn" type="button">測試登入</button>
-                </div>
-              </form>
               <div class="archive-grid" id="ssoStatusGrid"></div>
             </section>
 
@@ -2849,7 +3268,7 @@
                 <label>通知類型<select id="notificationType"><option>收文</option><option>待清稿</option><option>交換失敗</option><option>Token 到期</option><option>逾期查核</option></select></label>
                 <label>通知對象<select id="notificationTarget"><option>總務</option><option>行政部主任</option><option>業務助理</option><option>行政部主任</option></select></label>
                 <label>通知通道<select id="notificationChannel"><option>系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
-                <label>通知內容<textarea id="notificationBody" rows="3">請確認電子公文交換待辦事項。</textarea></label>
+                <label>通知內容<textarea id="notificationBody" rows="3">請確認公文收發電子用印系統待辦事項。</textarea></label>
               </form>
             </section>
 
@@ -3338,6 +3757,16 @@
             </div>
             <div class="go-live-ops-summary" id="opsGoLiveSummary"></div>
             <div class="go-live-ops-grid" id="opsGoLiveGrid"></div>
+            <section class="ops-production-checklist">
+              <div class="panel-heading tight">
+                <div>
+                  <p class="eyebrow">Production Setup</p>
+                  <h3>Production 補件清單</h3>
+                </div>
+                <button class="secondary-button" id="opsProductionChecklistExportBtn" type="button">匯出補件清單</button>
+              </div>
+              <div class="ops-production-checklist-grid" id="opsProductionChecklistGrid"></div>
+            </section>
           </section>
 
           <section class="panel">
@@ -3642,7 +4071,57 @@
       </section>
     </div>
 
+    <div class="modal-backdrop hidden" id="officialDecisionModal" role="dialog" aria-modal="true" aria-labelledby="officialDecisionModalTitle">
+      <section class="contract-modal-card official-decision-modal-card">
+        <div class="contract-modal-header">
+          <div>
+            <p class="eyebrow">Approval Decision</p>
+            <h3 id="officialDecisionModalTitle">簽核確認</h3>
+          </div>
+          <button class="secondary-button" id="officialDecisionModalCloseBtn" type="button">取消</button>
+        </div>
+        <form id="officialDecisionForm" class="official-decision-form">
+          <section class="official-decision-summary" id="officialDecisionSummary"></section>
+          <section id="officialApprovalReviewFields" class="official-decision-section">
+            <h4>送出核准前確認</h4>
+            <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required />我已查看原稿／送簽 PDF，內容與申請目的相符。</label>
+            <label class="decision-check"><input id="officialReviewAttachments" type="checkbox" required />我已查看全部附件，或確認本案沒有附件。</label>
+            <label class="decision-check"><input id="officialReviewEdited" type="checkbox" required />我已查看 PDF 編輯版與用印位置，或確認本案沒有編輯內容。</label>
+            <label>核准意見<textarea id="officialApprovalComment" rows="3" minlength="2" maxlength="1000" required placeholder="請填寫核准判斷或注意事項（至少 2 個字）"></textarea></label>
+          </section>
+          <section id="officialRejectionFields" class="official-decision-section" hidden>
+            <h4>退回補正內容</h4>
+            <label>駁回原因分類<select id="officialRejectCategory">
+              <option value="" selected disabled>請選擇原因</option>
+              <option value="content_error">內容錯誤或不完整</option>
+              <option value="attachment_missing">附件缺漏</option>
+              <option value="seal_or_position">印章或用印位置錯誤</option>
+              <option value="route_or_authority">簽核層級或權限不符</option>
+              <option value="compliance_risk">法遵／個資／機密風險</option>
+              <option value="other">其他</option>
+            </select></label>
+            <fieldset class="official-missing-items">
+              <legend>缺件或需修正項目</legend>
+              <label><input type="checkbox" name="officialMissingItem" value="document_content" />公文內容</label>
+              <label><input type="checkbox" name="officialMissingItem" value="source_pdf" />原始 PDF</label>
+              <label><input type="checkbox" name="officialMissingItem" value="attachments" />附件</label>
+              <label><input type="checkbox" name="officialMissingItem" value="seal_position" />印章／用印位置</label>
+              <label><input type="checkbox" name="officialMissingItem" value="applicant_information" />申請資料</label>
+            </fieldset>
+            <label>補正期限<input id="officialCorrectionDueDate" type="date" /></label>
+            <label>具體駁回原因<textarea id="officialRejectComment" rows="4" minlength="6" maxlength="1000" required placeholder="請明確說明需修改的位置與完成條件"></textarea></label>
+          </section>
+          <p class="official-decision-error" id="officialDecisionError" role="alert" hidden></p>
+          <div class="form-actions">
+            <button class="primary-button" id="officialDecisionSubmitBtn" type="submit">確認核准</button>
+            <button class="secondary-button" id="officialDecisionCancelBtn" type="button">取消</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="app.js?v=20260702-compose-two-page"></script>
+    <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
+    <script src="app.js?v=20260824-uiux-r3"></script>
   </body>
 </html>

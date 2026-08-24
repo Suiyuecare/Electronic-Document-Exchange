@@ -20,83 +20,11 @@ const loggingBridgeStorageKeys = [
   "suiyue-platform-session"
 ];
 const loggingQuickLoginCookieKey = "suiyue_hris_quick_login_user";
+const edocHandoffMarkerCookieKey = "suiyuecare-edoc-handoff-pending";
 const loggingQuickLoginWindowNamePrefix = "suiyue_hris_quick_login_user:";
 let authState = readJsonStorage(authStorageKey);
 
-const inboundDocs = [
-  {
-    id: "IN-1140522-00018",
-    receiveNo: "收1140522-00018",
-    exchangeNo: "EX-1140522-018",
-    agency: "衛生福利部",
-    agencyCode: "A21000000I",
-    type: "函",
-    subject: "長照服務品質稽核資料補件通知",
-    status: "待登錄",
-    owner: "總務",
-    dept: "總管理處",
-    priority: "速件",
-    security: "普通",
-    receivedAt: "2026-05-22 09:42",
-    dueDate: "2026-05-29",
-    attachments: ["稽核補件通知.pdf", "附件清冊.xml"],
-    note: "jAgent 已拉取，待登錄收文號與附件完整性。"
-  },
-  {
-    id: "IN-1140522-00013",
-    receiveNo: "收1140522-00013",
-    exchangeNo: "EX-1140522-013",
-    agency: "臺北市政府社會局",
-    agencyCode: "A63000000J",
-    type: "開會通知單",
-    subject: "北區長照服務協調會議",
-    status: "待分派",
-    owner: "行政部主任",
-    dept: "總管理處",
-    priority: "普通件",
-    security: "普通",
-    receivedAt: "2026-05-22 09:28",
-    dueDate: "2026-05-24",
-    attachments: ["開會通知單.pdf", "會議議程.pdf"],
-    note: "已完成登錄，待分派業務助理。"
-  },
-  {
-    id: "IN-1140521-00044",
-    receiveNo: "收1140521-00044",
-    exchangeNo: "EX-1140521-044",
-    agency: "新北市政府衛生局",
-    agencyCode: "A65000000I",
-    type: "函",
-    subject: "居家服務督導訪視資料回覆",
-    status: "已收文",
-    owner: "王督導",
-    dept: "居家照顧課",
-    priority: "普通件",
-    security: "普通",
-    receivedAt: "2026-05-21 15:18",
-    dueDate: "2026-05-28",
-    attachments: ["訪視回覆.pdf"],
-    note: "已分派承辦，待承辦回覆。"
-  },
-  {
-    id: "IN-1140520-00022",
-    receiveNo: "收1140520-00022",
-    exchangeNo: "EX-1140520-022",
-    agency: "桃園市政府社會局",
-    agencyCode: "A68000000J",
-    type: "函",
-    subject: "社區據點服務計畫審查意見",
-    status: "已收文",
-    owner: "陳經理",
-    dept: "社區據點課",
-    priority: "普通件",
-    security: "普通",
-    receivedAt: "2026-05-20 11:06",
-    dueDate: "2026-05-27",
-    attachments: ["審查意見.pdf", "補正表.xlsx"],
-    note: "已收文並納入計畫案追蹤。"
-  }
-];
+const inboundDocs = [];
 
 const pulledInboundTemplates = [
   {
@@ -137,12 +65,11 @@ const pulledInboundTemplates = [
   }
 ];
 
-let selectedInboundId = inboundDocs[0].id;
+let selectedInboundId = inboundDocs[0]?.id || "";
 let inboundFilter = "all";
 let inboundSearchTerm = "";
-const inboundAuditLog = [
-  ["10:08", "系統初始化", "載入既有收文與交換紀錄。"]
-];
+let inboundSection = "records";
+const inboundAuditLog = [];
 
 const dispatchDocs = [
   {
@@ -227,7 +154,31 @@ let selectedOfficialDocumentId = "";
 let officialWorkflowScope = "all";
 let officialWorkflowSearchTerm = "";
 let officialWorkflowStatusFilter = "";
+const pdfPointsPerMm = 72 / 25.4;
+const COMPANY_SEAL_SIZE_POLICY_MM = Object.freeze({
+  large_seal: Object.freeze({ widthMm: 30, heightMm: 30, label: "大章" }),
+  small_seal: Object.freeze({ widthMm: 18, heightMm: 18, label: "小章" })
+});
+const COMPANY_SEAL_CALIBRATION_LIMITS_MM = Object.freeze({
+  large_seal: Object.freeze({ min: 25, max: 35 }),
+  small_seal: Object.freeze({ min: 15, max: 22 })
+});
+const COMPANY_SEAL_RENDER_DPI = 250;
+// Default-size guidance only. Calibrated uploads use
+// companySealMinimumShortEdgePixels() instead of these values.
+const COMPANY_SEAL_MIN_SHORT_EDGE_PX = Object.freeze({ large_seal: 296, small_seal: 178 });
+const COMPANY_SEAL_ASPECT_RATIO_TOLERANCE = 0.01;
+const COMPANY_SEAL_CALIBRATION_SQUARE_TOLERANCE_MM = 0.01;
+const COMPANY_SEAL_GEOMETRY_COMPARISON_TOLERANCE = 1e-4;
 let officialSealOptions = [];
+let editingOfficialDocumentId = "";
+let officialDecisionState = { documentId: "", action: "", source: "workflow" };
+let officialStampPositionSeq = 1;
+let officialStampPositions = [createOfficialStampPosition()];
+let selectedOfficialStampPositionId = officialStampPositions[0].id;
+let internalDispatchItems = [];
+let internalDispatchRecipientDirectory = [];
+let selectedInternalDispatchId = "";
 const dispatchAuditLog = [
   ["10:12", "系統初始化", "載入既有發文與交換紀錄。"]
 ];
@@ -376,6 +327,10 @@ const archiveRecords = [
 const archiveAuditLog = [
   ["10:36", "歸檔保存初始化", "已載入原文、附件、交換事件、操作軌跡與檔案雜湊台帳。"]
 ];
+let archiveTotal = archiveRecords.length;
+let archiveBackendLoaded = false;
+let archiveLoadError = "";
+let archiveSearchTimer = null;
 
 const securityState = {
   certStatus: "未驗證",
@@ -405,7 +360,7 @@ const fileSecurityPolicy = {
   allowedTypes: "pdf,xml,xlsx,docx,p7m",
   maskPolicy: "身分證 / 電話 / Email",
   confidentialRoles: "行政部主任,主任,執行長",
-  watermarkText: "歲悅長照｜電子公文交換｜限授權使用",
+  watermarkText: "歲悅長照｜公文收發電子用印系統｜限授權使用",
   scanEngine: "ClamAV-compatible",
   overLimitAction: "自動隔離"
 };
@@ -462,8 +417,13 @@ const fileAccessLog = [
 let selectedAccountId = "USR-001";
 let accountFilter = "all";
 let accountSearchTerm = "";
+let accountReadinessPackage = null;
+let productionCutoverReadinessPackage = null;
+let productionNextActionPackage = null;
+let productionLoginReleaseDecisionPackage = null;
+let productionEmployeeLaunchNoticePackage = null;
 const accountSsoState = {
-  provider: "Google Workspace",
+  provider: "Finance Google SSO",
   domain: "suiyuecare.com",
   status: "未連線",
   lastTest: "尚未測試"
@@ -486,31 +446,9 @@ const roleJobLevelDefaults = {
   外部檢核單位: "外部檢核單位"
 };
 
-const userAccounts = [
-  { id: "USR-001", name: "林總務", email: "edoc@suiyuecare.com", unit: "總務", title: "總務課長", jobLevel: "課長", role: "總務", provider: "Google Workspace", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 10:05", ip: "203.0.113.18", device: "總務辦公室 Mac" },
-  { id: "USR-002", name: "張行政", email: "records@suiyuecare.com", unit: "行政部", title: "行政部長", jobLevel: "部長", role: "行政部主任", provider: "Microsoft Entra", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 09:48", ip: "198.51.100.27", device: "行政部主任筆電" },
-  { id: "USR-003", name: "王主管", email: "director@suiyuecare.com", unit: "居家照顧部", title: "居家服務督導", jobLevel: "組長", role: "主管", provider: "Google Workspace", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-21 16:20", ip: "203.0.113.18", device: "主管筆電" },
-  { id: "USR-004", name: "陳執行長", email: "ceo@suiyuecare.com", unit: "經營管理", title: "執行長", jobLevel: "執行長", role: "執行長", provider: "Google Workspace", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 08:56", ip: "203.0.113.44", device: "執行長筆電" },
-  { id: "USR-005", name: "何人資", email: "hr@suiyuecare.com", unit: "人資", title: "人資課長", jobLevel: "課長", role: "人資", provider: "Microsoft Entra", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 08:40", ip: "198.51.100.27", device: "人資筆電" },
-  { id: "USR-006", name: "許會計", email: "accounting@suiyuecare.com", unit: "會計", title: "會計課長", jobLevel: "課長", role: "會計", provider: "Microsoft Entra", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 08:38", ip: "198.51.100.28", device: "會計筆電" },
-  { id: "USR-007", name: "周業助", email: "sales-assistant@suiyuecare.com", unit: "業務部", title: "業務助理", jobLevel: "職員", role: "業務助理", provider: "Google Workspace", mfa: "待設定", status: "啟用", lastLogin: "2026-05-21 15:12", ip: "203.0.113.19", device: "業務助理筆電" },
-  { id: "USR-008", name: "員工測試", email: "employee@suiyuecare.com", unit: "居家照顧部", title: "居家照顧服務員", jobLevel: "職員", role: "員工", provider: "Google Workspace", mfa: "待設定", status: "啟用", lastLogin: "尚未登入", ip: "-", device: "尚未綁定" },
-  { id: "USR-009", name: "部門主管", email: "dept-chief@suiyuecare.com", unit: "營運管理處", title: "部門主管", jobLevel: "部長", role: "主任", provider: "Google Workspace", mfa: "已啟用", status: "啟用", lastLogin: "2026-05-22 09:20", ip: "203.0.113.22", device: "主管筆電" }
-];
-
-const accountLoginLogs = [
-  ["10:05", "edoc@suiyuecare.com", "Google Workspace", "203.0.113.18", "成功"],
-  ["09:48", "records@suiyuecare.com", "Microsoft Entra", "198.51.100.27", "成功"],
-  ["08:56", "it@suiyuecare.com", "本機帳號 + MFA", "203.0.113.44", "成功"],
-  ["08:10", "unknown@suiyuecare.com", "本機帳號", "192.0.2.41", "IP 封鎖"]
-];
-
-const accountDevices = [
-  { id: "ACC-DEV-001", userId: "USR-001", name: "總務辦公室 Mac", ip: "203.0.113.18", fingerprint: "FP-SYC-EDOC-A1F9", status: "信任" },
-  { id: "ACC-DEV-002", userId: "USR-002", name: "行政部主任筆電", ip: "198.51.100.27", fingerprint: "FP-SYC-EDOC-B8C2", status: "信任" },
-  { id: "ACC-DEV-003", userId: "USR-003", name: "居服督導 iPad", ip: "203.0.113.18", fingerprint: "FP-SYC-EDOC-C339", status: "待複核" },
-  { id: "ACC-DEV-004", userId: "USR-004", name: "資訊室管理機", ip: "203.0.113.44", fingerprint: "FP-SYC-EDOC-D601", status: "信任" }
-];
+const userAccounts = [];
+const accountLoginLogs = [];
+const accountDevices = [];
 
 const accountIpRules = [
   { id: "IP-001", ip: "203.0.113.0/24", purpose: "歲悅辦公室固定 IP", status: "允許" },
@@ -566,6 +504,7 @@ const opsState = {
   lastMonitorCheck: ""
 };
 let goLiveAuditState = null;
+let loginReadinessState = null;
 
 const opsApiLogs = [
   { time: "11:50:21", service: "jAgent", api: "POST /exchange/send", status: 200, duration: "186ms", code: "OK", message: "交換封包送出成功" },
@@ -596,7 +535,7 @@ const complianceDocuments = [
   { id: "DOC-COMP-002", title: "營運 Runbook", path: "docs/operations-runbook.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
   { id: "DOC-COMP-003", title: "資安事件通報與應變 SOP", path: "docs/incident-response-sop.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
   { id: "DOC-COMP-004", title: "保存年限與稽核證據政策", path: "docs/retention-audit-policy.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
-  { id: "DOC-COMP-005", title: "上線交接與季檢清單", path: "docs/go-live-operating-checklist.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
+  { id: "DOC-COMP-005", title: "上線交接與季檢清單", path: "docs/go-live-operating-checklist.md", owner: "行政部主任", status: "已更新", updatedAt: "2026-07-11" },
   { id: "DOC-COMP-006", title: "正式資料庫權限政策", path: "docs/database-security-policy.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
   { id: "DOC-COMP-007", title: "正式檔案儲存與病毒掃描政策", path: "docs/file-storage-scanning-policy.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" },
   { id: "DOC-COMP-008", title: "電子簽章憑證合法性驗證政策", path: "docs/certificate-legality-validation-policy.md", owner: "行政部主任", status: "已建立", updatedAt: "2026-05-23" }
@@ -625,7 +564,7 @@ const complianceGaps = [
   { id: "GAP-001", title: "正式 jAgent API 文件", owner: "行政部主任", status: "待取得", dueDate: "上線前" },
   { id: "GAP-002", title: "正式機關代碼與憑證卡", owner: "總務", status: "待取得", dueDate: "上線前" },
   { id: "GAP-003", title: "獨立 eDoc Supabase project", owner: "行政部主任", status: "待建立", dueDate: "部署前" },
-  { id: "GAP-004", title: "SMTP / LINE 正式通道驗證", owner: "行政部主任", status: "待驗證", dueDate: "部署前" }
+  { id: "GAP-004", title: "Resend / LINE 正式通道驗證", owner: "行政部主任", status: "待驗證", dueDate: "部署前" }
 ];
 
 const complianceAuditLog = [
@@ -659,7 +598,7 @@ const notificationGatewayState = {
   lineStatus: "未測試",
   inboxStatus: "啟用",
   scheduleStatus: "未排程",
-  emailApi: "讀取後端 SMTP 環境設定",
+  emailApi: "讀取後端 Resend 環境設定",
   lineWebhook: "讀取後端 LINE_WEBHOOK_URL",
   lastGatewayCheck: "尚未檢查",
   inboxRetention: "90 天",
@@ -668,7 +607,7 @@ const notificationGatewayState = {
   failureChannel: "Email + Line + 系統通知",
   lastTestReport: null,
   credentials: [
-    { id: "NCRED-EMAIL-SMTP", channel: "Email", provider: "SMTP / Transactional Email", credential_type: "SMTP 帳號/應用程式密碼", masked_identifier: "SMTP_HOST=未設定；SMTP_FROM=未設定", status: "待驗證", expires_at: "", last_validated_at: "" },
+    { id: "NCRED-EMAIL-SMTP", channel: "Email", provider: "Resend Email API（沿用官網）", credential_type: "Server-side API key", masked_identifier: "RESEND_API_KEY=未設定；MAIL_FROM=未設定", status: "待驗證", expires_at: "", last_validated_at: "" },
     { id: "NCRED-LINE-WEBHOOK", channel: "Line 工作群組", provider: "LINE Messaging API / Webhook", credential_type: "Webhook Secret / Channel Access Token", masked_identifier: "LINE_WEBHOOK_URL=未設定", status: "待驗證", expires_at: "", last_validated_at: "" },
     { id: "NCRED-INBOX-SIGNING", channel: "系統站內通知", provider: "Suiyuecare eDoc", credential_type: "站內通知簽章金鑰", masked_identifier: "APP_SECRET/CRON_SECRET", status: "待驗證", expires_at: "", last_validated_at: "" }
   ]
@@ -707,6 +646,10 @@ let selectedDatabaseId = "DOC-IN-1140522-00018";
 let databaseSearchTerm = "";
 let searchResults = [];
 let selectedSearchId = "";
+let searchHasRun = false;
+let searchTotal = 0;
+let searchHasMore = false;
+let searchError = "";
 let backendDashboardMetrics = null;
 const databaseAccessState = {};
 const databaseAuditLog = [
@@ -809,8 +752,8 @@ const featureGroups = [
 ];
 
 const roleNotes = {
-  員工: "可撰寫公文、處理自己的待辦，並查詢所屬部門收發公文紀錄。",
-  主管: "可處理所屬部門待辦、簽核與退回補正，並查詢部門公文紀錄。",
+  員工: "可撰寫公文、處理自己的待辦，並查詢所屬部門收發公文。",
+  主管: "可處理所屬部門待辦、簽核與退回補正，並查詢部門公文。",
   主任: "可查看所屬部門公文、核准部門分派、追蹤逾期與查詢交換結果。",
   執行長: "可查看全公司公文、核定重要或密件流程、查閱報表與稽核紀錄。",
   行政部主任: "可管理流程、清稿、角色設定、jAgent 參數、資安與營運維護。",
@@ -827,11 +770,11 @@ const rolePermissions = {
   員工: ["draft_dispatch", "view_assigned", "upload_attachment", "query_status"],
   主管: ["draft_dispatch", "view_assigned", "review_dispatch", "reject_case", "query_status", "view_audit"],
   主任: ["view_assigned", "assign_case", "query_status", "review_dispatch", "approve_contract", "view_audit"],
-  執行長: ["view_all_status", "query_status", "review_dispatch", "approve_format", "approve_contract", "view_audit", "export_audit"],
-  行政部主任: ["review_dispatch", "assign_case", "reject_case", "approve_format", "manage_contracts", "approve_contract", "manage_jagent", "manage_token", "manage_center", "manage_roles", "query_address_book", "view_audit", "export_audit"],
+  執行長: ["view_all_status", "query_status", "review_dispatch", "approve_format", "approve_contract", "view_audit", "export_audit", "seals.manage", "files.manage", "settings.system_manage"],
+  行政部主任: ["review_dispatch", "assign_case", "reject_case", "approve_format", "manage_contracts", "approve_contract", "manage_jagent", "manage_token", "manage_center", "manage_roles", "query_address_book", "view_audit", "export_audit", "seals.manage", "workflow.delegations.manage"],
   人資: ["view_assigned", "draft_dispatch", "draft_contract", "upload_attachment", "reply_case", "query_status"],
   會計: ["view_assigned", "draft_dispatch", "draft_contract", "approve_contract", "upload_attachment", "reply_case", "query_status"],
-  總務: ["pull_inbound", "register_inbound", "assign_case", "send_dispatch", "manage_contracts", "approve_contract", "query_status", "query_address_book"],
+  總務: ["pull_inbound", "register_inbound", "assign_case", "send_dispatch", "manage_contracts", "approve_contract", "query_status", "query_address_book", "seals.manage"],
   業務助理: ["draft_dispatch", "draft_contract", "view_assigned", "upload_attachment", "reply_case", "query_status"],
   董事會: ["official_documents.all_records", "contracts.view", "reports.operational_view", "audit_logs.view", "system_permissions.view"],
   股東: ["official_documents.all_records", "contracts.view", "reports.operational_view", "audit_logs.view"],
@@ -881,6 +824,7 @@ const loggingPermissionAliases = {
   "audit_logs.export": ["export_audit"],
   "system_permissions.view": ["view_audit"],
   "system_permissions.manage": ["manage_roles"],
+  "workflow.delegations.manage": [],
   "settings.system_manage": ["manage_center"]
 };
 
@@ -942,10 +886,10 @@ const permissionLabels = {
   manage_contracts: "合約管理",
   "official_documents.compose": "撰寫公文",
   "official_documents.todo": "公文待辦",
-  "official_documents.records": "公文紀錄",
+  "official_documents.records": "公文查詢",
   "official_documents.receive": "公文收發",
   "official_documents.all_todo": "全公司公文待辦",
-  "official_documents.all_records": "全公司公文紀錄",
+  "official_documents.all_records": "全公司公文查詢",
   "exchange.view": "交換查詢",
   "exchange.manage": "交換管理",
   "contracts.view": "合約檢視",
@@ -958,6 +902,7 @@ const permissionLabels = {
   "audit_logs.export": "稽核匯出",
   "system_permissions.view": "權限檢視",
   "system_permissions.manage": "權限管理",
+  "workflow.delegations.manage": "簽核代理管理",
   "settings.system_manage": "系統設定管理"
 };
 
@@ -980,13 +925,15 @@ let draftPreviewExpanded = false;
 let draftPreviewRenderTimer = null;
 let activeComposeStep = "fill";
 let currentComposeDraftId = "";
+let composeAutosaveRestoredForIdentity = "";
 let composeSaveState = {
   tone: "idle",
   title: "尚未暫存",
   detail: "輸入內容會先保護在此瀏覽器；按暫存草稿後會出現在發文清單。"
 };
-let approvalLogFilter = "all";
+let approvalLogFilter = "unanswered";
 let approvalLogSearchTerm = "";
+const composeDefaultContactPhone = "02-66045432 #";
 const composeSealTypes = ["無", "一般章", "公司設立章", "銀行印鑑章", "圖記章"];
 const composeSealPlacements = {
   large: { page: 1, x: 70, y: 80 },
@@ -1009,12 +956,11 @@ const workflowTasks = [
 const workflowSteps = [
   ["01", "申請人", "依職等與角色建立起案資料、附件與用印需求，送出後進入本人部門簽核。"],
   ["02", "申請人主管", "由 Logging 職位規劃中的主管層確認需求、附件與辦理依據。"],
-  ["03", "部門主管", "由部門主管層確認部門權責、金額、對外承諾與風險。"],
-  ["04", "會計", "僅 B / D 路由進入，複核費用、付款條件、預算與稅務資料。"],
+  ["03", "部門主任", "確認部門權責、金額、對外承諾與風險。"],
+  ["04", "執行長", "僅 C / D 路由在部門主任後進入，核定最高層代表、重大治理或高風險用印。"],
   ["05", "行政部門主任", "依 A / B / C / D 路由核定行政用印、文件完整性與流程合法性。"],
-  ["06", "執行長", "僅 C / D 路由進入，核定最高層代表、重大治理或高風險用印。"],
-  ["07", "總務", "核准後執行用印、登錄、保存影像與移交歸檔。"],
-  ["08", "申請人", "用印完成後回到申請人確認，完成結案與後續辦理。"]
+  ["06", "總務專員", "核准後執行用印、登錄、保存影像與移交歸檔。"],
+  ["07", "申請人收件", "用印完成後回到申請人收件，完成結案與後續辦理。"]
 ];
 
 const workflowAuditLog = [
@@ -1024,33 +970,74 @@ const workflowAuditLog = [
 const approvalRouteTypes = {
   A: {
     code: "A",
-    name: "A 行政部門用印（無需會計）",
+    name: "A 行政部門用印（統一簽核）",
     shortName: "行政部門用印",
-    requiresAccounting: false,
-    requiresCeo: false
+    requiresCeo: false,
+    flowNodes: ["申請人主管", "部門主任", "行政部門主任", "總務專員", "申請人收件"]
   },
   B: {
     code: "B",
-    name: "B 行政部門用印（需會計）",
-    shortName: "行政部門用印 + 會計",
-    requiresAccounting: true,
-    requiresCeo: false
+    name: "B 行政部門用印（統一簽核）",
+    shortName: "行政部門用印",
+    requiresCeo: false,
+    flowNodes: ["申請人主管", "部門主任", "行政部門主任", "總務專員", "申請人收件"]
   },
   C: {
     code: "C",
-    name: "C 執行長用印（無需會計）",
+    name: "C 執行長用印（統一簽核）",
     shortName: "執行長用印",
-    requiresAccounting: false,
-    requiresCeo: true
+    requiresCeo: true,
+    flowNodes: ["申請人主管", "部門主任", "執行長", "行政部門主任", "總務專員", "申請人收件"]
   },
   D: {
     code: "D",
-    name: "D 執行長用印（需會計）",
-    shortName: "執行長用印 + 會計",
-    requiresAccounting: true,
-    requiresCeo: true
+    name: "D 執行長用印（統一簽核）",
+    shortName: "執行長用印",
+    requiresCeo: true,
+    flowNodes: ["申請人主管", "部門主任", "執行長", "行政部門主任", "總務專員", "申請人收件"]
   }
 };
+
+const financeApplicantApprovalRoleAliases = Object.freeze({
+  supervisor: "section_chief",
+  section_chief: "section_chief",
+  "section-chief": "section_chief",
+  homecare_supervisor: "section_chief",
+  課長: "section_chief",
+  dept_manager: "department_head",
+  department_manager: "department_head",
+  department_head: "department_head",
+  "department-head": "department_head",
+  "business-director": "department_head",
+  主任: "department_head",
+  部門主任: "department_head"
+});
+
+function currentFinanceApplicantApprovalRole() {
+  const raw = String(
+    authState?.bridge?.loggingRoleKey
+    || authState?.user?.logging_role_key
+    || ""
+  ).trim();
+  return financeApplicantApprovalRoleAliases[raw] || raw;
+}
+
+function approvalFlowNodesForCurrentApplicant(nodes = []) {
+  const role = currentFinanceApplicantApprovalRole();
+  const skipped = role === "section_chief"
+    ? new Set(["申請人主管"])
+    : role === "department_head"
+      ? new Set(["申請人主管", "部門主任"])
+      : new Set();
+  return nodes.filter((node) => !skipped.has(node));
+}
+
+function currentApplicantApprovalRuleLabel() {
+  const role = currentFinanceApplicantApprovalRole();
+  if (role === "section_chief") return "課長流程：略過申請人主管";
+  if (role === "department_head") return "主任流程：略過申請人主管與部門主任";
+  return "一般職級流程";
+}
 
 const approvalDocumentCategories = [
   {
@@ -1094,11 +1081,16 @@ const approvalCategoryItems = approvalDocumentCategories.flatMap((group) =>
   group.items.map((item) => ({ ...item, group: group.group }))
 );
 
-function approvalCategoryForType(type = "") {
+function exactApprovalCategoryForType(type = "") {
   const normalized = String(type || "").trim();
   return approvalCategoryItems.find((item) =>
     item.label === normalized || (item.aliases || []).includes(normalized)
-  ) || {
+  ) || null;
+}
+
+function approvalCategoryForType(type = "") {
+  const normalized = String(type || "").trim();
+  return exactApprovalCategoryForType(normalized) || {
     label: normalized || "其他用印文件",
     group: "例外條件",
     route: "A",
@@ -1115,13 +1107,46 @@ function workflowTemplateKeyForRoute(routeCode = "A") {
   return `route${approvalRouteTypes[routeCode]?.code || "A"}`;
 }
 
+function approvalSelectionForType(type = "") {
+  const category = exactApprovalCategoryForType(type);
+  if (!category) {
+    return {
+      documentCategory: "",
+      documentCategoryGroup: "",
+      approvalRouteCode: "",
+      approvalRouteName: "",
+      workflowTemplateKey: "",
+      approvalFlowNodes: []
+    };
+  }
+  const route = approvalRouteTypes[category.route];
+  if (!route) {
+    return {
+      documentCategory: category.label,
+      documentCategoryGroup: category.group,
+      approvalRouteCode: "",
+      approvalRouteName: "",
+      workflowTemplateKey: "",
+      approvalFlowNodes: []
+    };
+  }
+  return {
+    documentCategory: category.label,
+    documentCategoryGroup: category.group,
+    approvalRouteCode: route.code,
+    approvalRouteName: route.name,
+    workflowTemplateKey: `official_seal_route_${route.code.toLowerCase()}_v1`,
+    // This is a display/payload snapshot only.  The backend independently
+    // derives and locks the authoritative route from the live Finance role.
+    approvalFlowNodes: approvalFlowNodesForCurrentApplicant(route.flowNodes || [])
+  };
+}
+
 function workflowStepsForRoute(routeCode = "A") {
   const route = approvalRouteTypes[routeCode] || approvalRouteTypes.A;
-  const steps = ["申請人送出", "申請人主管審核", "部門主管審核"];
-  if (route.requiresAccounting) steps.push("會計複核");
-  steps.push("行政部門主任核定");
-  if (route.requiresCeo) steps.push("執行長核定");
-  steps.push("總務用印登錄", "申請人確認");
+  const steps = ["申請人送出", "申請人主管", "部門主任"];
+  if (route.requiresCeo) steps.push("執行長");
+  steps.push("行政部門主任", "總務專員", "申請人收件");
   return steps;
 }
 
@@ -1135,6 +1160,19 @@ function workflowTemplateForRoute(routeCode = "A") {
 }
 
 let activeWorkflowTemplate = "routeC";
+let officialWorkflowConfig = {
+  enabled_steps: ["applicant_manager", "department_head", "admin_director", "general_affairs_review", "applicant_confirm"],
+  steps: [],
+  locked: true
+};
+const officialWorkflowStepLabels = {
+  applicant_manager: "申請人主管",
+  department_head: "部門主任",
+  ceo: "執行長",
+  admin_director: "行政部門主任",
+  general_affairs_review: "總務專員",
+  applicant_confirm: "申請人收件"
+};
 const workflowTemplates = {
   routeA: workflowTemplateForRoute("A"),
   routeB: workflowTemplateForRoute("B"),
@@ -1176,9 +1214,14 @@ const formatTemplateConfigs = [
 loadAdminConfigState();
 syncWorkflowTemplateObject();
 
-const workflowProxies = [
-  { id: "PX-001", from: "行政部主任", to: "總務", reason: "主管差勤代理", status: "啟用" }
-];
+// This is only the authenticated API response cache. Delegations are created,
+// revoked, authorized and applied by the backend; they never rewrite local
+// workflowTasks or substitute a role name in the browser.
+const workflowProxies = [];
+let workflowProxyCandidates = [];
+let workflowProxyCanManage = false;
+let workflowProxyLoadState = "idle";
+let workflowProxyCurrentUserId = "";
 
 const workflowProofLog = [
   ["11:28", "簽核引擎初始化", "流程範本、條件規則、代理人與不可否認紀錄已載入。"]
@@ -1186,8 +1229,17 @@ const workflowProofLog = [
 
 let selectedSealId = "SEAL-001";
 let selectedSealRequestId = "REQ-001";
-const companyRegistry = [
-  { id: "CO-001", name: "歲悅長照股份有限公司", taxId: "待設定", status: "啟用" }
+let companyRegistry = [
+  { id: "CO-001", financeEntityId: "E1", name: "歲悅股份有限公司", taxId: "60792234", address: "110臺北市信義區基隆路一段364巷6號1樓", status: "啟用" },
+  { id: "CO-002", financeEntityId: "E2", name: "樂齡歲悅股份有限公司", taxId: "60541552", address: "110臺北市信義區基隆路一段364巷6號1樓", status: "啟用" },
+  { id: "CO-003", financeEntityId: "E3", name: "移站式股份有限公司", taxId: "", address: "", status: "啟用" },
+  { id: "CO-004", financeEntityId: "E4", name: "大齡好好投資有限公司", taxId: "", address: "", status: "啟用" },
+  { id: "CO-005", financeEntityId: "E5", name: "歲悅股份有限公司附設臺北市私立歲悅居家長照機構", taxId: "00602175", address: "111臺北市士林區社子街63巷21弄2號1樓", status: "啟用" },
+  { id: "CO-006", financeEntityId: "E6", name: "樂齡歲悅股份有限公司附設臺北市私立歲悅萬華社區長照機構", taxId: "00667423", address: "108臺北市萬華區康定路43號2樓", status: "啟用" },
+  { id: "CO-007", financeEntityId: "E7", name: "愛無限整合服務有限公司", taxId: "90691342", address: "", status: "啟用" },
+  { id: "CO-008", financeEntityId: "E8", name: "愛無限整合有限公司附設新北市私立愛無限居家長照機構", taxId: "91254360", address: "", status: "啟用" },
+  { id: "CO-009", financeEntityId: "E9", name: "好窩居家職能治療所", taxId: "", address: "", status: "啟用" },
+  { id: "CO-010", financeEntityId: "E10", name: "歲悅萬華二館股份有限公司籌備處", taxId: "A128403108", address: "臺北市萬華區成都路159號2樓", status: "啟用" }
 ];
 const departmentRegistry = [
   { id: "DEP-001", company: "歲悅長照股份有限公司", name: "總管理處", manager: "執行長", status: "啟用" },
@@ -1217,28 +1269,599 @@ const sealAuditLog = [
 
 let uploadedSealPdf = null;
 let uploadedSealObjectUrl = "";
+let uploadedSealPreviewObjectUrl = "";
 let uploadedSealStampPositions = [];
+let uploadedSealTextOverlays = [];
+let uploadedSealPageCount = 0;
+let uploadedSealCurrentPage = 1;
+let uploadedSealMode = "official_document";
+let uploadedSealPlacementMode = "seal";
+let uploadedSealOptions = [];
+const PDF_EDITOR_SCHEMA_VERSION = 2;
+const PDF_EDITOR_RENDERER_VERSION = "pymupdf-1.26.5-editor-v3-kai-text-front";
+const PDF_EDITOR_MAX_FILE_BYTES = 50 * 1024 * 1024;
+const PDF_EDITOR_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+// JSON/Base64 requests expand the file by roughly one third and still pass
+// through a Vercel Function. Only the PDF Editor TUS path is a 50 MB path.
+const INLINE_JSON_UPLOAD_MAX_BYTES = 3 * 1024 * 1024;
+
+function requireInlineJsonUploadSize(file, label = "附件") {
+  if (file?.size > INLINE_JSON_UPLOAD_MAX_BYTES) {
+    throw new Error(`${label}目前透過 JSON 上傳，單檔上限 3 MB；大型 PDF 請改用電子用印 PDF 編輯器的私密直傳。`);
+  }
+}
+const PDF_EDITOR_MAX_PAGES = 300;
+const PDF_EDITOR_MAX_ELEMENTS = 1000;
+const PDF_EDITOR_AUTOSAVE_DELAY_MS = 2000;
+const PDF_EDITOR_ALLOWED_KINDS = new Set(["seal", "text", "replacement", "image", "shape", "checkmark", "highlight", "redaction"]);
+const PDF_EDITOR_DEFAULT_FONT_FAMILY = "biau_kai";
+const PDF_A4_WIDTH_PT = 595.2756;
+const PDF_A4_HEIGHT_PT = 841.8898;
+const PDF_A4_TOLERANCE_PT = 1.0;
+const PDF_A4_INVALID_MESSAGE = "PDF 只能使用 A4（直式或橫式），且每一頁都必須是 A4；請重新輸出後再上傳。";
+let officialPdfA4Validation = { fileKey: "", state: "idle", report: null };
+
+function editorElementLayerTier(element) {
+  const kind = String(element?.kind || "");
+  if (kind === "seal") return 0;
+  if (["text", "replacement"].includes(kind)) return 2;
+  return 1;
+}
+
+function compareEditorElementsForLayer(left, right) {
+  return editorElementLayerTier(left) - editorElementLayerTier(right)
+    || Number(left?.zIndex || 0) - Number(right?.zIndex || 0)
+    || String(left?.id || "").localeCompare(String(right?.id || ""));
+}
+
+function normalizeUploadedEditorElementLayers(state) {
+  (state?.pages || []).forEach((page) => {
+    (state?.elements || [])
+      .filter((element) => element.pageId === page.pageId)
+      .sort(compareEditorElementsForLayer)
+      .forEach((element, index) => {
+        element.zIndex = index + 1;
+      });
+  });
+}
+
+function emptyUploadedSealEditorState() {
+  return {
+    schemaVersion: PDF_EDITOR_SCHEMA_VERSION,
+    revisionNo: 0,
+    sourceFiles: [],
+    pages: [],
+    elements: [],
+    manifestSha256: ""
+  };
+}
+
+function clearUploadedEditorSensitivePreviews() {
+  window.clearTimeout(uploadedSealEditorRuntime?.saveTimer || 0);
+  [uploadedSealEditorRuntime?.assetUrls, uploadedSealEditorRuntime?.imageUrls].forEach((map) => {
+    map?.forEach?.((url) => { if (String(url || "").startsWith("blob:")) URL.revokeObjectURL(url); });
+    map?.clear?.();
+  });
+  uploadedSealEditorRuntime?.sealPreviewUrls?.forEach?.((entry) => {
+    window.clearTimeout(entry?.revokeTimer || 0);
+    if (String(entry?.url || "").startsWith("blob:")) URL.revokeObjectURL(entry.url);
+  });
+  uploadedSealEditorRuntime?.sealPreviewUrls?.clear?.();
+  uploadedSealEditorRuntime?.savedSealPreviewBindings?.clear?.();
+  uploadedSealEditorRuntime?.pdfDocuments?.forEach?.((document) => { void document.destroy?.(); });
+  uploadedSealEditorRuntime?.pdfDocuments?.clear?.();
+  uploadedSealEditorRuntime?.pageProxies?.clear?.();
+  uploadedSealEditorRuntime?.assetFiles?.clear?.();
+  void uploadedSealEditorRuntime?.preparedPdfDocument?.destroy?.();
+  if (typeof uploadedSealEditorRuntime === "object") {
+    uploadedSealEditorRuntime.preparedPdfDocument = null;
+    uploadedSealEditorRuntime.preparedUrl = "";
+    uploadedSealEditorRuntime.changeSummary = null;
+    uploadedSealEditorRuntime.documentId = "";
+    uploadedSealEditorRuntime.revisionId = "";
+    uploadedSealEditorRuntime.baseManifestSha256 = "";
+    uploadedSealEditorRuntime.locked = false;
+  }
+  uploadedSealEditorState = emptyUploadedSealEditorState();
+  uploadedSealPdf = null;
+}
+
+let uploadedSealEditorState = emptyUploadedSealEditorState();
+const uploadedSealEditorRuntime = {
+  documentId: "",
+  revisionId: "",
+  baseManifestSha256: "",
+  preparedFileId: "",
+  preparedSha256: "",
+  preparedUrl: "",
+  preparedPdfDocument: null,
+  reviewMode: "edited",
+  changeSummary: null,
+  mode: "general",
+  tool: "select",
+  zoom: 1,
+  fitPage: true,
+  locked: false,
+  saving: false,
+  savePromise: null,
+  saveQueued: false,
+  dirtyGeneration: 0,
+  savedGeneration: 0,
+  saveTimer: 0,
+  renderNonce: 0,
+  renderTask: null,
+  pdfDocuments: new Map(),
+  pageProxies: new Map(),
+  assetFiles: new Map(),
+  assetUrls: new Map(),
+  imageUrls: new Map(),
+  sealPreviewUrls: new Map(),
+  savedSealPreviewBindings: new Set(),
+  selectedIds: new Set(),
+  undoStack: [],
+  redoStack: [],
+  currentPageId: "",
+  currentViewport: null,
+  currentPageProxy: null,
+  thumbnailObserver: null,
+  thumbnailTasks: new Map(),
+  pointerAction: null,
+  touchPointers: new Map(),
+  pinchStartDistance: 0,
+  pinchStartZoom: 1,
+  guides: [],
+  clipboard: [],
+  conflict: null,
+  draftCreatePromise: null,
+  offlineDirty: false
+};
+
+async function ensurePdfJsLibrary() {
+  if (window.pdfjsLib?.getDocument) return window.pdfjsLib;
+  window.pdfjsLibPromise ||= import("./vendor/pdfjs/pdf.min.mjs?v=4.2.67").then((library) => {
+    window.pdfjsLib = library;
+    library.GlobalWorkerOptions.workerSrc = "vendor/pdfjs/pdf.worker.min.mjs?v=4.2.67";
+    return library;
+  });
+  return window.pdfjsLibPromise;
+}
+
+function pdfA4PageReport(pages = []) {
+  const normalized = pages.map((page, index) => {
+    const widthPt = Number(page?.widthPt ?? page?.width_pt ?? page?.width ?? 0);
+    const heightPt = Number(page?.heightPt ?? page?.height_pt ?? page?.height ?? 0);
+    const pageNumber = page?.page != null
+      ? Number(page.page)
+      : Number(page?.sourcePageIndex ?? index) + 1;
+    const shortEdgePt = Math.min(widthPt, heightPt);
+    const longEdgePt = Math.max(widthPt, heightPt);
+    const valid = Number.isFinite(shortEdgePt)
+      && Number.isFinite(longEdgePt)
+      && Math.abs(shortEdgePt - PDF_A4_WIDTH_PT) <= PDF_A4_TOLERANCE_PT
+      && Math.abs(longEdgePt - PDF_A4_HEIGHT_PT) <= PDF_A4_TOLERANCE_PT;
+    return {
+      page: pageNumber,
+      widthPt,
+      heightPt,
+      orientation: widthPt > heightPt ? "landscape" : "portrait",
+      valid
+    };
+  });
+  return {
+    valid: normalized.length > 0 && normalized.every((page) => page.valid),
+    pageCount: normalized.length,
+    portraitCount: normalized.filter((page) => page.orientation === "portrait").length,
+    landscapeCount: normalized.filter((page) => page.orientation === "landscape").length,
+    invalidPages: normalized.filter((page) => !page.valid),
+    pages: normalized
+  };
+}
+
+function requirePdfPagesA4(pages = []) {
+  const report = pdfA4PageReport(pages);
+  if (!report.valid) {
+    const error = new Error(PDF_A4_INVALID_MESSAGE);
+    error.code = "pdf_page_not_a4";
+    error.invalidPages = report.invalidPages;
+    throw error;
+  }
+  return report;
+}
+
+async function readPdfA4Pages(pdfDocument) {
+  const pages = [];
+  for (let pageNumber = 1; pageNumber <= Number(pdfDocument?.numPages || 0); pageNumber += 1) {
+    const page = await pdfDocument.getPage(pageNumber);
+    const userUnit = Number(page.userUnit || 1);
+    const view = page.view || [0, 0, 0, 0];
+    pages.push({
+      page: pageNumber,
+      widthPt: Math.abs(Number(view[2] || 0) - Number(view[0] || 0)) * userUnit,
+      heightPt: Math.abs(Number(view[3] || 0) - Number(view[1] || 0)) * userUnit
+    });
+  }
+  return pages;
+}
+
+function pdfA4AcceptedMessage(report = {}) {
+  const orientation = report.portraitCount && report.landscapeCount
+    ? `直式 ${report.portraitCount} 頁、橫式 ${report.landscapeCount} 頁`
+    : report.landscapeCount
+      ? `橫式 ${report.landscapeCount} 頁`
+      : `直式 ${report.portraitCount || report.pageCount || 0} 頁`;
+  return `A4 檢查通過：共 ${report.pageCount || 0} 頁（${orientation}）。`;
+}
+
+function pdfA4UiErrorMessage(error) {
+  return error?.code === "pdf_page_not_a4" || String(error?.rawMessage || error?.message || "").includes("pdf_page_not_a4")
+    ? PDF_A4_INVALID_MESSAGE
+    : error?.message || "PDF 頁面尺寸檢查失敗，請重新輸出後再上傳。";
+}
+
+function setPdfA4RuleStatus(ruleSelector, statusSelector, state, message) {
+  const rule = document.querySelector(ruleSelector);
+  const status = document.querySelector(statusSelector);
+  if (rule) rule.dataset.state = state;
+  if (status) status.textContent = message;
+}
+
+function setOfficialPdfA4Status(state, message) {
+  setPdfA4RuleStatus("#officialPdfA4Rule", "#officialPdfA4Status", state, message);
+  const input = document.querySelector("#officialPdfInput");
+  if (input) {
+    if (["ok", "error"].includes(state)) input.dataset.validity = state === "ok" ? "ok" : "needs";
+    else delete input.dataset.validity;
+  }
+}
+
+function setUploadedPdfA4Status(state, message) {
+  setPdfA4RuleStatus("#uploadedPdfA4Rule", "#uploadedPdfA4Status", state, message);
+}
+
+function ensureUploadedEditorPagesA4(pages = uploadedSealEditorState.pages) {
+  try {
+    const report = requirePdfPagesA4(pages);
+    setUploadedPdfA4Status("ok", pdfA4AcceptedMessage(report));
+    return report;
+  } catch (error) {
+    setUploadedPdfA4Status("error", PDF_A4_INVALID_MESSAGE);
+    throw error;
+  }
+}
+
+function pdfFileValidationKey(file) {
+  return file ? `${file.name}:${file.size}:${file.lastModified || 0}` : "";
+}
+
+async function inspectPdfFileA4(file) {
+  const pdfjsLib = await ensurePdfJsLibrary();
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(await file.arrayBuffer()),
+    enableXfa: false,
+    isEvalSupported: false,
+    useSystemFonts: true
+  });
+  let passwordProtected = false;
+  loadingTask.onPassword = () => {
+    passwordProtected = true;
+    void loadingTask.destroy();
+  };
+  let pdfDocument;
+  try {
+    pdfDocument = await loadingTask.promise;
+    const validation = await validateUploadedPdfDocument(pdfDocument);
+    return validation.a4Report;
+  } catch (error) {
+    if (passwordProtected || error?.name === "PasswordException") throw new Error("密碼加密 PDF 不接受上傳，請提供未加密版本。");
+    throw error;
+  } finally {
+    void pdfDocument?.destroy?.();
+  }
+}
+
+async function ensureOfficialPdfA4(file, options = {}) {
+  const fileKey = pdfFileValidationKey(file);
+  if (!file) throw new Error("請選擇要上傳的 PDF。");
+  if (!options.force && officialPdfA4Validation.fileKey === fileKey && officialPdfA4Validation.state === "ok") {
+    return officialPdfA4Validation.report;
+  }
+  officialPdfA4Validation = { fileKey, state: "checking", report: null };
+  setOfficialPdfA4Status("checking", "正在檢查每一頁是否為 A4…");
+  try {
+    const report = await inspectPdfFileA4(file);
+    officialPdfA4Validation = { fileKey, state: "ok", report };
+    setOfficialPdfA4Status("ok", pdfA4AcceptedMessage(report));
+    return report;
+  } catch (error) {
+    const message = pdfA4UiErrorMessage(error);
+    officialPdfA4Validation = { fileKey, state: "error", report: null };
+    setOfficialPdfA4Status("error", message);
+    throw Object.assign(error instanceof Error ? error : new Error(message), { message });
+  }
+}
+
+async function handleOfficialPdfA4Change(event) {
+  const file = event?.currentTarget?.files?.[0] || null;
+  if (!file) {
+    officialPdfA4Validation = { fileKey: "", state: "idle", report: null };
+    setOfficialPdfA4Status("idle", "尚未檢查 PDF 頁面尺寸。");
+    return;
+  }
+  try {
+    await ensureOfficialPdfA4(file, { force: true });
+  } catch (error) {
+    showToast(pdfA4UiErrorMessage(error));
+  }
+}
+let activeRouteTarget = "dashboard";
 let companySealModuleLoaded = false;
 let companySealCompanies = [];
+let companySealCompanySyncError = "";
 let companySealReferences = { grouped: {} };
 let companySealLibrary = [];
 let companySealFiles = [];
 let companySealRequests = [];
 let companySealLogs = [];
+let companySealVaultReadinessReport = null;
 let selectedCompanySealCompanyId = "";
 let selectedCompanySealId = "";
-let companySealStampPositions = [
-  { page: 1, x: 420, y: 130, w: 85, h: 85, label: "用印", type: "general_seal" }
+let simpleSealCategory = "establishment_seal";
+let selectedSimpleSealRecordId = "";
+let simpleSealGeometryValidationSequence = 0;
+const simpleSealMaxUploadBytes = 3 * 1024 * 1024;
+const simpleSealMimeByExtension = Object.freeze({
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp"
+});
+let companySealStampPositions = [fixedCompanySealStampPosition(
+  { page: 1, x: 420, y: 130, label: "用印", type: "general_seal" },
+  "large_seal"
+)];
+const companySealLaunchRequiredCategories = [
+  { code: "general_seal", name: "便章", purpose: "日常公文、一般函稿與例行文件" },
+  { code: "establishment_seal", name: "公司設立章", purpose: "設立、變更、重大治理與登記文件" },
+  { code: "official_seal", name: "關防印", purpose: "正式公文、機關往來與高敏感文件" },
+  { code: "bank_seal", name: "銀行章", purpose: "銀行往來、帳戶與付款授權文件" }
 ];
 
-const pdfPointsPerMm = 72 / 25.4;
+function companySealSizeType(sealOrSizeType, dimensionHintPt = 0) {
+  const raw = typeof sealOrSizeType === "string"
+    ? sealOrSizeType
+    : sealOrSizeType?.seal_size_type || sealOrSizeType?.sealSizeType || sealOrSizeType?.properties?.sealSizeType || "";
+  if (Object.prototype.hasOwnProperty.call(COMPANY_SEAL_SIZE_POLICY_MM, raw)) return raw;
+  const explicitWidthMm = Number(sealOrSizeType?.widthMm ?? sealOrSizeType?.width_mm ?? 0);
+  if (Number.isFinite(explicitWidthMm) && explicitWidthMm > 0) {
+    return explicitWidthMm <= (COMPANY_SEAL_SIZE_POLICY_MM.large_seal.widthMm + COMPANY_SEAL_SIZE_POLICY_MM.small_seal.widthMm) / 2
+      ? "small_seal"
+      : "large_seal";
+  }
+  const hintedPointSize = Number(dimensionHintPt || sealOrSizeType?.width || sealOrSizeType?.w || 0);
+  const largeWidthPt = COMPANY_SEAL_SIZE_POLICY_MM.large_seal.widthMm * pdfPointsPerMm;
+  const smallWidthPt = COMPANY_SEAL_SIZE_POLICY_MM.small_seal.widthMm * pdfPointsPerMm;
+  return hintedPointSize > 0 && hintedPointSize <= (largeWidthPt + smallWidthPt) / 2 ? "small_seal" : "large_seal";
+}
+
+function validateCompanySealCalibration(sizeType, widthMm, heightMm) {
+  const sealSizeType = companySealSizeType(sizeType);
+  const limits = COMPANY_SEAL_CALIBRATION_LIMITS_MM[sealSizeType];
+  const width = Number(widthMm);
+  const height = Number(heightMm);
+  const label = COMPANY_SEAL_SIZE_POLICY_MM[sealSizeType].label;
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return { ok: false, sealSizeType, message: "請輸入有效的印章校準寬度與高度。" };
+  }
+  if (width < limits.min || width > limits.max || height < limits.min || height > limits.max) {
+    return {
+      ok: false,
+      sealSizeType,
+      message: `${label}校準長寬必須介於 ${limits.min}–${limits.max} mm。`
+    };
+  }
+  if (Math.abs(width - height) > COMPANY_SEAL_CALIBRATION_SQUARE_TOLERANCE_MM + 1e-9) {
+    return {
+      ok: false,
+      sealSizeType,
+      message: "印章校準寬高差不得超過 0.01 mm，請輸入相同長寬以避免變形。"
+    };
+  }
+  return { ok: true, sealSizeType, widthMm: width, heightMm: height, limits };
+}
+
+function calibratedCompanySealMillimeters(sealOrSizeType, dimensionHintPt = 0) {
+  const sealSizeType = companySealSizeType(sealOrSizeType, dimensionHintPt);
+  const policy = COMPANY_SEAL_SIZE_POLICY_MM[sealSizeType];
+  if (!sealOrSizeType || typeof sealOrSizeType === "string") {
+    return { sealSizeType, widthMm: policy.widthMm, heightMm: policy.heightMm, source: "default" };
+  }
+  const currentFile = sealOrSizeType.current_file || sealOrSizeType.currentFile || null;
+  const candidates = [
+    [currentFile?.render_width_mm ?? currentFile?.renderWidthMm, currentFile?.render_height_mm ?? currentFile?.renderHeightMm, "current_file"],
+    [sealOrSizeType.render_width_mm ?? sealOrSizeType.renderWidthMm, sealOrSizeType.render_height_mm ?? sealOrSizeType.renderHeightMm, "seal"],
+    [sealOrSizeType.properties?.physicalWidthMm, sealOrSizeType.properties?.physicalHeightMm, "editor_snapshot"]
+  ];
+  for (const [widthMm, heightMm, source] of candidates) {
+    const validation = validateCompanySealCalibration(sealSizeType, widthMm, heightMm);
+    if (validation.ok) return { ...validation, source };
+  }
+  return { sealSizeType, widthMm: policy.widthMm, heightMm: policy.heightMm, source: "default" };
+}
+
+function companySealFixedGeometry(sealOrSizeType, dimensionHintPt = 0) {
+  const calibration = calibratedCompanySealMillimeters(sealOrSizeType, dimensionHintPt);
+  const { sealSizeType, widthMm, heightMm } = calibration;
+  const policy = COMPANY_SEAL_SIZE_POLICY_MM[sealSizeType];
+  return {
+    sealSizeType,
+    label: policy.label,
+    widthMm,
+    heightMm,
+    widthPt: widthMm * pdfPointsPerMm,
+    heightPt: heightMm * pdfPointsPerMm,
+    aspectRatio: widthMm / heightMm,
+    calibrationSource: calibration.source,
+    sizeLocked: true
+  };
+}
+
+function companySealGeometryNearlyEqual(left, right, tolerance = COMPANY_SEAL_GEOMETRY_COMPARISON_TOLERANCE) {
+  return Number.isFinite(Number(left))
+    && Number.isFinite(Number(right))
+    && Math.abs(Number(left) - Number(right)) <= tolerance;
+}
+
+function formatCompanySealMeasurement(value) {
+  return Number(value || 0).toFixed(2);
+}
+
+function companySealMinimumShortEdgePixels(sealOrGeometry) {
+  const geometry = sealOrGeometry?.widthMm && sealOrGeometry?.heightMm
+    ? sealOrGeometry
+    : companySealFixedGeometry(sealOrGeometry || "large_seal");
+  return Math.ceil((Math.max(Number(geometry.widthMm), Number(geometry.heightMm)) / 25.4) * COMPANY_SEAL_RENDER_DPI);
+}
 
 function sealWidthPt(seal) {
-  return Math.round(Number(seal?.widthMm || 30) * pdfPointsPerMm * 100) / 100;
+  return companySealFixedGeometry(seal).widthPt;
 }
 
 function sealHeightPt(seal) {
-  return Math.round(Number(seal?.heightMm || 30) * pdfPointsPerMm * 100) / 100;
+  return companySealFixedGeometry(seal).heightPt;
+}
+
+function fixedCompanySealStampPosition(position = {}, sealOrSizeType = "large_seal") {
+  const geometry = companySealFixedGeometry(sealOrSizeType, Math.max(Number(position.width || position.w || 0), Number(position.height || position.h || 0)));
+  return {
+    ...position,
+    w: geometry.widthPt,
+    h: geometry.heightPt,
+    width: geometry.widthPt,
+    height: geometry.heightPt,
+    seal_size_type: geometry.sealSizeType,
+    size_locked: true
+  };
+}
+
+function uploadedEditorSealRecord(element) {
+  const sealId = element?.properties?.sealId || element?.seal_id || "";
+  return [...uploadedSealOptions, ...officialSealOptions, ...companySealLibrary].find((seal) => seal.id === sealId) || null;
+}
+
+function companySealCurrentVersionSnapshot(seal) {
+  const currentFile = seal?.current_file || seal?.currentFile || null;
+  return {
+    sealFileId: String(currentFile?.id || currentFile?.file_id || seal?.current_file_id || seal?.currentFileId || ""),
+    sealFileSha256: String(
+      currentFile?.file_hash
+      || currentFile?.sha256
+      || currentFile?.file_sha256
+      || seal?.current_file_sha256
+      || seal?.currentFileSha256
+      || ""
+    )
+  };
+}
+
+function uploadedEditorImmutableSealGeometry(element) {
+  const properties = element?.properties || {};
+  // A persisted renderer profile was verified against the immutable Seal
+  // Vault file by the server. Prefer it over legacy client-only physical
+  // fields so a 30 mm legacy draft rebound to a 32 mm file cannot drift back
+  // to 30 mm after the authoritative save response is loaded.
+  const rawWidthMm = properties.renderWidthMm ?? properties.render_width_mm ?? properties.physicalWidthMm;
+  const rawHeightMm = properties.renderHeightMm ?? properties.render_height_mm ?? properties.physicalHeightMm;
+  const hasExplicitPhysicalSnapshot = (rawWidthMm !== undefined && rawWidthMm !== null)
+    || (rawHeightMm !== undefined && rawHeightMm !== null);
+  const hasFileSnapshot = Boolean(
+    (properties.sealFileId || properties.seal_file_id)
+    && (properties.sealFileSha256 || properties.seal_file_sha256)
+  );
+  // Only a complete file ID + hash + physical profile is immutable. Older
+  // drafts that only carried dimensions must be bound to current once by the
+  // backend, otherwise client and server can oscillate between two versions.
+  if (!hasExplicitPhysicalSnapshot || !hasFileSnapshot) return null;
+  const sealSizeType = companySealSizeType(properties.sealSizeType || element);
+  const policy = COMPANY_SEAL_SIZE_POLICY_MM[sealSizeType];
+  const validation = validateCompanySealCalibration(sealSizeType, rawWidthMm, rawHeightMm);
+  // Explicit but invalid physical metadata is untrusted. Do not fall through
+  // to caller-controlled point dimensions; current-file normalization and
+  // the backend file-aware validator will reject or repair it.
+  if (!validation.ok) return null;
+  const widthMm = validation?.widthMm ?? policy.widthMm;
+  const heightMm = validation?.heightMm ?? policy.heightMm;
+  return {
+    sealSizeType,
+    label: policy.label,
+    widthMm,
+    heightMm,
+    widthPt: widthMm * pdfPointsPerMm,
+    heightPt: heightMm * pdfPointsPerMm,
+    aspectRatio: widthMm / heightMm,
+    calibrationSource: "immutable_editor_snapshot",
+    sizeLocked: true
+  };
+}
+
+function normalizeUploadedEditorSealGeometry(state = uploadedSealEditorState) {
+  let changed = false;
+  (state?.elements || []).forEach((element) => {
+    if (element?.kind !== "seal") return;
+    const page = (state?.pages || []).find((item) => item.pageId === element.pageId);
+    const sealRecord = uploadedEditorSealRecord(element);
+    const explicitSizeType = element.properties?.sealSizeType || element.properties?.seal_size_type || sealRecord?.seal_size_type || sealRecord?.sealSizeType || "";
+    const immutableSnapshotGeometry = uploadedEditorImmutableSealGeometry(element);
+    const geometry = immutableSnapshotGeometry
+      || companySealFixedGeometry(sealRecord || { ...element, seal_size_type: explicitSizeType }, Math.max(Number(element.width || 0), Number(element.height || 0)));
+    const currentVersionSnapshot = immutableSnapshotGeometry ? null : companySealCurrentVersionSnapshot(sealRecord);
+    const nextWidth = geometry.widthPt;
+    const nextHeight = geometry.heightPt;
+    const nextX = page ? Math.max(0, Math.min(Math.max(0, Number(page.widthPt || 0) - nextWidth), Number(element.x || 0))) : Number(element.x || 0);
+    const nextY = page ? Math.max(0, Math.min(Math.max(0, Number(page.heightPt || 0) - nextHeight), Number(element.y || 0))) : Number(element.y || 0);
+    const previousProperties = element.properties || {};
+    const widthMatches = companySealGeometryNearlyEqual(element.width, nextWidth);
+    const heightMatches = companySealGeometryNearlyEqual(element.height, nextHeight);
+    const xMatches = companySealGeometryNearlyEqual(element.x, nextX);
+    const yMatches = companySealGeometryNearlyEqual(element.y, nextY);
+    const physicalWidthMatches = companySealGeometryNearlyEqual(previousProperties.physicalWidthMm, geometry.widthMm);
+    const physicalHeightMatches = companySealGeometryNearlyEqual(previousProperties.physicalHeightMm, geometry.heightMm);
+    const aspectRatioMatches = companySealGeometryNearlyEqual(previousProperties.aspectRatio, geometry.aspectRatio);
+    const nextSealFileId = immutableSnapshotGeometry
+      ? String(previousProperties.sealFileId || previousProperties.seal_file_id || "")
+      : String(currentVersionSnapshot?.sealFileId || "");
+    const nextSealFileSha256 = immutableSnapshotGeometry
+      ? String(previousProperties.sealFileSha256 || previousProperties.seal_file_sha256 || "")
+      : String(currentVersionSnapshot?.sealFileSha256 || "");
+    if (
+      !widthMatches
+      || !heightMatches
+      || !xMatches
+      || !yMatches
+      || previousProperties.sealSizeType !== geometry.sealSizeType
+      || !physicalWidthMatches
+      || !physicalHeightMatches
+      || !aspectRatioMatches
+      || (nextSealFileId && previousProperties.sealFileId !== nextSealFileId)
+      || (nextSealFileSha256 && previousProperties.sealFileSha256 !== nextSealFileSha256)
+      || previousProperties.sizeLocked !== true
+    ) changed = true;
+    if (!xMatches) element.x = nextX;
+    if (!yMatches) element.y = nextY;
+    if (!widthMatches) element.width = nextWidth;
+    if (!heightMatches) element.height = nextHeight;
+    const nextProperties = {
+      ...previousProperties,
+      sealSizeType: geometry.sealSizeType,
+      physicalWidthMm: physicalWidthMatches ? previousProperties.physicalWidthMm : geometry.widthMm,
+      physicalHeightMm: physicalHeightMatches ? previousProperties.physicalHeightMm : geometry.heightMm,
+      aspectRatio: aspectRatioMatches ? previousProperties.aspectRatio : geometry.aspectRatio,
+      sizeLocked: true
+    };
+    if (nextSealFileId) nextProperties.sealFileId = nextSealFileId;
+    if (nextSealFileSha256) nextProperties.sealFileSha256 = nextSealFileSha256;
+    element.properties = nextProperties;
+  });
+  return changed;
 }
 
 const signingCertificates = [
@@ -1285,7 +1908,7 @@ const contractRecords = [
     storageStatus: "待歸檔",
     status: "待主管審核",
     summary: "年度資訊維護、客服支援、資安弱點修補與 SLA 回覆承諾。",
-    riskNote: "C 執行長用印（無需會計）：需申請人主管、部門主管、行政部門主任、執行長、總務與申請人確認。",
+    riskNote: "C 執行長用印：申請人主管、部門主任、執行長、行政部門主任、總務專員與申請人收件。",
     attachments: ["合約草案.pdf", "報價單.pdf", "服務範圍清單.xlsx"],
     signedAt: "",
     archiveHash: "",
@@ -1311,7 +1934,7 @@ const contractRecords = [
     storageStatus: "待歸檔",
     status: "待用印簽署",
     summary: "影印機、掃描設備與耗材保固租賃。",
-    riskNote: "D 執行長用印（需會計）：用印前請確認租期、提前解約條款、會計複核與維修回應時間。",
+    riskNote: "D 執行長用印：依統一簽核鏈確認租期、提前解約條款與維修回應時間。",
     attachments: ["租賃合約草案.pdf", "設備明細.pdf"],
     signedAt: "",
     archiveHash: "",
@@ -1725,6 +2348,7 @@ function openUnifiedFlowSource(flowId = selectedUnifiedFlowId) {
   if (!flow) return showToast("找不到這筆文件流程。");
   if (flow.sourceType === "inbound") {
     selectedInboundId = flow.sourceId;
+    setInboundSection("records");
     renderInboundRows();
     renderInboundDetail();
     setView(isRouteAllowed("inbound") ? "inbound" : "search");
@@ -1781,12 +2405,12 @@ let dailyActionCache = [];
 
 const titles = {
   dashboard: "交換總覽",
-  search: "查詢與搜尋",
-  approvalLog: "簽核流程紀錄",
+  search: "公文查詢",
+  approvalLog: "簽核進度",
   contracts: "合約管理",
   contractSeal: "合約用印",
-  inbound: "收文管理",
-  dispatch: "發文管理",
+  electronicSeal: "電子用印",
+  inbound: "公文收錄",
   compose: "建立電子公文",
   format: "文書格式",
   workflow: "流程控管",
@@ -1864,6 +2488,28 @@ function downloadTextFile(fileName, content, type = "application/json;charset=ut
   URL.revokeObjectURL(url);
 }
 
+async function downloadBinaryFile(path, fallbackFileName, options = {}) {
+  const { headers: optionHeaders = {}, ...fetchOptions } = options;
+  const headers = { ...optionHeaders };
+  if (isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
+  const response = await fetch(`${backendApiBase}${path}`, { ...fetchOptions, headers, cache: "no-store" });
+  if (!response.ok) {
+    const raw = await response.text();
+    throw new Error(raw.slice(0, 160) || `HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const fileNameMatch = disposition.match(/filename="?([^"]+)"?/i);
+  const fileName = fileNameMatch ? decodeURIComponent(fileNameMatch[1]) : fallbackFileName;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+  return { fileName, size: blob.size, type: blob.type };
+}
+
 function blockOperation(message, auditFn = null, auditTitle = "操作防呆阻擋") {
   if (auditFn) auditFn(auditTitle, message);
   showToast(message);
@@ -1880,11 +2526,40 @@ function clearLogWithConfirm(log, renderFn, label) {
 
 function setView(target) {
   if (!isRouteAllowed(target)) target = "dashboard";
-  document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === target));
-  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.target === target));
+  activeRouteTarget = target;
+  document.body.dataset.activeRoute = target;
+  const viewTarget = target === "contractSeal" ? "electronicSeal" : target;
+  document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === viewTarget));
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    const active = item.dataset.target === target;
+    item.classList.toggle("active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+  document.querySelectorAll("[data-more-nav-target]").forEach((item) => {
+    const active = item.dataset.moreNavTarget === target;
+    item.classList.toggle("active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+  const activeNavItem = document.querySelector(`.nav-item[data-target="${target}"]`);
+  const navList = activeNavItem?.closest(".nav-list");
+  if (activeNavItem && navList && window.matchMedia("(max-width: 720px)").matches) {
+    window.requestAnimationFrame(() => {
+      const left = activeNavItem.offsetLeft - ((navList.clientWidth - activeNavItem.offsetWidth) / 2);
+      navList.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+    });
+  }
   document.querySelector("#pageTitle").textContent = simpleRouteTitle(target);
   document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(target);
   updateHeaderStatus();
+  if (target === "approvalLog" && hasAuthenticatedBackendSession()) void loadApprovalProgressFromBackend();
+  if (target === "archive" && hasAuthenticatedBackendSession()) void loadArchiveRecordsFromBackend();
+  if (target === "contractSeal" || target === "electronicSeal") {
+    configureUploadedSealMode(target);
+    void initializeUploadedSealWorkspace();
+  }
+  void loadRouteBackendData(target, true);
   if (location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
 }
 
@@ -1931,16 +2606,20 @@ function updateHeaderStatus() {
 
 function refreshCurrentWorkspace() {
   applyRoleNavigation();
+  renderOfficialWorkflowConfig();
   renderIdentityWorkbench();
   renderScopeZone();
   renderRoleDashboard();
   renderInboundRows();
   renderInboundDetail();
+  prepareInboundArchiveForm();
+  renderInternalDispatchModule();
   renderDispatchBoard();
   renderDispatchDetail();
   renderApprovalLog();
   renderNotifications();
   updateHeaderStatus();
+  if (hasAuthenticatedBackendSession()) void loadWorkflowDelegations(true);
   showToast("已重新整理目前資料。");
 }
 
@@ -2036,8 +2715,8 @@ function renderDocumentAclPanel(doc) {
       <div class="acl-table">
         ${rows.length ? rows.map((rule) => `
           <div class="acl-row">
-            <strong>${rule.principal}</strong>
-            <span>${rule.reason}</span>
+            <strong>${escapeHtml(rule.principal)}</strong>
+            <span>${escapeHtml(rule.reason)}</span>
             <small>${rule.view ? "檢視" : "不可檢視"} · ${rule.sign ? "簽核" : "不可簽核"} · ${rule.download ? "下載" : "不可下載"} · ${rule.seal ? "用印" : "不可用印"}</small>
           </div>
         `).join("") : `<p class="empty-text">尚未設定單件 ACL，暫依角色與部門範圍控管。</p>`}
@@ -2120,28 +2799,82 @@ function canSeeCompanyWideDocs(role = activeRole()) {
   return ["總務", "行政部主任", "執行長", "董事會", "股東"].includes(role);
 }
 
+function hasBackendPermission(permission) {
+  if (!permission) return false;
+  return Boolean((authState?.permissions || []).includes(permission) || (rolePermissions[activeRole()] || []).includes(permission));
+}
+
+function isFinanceAuthenticatedSession(session = authState) {
+  const user = session?.user || {};
+  const token = String(session?.token || "");
+  const financeSource = user.account_source === "finance"
+    || user.provider === "Finance Google SSO"
+    || session?.bridge?.sourceSystem === "finance";
+  return Boolean(user.id && financeSource && isHeaderSafeToken(token) && !token.startsWith("quick-"));
+}
+
+function isCompanySealCustodian(session = authState) {
+  if (!isFinanceAuthenticatedSession(session)) return false;
+  const user = session.user || {};
+  if (String(user.account_source || "").trim().toLowerCase() !== "finance") return false;
+  const status = String(user.status || "").trim().toLowerCase();
+  if (!["active", "enabled", "啟用"].includes(status)) return false;
+  const financeRoleKey = String(
+    user.logging_role_key
+      || user.loggingRoleKey
+      || session?.bridge?.loggingRoleKey
+      || session?.bridge?.logging_role_key
+      || ""
+  ).trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const unit = String(user.unit || user.department || "").replace(/\s+/g, "");
+  if (unit === "系統處" || financeRoleKey === "system_department") return false;
+  const role = String(user.role || "").replace(/\s+/g, "");
+  if (role === "執行長") return true;
+  const title = String(user.title || "").replace(/\s+/g, "");
+  return ["行政部主任", "行政部門主任"].includes(role)
+    && ["行政部", "行政部門"].includes(unit)
+    && /(行政部主任|行政部門主任|行政部長)/.test(title);
+}
+
+function requireCompanySealCustodian(action = "變更 Seal Vault") {
+  if (isCompanySealCustodian()) return true;
+  showToast(`僅執行長／行政部門主任可${action}。`);
+  return false;
+}
+
+function canSyncAuditLogs() {
+  if (hasAuthenticatedBackendSession()) {
+    const permissions = authState?.permissions || [];
+    return permissions.includes("audit_logs.view") || permissions.includes("audit_logs.export");
+  }
+  return hasBackendPermission("audit_logs.view") || hasBackendPermission("audit_logs.export");
+}
+
 const navByIdentity = {
-  employee: ["dashboard", "compose", "notifications", "search"],
-  supervisor: ["dashboard", "compose", "notifications", "search"],
+  employee: ["dashboard", "compose", "electronicSeal", "approvalLog", "notifications", "search"],
+  supervisor: ["dashboard", "approvalLog", "compose", "electronicSeal", "inbound", "notifications", "search"],
   viewer: ["dashboard", "search"],
-  companyOps: ["dashboard", "compose", "inbound", "notifications", "search"],
-  executive: ["dashboard", "compose", "inbound", "notifications", "search"]
+  companyOps: ["dashboard", "inbound", "electronicSeal", "approvalLog", "compose", "search", "seals"],
+  executive: ["dashboard", "approvalLog", "electronicSeal", "inbound", "compose", "search", "seals", "settings"]
 };
 
 const secondaryRoutesByIdentity = {
-  employee: ["notifications", "approvalLog"],
-  supervisor: ["notifications", "approvalLog", "workflow"],
+  employee: ["notifications", "approvalLog", "contractSeal"],
+  supervisor: ["notifications", "approvalLog", "contractSeal", "workflow"],
   viewer: ["approvalLog"],
-  companyOps: ["notifications", "approvalLog", "contracts", "contractSeal", "workflow", "tracking", "reports", "exchange"],
-  executive: ["notifications", "approvalLog", "contracts", "contractSeal", "workflow", "tracking", "reports", "exchange", "seals", "accounts", "settings", "ops"]
+  companyOps: ["notifications", "approvalLog", "contracts", "contractSeal", "workflow", "tracking", "reports"],
+  executive: ["notifications", "approvalLog", "contracts", "contractSeal", "workflow", "tracking", "reports", "seals", "accounts", "settings", "ops"]
 };
 
 function primaryRoutesForRole(role = activeRole()) {
-  if (role === "執行長") return navByIdentity.executive;
-  if (["行政部主任", "總務", "執行長"].includes(role)) return navByIdentity.companyOps;
-  if (["主管", "主任"].includes(role)) return navByIdentity.supervisor;
-  if (["董事會", "股東", "外部檢核單位"].includes(role)) return navByIdentity.viewer;
-  return navByIdentity.employee;
+  let routes = navByIdentity.employee;
+  if (role === "執行長") routes = navByIdentity.executive;
+  else if (["行政部主任", "總務"].includes(role)) routes = navByIdentity.companyOps;
+  else if (["主管", "主任"].includes(role)) routes = navByIdentity.supervisor;
+  else if (["董事會", "股東", "外部檢核單位"].includes(role)) routes = navByIdentity.viewer;
+  const canManageSeals = (rolePermissions[role] || []).includes("seals.manage")
+    || (role === activeRole() && (authState?.permissions || []).includes("seals.manage"));
+  return routes.filter((route) => route !== "seals" || canManageSeals);
 }
 
 function secondaryRoutesForRole(role = activeRole()) {
@@ -2162,10 +2895,10 @@ function isRouteAllowed(target) {
 
 function simpleRouteLabels(role = activeRole()) {
   const companyWide = ["行政部主任", "總務", "執行長"].includes(role);
-  if (role === "執行長") return { dashboard: "儀表板", compose: "撰寫公文", inbound: "公文收發", notifications: "全公司待辦", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", search: "公文紀錄", seals: "公司與印章設定" };
+  if (role === "執行長") return { dashboard: "儀表板", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "公文收錄", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核進度", workflow: "簽核流程設定", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" };
   return companyWide
-    ? { dashboard: "儀表板", compose: "撰寫公文", inbound: "公文收發", notifications: "全公司待辦", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", search: "公文紀錄" }
-    : { dashboard: "我的工作台", compose: "撰寫公文", notifications: "我的待辦", approvalLog: "簽核紀錄", search: "公文紀錄" };
+    ? { dashboard: "儀表板", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "公文收錄", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核進度", workflow: "簽核流程", search: "公文查詢", seals: "印章檔案庫" }
+    : { dashboard: "我的工作台", electronicSeal: "電子用印", contractSeal: "合約用印", compose: "撰寫公文", inbound: "公文收錄", notifications: "我的待辦", approvalLog: "簽核進度", workflow: "簽核流程", search: "公文查詢" };
 }
 
 function simpleRouteTitle(target, role = activeRole()) {
@@ -2178,13 +2911,46 @@ function simpleRouteEyebrow(target, role = activeRole()) {
   if (target === "compose") return "填寫與預覽 -> 確認 -> 送簽";
   if (target === "notifications") return "今天要處理、即將逾期、已退回與交換失敗";
   if (target === "contracts") return "本單位合約台帳與簽核";
-  if (target === "contractSeal") return "總務合約用印、退回補正與用印紀錄";
-  if (target === "search") return canSeeCompanyWideDocs(role) ? "全公司公文紀錄" : "部門公文紀錄";
+  if (target === "contractSeal") return "上傳合約 PDF、標示印章與文字位置、送出簽核";
+  if (target === "electronicSeal") return "填寫申請、預覽 PDF 並直接標示用印位置";
+  if (target === "search") return canSeeCompanyWideDocs(role) ? "可查詢全公司公文" : "可查詢授權範圍內公文";
   if (target === "approvalLog") return canSeeCompanyWideDocs(role) ? "全公司簽核流程" : "我的簽核與部門流程";
-  if (target === "inbound") return "總務收文、登錄與分派";
+  if (target === "inbound") return "信件與公文歸檔、內部派發與處理回覆";
   if (kind === "employee") return "我的待辦與退回補正";
   if (kind === "supervisor") return "主管簽核與部門風險";
   return "全公司收發與交換處理";
+}
+
+function moreNavigationRoutesForRole(role = activeRole(), compactMobile = window.matchMedia("(max-width: 720px)").matches) {
+  const primary = primaryRoutesForRole(role);
+  const secondary = secondaryRoutesForRole(role).filter((route) => !primary.includes(route));
+  const mobileOverflow = compactMobile ? primary.slice(4) : [];
+  // contractSeal remains a compatible deep-link and contract-list action, but
+  // it opens the same uploaded-PDF editor as electronicSeal. Listing both in
+  // navigation makes first-time users think they are separate workflows.
+  return [...new Set([...mobileOverflow, ...secondary])]
+    .filter((route) => route !== "contractSeal" && isRouteAllowed(route));
+}
+
+function renderMoreNavigation() {
+  const button = document.querySelector("#navMoreBtn");
+  const list = document.querySelector("#navMoreList");
+  if (!button || !list) return;
+  const routes = moreNavigationRoutesForRole();
+  button.hidden = routes.length === 0;
+  list.innerHTML = routes.map((route) => {
+    const exchangeDisabled = route === "exchange";
+    const label = exchangeDisabled ? "政府電子交換（未啟用）" : simpleRouteTitle(route);
+    const description = exchangeDisabled
+      ? "目前僅保留設定與健康檢查；不會連正式交換環境。"
+      : simpleRouteEyebrow(route);
+    return `
+      <button class="nav-more-item" type="button" data-more-nav-target="${route}">
+        <strong>${label}</strong>
+        <span>${description}</span>
+      </button>
+    `;
+  }).join("") || `<p class="nav-more-empty">目前沒有其他可用功能。</p>`;
 }
 
 function applyRoleNavigation() {
@@ -2197,6 +2963,7 @@ function applyRoleNavigation() {
   items.forEach((item) => {
     const routeIndex = primary.indexOf(item.dataset.target);
     item.hidden = routeIndex === -1;
+    item.dataset.mobileCompactHidden = routeIndex >= 4 ? "true" : "false";
     item.style.order = String(routeIndex === -1 ? 999 : routeIndex);
     if (labels[item.dataset.target]) item.textContent = labels[item.dataset.target];
   });
@@ -2210,7 +2977,7 @@ function applyRoleNavigation() {
   const companyWide = ["行政部主任", "總務", "執行長"].includes(activeRole());
   document.querySelector("#pullInboundBtn")?.toggleAttribute("hidden", !companyWide);
   document.querySelector("#sendQueueBtn")?.toggleAttribute("hidden", !companyWide);
-  const active = document.querySelector(".view.active")?.id || "dashboard";
+  const active = document.body.dataset.activeRoute || document.querySelector(".view.active")?.id || "dashboard";
   document.querySelector("#pageTitle").textContent = simpleRouteTitle(active);
   document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(active);
   updateHeaderStatus();
@@ -2220,7 +2987,134 @@ function applyRoleNavigation() {
     if (!target || !titles[target]) return;
     control.toggleAttribute("hidden", !allowed.includes(target));
   });
+  renderMoreNavigation();
   if (!allowed.includes(active)) setView("dashboard");
+}
+
+function internalDispatchRecipientForCurrentUser(item = {}) {
+  const userId = authState?.user?.id || "";
+  return (item.recipients || []).find((recipient) => recipient.recipient_user_id === userId) || null;
+}
+
+function internalDispatchDueTime(item = {}) {
+  if (!item.due_at) return null;
+  const time = Date.parse(String(item.due_at).replace(" ", "T"));
+  return Number.isNaN(time) ? null : time;
+}
+
+function isInternalDispatchOverdue(item = {}) {
+  const dueTime = internalDispatchDueTime(item);
+  return Boolean(dueTime && item.status !== "closed" && dueTime < Date.now());
+}
+
+function internalDispatchNeedsMyReply(item = {}) {
+  const recipient = internalDispatchRecipientForCurrentUser(item);
+  return Boolean(item.reply_required && item.status !== "closed" && recipient?.action_required && recipient.status !== "replied");
+}
+
+function internalDispatchNeedsClose(item = {}) {
+  return Boolean(
+    canCloseInternalDispatch(item)
+    && item.status !== "closed"
+    && (item.status === "reply_completed" || (!item.reply_required && item.status === "sent"))
+  );
+}
+
+function internalDispatchTodoCard(item = {}) {
+  const recipients = item.recipients || [];
+  const required = recipients.filter((recipient) => recipient.action_required);
+  const replies = required.filter((recipient) => recipient.status === "replied").length;
+  const pending = required.filter((recipient) => recipient.status !== "replied").length;
+  const needsReply = internalDispatchNeedsMyReply(item);
+  const needsClose = internalDispatchNeedsClose(item);
+  return {
+    badge: needsReply ? "回文" : "派文",
+    title: item.subject || item.title || item.id,
+    meta: needsReply
+      ? `${item.sender_name || "派文者"} · ${item.due_at || "無期限"}`
+      : `${internalDispatchStatusLabel(item.status)} · 處理 ${replies}/${required.length}`,
+    body: needsReply
+      ? "請回覆內部派文內容，送出後會留在派文紀錄。"
+      : needsClose
+        ? `尚有 ${pending} 位未回覆；已可確認是否結案。`
+        : item.body || "內部派文已送達。",
+    issue: isInternalDispatchOverdue(item)
+  };
+}
+
+function officialDocumentIsApplicant(item = {}) {
+  const user = authState?.user || {};
+  return Boolean(item.applicant_id && item.applicant_id === user.id) || Boolean(item.applicant_name && item.applicant_name === user.name);
+}
+
+function officialDocumentPendingStepMatchesRole(item = {}) {
+  if (item.can_act) return true;
+  if (hasBackendPermission("official_documents.all_todo")) return true;
+  const role = activeRole();
+  const key = item.current_step || "";
+  if (key === "applicant_manager") return role === "主管";
+  if (key === "admin_director") return role === "行政部主任";
+  if (key === "general_affairs_review") return role === "總務";
+  if (key === "ceo") return role === "執行長";
+  if (key === "applicant_confirm") return officialDocumentIsApplicant(item);
+  return false;
+}
+
+function officialDocumentNeedsUserAttention(item = {}) {
+  const status = item.current_status || "";
+  const applicant = officialDocumentIsApplicant(item);
+  if (["rejected", "draft"].includes(status)) return applicant;
+  if (status === "stamping_failed") return item.can_manage_dispatch || activeRole() === "總務" || hasBackendPermission("official_documents.all_todo");
+  if (status === "pending_general_affairs_dispatch") return item.can_manage_dispatch || activeRole() === "總務" || hasBackendPermission("official_documents.all_todo");
+  if (status === "returned_to_applicant_for_send") return applicant || item.can_manage_dispatch;
+  if (["dispatched", "sent_by_applicant", "stamped"].includes(status) && item.current_step === "applicant_confirm") return applicant;
+  if (status.startsWith("pending_")) return officialDocumentPendingStepMatchesRole(item);
+  return false;
+}
+
+function officialDocumentActionLabel(item = {}) {
+  const status = item.current_status || "";
+  if (status === "pending_general_affairs_dispatch") return "完成寄發";
+  if (status === "returned_to_applicant_for_send") return "回填寄出";
+  if (["dispatched", "sent_by_applicant", "stamped"].includes(status) && item.current_step === "applicant_confirm") return "申請人確認";
+  if (status === "rejected") return "補正申請";
+  if (status === "draft") return "繼續草稿";
+  if (status === "stamping_failed") return "處理用印失敗";
+  if (status.startsWith("pending_")) return "處理簽核";
+  return "查看申請單";
+}
+
+function officialDocumentPriority(item = {}) {
+  if (["rejected", "stamping_failed"].includes(item.current_status)) return 3;
+  if (["pending_general_affairs_dispatch", "returned_to_applicant_for_send"].includes(item.current_status)) return 3;
+  if ((item.current_status || "").startsWith("pending_")) return 2;
+  return 1;
+}
+
+function officialDocumentTodoCard(item = {}) {
+  const status = item.current_status || "";
+  const record = officialDispatchRecord(item) || {};
+  return {
+    badge: "發文",
+    title: item.title || item.subject || item.id,
+    meta: `${officialStatusLabel(status)} · ${item.current_step_name || item.current_step || "未送出"}`,
+    body: status === "pending_general_affairs_dispatch"
+      ? "已用印完成，請總務下載已用印版本、寄發並回填證明。"
+      : status === "returned_to_applicant_for_send"
+        ? "已用印完成，請申請人自行寄送並回填紀錄。"
+        : status === "stamping_failed"
+          ? "自動用印失敗，請總務檢查印章版本、PDF 或 Seal Vault。"
+          : record.completed_at
+            ? "寄發已完成，等待申請人確認與歸檔。"
+            : item.request_reason || item.recipient || "請處理目前發文申請單關卡。",
+    issue: ["rejected", "stamping_failed"].includes(status)
+  };
+}
+
+function refreshDashboardWorkEntryPoints() {
+  renderIdentityWorkbench();
+  renderRoleDashboard();
+  renderUnifiedFlows();
 }
 
 function identityWorkbenchData() {
@@ -2231,14 +3125,17 @@ function identityWorkbenchData() {
   const scopedContracts = visibleContracts();
   const contractTodos = scopedContracts.filter((contract) => /草稿|待|退回|用印/.test(contract.status));
   const flowTodos = visibleUnifiedDocumentFlows().filter(isUnifiedFlowTodo);
+  const internalReplyTodos = internalDispatchItems.filter(internalDispatchNeedsMyReply);
+  const internalCloseTodos = internalDispatchItems.filter(internalDispatchNeedsClose);
+  const officialTodos = officialWorkflowItems.filter(officialDocumentNeedsUserAttention);
   const myTracking = trackingCases.filter((item) => item.owner === role || item.owner === authState?.user?.name || (kind === "supervisor" && ["行政部主任", "主任", "執行長"].includes(item.owner)));
   if (kind === "generalAffairs") {
     const pendingInbound = scopedInbound.filter((doc) => ["待登錄", "待分派"].includes(doc.status));
     const failedDispatch = scopedDispatch.filter((doc) => doc.status === "交換失敗");
     const readyDispatch = scopedDispatch.filter((doc) => ["待清稿", "已清稿", "已封裝", "退回補正"].includes(doc.status));
-    const totalTodoCount = flowTodos.length || pendingInbound.length + failedDispatch.length + readyDispatch.length + contractTodos.length;
+    const totalTodoCount = flowTodos.length || pendingInbound.length + failedDispatch.length + readyDispatch.length + contractTodos.length + internalCloseTodos.length + officialTodos.length;
     return {
-      eyebrow: "General Affairs Desk",
+      eyebrow: "總務工作台",
       title: "全公司儀表板",
       status: "全公司狀態",
       headline: `${totalTodoCount} 件今天要處理`,
@@ -2249,10 +3146,11 @@ function identityWorkbenchData() {
       actions: [
         ["公文收發", "inbound", "", "primary", "收文、登錄、分派"],
         ["撰寫公文", "compose", "", "secondary", "建立函稿並預覽"],
-        ["全公司待辦", "notifications", "", "secondary", "今天、逾期、退回、失敗"],
-        ["公文紀錄", "search", "", "secondary", "查詢全公司收發"]
+        ["公文查詢", "search", "", "secondary", "查詢全公司收發"]
       ],
       todos: [
+        ...officialTodos.slice(0, 2).map(officialDocumentTodoCard),
+        ...internalCloseTodos.slice(0, 2).map(internalDispatchTodoCard),
         ...flowTodos.slice(0, 5).map(unifiedFlowTodoCard),
         ...pendingInbound.slice(0, 1).map((doc) => ({ badge: doc.status === "待登錄" ? "收文" : "分派", title: doc.subject, meta: `${doc.receiveNo} · ${doc.agency}`, body: `期限 ${doc.dueDate} · ${doc.status}` }))
       ].slice(0, 5),
@@ -2270,15 +3168,17 @@ function identityWorkbenchData() {
       title: "主管工作台",
       status: "簽核與風險",
       headline: `${(roleFlowTodos.length || pendingTasks.length) + myTracking.filter((item) => item.status !== "已完成").length} 件待主管處理`,
-      summary: "主管只保留撰寫公文、公文待辦與部門公文紀錄；不顯示收發、維運、報表與系統設定頁籤。",
+      summary: "主管只保留撰寫、簽核與部門公文查詢；不顯示維運與系統設定。",
       todoTitle: "我的待辦",
       alertTitle: "提醒與風險",
       actions: [
         ["撰寫公文", "compose", "", "primary", "建立函稿並預覽"],
         ["公文待辦", "notifications", "", "secondary", "簽核、退回與逾期提醒"],
-        ["公文紀錄", "search", "", "secondary", "只看該部門收發公文"]
+        ["公文查詢", "search", "", "secondary", "只看該部門收發公文"]
       ],
       todos: [
+        ...officialTodos.slice(0, 2).map(officialDocumentTodoCard),
+        ...internalReplyTodos.slice(0, 2).map(internalDispatchTodoCard),
         ...roleFlowTodos.slice(0, 4).map(unifiedFlowTodoCard),
         ...pendingTasks.slice(0, 4).map((task) => ({ title: task.title, meta: `${task.step} · ${task.status}`, body: task.type })),
         ...scopedDispatch.filter((doc) => ["待清稿", "已封裝"].includes(doc.status)).slice(0, 2).map((doc) => ({ title: doc.subject, meta: `${doc.no} · ${doc.status}`, body: doc.to })),
@@ -2293,20 +3193,23 @@ function identityWorkbenchData() {
   const assignedInbound = scopedInbound.filter((doc) => doc.owner === role || doc.dept === role || doc.owner === authState?.user?.name);
   const drafts = scopedDispatch.filter((doc) => ["草稿", "退回補正", "待清稿"].includes(doc.status));
   const myFlowTodos = flowTodos.filter((flow) => flow.currentOwner === role || flow.owner === role || flow.dept === activeUnit());
+  const employeeTodoCount = myFlowTodos.length + assignedInbound.length + drafts.length + internalReplyTodos.length + officialTodos.length;
   return {
     eyebrow: "Employee Desk",
     title: "員工工作台",
     status: "我的待辦",
-    headline: `${myFlowTodos.length || assignedInbound.length + drafts.length} 件我的公文`,
-    summary: "員工只保留撰寫公文、公文待辦與部門公文紀錄；不顯示總務、主管維運或全公司功能。",
+    headline: `${employeeTodoCount} 件我的公文`,
+    summary: "員工可撰寫公文、處理自己的待辦並查詢授權公文。",
     todoTitle: "我的待辦",
     alertTitle: "提醒與風險",
     actions: [
       ["撰寫公文", "compose", "", "primary", "填寫內容並確認即時函稿預覽"],
       ["公文待辦", "notifications", "", "secondary", "查看我的待辦與退回補正"],
-      ["公文紀錄", "search", "", "secondary", "只看該部門收發公文"]
+      ["公文查詢", "search", "", "secondary", "只看該部門收發公文"]
     ],
     todos: [
+      ...officialTodos.slice(0, 2).map(officialDocumentTodoCard),
+      ...internalReplyTodos.slice(0, 2).map(internalDispatchTodoCard),
       ...myFlowTodos.slice(0, 4).map(unifiedFlowTodoCard),
       ...assignedInbound.slice(0, 3).map((doc) => ({ title: doc.subject, meta: `${doc.receiveNo} · ${doc.status}`, body: `${doc.agency} · ${doc.dueDate}` })),
       ...drafts.slice(0, 3).map((doc) => ({ title: doc.subject, meta: `${doc.no} · ${doc.status}`, body: doc.lastReply })),
@@ -2419,6 +3322,45 @@ function dailyActionItems() {
       priority: /逾期|未收/.test(item.status) ? 3 : 2
     }));
 
+  internalDispatchItems
+    .filter((item) => internalDispatchNeedsMyReply(item) || internalDispatchNeedsClose(item))
+    .forEach((item) => {
+      const needsReply = internalDispatchNeedsMyReply(item);
+      const needsClose = internalDispatchNeedsClose(item);
+      items.push({
+        id: `INTERNAL-DISPATCH-${item.id}`,
+        dedupeKey: `INTERNAL-DISPATCH-${item.id}`,
+        tone: isInternalDispatchOverdue(item) ? "issue" : "normal",
+        badge: needsReply ? "回文" : "派文",
+        title: item.subject || item.title || item.id,
+        meta: needsReply ? `${item.sender_name || "派文者"} · ${item.due_at || "無期限"}` : `${internalDispatchStatusLabel(item.status)} · ${item.due_at || "無期限"}`,
+        body: needsReply ? "這筆內部派文要求回覆，請在期限前填寫回文。" : "收件人已回覆或不需回文，請確認是否結案。",
+        action: needsReply ? "回覆派文" : needsClose ? "確認結案" : "查看派文",
+        target: "dispatch",
+        selectInternalDispatchId: item.id,
+        priority: isInternalDispatchOverdue(item) ? 3 : 2
+      });
+    });
+
+  officialWorkflowItems
+    .filter(officialDocumentNeedsUserAttention)
+    .forEach((item) => {
+      const card = officialDocumentTodoCard(item);
+      items.push({
+        id: `OFFICIAL-DOCUMENT-${item.id}`,
+        dedupeKey: `OFFICIAL-DOCUMENT-${item.id}`,
+        tone: card.issue ? "issue" : "normal",
+        badge: card.badge,
+        title: card.title,
+        meta: card.meta,
+        body: card.body,
+        action: officialDocumentActionLabel(item),
+        target: "dispatch",
+        selectOfficialDocumentId: item.id,
+        priority: officialDocumentPriority(item)
+      });
+    });
+
   visibleContracts()
     .filter((contract) => /草稿|待|退回|用印|簽核/.test(contract.status) || isContractRenewalSoon(contract))
     .forEach((contract) => {
@@ -2452,7 +3394,7 @@ function dailyActionItems() {
 }
 
 function dailyActionReason(item, index) {
-  if (item.tone === "issue") return "有逾期、退回或交換異常，建議優先處理。";
+  if (item.tone === "issue") return "有逾期、退回或流程異常，建議優先處理。";
   if (item.priority >= 2) return "今天若未處理，流程會卡在目前關卡。";
   if (index === 0) return "這是目前最接近你角色職責的下一步。";
   return "可在主要急件完成後接著處理。";
@@ -2470,6 +3412,23 @@ function openDailyAction(index) {
     selectedContractId = item.selectContractId;
     renderContracts();
     renderContractSeal();
+  }
+  if (item.selectInternalDispatchId) {
+    selectedInternalDispatchId = item.selectInternalDispatchId;
+    setView(isRouteAllowed("inbound") ? "inbound" : "notifications");
+    setInboundSection("dispatch");
+    renderInternalDispatchModule();
+    window.setTimeout(() => document.querySelector("#internalDispatchDetail")?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+    return;
+  }
+  if (item.selectOfficialDocumentId) {
+    selectedOfficialDocumentId = item.selectOfficialDocumentId;
+    officialWorkflowScope = "all";
+    setView(isRouteAllowed("dispatch") ? "dispatch" : "notifications");
+    renderOfficialWorkflow();
+    void loadOfficialDocumentDetail(selectedOfficialDocumentId);
+    window.setTimeout(() => document.querySelector("#officialWorkflowDetail")?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+    return;
   }
   if (item.flowId && isRouteAllowed(item.target)) {
     openUnifiedFlowSource(item.flowId);
@@ -2498,7 +3457,7 @@ function renderDailyActionCenter() {
   `).join("") : `
     <article class="daily-action-empty">
       <strong>目前沒有急件</strong>
-      <p>可以先撰寫新公文、查詢公文紀錄，或確認通知中心沒有補件提醒。</p>
+      <p>可以先撰寫新公文、查詢公文，或確認通知中心沒有補件提醒。</p>
       <button class="secondary-button" type="button" data-daily-action-empty="compose">撰寫公文</button>
     </article>
   `;
@@ -2521,14 +3480,35 @@ function dashboardRoleData() {
   const completed = scopedDispatch.filter((doc) => doc.status === "交換完成");
   const pendingWorkflow = workflowTasks.filter((task) => task.role === role && /待|審核|查核|退回/.test(task.status));
   const myTracking = trackingCases.filter((item) => item.owner === role || item.owner === authState?.user?.name || (kind === "supervisor" && ["行政部主任", "主任", "執行長"].includes(item.owner)));
+  const internalOnly = formalExchangeUiBlocked();
+  const officialAttention = officialWorkflowItems.filter(officialDocumentNeedsUserAttention);
+  const pendingGeneralAffairsDispatch = officialWorkflowItems.filter((item) =>
+    item.current_step === "general_affairs_dispatch"
+    || item.current_status === "pending_general_affairs_dispatch"
+  );
+  const pendingApplicantReceipt = officialWorkflowItems.filter((item) =>
+    item.current_step === "applicant_confirm"
+    || item.current_status === "pending_applicant_confirm"
+  );
+  const returnedOfficial = officialWorkflowItems.filter((item) => /returned|退回|補正/.test(`${item.current_status || ""} ${item.status || ""}`));
   const roleChecks = {
-    generalAffairs: [
+    generalAffairs: internalOnly ? [
+      ["先收再分", "新來文先由總務登錄與分派，不直接進入部門池。"],
+      ["待寄發優先", `${pendingGeneralAffairsDispatch.length} 件已完成簽核，等待總務寄發。`],
+      ["申請人收件", `${pendingApplicantReceipt.length} 件等待申請人確認收到最終檔案。`],
+      ["部門隔離", "總務收文入口與行政部主任內部公文保持隔離。"]
+    ] : [
       ["先收再分", "新來文先由總務登錄與分派，不直接進入部門池。"],
       ["交換異常優先", `${exchangeFailed.length} 件交換失敗需確認機關代碼、封包與 jAgent 回覆。`],
       ["Token 作業", `目前 Token ${tokenLeft}，到期前需刷新。`],
       ["部門隔離", "總務收文入口與行政部主任內部公文保持隔離。"]
     ],
-    supervisor: [
+    supervisor: internalOnly ? [
+      ["先看簽核", `${pendingWorkflow.length} 件流程待主管核定或退回補正。`],
+      ["盯逾期", `${myTracking.filter((item) => ["逾期提醒", "未收確認", "退回補正"].includes(item.status)).length} 件稽催風險需追蹤。`],
+      ["退回補正", `${returnedOfficial.length} 件公文需要申請人補正。`],
+      ["用印風險", "核准前先確認 PDF、附件與用印位置；核准後保留完整版本紀錄。"]
+    ] : [
       ["先看簽核", `${pendingWorkflow.length} 件流程待主管核定或退回補正。`],
       ["盯逾期", `${myTracking.filter((item) => ["逾期提醒", "未收確認", "退回補正"].includes(item.status)).length} 件稽催風險需追蹤。`],
       ["看營運報表", `SLA ${report.slaRate}%、交換健康 ${report.exchangeHealth}。`],
@@ -2543,8 +3523,32 @@ function dashboardRoleData() {
   };
   if (kind === "generalAffairs") {
     const pendingInbound = scopedInbound.filter((doc) => ["待登錄", "待分派"].includes(doc.status));
+    if (internalOnly) {
+      return {
+        eyebrow: "總務首頁",
+        title: role === "總務" ? "總務儀表板" : `${role}儀表板`,
+        scope: "全公司內部公文",
+        metrics: [
+          ["待登錄/分派", pendingInbound.length, `待登錄 ${pendingInbound.filter((doc) => doc.status === "待登錄").length} / 待分派 ${pendingInbound.filter((doc) => doc.status === "待分派").length}`],
+          ["待寄發", pendingGeneralAffairsDispatch.length, "簽核完成後由總務寄發並上傳證明"],
+          ["待處理流程", officialAttention.length, "簽核、退回、寄發與申請人收件"],
+          ["申請人待收件", pendingApplicantReceipt.length, "最終檔案交回申請人確認"]
+        ],
+        pipeline: [
+          ["待登錄", pendingInbound.filter((doc) => doc.status === "待登錄").length],
+          ["待分派", pendingInbound.filter((doc) => doc.status === "待分派").length],
+          ["待簽核", pendingWorkflow.length],
+          ["待寄發", pendingGeneralAffairsDispatch.length],
+          ["待收件", pendingApplicantReceipt.length]
+        ],
+        primaryTitle: "公文收發與寄發待辦",
+        primaryTarget: "inbound",
+        primaryButton: "處理公文",
+        checks: roleChecks.generalAffairs
+      };
+    }
     return {
-      eyebrow: "General Affairs Home",
+      eyebrow: "總務首頁",
       title: role === "總務" ? "總務儀表板" : `${role}儀表板`,
       scope: "全公司儀表板",
       metrics: [
@@ -2568,6 +3572,30 @@ function dashboardRoleData() {
   }
   if (kind === "supervisor") {
     const overdue = myTracking.filter((item) => ["逾期提醒", "未收確認", "退回補正"].includes(item.status));
+    if (internalOnly) {
+      return {
+        eyebrow: "主管首頁",
+        title: role === "執行長" ? "執行長首頁" : "主管首頁",
+        scope: "簽核 / 退回 / 逾期",
+        metrics: [
+          ["待簽核", pendingWorkflow.length, "確認公文內容、附件與用印位置"],
+          ["逾期風險", overdue.length, overdue.length ? overdue[0].title : "目前無高風險逾期"],
+          ["退回補正", returnedOfficial.length, "等待申請人修正後重新送簽"],
+          ["待寄發", pendingGeneralAffairsDispatch.length, "流程完成後交由總務寄發"]
+        ],
+        pipeline: [
+          ["待簽核", pendingWorkflow.length],
+          ["退回補正", returnedOfficial.length],
+          ["逾期/未收", overdue.length],
+          ["待寄發", pendingGeneralAffairsDispatch.length],
+          ["待收件", pendingApplicantReceipt.length]
+        ],
+        primaryTitle: "主管簽核與流程風險",
+        primaryTarget: "notifications",
+        primaryButton: "查看待辦",
+        checks: roleChecks.supervisor
+      };
+    }
     return {
       eyebrow: "Supervisor Home",
       title: role === "執行長" ? "執行長首頁" : "主管首頁",
@@ -2603,14 +3631,14 @@ function dashboardRoleData() {
         ["稽核紀錄", reportsAuditLog.length + accountAuditLog.length, "不可修改與刪除"]
       ],
       pipeline: [
-        ["公文紀錄", scopedInbound.length + scopedDispatch.length],
+        ["公文查詢", scopedInbound.length + scopedDispatch.length],
         ["簽核紀錄", dashboardApprovalTasks().length],
         ["合約", visibleContracts().length],
         ["稽核", reportsAuditLog.length + accountAuditLog.length]
       ],
       primaryTitle: "檢視紀錄",
       primaryTarget: "search",
-      primaryButton: "公文紀錄",
+      primaryButton: "公文查詢",
       checks: [
         ["唯讀原則", "此角色不處理收發、撰寫、用印或系統設定。"],
         ["授權可追溯", "外部檢核僅顯示被授權的資料，所有開啟與匯出都需寫入 audit log。"],
@@ -2649,7 +3677,24 @@ function renderRoleDashboard() {
   const data = dashboardRoleData();
   const backendMetrics = backendDashboardMetrics;
   const kind = identityKindForRole();
-  const metrics = backendMetrics ? (
+  const metrics = backendMetrics && formalExchangeUiBlocked() ? (
+    kind === "generalAffairs" ? [
+      ["可見公文", backendMetrics.documents, "後端依登入角色與公司範圍計算"],
+      ["待登錄/分派", backendMetrics.inboundPending, "收文待登錄與待分派"],
+      ["待寄發/補正", backendMetrics.dispatchPending, "內部發文、寄發與補正待辦"],
+      ["今日優先", dailyActionItems().length, "依逾期、退回與目前關卡排序"]
+    ] : kind === "supervisor" ? [
+      ["可見公文", backendMetrics.documents, "後端依部門、角色與簽核關係計算"],
+      ["待簽核/補正", backendMetrics.dispatchPending, "主管可見範圍內待處理案件"],
+      ["今日優先", dailyActionItems().length, "依逾期、退回與簽核關卡排序"],
+      ["稽核資料", backendMetrics.auditLogs ? backendMetrics.auditLogs : "受限", backendMetrics.auditLogs ? "已授權查看操作紀錄" : "此角色不顯示後台稽核資料"]
+    ] : [
+      ["我的公文", backendMetrics.documents, "後端依承辦、部門與簽核關係計算"],
+      ["待送簽/補正", backendMetrics.dispatchPending, "我的草稿、簽核或退回補正"],
+      ["今日優先", dailyActionItems().length, "先處理逾期、退回與目前關卡"],
+      ["資料範圍", "依權限", "只顯示與本人或簽核流程有關的資料"]
+    ]
+  ) : backendMetrics ? (
     kind === "generalAffairs" ? [
       ["可見公文", backendMetrics.documents, "後端依登入角色與 ACL 計算"],
       ["待登錄/分派", backendMetrics.inboundPending, "收文待登錄與待分派"],
@@ -2693,8 +3738,6 @@ function renderRoleDashboard() {
     </article>
   `).join("");
   renderDailyActionCenter();
-  renderRolePerspectiveReview();
-  renderGoLiveGate();
   renderDashboardApprovalProgress();
   renderSupervisorCommandDashboard();
 }
@@ -2726,10 +3769,10 @@ function renderDashboardApprovalProgress() {
     const itemSnapshot = approvalProgressSnapshot(item);
     const itemCurrent = itemSnapshot.steps.find((step) => step.state === "current" || step.state === "returned") || itemSnapshot.steps[0];
     return `
-      <button class="dashboard-approval-item ${item.id === selectedWorkflowTaskId ? "active" : ""}" type="button" data-dashboard-approval="${item.id}">
-        <strong>${item.title}</strong>
-        <span>${item.id} · ${item.type} · ${item.status}</span>
-        <small>目前：${itemCurrent?.title || item.step}</small>
+      <button class="dashboard-approval-item ${item.id === selectedWorkflowTaskId ? "active" : ""}" type="button" data-dashboard-approval="${escapeHtml(item.id)}">
+        <strong>${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.id)} · ${escapeHtml(item.type)} · ${escapeHtml(item.status)}</span>
+        <small>目前：${escapeHtml(itemCurrent?.title || item.step)}</small>
       </button>
     `;
   }).join("");
@@ -2740,16 +3783,16 @@ function renderDashboardApprovalProgress() {
   }
   summary.innerHTML = `
     <article class="approval-progress-card compact">
-      <span>${task.id} · ${task.type}</span>
-      <strong>${task.title}</strong>
-      <p>目前停在「${currentStep?.title || task.step}」，負責角色：${currentStep?.owner || task.role}，進度 ${doneCount}/${snapshot.steps.length} 關。</p>
+      <span>${escapeHtml(task.id)} · ${escapeHtml(task.type)}</span>
+      <strong>${escapeHtml(task.title)}</strong>
+      <p>目前停在「${escapeHtml(currentStep?.title || task.step)}」，負責角色：${escapeHtml(currentStep?.owner || task.role)}，進度 ${doneCount}/${snapshot.steps.length} 關。</p>
     </article>
   `;
   steps.innerHTML = snapshot.steps.map((step) => `
-    <article class="dashboard-approval-step ${step.state}">
-      <time>${step.no}</time>
-      <strong>${step.title}</strong>
-      <span>${step.owner} · ${step.status}</span>
+    <article class="dashboard-approval-step ${safeHtmlClassToken(step.state, "pending")}">
+      <time>${escapeHtml(step.no)}</time>
+      <strong>${escapeHtml(step.title)}</strong>
+      <span>${escapeHtml(step.owner)} · ${escapeHtml(step.status)}</span>
     </article>
   `).join("");
   document.querySelectorAll("[data-dashboard-approval]").forEach((button) => {
@@ -2768,26 +3811,33 @@ function renderSupervisorCommandDashboard() {
   const role = activeRole();
   const kind = identityKindForRole(role);
   const stats = reportStats();
+  const internalOnly = formalExchangeUiBlocked();
+  const operationalExceptions = internalOnly
+    ? stats.exceptionItems.filter((item) => !/交換|jAgent|Token/i.test(`${item.title || ""} ${item.type || ""} ${item.status || ""}`))
+    : stats.exceptionItems;
   const riskItems = [
     ...stats.overdueItems.map((item) => ({ title: item.title, meta: `${item.owner} · ${item.status}`, body: `期限：${item.dueDate}`, severity: 3 })),
-    ...stats.exceptionItems.map((item) => ({ title: item.title, meta: `${item.owner} · ${item.type}`, body: "需確認補正、重送或主管覆核。", severity: 2 })),
+    ...operationalExceptions.map((item) => ({ title: item.title, meta: `${item.owner} · ${item.type}`, body: "需確認補正、退回或主管覆核。", severity: 2 })),
     ...sealRequests.filter((request) => request.status === "待簽核").map((request) => ({ title: sealRequestDoc(request)?.subject || request.id, meta: `${request.step} · 待用印`, body: "核准後會自動押章並留存 PDF 雜湊。", severity: 2 })),
     ...workflowTasks.filter((task) => task.role === role && /待|退回|審核|查核/.test(task.status)).map((task) => ({ title: task.title, meta: `${task.step} · ${task.status}`, body: task.type, severity: 1 }))
   ].sort((a, b) => b.severity - a.severity).slice(0, 5);
   panel.hidden = kind !== "supervisor";
   if (kind !== "supervisor") return;
-  const decision = stats.exchangeHealth !== "正常" || stats.overdueItems.length || stats.exceptionItems.length
+  const decision = operationalExceptions.length || stats.overdueItems.length
     ? "今天先處理異常與逾期"
     : "營運穩定，維持簽核節奏";
   document.querySelector("#supervisorCommandStatus").textContent = `${role} · ${stats.slaRate}% SLA`;
   document.querySelector("#supervisorDecisionTitle").textContent = decision;
-  document.querySelector("#supervisorDecisionBody").textContent = `本期收發 ${stats.inboundCount + stats.dispatchCount} 件，成功率 ${stats.successRate}%，異常 ${stats.exceptionItems.length} 件，逾期 ${stats.overdueItems.length} 件。主管應先看高風險清單，再決定退回、改派或建立稽催。`;
+  document.querySelector("#supervisorDecisionBody").textContent = internalOnly
+    ? `目前有 ${riskItems.length} 件需注意、${stats.overdueItems.length} 件逾期。請先確認內容、附件與簽核關卡，再決定核准、退回或改派。`
+    : `本期收發 ${stats.inboundCount + stats.dispatchCount} 件，成功率 ${stats.successRate}%，異常 ${stats.exceptionItems.length} 件，逾期 ${stats.overdueItems.length} 件。主管應先看高風險清單，再決定退回、改派或建立稽催。`;
   document.querySelector("#supervisorDecisionActions").innerHTML = [
     ["看簽核", "workflow", "primary"],
     ["處理逾期", "tracking", "secondary"],
     ["正式報表", "reports", "secondary"],
     ["通知中心", "notifications", "secondary"]
-  ].map(([label, target, style]) => `<button class="${style === "primary" ? "primary-button" : "secondary-button"}" type="button" data-dashboard-action-target="${target}">${label}</button>`).join("");
+  ].filter(([, target]) => isRouteAllowed(target))
+    .map(([label, target, style]) => `<button class="${style === "primary" ? "primary-button" : "secondary-button"}" type="button" data-dashboard-action-target="${target}">${label}</button>`).join("");
   document.querySelector("#supervisorRiskCount").textContent = `${riskItems.length} 件`;
   document.querySelector("#supervisorRiskList").innerHTML = riskItems.map((item) => `
     <article class="identity-item ${item.severity >= 2 ? "issue" : ""}">
@@ -3047,16 +4097,98 @@ function setSelectOptionItems(selector, items, selected = "") {
   if (items.some((item) => item.value === fallback)) element.value = fallback;
 }
 
-function renderApprovalCategorySelect(selector, selected = "") {
+function renderApprovalCategorySelect(selector, selected = "", options = {}) {
   const element = document.querySelector(selector);
   if (!element) return;
-  const selectedLabel = approvalCategoryForType(selected || approvalCategoryItems[0]?.label).label;
-  element.innerHTML = approvalDocumentCategories.map((group) => `
+  const exactSelected = exactApprovalCategoryForType(selected);
+  const selectedLabel = exactSelected?.label || (options.requireSelection ? "" : approvalCategoryForType(selected || approvalCategoryItems[0]?.label).label);
+  const placeholder = options.requireSelection
+    ? `<option value=""${selectedLabel ? "" : " selected"} disabled>${options.placeholder || "請選擇文件細項"}</option>`
+    : "";
+  element.innerHTML = `${placeholder}${approvalDocumentCategories.map((group) => `
     <optgroup label="${group.group}">
       ${group.items.map((item) => `<option value="${item.label}"${item.label === selectedLabel ? " selected" : ""}>${item.label} → ${item.route}</option>`).join("")}
     </optgroup>
-  `).join("");
+  `).join("")}`;
+  element.toggleAttribute("required", Boolean(options.requireSelection));
   if (selectedLabel && [...element.options].some((option) => option.value === selectedLabel)) element.value = selectedLabel;
+}
+
+function approvalSelectionForSelect(selector) {
+  return approvalSelectionForType(document.querySelector(selector)?.value || "");
+}
+
+function approvalRouteFlowMarkup(selection) {
+  if (!selection.approvalRouteCode || !selection.approvalFlowNodes.length) {
+    return `<li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>`;
+  }
+  return selection.approvalFlowNodes.map((node, index) => `
+    <li>
+      <span>${index + 1}</span>
+      <div>
+        <strong>${escapeDraftHtml(node)}</strong>
+        <small>簽核關係人＝${escapeDraftHtml(node)}<br />簽核種類＝核准／駁回</small>
+      </div>
+    </li>
+  `).join("");
+}
+
+function renderApprovalRoutePicker(config) {
+  const selection = approvalSelectionForSelect(config.select);
+  const badgeText = selection.approvalRouteCode ? `${selection.approvalRouteCode} 級` : "尚未選擇";
+  const groupName = selection.documentCategoryGroup.replace(/（勿選）/g, "");
+  const detailText = selection.documentCategory
+    ? `${groupName} · ${selection.documentCategory} · ${selection.approvalRouteName} · ${currentApplicantApprovalRuleLabel()}`
+    : "選擇文件細項後顯示 A／B／C／D 流程。";
+  (config.badges || []).forEach((selector) => {
+    const node = document.querySelector(selector);
+    if (node) node.textContent = badgeText;
+  });
+  (config.names || []).forEach((selector) => {
+    const node = document.querySelector(selector);
+    if (node) node.textContent = detailText;
+  });
+  (config.flows || []).forEach((selector) => {
+    const node = document.querySelector(selector);
+    if (node) node.innerHTML = approvalRouteFlowMarkup(selection);
+  });
+  (config.outcomes || []).forEach((selector) => {
+    const node = document.querySelector(selector);
+    if (node) node.textContent = selection.approvalRouteCode
+      ? "核准後系統用印／免印寄發，申請人確認結案"
+      : "";
+  });
+  return selection;
+}
+
+function renderComposeApprovalRoute() {
+  return renderApprovalRoutePicker({
+    select: "#composeApprovalCategorySelect",
+    badges: ["#composeApprovalRouteBadge", "#composeApprovalRouteStatus"],
+    names: ["#composeApprovalRouteName", "#composeApprovalRouteConfirmName"],
+    flows: ["#composeApprovalRoutePreview", "#composeApprovalFlow"],
+    outcomes: ["#composeApprovalRouteOutcome", "#composeApprovalRouteConfirmOutcome"]
+  });
+}
+
+function renderOfficialApplicationApprovalRoute() {
+  return renderApprovalRoutePicker({
+    select: "#officialApprovalCategorySelect",
+    badges: ["#officialApprovalRouteBadge"],
+    names: ["#officialApprovalRouteName"],
+    flows: ["#officialApprovalRoutePreview"],
+    outcomes: ["#officialApprovalRouteOutcome"]
+  });
+}
+
+function renderUploadedSealApprovalRoute() {
+  return renderApprovalRoutePicker({
+    select: "#uploadedSealApprovalCategorySelect",
+    badges: ["#uploadedSealApprovalRouteBadge"],
+    names: ["#uploadedSealApprovalRouteName"],
+    flows: ["#uploadedSealApprovalRoutePreview"],
+    outcomes: ["#uploadedSealApprovalRouteOutcome"]
+  });
 }
 
 function replaceConfigArray(target, rows) {
@@ -3176,8 +4308,6 @@ function applyEdocRoleOptions() {
     "#notificationTarget",
     "#jobNotifyInput",
     "#securityRoleSelect",
-    "#workflowProxyFrom",
-    "#workflowProxyTo",
     "#workflowActionTarget",
     "#securityCertOwner",
     "#sealOwnerInput",
@@ -3229,25 +4359,6 @@ function isProductionEdocHost() {
   return window.location.hostname === "edoc.suiyuecare.com";
 }
 
-function portalHandoffParams() {
-  const params = new URLSearchParams(window.location.search);
-  const payload = params.get("payload") || "";
-  const signature = params.get("signature") || "";
-  const token = params.get("token") || "";
-  if (!payload && !token) return null;
-  return {
-    source: "logging-portal",
-    bridgeSource: "portal-query",
-    payload,
-    signature,
-    token,
-    email: params.get("email") || "",
-    role: params.get("role") || "",
-    scope: params.get("scope") || "",
-    portal: params.get("portal") || ""
-  };
-}
-
 function cleanPortalHandoffUrl() {
   const params = new URLSearchParams(window.location.search);
   const keys = ["payload", "signature", "token", "email", "role", "scope", "portal", "portalLogin"];
@@ -3261,6 +4372,7 @@ function edocReturnUrlForPortal() {
   const url = new URL(window.location.href);
   ["payload", "signature", "token", "email", "role", "scope", "portal"].forEach((key) => url.searchParams.delete(key));
   url.searchParams.delete("localLogin");
+  url.hash = "";
   return url.toString();
 }
 
@@ -3275,19 +4387,45 @@ function redirectToLoggingPortal() {
   window.location.replace(buildLoggingPortalUrl());
 }
 
+const loggingPortalReturnCodes = new Set([
+  "module_picker",
+  "signed_out",
+  "sso_denied",
+  "sso_unavailable",
+  "sso_failed"
+]);
+
+function loggingPortalModulePickerUrl(code = "module_picker") {
+  const url = new URL(loggingPortalUrl);
+  url.searchParams.set("returnFrom", "edoc");
+  url.searchParams.set("moduleError", loggingPortalReturnCodes.has(code) ? code : "sso_failed");
+  return url.toString();
+}
+
+function returnToLoggingPortalModulePicker(code = "module_picker", navigationMode = "assign") {
+  // This explicit return marker tells Portal to discard module, next and any
+  // pending auto-launch intent before it renders the module picker.
+  const destination = loggingPortalModulePickerUrl(code);
+  if (navigationMode === "replace") window.location.replace(destination);
+  else window.location.assign(destination);
+}
+
+function portalSsoFailureCode(error) {
+  if ([400, 401, 403, 409].includes(Number(error?.status)) || error?.code === "finance_identity_denied") return "sso_denied";
+  if (Number(error?.status) === 502 || Number(error?.status) === 503 || Number(error?.status) === 504) {
+    return "sso_unavailable";
+  }
+  return "sso_failed";
+}
+
 function shouldRedirectToLoggingPortal() {
   if (!isProductionEdocHost()) return false;
-  const params = new URLSearchParams(window.location.search);
-  if (params.get("localLogin") === "1") return false;
-  if (params.get("portalLogin") !== "1") return false;
-  if (portalHandoffParams()) return false;
+  if (readCookieValue(edocHandoffMarkerCookieKey) === "1") return false;
   if (readCookieValue(loggingQuickLoginCookieKey)) return false;
   return true;
 }
 
 function readLoggingBridgePayload() {
-  const portalPayload = portalHandoffParams();
-  if (portalPayload) return portalPayload;
   for (const key of loggingBridgeStorageKeys) {
     const value = readJsonStorage(key);
     if (value?.user || value?.email || value?.session || value?.profile || value?.currentUser) {
@@ -3320,6 +4458,11 @@ function syncUserAccountFromSession(session, providerLabel = "後端 session") {
       role: user.role,
       mfa: user.mfa_status || "由平台管理",
       status: user.status || "啟用",
+      companyId: user.company_id || "",
+      companyName: user.company_name || "",
+      companyAddress: user.company_address || "",
+      managerName: user.approval_manager_name || user.manager_name || "",
+      managerEmail: user.approval_manager_email || user.manager_email || "",
       lastLogin: user.last_login_at || nowTime(),
       ip: providerLabel,
       device: "目前瀏覽器"
@@ -3336,32 +4479,189 @@ function syncUserAccountFromSession(session, providerLabel = "後端 session") {
     provider: user.provider || providerLabel,
     mfa: user.mfa_status || existing.mfa,
     status: user.status || existing.status,
+    companyId: user.company_id || existing.companyId || "",
+    companyName: user.company_name || existing.companyName || "",
+    companyAddress: user.company_address || existing.companyAddress || "",
+    managerName: user.approval_manager_name || user.manager_name || existing.managerName || "",
+    managerEmail: user.approval_manager_email || user.manager_email || existing.managerEmail || "",
     lastLogin: user.last_login_at || nowTime(),
     ip: providerLabel,
     device: "目前瀏覽器"
   });
 }
 
-function enterApp(message = "登入成功，已進入電子公文交換系統。") {
+function hasAuthenticatedBackendSession() {
+  return Boolean(authState?.user && isHeaderSafeToken(authState?.token) && !String(authState.token).startsWith("quick-"));
+}
+
+function canEnterLaunchSetupMode(session = authState) {
+  const user = session?.user || {};
+  const permissions = new Set(session?.permissions || []);
+  const setupRoles = new Set(["行政部主任", "總務", "執行長"]);
+  const setupPermissions = [
+    "system_permissions.manage",
+    "seals.manage",
+    "official_documents.all_todo",
+    "official_documents.receive",
+    "audit_logs.export"
+  ];
+  return Boolean(
+    setupRoles.has(user.role)
+    || setupPermissions.some((permission) => permissions.has(permission))
+  );
+}
+
+async function rejectNonSetupUserDuringLaunchSetup(session = authState, provider = "正式登入") {
+  const user = session?.user || {};
+  const isFinanceIdentity = user.account_source === "finance"
+    || user.provider === "Finance Google SSO"
+    || provider === "Finance Google SSO";
+  if (isFinanceIdentity && user.id && user.role) return false;
+  if (!loginReadinessAllowsSetupLogin() || canEnterLaunchSetupMode(session)) return false;
+  const email = session?.user?.email || "unknown";
+  try {
+    if (isHeaderSafeToken(session?.token)) {
+      await backendRequest("/auth/logout", { method: "POST", body: "{}" });
+    }
+  } catch (error) {
+    console.warn("setup-mode logout failed", error);
+  }
+  authState = null;
+  localStorage.removeItem(authStorageKey);
+  applyProductionLoginSafetyState();
+  recordLogin(email, provider, "限制");
+  addAccountAudit("補件模式登入限制", `${email} 不是行政部主任、總務、執行長或系統補件權限帳號；內部上線未通過前不可進入。`);
+  showToast("正式站目前只開放補件人員登入；一般同仁請等 internalGo 通過後再使用。");
+  return true;
+}
+
+function runAuthenticatedStartupSyncs(silent = true) {
+  if (!hasAuthenticatedBackendSession()) return;
+  const workflowScope = officialWorkflowScope === "new" ? "all" : officialWorkflowScope || "all";
+  // Keep first paint task-focused.  The previous startup fired more than ten
+  // authenticated APIs at once; each request also revalidated Finance and
+  // turned a valid login into a long queue.  Load only the dashboard sources
+  // now and let each workspace load its own data when opened.
+  void loadOfficialWorkflow(workflowScope);
+  void syncNotificationsFromBackend(silent);
+  void syncDashboardFromBackend(silent);
+}
+
+const routeBackendDataLoaded = new Set();
+
+async function loadRouteBackendData(target, silent = true) {
+  if (!hasAuthenticatedBackendSession() || routeBackendDataLoaded.has(target)) return;
+  routeBackendDataLoaded.add(target);
+  try {
+    if (["compose", "contractSeal", "electronicSeal"].includes(target)) {
+      await Promise.all([
+        loadFinanceCompanyDirectory(),
+        loadOfficialSealOptions(),
+      ]);
+    }
+    if (["compose", "workflow"].includes(target)) await loadOfficialWorkflowConfig(silent);
+    if (target === "workflow") await loadWorkflowDelegations(silent);
+    if (target === "inbound") await loadInternalDispatches(silent);
+    if (target === "seals") await loadCompanySealModule(true);
+    if (target === "jobs") await syncJobsFromBackend(silent);
+    if (target === "database") await syncDatabaseFromBackend(silent);
+    if (["ops", "settings"].includes(target)) await syncGoLiveAuditFromBackend(silent);
+  } catch (error) {
+    routeBackendDataLoaded.delete(target);
+    console.warn(`[edoc-route:${target}] background data load failed`, error);
+  }
+}
+
+function setModuleEntryProgress(percent, title, detail) {
+  const screen = document.querySelector("#moduleEntryProgress");
+  if (!screen) return;
+  const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
+  screen.classList.remove("hidden");
+  const heading = document.querySelector("#moduleEntryProgressTitle");
+  const description = document.querySelector("#moduleEntryProgressDetail");
+  const bar = document.querySelector("#moduleEntryProgressBar");
+  const label = document.querySelector("#moduleEntryProgressPercent");
+  if (heading && title) heading.textContent = title;
+  if (description && detail) description.textContent = detail;
+  if (bar) bar.style.width = `${normalized}%`;
+  if (label) label.textContent = `${Math.round(normalized)}%`;
+}
+
+function finishModuleEntryProgress() {
+  setModuleEntryProgress(100, "工作台已準備完成", "正在開啟您的待辦與公文工作區。");
+  window.setTimeout(() => document.querySelector("#moduleEntryProgress")?.classList.add("hidden"), 180);
+}
+
+async function loadFinanceCompanyDirectory() {
+  try {
+    const companies = await backendRequest("/companies");
+    if (!Array.isArray(companies) || !companies.length) return;
+    companySealCompanies = companies;
+    syncCompanyRegistryFromFinance(companies);
+    renderOfficialCompanyOptions();
+    renderUploadedSealCompanyOptions();
+    // Feature flags arrive after the initial workspace paint. Refresh the
+    // editor so an enabled company is not left showing the fail-closed state.
+    renderUploadedSealWorkbench();
+  } catch (error) {
+    console.warn("Finance company directory sync failed", error);
+  }
+}
+
+function enterApp(message = "登入成功，已進入公文收發電子用印系統。") {
+  setModuleEntryProgress(82, "帳號確認完成", "正在載入您的角色、待辦與可使用功能。");
   document.querySelector("#loginScreen").classList.add("hidden");
+  document.querySelector("#loginScreen").setAttribute("aria-hidden", "true");
   document.querySelector("#appShell").classList.remove("hidden");
   applyAuthUser();
-  applyRoleNavigation();
-  renderIdentityWorkbench();
-  renderScopeZone();
-  renderRoleDashboard();
-  renderInboundRows();
-  renderInboundDetail();
-  renderDispatchBoard();
-  renderDispatchDetail();
-  void loadOfficialWorkflow("all");
-  void loadOfficialSealOptions();
-  renderApprovalLog();
-  applyComposeContactDefaults(true);
-  void syncGoLiveAuditFromBackend(true);
-  void syncDashboardFromBackend(true);
-  void syncDatabaseFromBackend(true);
+  const requestedRoute = location.hash?.slice(1);
+  setView(requestedRoute && titles[requestedRoute] && isRouteAllowed(requestedRoute) ? requestedRoute : "dashboard");
+  runAuthenticatedStartupSyncs(true);
+  window.requestAnimationFrame(() => {
+    finishModuleEntryProgress();
+    scheduleDeferredWorkspaceInitialization();
+  });
   showToast(message);
+}
+
+function runAuthenticatedEntryStep(stage, operation) {
+  try {
+    return operation();
+  } catch (error) {
+    console.warn(`[edoc-entry:${stage}]`, error);
+    return null;
+  }
+}
+
+function persistAuthenticatedSession(session = authState) {
+  return runAuthenticatedEntryStep("persist-session", () => {
+    localStorage.setItem(authStorageKey, JSON.stringify(session));
+    return true;
+  }) === true;
+}
+
+function enterAuthenticatedAppSafely(message) {
+  try {
+    enterApp(message);
+    return true;
+  } catch (error) {
+    // Authentication has already succeeded. A secondary dashboard render error
+    // must not be treated as an SSO failure or the user is trapped in a loop.
+    console.error("[edoc-entry:render] authenticated shell recovery", error);
+    const loginScreen = document.querySelector("#loginScreen");
+    const appShell = document.querySelector("#appShell");
+    loginScreen?.classList.add("hidden");
+    loginScreen?.setAttribute("aria-hidden", "true");
+    appShell?.classList.remove("hidden");
+    document.body?.setAttribute("data-entry-recovery", "true");
+    runAuthenticatedEntryStep("apply-auth-user", applyAuthUser);
+    runAuthenticatedEntryStep("apply-role-navigation", applyRoleNavigation);
+    runAuthenticatedEntryStep("render-dashboard", renderRoleDashboard);
+    runAuthenticatedEntryStep("show-recovery-message", () => {
+      showToast("登入已完成；部分儀表板資料載入失敗，仍可先使用左側功能。重新整理後系統會自動續用登入狀態。");
+    });
+    return true;
+  }
 }
 
 function leaveApp() {
@@ -3369,10 +4669,19 @@ function leaveApp() {
     backendRequest("/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
   }
   authState = null;
+  clearUploadedEditorSensitivePreviews();
+  clearComposeAutosave();
+  composeAutosaveRestoredForIdentity = "";
   localStorage.removeItem(authStorageKey);
   cleanPortalHandoffUrl();
   document.querySelector("#appShell").classList.add("hidden");
+  if (isProductionEdocHost()) {
+    returnToLoggingPortalModulePicker("signed_out", "replace");
+    return;
+  }
   document.querySelector("#loginScreen").classList.remove("hidden");
+  document.querySelector("#loginScreen").setAttribute("aria-hidden", "false");
+  applyProductionLoginSafetyState();
   showToast("已登出系統。");
 }
 
@@ -3388,14 +4697,18 @@ function applyAuthUser() {
   if (roleSelect && [...roleSelect.options].some((option) => option.textContent === workflowRole)) {
     roleSelect.value = workflowRole;
   }
-  const bridgeNote = authState.bridge?.loggingRoleKey || user.logging_role_key ? ` · Logging ${authState.bridge?.loggingRoleKey || user.logging_role_key}` : "";
-  document.querySelector("#roleNote").textContent = `${user.name} · ${user.unit || "未設定單位"} · ${user.title || user.role} · ${user.job_level || jobLevelForRole(user.role)}${bridgeNote}`;
+  const currentRoleLabel = document.querySelector("#currentRoleLabel");
+  if (currentRoleLabel) currentRoleLabel.textContent = `${user.name} · ${user.role}`;
+  const managerNote = user.approval_manager_name || user.manager_name ? ` · 主管 ${user.approval_manager_name || user.manager_name}` : "";
+  document.querySelector("#roleNote").textContent = `${user.company_name || "公司未設定"} · ${user.unit || "未設定單位"} · ${user.title || user.role}${managerNote}`;
   applyRoleNavigation();
   renderIdentityWorkbench();
   renderScopeZone();
   renderRoleDashboard();
   renderApprovalLog();
   applyComposeContactDefaults(true);
+  applyProductionLoginSafetyState();
+  applyCompanySealCustodianUi();
 }
 
 async function loginWithBackend(email, password, provider) {
@@ -3404,10 +4717,11 @@ async function loginWithBackend(email, password, provider) {
     body: JSON.stringify({ email, password, provider })
   });
   authState = session;
-  localStorage.setItem(authStorageKey, JSON.stringify(session));
-  syncUserAccountFromSession(session, "後端 session");
-  recordLogin(session.user.email, provider, "成功");
-  enterApp(`${session.user.name} 已通過後端 Auth / RBAC 登入。`);
+  persistAuthenticatedSession(session);
+  if (await rejectNonSetupUserDuringLaunchSetup(session, provider)) return;
+  runAuthenticatedEntryStep("sync-backend-user", () => syncUserAccountFromSession(session, "後端 session"));
+  runAuthenticatedEntryStep("record-backend-login", () => recordLogin(session.user.email, provider, "成功"));
+  enterAuthenticatedAppSafely(`${session.user.name} 已通過後端 Auth / RBAC 登入。`);
 }
 
 async function loginWithLoggingBridge(bridgePayload) {
@@ -3416,24 +4730,86 @@ async function loginWithLoggingBridge(bridgePayload) {
     body: JSON.stringify(bridgePayload)
   });
   authState = session;
-  localStorage.setItem(authStorageKey, JSON.stringify(session));
-  cleanPortalHandoffUrl();
-  syncUserAccountFromSession(session, "Logging / 平台帳號");
-  recordLogin(session.user.email, "Logging / 平台帳號", "成功");
-  addAccountAudit("Logging 帳號連動", `${session.user.email} 已沿用 Logging 帳號進入 EDOC，角色同步為 ${session.user.role}。`);
-  enterApp(`${session.user.name} 已沿用 Logging 帳號進入 EDOC。`);
-  return true;
+  persistAuthenticatedSession(session);
+  if (await rejectNonSetupUserDuringLaunchSetup(session, "Finance Google SSO")) return false;
+  runAuthenticatedEntryStep("clean-portal-url", cleanPortalHandoffUrl);
+  runAuthenticatedEntryStep("sync-finance-user", () => syncUserAccountFromSession(session, "Finance Google SSO"));
+  runAuthenticatedEntryStep("record-finance-login", () => recordLogin(session.user.email, "Finance Google SSO", "成功"));
+  runAuthenticatedEntryStep("audit-finance-login", () => {
+    addAccountAudit("Finance 帳號連動", `${session.user.email} 已沿用 Finance 公司帳號進入公文收發電子用印系統，角色同步為 ${session.user.role}。`);
+  });
+  return enterAuthenticatedAppSafely(`${session.user.name} 已沿用 Finance 公司帳號進入公文收發電子用印系統。`);
+}
+
+function clearPostedHandoffMarker() {
+  document.cookie = `${encodeURIComponent(edocHandoffMarkerCookieKey)}=; Max-Age=0; Path=/; Secure; SameSite=Strict`;
+}
+
+async function resumePostedHandoffSession() {
+  const hasVisibleMarker = readCookieValue(edocHandoffMarkerCookieKey) === "1";
+  const shouldProbeHttpOnlyHandoff = isProductionEdocHost()
+    && (hasVisibleMarker || window.__edocProbeHttpOnlyHandoff === true);
+  if (!shouldProbeHttpOnlyHandoff) return null;
+  setModuleEntryProgress(
+    38,
+    "正在驗證公司帳號",
+    hasVisibleMarker ? "安全接收會計系統的登入狀態。" : "確認瀏覽器中既有的安全登入狀態。"
+  );
+  try {
+    const session = await backendRequest("/auth/handoff-session", {
+      method: "POST",
+      headers: { "X-EDOC-Handoff-Exchange": "1" },
+      body: "{}"
+    });
+    setModuleEntryProgress(68, "正在載入人員權限", "確認公司、部門、職級與簽核角色。");
+    authState = session;
+    persistAuthenticatedSession(session);
+    if (await rejectNonSetupUserDuringLaunchSetup(session, "Finance Google SSO")) return true;
+    runAuthenticatedEntryStep("sync-posted-handoff-user", () => syncUserAccountFromSession(session, "Finance Google SSO"));
+    runAuthenticatedEntryStep("record-posted-handoff-login", () => recordLogin(session.user.email, "Finance Google SSO", "成功"));
+    runAuthenticatedEntryStep("audit-posted-handoff-login", () => {
+      addAccountAudit("Finance 帳號連動", `${session.user.email} 已透過安全交接沿用 Finance 公司帳號進入系統。`);
+    });
+    return enterAuthenticatedAppSafely(`${session.user.name} 已沿用 Finance 公司帳號進入公文收發電子用印系統。`);
+  } catch (error) {
+    // The visible marker is only a progress hint. It can outlive the scoped
+    // HttpOnly handoff cookie after a restored tab, interrupted redirect or an
+    // older deployment. When the backend confirms that no handoff session is
+    // present, clear the hint and request a fresh Portal handoff instead of
+    // showing a false permission denial.
+    if (error?.status === 401 && error?.code === "handoff_session_missing") {
+      return null;
+    }
+    authState = null;
+    localStorage.removeItem(authStorageKey);
+    const diagnosticCode = portalSsoFailureCode(error);
+    console.warn(`[edoc-entry:${diagnosticCode}] Posted Finance SSO handoff failed`);
+    if (isProductionEdocHost()) {
+      returnToLoggingPortalModulePicker(diagnosticCode, "replace");
+      return true;
+    }
+    return false;
+  } finally {
+    window.__edocProbeHttpOnlyHandoff = false;
+    clearPostedHandoffMarker();
+  }
 }
 
 async function tryResumePlatformSession() {
+  setModuleEntryProgress(24, "正在確認登入狀態", "沿用同一模組的公司帳號，不會要求重複登入。");
+  const postedHandoffResult = await resumePostedHandoffSession();
+  if (postedHandoffResult !== null) return postedHandoffResult;
   if (authState?.token) {
+    setModuleEntryProgress(42, "正在恢復工作階段", "使用既有登入狀態，確認帳號仍為啟用。");
     try {
       const current = await backendRequest("/auth/me");
       authState = { ...current, token: authState.token, bridge: current.bridge || authState.bridge };
-      localStorage.setItem(authStorageKey, JSON.stringify(authState));
-      syncUserAccountFromSession(authState, authState.user?.provider || "既有 EDOC session");
-      enterApp(`${authState.user.name} 已沿用既有登入狀態進入 EDOC。`);
-      return true;
+      persistAuthenticatedSession(authState);
+      if (await rejectNonSetupUserDuringLaunchSetup(authState, authState.user?.provider || "既有公文系統 session")) return false;
+      runAuthenticatedEntryStep("sync-resumed-user", () => {
+        syncUserAccountFromSession(authState, authState.user?.provider || "既有公文系統 session");
+      });
+      return enterAuthenticatedAppSafely(`${authState.user.name} 已沿用既有登入狀態進入公文收發電子用印系統。`);
     } catch (error) {
       localStorage.removeItem(authStorageKey);
       authState = null;
@@ -3445,73 +4821,21 @@ async function tryResumePlatformSession() {
       redirectToLoggingPortal();
       return true;
     }
+    document.querySelector("#moduleEntryProgress")?.classList.add("hidden");
     return false;
   }
   try {
+    setModuleEntryProgress(46, "正在連接會計系統", "確認最新人員、公司與簽核角色。");
     return await loginWithLoggingBridge(bridgePayload);
   } catch (error) {
-    console.warn("Logging bridge login failed", error);
-    addAccountAudit("Logging 帳號連動失敗", error.message || "無法沿用 Logging 帳號進入 EDOC。");
-    if (shouldRedirectToLoggingPortal()) {
-      redirectToLoggingPortal();
+    const diagnosticCode = portalSsoFailureCode(error);
+    console.warn(`[edoc-entry:${diagnosticCode}] Finance SSO bridge login failed`);
+    addAccountAudit("Finance 帳號連動失敗", `無法沿用 Finance 公司帳號進入系統；診斷代碼 ${diagnosticCode}。`);
+    if (isProductionEdocHost()) {
+      returnToLoggingPortalModulePicker(diagnosticCode, "replace");
       return true;
     }
     return false;
-  }
-}
-
-function quickLoginProfile(role) {
-  const scope = roleDataScopes[role] || { departments: ["系統預設"] };
-  const titleMap = {
-    員工: "居家照顧服務員",
-    主管: "居家服務督導",
-    主任: "主任",
-    執行長: "執行長",
-    行政部主任: "行政部主任",
-    人資: "人資專員",
-    會計: "會計專員",
-    總務: "總務收發",
-    業務助理: "業務助理",
-    董事會: "董事會成員",
-    股東: "股東",
-    外部檢核單位: "外部檢核"
-  };
-  return {
-    email: `${role}@suiyuecare.local`,
-    password: "demo1234",
-    provider: "快速測試登入",
-    session: {
-      token: `quick-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      user: {
-        id: `QUICK-${role}`,
-        name: `${role}測試帳號`,
-        email: `${role}@suiyuecare.local`,
-        unit: scope.departments?.[0] || role,
-        title: titleMap[role] || role,
-        job_level: jobLevelForRole(role),
-        role,
-        provider: "快速測試登入",
-        mfa_status: "測試略過",
-        status: "啟用"
-      },
-      permissions: rolePermissions[role] || []
-    }
-  };
-}
-
-async function quickLoginAsRole(role) {
-  const profile = quickLoginProfile(role);
-  document.querySelector("#loginEmail").value = profile.email;
-  document.querySelector("#loginPassword").value = profile.password;
-  try {
-    await loginWithBackend(profile.email, profile.password, profile.provider);
-  } catch (error) {
-    authState = profile.session;
-    localStorage.setItem(authStorageKey, JSON.stringify(authState));
-    syncUserAccountFromSession(authState, "快速登入");
-    recordLogin(authState.user.email, profile.provider, "成功");
-    enterApp(`${role} 已快速登入，正在檢視 ${roleDataScopes[role]?.title || role} 權限。`);
-    addAccountAudit("快速角色登入", `${role} 使用快速登入進入系統；後端 Auth 未回應時改用本機測試 session。`);
   }
 }
 
@@ -3550,11 +4874,70 @@ function currentInboundDoc() {
   return rows.find((doc) => doc.id === selectedInboundId) || rows[0] || null;
 }
 
+function inboundSourceLabel(sourceType = "") {
+  return {
+    general_affairs_email: "總務 Email",
+    general_affairs_physical: "總務實體來文",
+    local_unit_physical: "地方單位實體來文",
+    jagent_mock: "交換測試",
+    manual: "人工登錄"
+  }[sourceType] || "人工登錄";
+}
+
+function inboundAttachmentName(attachment) {
+  if (typeof attachment === "string") return attachment;
+  return attachment?.fileName || attachment?.file_name || attachment?.name || "附件";
+}
+
+function inboundAttachmentId(attachment) {
+  return typeof attachment === "object" && attachment ? (attachment.id || attachment.attachment_id || "") : "";
+}
+
+function canCreateInternalDispatch() {
+  return ["總務", "行政部主任", "行政部門主任", "執行長"].includes(activeRole());
+}
+
+function setInboundSection(section = "records") {
+  inboundSection = ["records", "archive", "dispatch"].includes(section) ? section : "records";
+  document.querySelectorAll("[data-inbound-section]").forEach((button) => {
+    const active = button.dataset.inboundSection === inboundSection;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll("[data-inbound-section-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.inboundSectionPanel !== inboundSection;
+  });
+  if (inboundSection === "archive") prepareInboundArchiveForm();
+  if (inboundSection === "dispatch") {
+    void loadInternalDispatches(true).then(() => markInternalDispatchRead(selectedInternalDispatchId, { silent: true }));
+  }
+}
+
+function prepareInboundArchiveForm() {
+  const user = authState?.user || {};
+  const role = activeRole();
+  const source = document.querySelector("#inboundArchiveSourceType");
+  const generalAffairs = role === "總務";
+  if (source) {
+    [...source.options].forEach((option) => {
+      option.hidden = option.value !== "local_unit_physical" && !generalAffairs;
+      option.disabled = option.hidden;
+    });
+    if (!generalAffairs || source.selectedOptions[0]?.disabled) source.value = "local_unit_physical";
+  }
+  const receivedDate = document.querySelector("#inboundArchiveReceivedDate");
+  if (receivedDate && !receivedDate.value) receivedDate.value = new Date().toISOString().slice(0, 10);
+  const department = document.querySelector("#inboundArchiveDepartment");
+  if (department && !department.value) department.value = user.unit || "";
+  const owner = document.querySelector("#inboundArchiveOwnerLabel");
+  if (owner) owner.textContent = `${user.name || "目前帳號"}｜${user.unit || "未設定單位"}`;
+}
+
 function filteredInboundDocs() {
   const term = inboundSearchTerm.trim().toLowerCase();
   return scopedInboundDocs().filter((doc) => {
     const matchFilter = inboundFilter === "all" || doc.status === inboundFilter;
-    const haystack = `${doc.receiveNo} ${doc.exchangeNo} ${doc.agency} ${doc.subject} ${doc.owner} ${doc.dept}`.toLowerCase();
+    const haystack = `${doc.receiveNo} ${doc.exchangeNo} ${inboundSourceLabel(doc.sourceType)} ${doc.agency} ${doc.subject} ${doc.owner} ${doc.dept}`.toLowerCase();
     return matchFilter && (!term || haystack.includes(term));
   });
 }
@@ -3575,16 +4958,17 @@ function renderInboundRows() {
   if (rows.length && !rows.some((doc) => doc.id === selectedInboundId)) selectedInboundId = rows[0].id;
   document.querySelector("#inboundCount").textContent = `${rows.length} 筆`;
   if (!rows.length) {
-    document.querySelector("#inboundRows").innerHTML = `<tr><td colspan="5" class="empty-text">此工作區目前沒有可檢視的收文。</td></tr>`;
+    document.querySelector("#inboundRows").innerHTML = `<tr><td colspan="6" class="empty-text">目前沒有可檢視的收錄資料。</td></tr>`;
     return;
   }
   document.querySelector("#inboundRows").innerHTML = rows.map((doc) => `
-    <tr class="${doc.id === selectedInboundId ? "selected-row" : ""}" data-inbound-id="${doc.id}" tabindex="0">
-      <td><button class="text-button row-select" type="button" data-select-inbound="${doc.id}">${doc.receiveNo}</button><small>${doc.exchangeNo}</small></td>
-      <td>${doc.agency}<small>${doc.agencyCode}</small></td>
-      <td>${doc.subject}</td>
-      <td><span class="badge ${badgeClass(doc.status)}">${doc.status}</span></td>
-      <td>${doc.owner}<small>${doc.dept}</small></td>
+    <tr class="${doc.id === selectedInboundId ? "selected-row" : ""}" data-inbound-id="${escapeHtml(doc.id)}" tabindex="0">
+      <td><button class="text-button row-select" type="button" data-select-inbound="${escapeHtml(doc.id)}">${escapeHtml(doc.receiveNo)}</button><small>${escapeHtml(doc.exchangeNo)}</small></td>
+      <td>${escapeHtml(inboundSourceLabel(doc.sourceType))}</td>
+      <td>${escapeHtml(doc.agency)}<small>${escapeHtml(doc.agencyCode)}</small></td>
+      <td>${escapeHtml(doc.subject)}</td>
+      <td><span class="badge ${safeHtmlClassToken(badgeClass(doc.status), "info")}">${escapeHtml(doc.status)}</span></td>
+      <td>${escapeHtml(doc.owner)}<small>${escapeHtml(doc.dept)}</small></td>
     </tr>
   `).join("");
 
@@ -3614,26 +4998,30 @@ function renderInboundRows() {
 }
 
 function inboundDetailMarkup(doc) {
+  const attachments = Array.isArray(doc.attachments) ? doc.attachments : [];
+  const note = doc.note || "尚未填寫收文備註。";
   return `
     <div class="doc-detail">
-      <strong>${doc.subject}</strong>
+      <strong>${escapeHtml(doc.subject || "未命名收文")}</strong>
       <dl>
-        <div><dt>收文號</dt><dd>${doc.receiveNo}</dd></div>
-        <div><dt>交換號</dt><dd>${doc.exchangeNo}</dd></div>
-        <div><dt>來文機關</dt><dd>${doc.agency}（${doc.agencyCode}）</dd></div>
-        <div><dt>文別 / 速別</dt><dd>${doc.type} / ${doc.priority}</dd></div>
-        <div><dt>密等</dt><dd>${doc.security}</dd></div>
-        <div><dt>收受時間</dt><dd>${doc.receivedAt}</dd></div>
-        <div><dt>期限</dt><dd>${doc.dueDate}</dd></div>
-        <div><dt>承辦</dt><dd>${doc.dept} / ${doc.owner}</dd></div>
+        <div><dt>收文號</dt><dd>${escapeHtml(doc.receiveNo || "待登錄")}</dd></div>
+        <div><dt>收錄來源</dt><dd>${escapeHtml(inboundSourceLabel(doc.sourceType))}</dd></div>
+        <div><dt>交換號</dt><dd>${escapeHtml(doc.exchangeNo || "未建立")}</dd></div>
+        <div><dt>來文機關</dt><dd>${escapeHtml(doc.agency || "未填寫")}（${escapeHtml(doc.agencyCode || "無代碼")}）</dd></div>
+        <div><dt>文別 / 速別</dt><dd>${escapeHtml(doc.type || "未填寫")} / ${escapeHtml(doc.priority || "普通件")}</dd></div>
+        <div><dt>密等</dt><dd>${escapeHtml(doc.security || "普通")}</dd></div>
+        <div><dt>收受時間</dt><dd>${escapeHtml(doc.receivedAt || "未填寫")}</dd></div>
+        <div><dt>期限</dt><dd>${escapeHtml(doc.dueDate || "未設定")}</dd></div>
+        <div><dt>承辦</dt><dd>${escapeHtml(doc.dept || "未分派")} / ${escapeHtml(doc.owner || "未指派")}</dd></div>
       </dl>
-      <p>${doc.note}</p>
+      <p>${escapeHtml(note)}</p>
       <div class="attachment-list">
-        ${doc.attachments.map((file) => `<button class="file-chip" type="button" data-file="${file}">${file}</button>`).join("")}
+        ${attachments.length ? attachments.map((file) => `<button class="file-chip" type="button" data-file="${escapeHtml(inboundAttachmentName(file))}" data-inbound-attachment-id="${escapeHtml(inboundAttachmentId(file))}">${escapeHtml(inboundAttachmentName(file))}</button>`).join("") : `<span class="empty-text">尚無附件。</span>`}
       </div>
       <div class="detail-actions">
-        <button class="primary-button" type="button" data-inbound-action="register" ${canUseDocAction(doc, "sign") || canUseDocAction(doc, "view") ? "" : "disabled"}>登錄</button>
-        <button class="secondary-button" type="button" data-inbound-action="assign" ${canUseDocAction(doc, "sign") ? "" : "disabled"}>分派</button>
+        ${doc.status === "待登錄" ? `<button class="primary-button" type="button" data-inbound-action="register" ${canUseDocAction(doc, "sign") || canUseDocAction(doc, "view") ? "" : "disabled"}>登錄</button>` : ""}
+        ${["待分派", "異常待處理"].includes(doc.status) ? `<button class="secondary-button" type="button" data-inbound-action="assign" ${canUseDocAction(doc, "sign") ? "" : "disabled"}>分派承辦</button>` : ""}
+        ${canCreateInternalDispatch() ? `<button class="secondary-button" type="button" data-inbound-action="internal-dispatch">內部派發</button>` : ""}
         <button class="secondary-button" type="button" data-inbound-action="exception">誤送/漏送</button>
         <button class="secondary-button" type="button" data-inbound-action="export">匯出</button>
       </div>
@@ -3645,8 +5033,9 @@ function inboundDetailMarkup(doc) {
 function bindInboundDetailActions(container, doc) {
   container.querySelectorAll(".file-chip").forEach((button) => {
     button.addEventListener("click", () => {
-      if (!canUseDocAction(doc, "download")) return showToast("此角色未取得本公文附件下載/預覽權限。");
-      showToast(`已開啟附件預覽：${button.dataset.file}`);
+      if (!button.dataset.inboundAttachmentId && !canUseDocAction(doc, "download")) return showToast("此角色未取得本公文附件下載/預覽權限。");
+      if (!button.dataset.inboundAttachmentId) return showToast(`附件尚未寫入後端：${button.dataset.file}`);
+      void downloadInboundAttachment(doc.id, button.dataset.inboundAttachmentId, button.dataset.file);
     });
   });
   container.querySelectorAll("[data-inbound-action]").forEach((button) => {
@@ -3654,6 +5043,13 @@ function bindInboundDetailActions(container, doc) {
       const action = button.dataset.inboundAction;
       if (action === "register") registerInbound([doc.id]);
       if (action === "assign") assignInbound([doc.id]);
+      if (action === "internal-dispatch") {
+        setInboundSection("dispatch");
+        window.setTimeout(() => {
+          const select = document.querySelector("#internalDispatchDocumentSelect");
+          if (select) select.value = doc.id;
+        }, 80);
+      }
       if (action === "exception") createInboundException([doc.id], document.querySelector("#exceptionType").value);
       if (action === "export") {
         addInboundAudit("匯出收文清單", `已匯出 ${filteredInboundDocs().length} 筆目前篩選資料。`);
@@ -3708,6 +5104,194 @@ function renderInboundAuditLog() {
       </div>
     </article>
   `).join("");
+}
+
+function mapBackendInboundDocument(row = {}) {
+  const attachments = Array.isArray(row.attachments) ? row.attachments : [];
+  const metadata = row.metadata || {};
+  const statusLabel = {
+    registered: "待分派",
+    archived: "已歸檔",
+    assigned: "已收文",
+    closed: "結案",
+    cancelled: "已取消"
+  }[row.status] || row.status || "待登錄";
+  return {
+    id: row.id,
+    receiveNo: row.receive_no || row.receiveNo || row.id,
+    exchangeNo: row.external_exchange_id || metadata.exchangeNo || `MANUAL-${row.id}`,
+    sourceType: row.source_type || "manual",
+    agency: row.sender_name || "去識別化來文單位",
+    agencyCode: metadata.agencyCode || "MANUAL",
+    type: metadata.documentType || "一般來文",
+    priority: row.priority || "普通件",
+    security: row.security_level || "普通",
+    subject: row.subject || "未命名收文",
+    status: statusLabel,
+    owner: row.assignee_name || "待指派",
+    dept: row.recipient_department_name || "待分派",
+    receivedAt: metadata.received_date || row.created_at || "",
+    dueDate: row.due_at || "",
+    note: row.body || metadata.note || "",
+    attachments: attachments.map((file) => ({
+      id: file.id || file.attachment_id || "",
+      fileName: file.file_name || file.name || "附件",
+      mimeType: file.file_mime_type || file.mime_type || "",
+      size: file.file_size || file.size || 0,
+      createdAt: file.created_at || ""
+    }))
+  };
+}
+
+function upsertInboundDocFromBackend(row = {}) {
+  const doc = mapBackendInboundDocument(row);
+  const index = inboundDocs.findIndex((item) => item.id === doc.id);
+  if (index >= 0) inboundDocs[index] = doc;
+  else inboundDocs.unshift(doc);
+  selectedInboundId = doc.id;
+  renderInboundRows();
+  renderInboundDetail();
+  return doc;
+}
+
+function applyPersistentInboundDocuments(rows = []) {
+  if (!Array.isArray(rows)) return;
+  const mapped = rows.map(mapBackendInboundDocument);
+  inboundDocs.splice(0, inboundDocs.length, ...mapped);
+  selectedInboundId = inboundDocs[0]?.id || "";
+  renderInboundRows();
+  renderInboundDetail();
+}
+
+async function createInboundArchiveFromForm() {
+  if (!hasAuthenticatedBackendSession()) return showToast("請先由公司登入入口登入，再新增公文收錄。");
+  const sourceType = document.querySelector("#inboundArchiveSourceType")?.value || "local_unit_physical";
+  const senderName = document.querySelector("#inboundArchiveSenderName")?.value.trim() || "";
+  const subject = document.querySelector("#inboundArchiveSubject")?.value.trim() || "";
+  if (!senderName) return showToast("請填寫來文單位或寄件人。");
+  if (!subject) return showToast("請填寫信件或公文主旨。");
+  const files = [...(document.querySelector("#inboundArchiveFiles")?.files || [])];
+  const submit = document.querySelector("#inboundArchiveSubmitBtn");
+  const originalLabel = submit?.textContent || "完成收錄歸檔";
+  let archived = null;
+  if (submit) {
+    submit.disabled = true;
+    submit.textContent = "正在收錄...";
+  }
+  try {
+    archived = await backendRequest("/inbound-documents", {
+      method: "POST",
+      body: JSON.stringify({
+        source_type: sourceType,
+        sender_name: senderName,
+        sender_contact: document.querySelector("#inboundArchiveSenderContact")?.value.trim() || "",
+        subject,
+        body: document.querySelector("#inboundArchiveBody")?.value.trim() || "",
+        recipient_department_name: document.querySelector("#inboundArchiveDepartment")?.value.trim() || authState?.user?.unit || "",
+        priority: document.querySelector("#inboundArchivePriority")?.value || "普通件",
+        security_level: document.querySelector("#inboundArchiveSecurity")?.value || "普通",
+        status: "archived",
+        metadata: {
+          received_date: document.querySelector("#inboundArchiveReceivedDate")?.value || "",
+          documentType: document.querySelector("#inboundArchiveDocumentType")?.value || "公文",
+          archive_source_label: inboundSourceLabel(sourceType),
+          archived_by_finance_account: authState?.user?.email || ""
+        }
+      })
+    });
+    for (const file of files) {
+      requireInlineJsonUploadSize(file, "收文附件");
+      const uploaded = await backendRequest(`/inbound-documents/${encodeURIComponent(archived.id)}/attachments`, {
+        method: "POST",
+        body: JSON.stringify({
+          file_name: file.name,
+          file_mime_type: file.type || "application/octet-stream",
+          content_base64: await fileToBase64(file),
+          attachment_type: "inbound_archive_attachment"
+        })
+      });
+      archived = uploaded.inbound_document || archived;
+    }
+    const doc = upsertInboundDocFromBackend(archived);
+    renderInternalDispatchDocumentOptions();
+    addInboundAudit("完成公文收錄", `${doc.receiveNo} 已由「${inboundSourceLabel(sourceType)}」歸檔，附件 ${files.length} 份。`);
+    document.querySelector("#inboundArchiveForm")?.reset();
+    prepareInboundArchiveForm();
+    setInboundSection("records");
+    showToast(`已完成收錄：${doc.receiveNo}`);
+    return doc;
+  } catch (error) {
+    if (archived) upsertInboundDocFromBackend(archived);
+    showToast(archived ? `公文已收錄，但附件上傳未完成：${error.message}` : `公文收錄失敗：${error.message}`);
+  } finally {
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = originalLabel;
+    }
+  }
+}
+
+async function downloadInboundAttachment(inboundId, attachmentId, fallbackName = "inbound-attachment") {
+  try {
+    const response = await fetch(`${backendApiBase}/inbound-documents/${encodeURIComponent(inboundId)}/attachments/${encodeURIComponent(attachmentId)}/download`, {
+      headers: isHeaderSafeToken(authState?.token) ? { Authorization: `Bearer ${authState.token}` } : {},
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error((await response.text()).slice(0, 180) || `HTTP ${response.status}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = decodeURIComponent(response.headers.get("Content-Disposition")?.match(/filename=\"?([^\";]+)/)?.[1] || fallbackName);
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    showToast(`已下載附件：${fallbackName}`);
+  } catch (error) {
+    showToast(`附件下載失敗：${error.message}`);
+  }
+}
+
+function launchSmokeInboundPdfBase64() {
+  return btoa([
+    "%PDF-1.4",
+    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
+    "2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj",
+    "trailer << /Root 1 0 R >>",
+    "%%EOF"
+  ].join("\n"));
+}
+
+async function createBackendInboundLaunchSmokeTest() {
+  if (!hasAuthenticatedBackendSession()) {
+    showToast("請先用總務或行政部正式帳號登入，再建立後端收文走測。");
+    return;
+  }
+  try {
+    const result = await backendRequest("/production/launch-smoke/inbound-assignment", {
+      method: "POST",
+      body: JSON.stringify({
+        source: "frontend_launch_smoke_test"
+      })
+    });
+    const assigned = result.inbound_document;
+    const doc = upsertInboundDocFromBackend(assigned);
+    addInboundAudit("建立後端收文走測", `${doc.receiveNo} 已寫入 inbound_documents，並指派 ${doc.owner}，期限 ${doc.dueDate}。`);
+    focusInboundRegisterJourney();
+    showToast("已建立後端收文走測並完成分派，請重新跑 Go / No-Go。");
+  } catch (error) {
+    if (error.rawMessage === "launch_smoke_inbound_assignee_required" || error.code === "launch_smoke_inbound_assignee_required") {
+      showToast("找不到可指派的正式同仁帳號，請先補帳號權限。");
+      return;
+    }
+    if (error.status === 403 || /forbidden|權限/.test(error.message)) {
+      showToast("目前帳號不能建立收文走測，請切換總務、行政部或系統管理員正式帳號。");
+      return;
+    }
+    showToast(`建立收文走測失敗：${error.message}`);
+    prefillInboundAssignmentLaunchSmokeTest();
+  }
 }
 
 function mutateInbound(ids, handler) {
@@ -3791,6 +5375,7 @@ function createInboundException(ids, forcedType) {
 }
 
 function pullJagentInbound() {
+  if (!guardFormalExchangeUi("拉取 jAgent 來文")) return;
   const newDocs = pulledInboundTemplates.filter((doc) => !inboundDocs.some((item) => item.id === doc.id));
   if (!newDocs.length) return showToast("目前沒有新的 jAgent 來文。");
   inboundDocs.unshift(...newDocs.map((doc) => ({ ...doc, attachments: [...doc.attachments] })));
@@ -3807,19 +5392,25 @@ function addDispatchAudit(title, body) {
 }
 
 function composePayload() {
+  const selectedLargeSealType = document.querySelector("#largeSealType")?.value || "無";
+  const selectedSmallSealType = document.querySelector("#smallSealType")?.value || "無";
+  const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
   return {
     companyName: document.querySelector("#composeCompanySelect")?.value || companyRegistry[0]?.name || "歲悅長照股份有限公司",
     no: document.querySelector("#dispatchNo")?.value.trim() || "",
     type: document.querySelector("#docType")?.value || "函",
     priority: document.querySelector("#priority")?.value || "普通件",
+    ...approvalSelection,
     recipient: document.querySelector("#recipient")?.value.trim() || "未指定受文者",
-    contactAddress: document.querySelector("#contactAddress")?.value.trim() || "220205 新北市板橋區英士路192之1號",
+    purpose: document.querySelector("#documentPurpose")?.value.trim() || "",
+    contactAddress: document.querySelector("#contactAddress")?.value.trim() || "",
     contactOwner: document.querySelector("#contactOwner")?.value.trim() || activeRole(),
-    contactPhone: document.querySelector("#contactPhone")?.value.trim() || "(02)2257-7155 分機3762",
+    contactPhone: document.querySelector("#contactPhone")?.value.trim() || composeDefaultContactPhone,
     contactFax: document.querySelector("#contactFax")?.value.trim() || "(02)2254-4029",
-    contactEmail: document.querySelector("#contactEmail")?.value.trim() || "edoc@suiyuecare.com",
-    largeSealType: document.querySelector("#largeSealType")?.value || "無",
-    smallSealType: document.querySelector("#smallSealType")?.value || "無",
+    contactEmail: document.querySelector("#contactEmail")?.value.trim() || authState?.user?.email || "",
+    deliveryMode: "seal_or_manual_dispatch",
+    largeSealType: selectedLargeSealType,
+    smallSealType: selectedSmallSealType,
     sealPlacements: {
       large: { ...composeSealPlacements.large },
       small: { ...composeSealPlacements.small }
@@ -3831,12 +5422,28 @@ function composePayload() {
   };
 }
 
+function syncComposeElectronicExchangeMode(_changedSelect = null) {
+  const largeSelect = document.querySelector("#largeSealType");
+  const smallSelect = document.querySelector("#smallSealType");
+  if (!largeSelect || !smallSelect) return false;
+  if (!composeSealTypes.includes(largeSelect.value)) largeSelect.value = "一般章";
+  if (!composeSealTypes.includes(smallSelect.value)) smallSelect.value = "無";
+  const hint = document.querySelector("#composeSealModeHint");
+  if (hint) {
+    hint.textContent = "所有發文均須依文件類型完成用印簽核；政府電子公文正式交換目前維持停用。";
+    hint.dataset.validity = "";
+  }
+  return false;
+}
+
 const composeAutosaveSelectors = [
   "#composeCompanySelect",
   "#docType",
   "#priority",
+  "#composeApprovalCategorySelect",
   "#dispatchNo",
   "#recipient",
+  "#documentPurpose",
   "#contactAddress",
   "#contactOwner",
   "#contactPhone",
@@ -3856,8 +5463,13 @@ function composeRawSnapshot() {
     if (!element) return;
     values[selector] = element.value;
   });
+  const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
   return {
+    schemaVersion: 2,
+    userId: authState?.user?.id || "",
+    companyId: authState?.user?.company_id || "",
     values,
+    approval: { ...approvalSelection, approvalFlowNodes: [...approvalSelection.approvalFlowNodes] },
     sealPlacements: {
       large: { ...composeSealPlacements.large },
       small: { ...composeSealPlacements.small }
@@ -3870,7 +5482,9 @@ function composeRawSnapshot() {
 function composeSnapshotHasMeaningfulContent(snapshot) {
   const values = snapshot?.values || {};
   return Boolean(
+    String(values["#composeApprovalCategorySelect"] || "").trim() ||
     String(values["#recipient"] || "").trim() ||
+    String(values["#documentPurpose"] || "").trim() ||
     String(values["#subject"] || "").trim() ||
     String(values["#bodyText"] || "").trim() ||
     String(values["#attachmentDetails"] || "").trim()
@@ -3887,6 +5501,14 @@ function formatComposeSaveTime(isoText) {
 function writeComposeAutosave() {
   const snapshot = composeRawSnapshot();
   if (!composeSnapshotHasMeaningfulContent(snapshot)) return;
+  if (!snapshot.userId || !snapshot.companyId) {
+    composeSaveState = {
+      tone: "idle",
+      title: "登入後才會自動保護",
+      detail: "目前沒有可辨識的 Finance 使用者與公司，為避免共用裝置資料混用，系統不會寫入本機草稿。"
+    };
+    return;
+  }
   const saved = {
     updatedAt: new Date().toISOString(),
     snapshot
@@ -3908,6 +5530,98 @@ function writeComposeAutosave() {
   };
 }
 
+function composeAutosaveIdentity() {
+  const userId = String(authState?.user?.id || "").trim();
+  const companyId = String(authState?.user?.company_id || "").trim();
+  return userId && companyId ? `${userId}:${companyId}` : "";
+}
+
+function readComposeAutosave() {
+  let raw = "";
+  try {
+    raw = localStorage.getItem(composeAutosaveStorageKey) || "";
+  } catch (error) {
+    return null;
+  }
+  if (!raw) return null;
+  if (raw.length > 512000) {
+    clearComposeAutosave();
+    return null;
+  }
+  let saved = null;
+  try {
+    saved = JSON.parse(raw);
+  } catch (error) {
+    clearComposeAutosave();
+    return null;
+  }
+  const snapshot = saved?.snapshot;
+  const identity = composeAutosaveIdentity();
+  const savedIdentity = `${String(snapshot?.userId || "").trim()}:${String(snapshot?.companyId || "").trim()}`;
+  if (!identity) return null;
+  if (
+    Number(snapshot?.schemaVersion) !== 2
+    || !String(snapshot?.userId || "").trim()
+    || !String(snapshot?.companyId || "").trim()
+    || savedIdentity !== identity
+    || !composeSnapshotHasMeaningfulContent(snapshot)
+  ) {
+    clearComposeAutosave();
+    return null;
+  }
+  return saved;
+}
+
+function clampComposePlacement(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(96, Math.max(4, number)) : fallback;
+}
+
+function restoreComposeAutosave() {
+  const identity = composeAutosaveIdentity();
+  if (!identity || composeAutosaveRestoredForIdentity === identity) return false;
+  composeAutosaveRestoredForIdentity = identity;
+  const saved = readComposeAutosave();
+  if (!saved) return false;
+  const snapshot = saved.snapshot;
+  const values = snapshot.values || {};
+  const approvalCategory = String(values["#composeApprovalCategorySelect"] || snapshot.approval?.documentCategory || "").slice(0, 300);
+  renderApprovalCategorySelect("#composeApprovalCategorySelect", approvalCategory, { requireSelection: true });
+  composeAutosaveSelectors.forEach((selector) => {
+    if (selector === "#composeApprovalCategorySelect") return;
+    const element = document.querySelector(selector);
+    const value = values[selector];
+    if (!element || typeof value !== "string") return;
+    const safeValue = value.slice(0, element.tagName === "TEXTAREA" ? 50000 : 2000);
+    if (element.tagName === "SELECT" && ![...element.options].some((option) => option.value === safeValue)) return;
+    element.value = safeValue;
+    if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactEmail"].includes(selector)) {
+      element.dataset.autoDefault = "false";
+    }
+  });
+  ["large", "small"].forEach((kind) => {
+    const placement = snapshot.sealPlacements?.[kind] || {};
+    composeSealPlacements[kind].page = Math.max(1, Math.min(300, Number(placement.page) || 1));
+    composeSealPlacements[kind].x = clampComposePlacement(placement.x, composeSealPlacements[kind].x);
+    composeSealPlacements[kind].y = clampComposePlacement(placement.y, composeSealPlacements[kind].y);
+  });
+  currentComposeDraftId = dispatchDocs.some((item) => item.id === snapshot.currentComposeDraftId && item.status === "草稿")
+    ? snapshot.currentComposeDraftId
+    : "";
+  draftConfirmed = false;
+  draftSigned = false;
+  activeComposeStep = "fill";
+  composeSaveState = {
+    tone: "local",
+    title: "已復原未送出的內容",
+    detail: `${formatComposeSaveTime(saved.updatedAt)} 已復原文字與用印位置；基於瀏覽器安全限制，請重新選擇尚未上傳的本機附件。`
+  };
+  renderComposeApprovalRoute();
+  renderDraftPreview();
+  renderComposeSaveStatus();
+  return true;
+}
+
 function clearComposeAutosave() {
   try {
     localStorage.removeItem(composeAutosaveStorageKey);
@@ -3917,15 +5631,27 @@ function clearComposeAutosave() {
 }
 
 function renderComposeSaveStatus() {
-  // Local autosave is intentionally silent; the compose page should stay focused on the document.
+  const target = document.querySelector("#composeSaveStatus");
+  if (!target) return;
+  target.dataset.tone = composeSaveState.tone || "idle";
+  target.innerHTML = `<strong>${escapeHtml(composeSaveState.title || "尚未儲存到系統")}</strong><span>${escapeHtml(composeSaveState.detail || "請按暫存草稿完成後端保存。")}</span>`;
 }
 
-function renderComposeCompanyOptions() {
+function renderComposeCompanyOptions(preferAccount = false) {
   const select = document.querySelector("#composeCompanySelect");
   if (!select) return;
-  const current = select.value || companyRegistry[0]?.name || "歲悅長照股份有限公司";
-  const names = companyRegistry.map((item) => item.name);
-  select.innerHTML = optionTags(names, names.includes(current) ? current : names[0]);
+  const accountCompany = authState?.user?.company_name || "";
+  const accountCompanyId = authState?.user?.company_id || "";
+  const company = companyRegistry.find((item) => item.id === accountCompanyId || item.name === accountCompany)
+    || (accountCompanyId && accountCompany ? { id: accountCompanyId, name: accountCompany } : null);
+  if (!company) {
+    select.innerHTML = `<option value="">登入帳號尚未連動 Finance 公司</option>`;
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = optionTags([company.name], company.name);
+  select.dataset.autoDefault = "true";
 }
 
 function renderDraftSealPlaceholder(kind, label, sealType, sizeClass) {
@@ -3944,7 +5670,40 @@ function renderDraftSealPlaceholder(kind, label, sealType, sizeClass) {
 }
 
 const draftMeasurePageWidthPx = 794;
+const officialDraftFontQuery = '16px "EDoc LXGW WenKai TC"';
 let draftMeasurePreviewElement = null;
+let officialDraftFontReady = false;
+let officialDraftFontLoadPromise = null;
+let officialDraftFontRerendered = false;
+
+function ensureOfficialDraftFontReady() {
+  if (officialDraftFontReady) return Promise.resolve(true);
+  if (!document.fonts?.load) {
+    officialDraftFontReady = true;
+    return Promise.resolve(false);
+  }
+  if (!officialDraftFontLoadPromise) {
+    officialDraftFontLoadPromise = document.fonts.load(officialDraftFontQuery)
+      .then(() => document.fonts.ready)
+      .then(() => {
+        officialDraftFontReady = true;
+        return true;
+      })
+      .catch(() => false);
+  }
+  return officialDraftFontLoadPromise;
+}
+
+function scheduleOfficialDraftFontRerender() {
+  if (officialDraftFontRerendered || officialDraftFontReady) return;
+  void ensureOfficialDraftFontReady().then((loaded) => {
+    if (!loaded || officialDraftFontRerendered) return;
+    officialDraftFontRerendered = true;
+    draftMeasurePreviewElement?.remove();
+    draftMeasurePreviewElement = null;
+    renderDraftPreview({ force: true, fontReady: true });
+  });
+}
 
 function escapeDraftHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -3956,15 +5715,30 @@ function escapeDraftHtml(value = "") {
   })[char]);
 }
 
+// All dynamic application, approval and notification HTML shares the draft
+// renderer's well-tested encoder.
+function escapeHtml(value = "") {
+  return escapeDraftHtml(value);
+}
+
+function safeHtmlClassToken(value = "", fallback = "") {
+  const token = String(value || "").trim();
+  return /^[a-z0-9_-]+$/i.test(token) ? token : fallback;
+}
+
 function draftBodySource(text) {
   return (text || "尚未填寫說明內容。").trim() || "尚未填寫說明內容。";
+}
+
+function draftSubjectSource(text) {
+  return (text || "未填主旨").trim() || "未填主旨";
 }
 
 function draftAttachmentText(data) {
   const fileText = data.attachments?.length ? data.attachments.join("、") : "";
   const detailText = data.attachmentDetails?.trim() || "";
   if (fileText && detailText) return `${fileText}；${detailText}`;
-  return detailText || fileText || "函稿本文、附件清冊";
+  return detailText || fileText || "無";
 }
 
 function ensureDraftMeasurePreview() {
@@ -3978,10 +5752,11 @@ function ensureDraftMeasurePreview() {
   return draftMeasurePreviewElement;
 }
 
-function draftPageMainFits(data, body, pageNumber, attachmentsText) {
+function draftPageMainFits(data, content, pageNumber, attachmentsText, terminal = true) {
   const measure = ensureDraftMeasurePreview();
   if (!measure) return true;
-  measure.innerHTML = renderOfficialDraftPageHtml(data, body, pageNumber, 99, attachmentsText);
+  const totalPages = terminal ? pageNumber : pageNumber + 1;
+  measure.innerHTML = renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, attachmentsText);
   const main = measure.querySelector(".draft-main");
   const pageNumberNode = measure.querySelector(".draft-page-number");
   if (!main || !pageNumberNode) return true;
@@ -4007,14 +5782,15 @@ function preferredDraftBreak(text, limit) {
   return bestIndex >= minBreak ? bestIndex + bestLength : bounded;
 }
 
-function draftFitLength(data, text, pageNumber, attachmentsText) {
+function draftFitLength(data, text, pageNumber, attachmentsText, baseContent, field) {
   let low = 1;
   let high = text.length;
   let best = 0;
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
-    const candidate = text.slice(0, mid).trim();
-    if (candidate && draftPageMainFits(data, candidate, pageNumber, attachmentsText)) {
+    const candidate = text.slice(0, mid);
+    const content = { ...baseContent, [field]: candidate };
+    if (candidate && draftPageMainFits(data, content, pageNumber, attachmentsText, false)) {
       best = mid;
       low = mid + 1;
     } else {
@@ -4025,7 +5801,7 @@ function draftFitLength(data, text, pageNumber, attachmentsText) {
 }
 
 function chunkTextByLength(text, firstLimit = 235, nextLimit = 390) {
-  const source = (text || "尚未填寫說明內容。").trim();
+  const source = String(text || "");
   const chunks = [];
   let remaining = source;
   let limit = firstLimit;
@@ -4038,44 +5814,148 @@ function chunkTextByLength(text, firstLimit = 235, nextLimit = 390) {
       windowText.lastIndexOf("，")
     );
     const cut = breakAt > Math.floor(limit * 0.58) ? breakAt + 1 : limit;
-    chunks.push(remaining.slice(0, cut).trim());
-    remaining = remaining.slice(cut).trim();
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut);
     limit = nextLimit;
   }
-  chunks.push(remaining || "尚未填寫說明內容。");
+  if (remaining || !chunks.length) chunks.push(remaining);
   return chunks;
 }
 
-function splitDraftBodyIntoPages(data, attachmentsText) {
-  const source = draftBodySource(data.body);
-  if (!ensureDraftMeasurePreview()) return chunkTextByLength(source);
+function fallbackDraftContentPages(data) {
+  const subjectChunks = chunkTextByLength(draftSubjectSource(data.subject), 110, 230);
+  const bodyChunks = chunkTextByLength(draftBodySource(data.body), 190, 330);
   const pages = [];
-  let remaining = source;
+  subjectChunks.forEach((subject, index) => {
+    pages.push({
+      subject,
+      body: "",
+      subjectContinued: index > 0,
+      bodyContinued: false
+    });
+  });
+  bodyChunks.forEach((body, index) => {
+    pages.push({
+      subject: "",
+      body,
+      subjectContinued: false,
+      bodyContinued: index > 0
+    });
+  });
+  return pages;
+}
+
+function splitDraftContentIntoPages(data, attachmentsText) {
+  let subjectRemaining = draftSubjectSource(data.subject);
+  let bodyRemaining = draftBodySource(data.body);
+  if (!ensureDraftMeasurePreview()) return fallbackDraftContentPages(data);
+  const pages = [];
   let pageNumber = 1;
-  const maxPages = 30;
-  while (remaining && pages.length < maxPages) {
-    if (draftPageMainFits(data, remaining, pageNumber, attachmentsText)) {
-      pages.push(remaining);
-      remaining = "";
-      break;
+  let subjectStarted = false;
+  let bodyStarted = false;
+  const maxPages = 1000;
+
+  while ((subjectRemaining || bodyRemaining) && pages.length < maxPages) {
+    const content = {
+      subject: "",
+      body: "",
+      subjectContinued: subjectStarted,
+      bodyContinued: bodyStarted
+    };
+
+    if (subjectRemaining) {
+      const fullSubject = { ...content, subject: subjectRemaining };
+      if (draftPageMainFits(data, fullSubject, pageNumber, attachmentsText, false)) {
+        content.subject = subjectRemaining;
+        subjectRemaining = "";
+        subjectStarted = true;
+      } else {
+        const fitLength = draftFitLength(
+          data,
+          subjectRemaining,
+          pageNumber,
+          attachmentsText,
+          content,
+          "subject"
+        );
+        if (fitLength > 0) {
+          const cut = preferredDraftBreak(subjectRemaining, fitLength);
+          content.subject = subjectRemaining.slice(0, cut);
+          subjectRemaining = subjectRemaining.slice(cut);
+          subjectStarted = true;
+        } else if (pageNumber === 1) {
+          // A long recipient or attachment list may consume the first page.
+          // Keep that header intact and continue the subject on page two.
+          pages.push(content);
+          pageNumber += 1;
+          continue;
+        } else {
+          content.subject = subjectRemaining.slice(0, 1);
+          subjectRemaining = subjectRemaining.slice(1);
+          subjectStarted = true;
+        }
+        pages.push(content);
+        pageNumber += 1;
+        continue;
+      }
     }
-    const fitLength = draftFitLength(data, remaining, pageNumber, attachmentsText);
-    let cut = fitLength > 0 ? preferredDraftBreak(remaining, fitLength) : Math.min(remaining.length, 20);
-    let pageText = remaining.slice(0, cut).trim();
-    if (pageText && !draftPageMainFits(data, pageText, pageNumber, attachmentsText) && fitLength > 0) {
-      cut = fitLength;
-      pageText = remaining.slice(0, cut).trim();
+
+    if (!subjectRemaining && bodyRemaining) {
+      const fullBody = { ...content, body: bodyRemaining, bodyContinued: bodyStarted };
+      if (draftPageMainFits(data, fullBody, pageNumber, attachmentsText, true)) {
+        content.body = bodyRemaining;
+        bodyRemaining = "";
+        bodyStarted = true;
+      } else {
+        const fitLength = draftFitLength(
+          data,
+          bodyRemaining,
+          pageNumber,
+          attachmentsText,
+          content,
+          "body"
+        );
+        if (fitLength > 0) {
+          // If all body text fits only without 正本／副本, leave at least one
+          // character for a final page that can safely carry distribution data.
+          const boundedFit = Math.min(fitLength, Math.max(1, bodyRemaining.length - 1));
+          const cut = preferredDraftBreak(bodyRemaining, boundedFit);
+          content.body = bodyRemaining.slice(0, cut);
+          bodyRemaining = bodyRemaining.slice(cut);
+          bodyStarted = true;
+        } else if (content.subject) {
+          pages.push(content);
+          pageNumber += 1;
+          continue;
+        } else {
+          content.body = bodyRemaining.slice(0, 1);
+          bodyRemaining = bodyRemaining.slice(1);
+          bodyStarted = true;
+        }
+      }
     }
-    if (!pageText) {
-      cut = Math.min(remaining.length, 1);
-      pageText = remaining.slice(0, cut);
-    }
-    pages.push(pageText);
-    remaining = remaining.slice(cut).trim();
+
+    pages.push(content);
     pageNumber += 1;
   }
-  if (remaining) pages.push(remaining);
-  return pages.length ? pages : ["尚未填寫說明內容。"];
+
+  if (subjectRemaining || bodyRemaining) {
+    throw new Error("函稿內容超過可預覽頁數，請縮短主旨或說明。");
+  }
+  const finalPage = pages[pages.length - 1];
+  if (finalPage && !draftPageMainFits(data, finalPage, pages.length, attachmentsText, true)) {
+    const distributionPage = {
+      subject: "",
+      body: "",
+      subjectContinued: false,
+      bodyContinued: bodyStarted
+    };
+    if (!draftPageMainFits(data, distributionPage, pages.length + 1, attachmentsText, true)) {
+      throw new Error("函稿正副本欄位超過可預覽範圍，請縮短受文者內容。");
+    }
+    pages.push(distributionPage);
+  }
+  return pages.length ? pages : fallbackDraftContentPages(data);
 }
 
 function normalizeSealPlacementPages(pageCount) {
@@ -4178,12 +6058,16 @@ function bindDraftSealDrag() {
 function composeContactDefaults(role = activeRole()) {
   const unit = activeUnit() || roleDataScopes[role]?.departments?.[0] || "業務部";
   const account = userAccounts.find((item) => item.role === role && item.status === "啟用");
+  const selectedCompanyName = document.querySelector("#composeCompanySelect")?.value || authState?.user?.company_name || "";
+  const selectedCompany = companyRegistry.find((item) => item.name === selectedCompanyName)
+    || companyRegistry.find((item) => item.id === authState?.user?.company_id)
+    || null;
   return {
-    contactAddress: "220205 新北市板橋區英士路192之1號",
+    contactAddress: selectedCompany?.address || authState?.user?.company_address || "",
     contactOwner: authState?.user?.name || account?.name || role,
-    contactPhone: "(02)2257-7155 分機3762",
+    contactPhone: composeDefaultContactPhone,
     contactFax: "(02)2254-4029",
-    contactEmail: authState?.user?.email || account?.email || "edoc@suiyuecare.com",
+    contactEmail: authState?.user?.email || account?.email || "",
     unit
   };
 }
@@ -4198,7 +6082,11 @@ function applyComposeContactDefaults(force = false) {
     ["#contactEmail", defaults.contactEmail]
   ].forEach(([selector, value]) => {
     const input = document.querySelector(selector);
-    if (input && (force || !input.value.trim())) input.value = value;
+    if (!input) return;
+    if (force || !input.value.trim() || input.dataset.autoDefault === "true") {
+      input.value = value;
+      input.dataset.autoDefault = "true";
+    }
   });
   renderDraftPreview();
 }
@@ -4211,12 +6099,17 @@ function setAiDraftStatus(text, tone = "") {
 }
 
 async function generateAiDraft() {
-  const plainText = document.querySelector("#aiPlainText")?.value.trim() || "";
+  const plainText = document.querySelector("#documentPurpose")?.value.trim()
+    || document.querySelector("#aiPlainText")?.value.trim()
+    || "";
   if (!hasMinimumText(plainText, 6)) {
-    return blockOperation("請先在白話文欄位輸入至少 6 個字。", addDispatchAudit, "AI 公文助理防呆");
+    document.querySelector("#documentPurpose")?.focus();
+    return blockOperation("請先填寫至少 6 個字的公文用途。", addDispatchAudit, "AI 公文助理防呆");
   }
-  const button = document.querySelector("#aiGenerateDraftBtn");
+  const button = document.querySelector("#generateFromPurposeBtn") || document.querySelector("#aiGenerateDraftBtn");
   button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = "正在產生...";
   setAiDraftStatus("生成中", "loading");
   try {
     const data = composePayload();
@@ -4232,11 +6125,18 @@ async function generateAiDraft() {
         role: activeRole()
       })
     });
-    document.querySelector("#aiGeneratedSubject").value = result.subject || "";
-    document.querySelector("#aiGeneratedBody").value = result.body || "";
+    const subjectInput = document.querySelector("#subject");
+    const bodyInput = document.querySelector("#bodyText");
+    if (subjectInput) subjectInput.value = result.subject || "";
+    if (bodyInput) bodyInput.value = result.body || "";
+    const purposeHint = document.querySelector("#documentPurposeHint");
+    if (purposeHint) purposeHint.textContent = result.usedOpenAI
+      ? `已由 ${result.model} 產生並填入主旨與說明，可繼續編輯。`
+      : "已由公文模板產生並填入主旨與說明，可繼續編輯。";
+    markDraftDirty();
     setAiDraftStatus(result.usedOpenAI ? "OpenAI 已生成" : "模板已生成", result.usedOpenAI ? "ok" : "fallback");
     addDispatchAudit("AI 生成函稿", result.usedOpenAI ? `已使用 ${result.model} 產生主旨與內文。` : result.notice || "已使用本機模板產生主旨與內文。");
-    showToast(result.usedOpenAI ? "AI 已生成主旨與內文。" : "已生成主旨與內文，OpenAI 未啟用時使用模板備援。");
+    showToast(result.usedOpenAI ? "已產生並填入公文主旨與說明。" : "已用公文模板產生並填入主旨與說明。");
   } catch (error) {
     const reason = error?.message || "未知錯誤";
     setAiDraftStatus("生成失敗", "error");
@@ -4244,6 +6144,7 @@ async function generateAiDraft() {
     showToast(`AI 生成失敗：${reason}`);
   } finally {
     button.disabled = false;
+    button.textContent = originalLabel;
   }
 }
 
@@ -4267,36 +6168,54 @@ function clearAiDraft() {
   showToast("AI 公文助理欄位已清除。");
 }
 
-function renderOfficialDraftPageHtml(data, body, pageNumber, totalPages, attachmentsText) {
+function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, attachmentsText) {
   const today = new Date();
   const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
   const isFirstPage = pageNumber === 1;
+  const isLastPage = pageNumber === totalPages;
+  const pageContent = typeof content === "string"
+    ? {
+        subject: isFirstPage ? draftSubjectSource(data.subject) : "",
+        body: content,
+        subjectContinued: false,
+        bodyContinued: !isFirstPage
+      }
+    : {
+        subject: String(content?.subject || ""),
+        body: String(content?.body || ""),
+        subjectContinued: Boolean(content?.subjectContinued),
+        bodyContinued: Boolean(content?.bodyContinued)
+      };
   return `
-    <section class="draft-page" data-page-number="${pageNumber}" aria-label="函稿第 ${pageNumber} 頁">
+    <section class="draft-page" data-page-number="${pageNumber}" role="document" aria-label="正式函稿第 ${pageNumber} 頁，共 ${totalPages} 頁">
+      <aside class="draft-binding-guide" aria-hidden="true">
+        <span class="draft-binding-mark draft-binding-mark-top">裝</span>
+        <span class="draft-binding-mark draft-binding-mark-middle">訂</span>
+        <span class="draft-binding-mark draft-binding-mark-bottom">線</span>
+      </aside>
       ${isFirstPage ? `
         <section class="draft-file-meta" aria-label="檔案資訊">
-          <span>檔　號：</span>
-          <span>保存年限：</span>
+          <div><span>檔　號：</span><strong aria-hidden="true">　</strong></div>
+          <div><span>保存年限：</span><strong aria-hidden="true">　</strong></div>
         </section>
         <header class="draft-official-head">
           <h1>
-            <span>${escapeDraftHtml(data.companyName)}</span>
-            <strong>${escapeDraftHtml(data.type)}</strong>
+            <span class="draft-agency-name">${escapeDraftHtml(data.companyName)}</span>
+            <strong class="draft-document-type">${escapeDraftHtml(data.type)}</strong>
           </h1>
-          <section class="draft-contact-block">
+          <address class="draft-contact-block">
             <span>地址：${escapeDraftHtml(data.contactAddress)}</span>
             <span>承辦人：${escapeDraftHtml(data.contactOwner)}</span>
             <span>電話：${escapeDraftHtml(data.contactPhone)}</span>
-            <span>傳真：${escapeDraftHtml(data.contactFax)}</span>
             <span>電子信箱：${escapeDraftHtml(data.contactEmail)}</span>
-          </section>
+          </address>
         </header>
-        <section class="draft-recipient-line">受文者：${escapeDraftHtml(data.recipient)}</section>
+        <section class="draft-recipient-line"><span>受文者：</span><strong>${escapeDraftHtml(data.recipient)}</strong></section>
         <section class="draft-official-meta">
           <div><span>發文日期：</span><strong>${escapeDraftHtml(rocDate)}</strong></div>
           <div><span>發文字號：</span><strong>${escapeDraftHtml(data.no || "系統產生中")}</strong></div>
           <div><span>速別：</span><strong>${escapeDraftHtml(data.priority)}</strong></div>
-          <div><span>密等及解密條件或保密期限：</span><strong>普通</strong></div>
+          <div><span>密等及解密條件或保密期限：</span><strong aria-hidden="true">　</strong></div>
           <div><span>附件：</span><strong>${escapeDraftHtml(attachmentsText)}</strong></div>
         </section>
       ` : `
@@ -4306,13 +6225,28 @@ function renderOfficialDraftPageHtml(data, body, pageNumber, totalPages, attachm
         </section>
       `}
       <section class="draft-main ${isFirstPage ? "" : "continued"}">
-        ${isFirstPage ? `<div class="draft-content-row draft-subject"><span>主旨：</span><strong>${escapeDraftHtml(data.subject)}</strong></div>` : ""}
-        <div class="draft-content-row draft-description">
-          <span>${isFirstPage ? "說明：" : "續："}</span>
-          <div class="draft-body">${escapeDraftHtml(body)}</div>
-        </div>
+        ${pageContent.subject ? `
+          <div class="draft-content-row draft-subject">
+            ${pageContent.subjectContinued
+              ? '<span class="draft-continuation-label" aria-hidden="true">　</span>'
+              : "<span>主旨：</span>"}
+            <strong>${escapeDraftHtml(pageContent.subject)}</strong>
+          </div>
+        ` : ""}
+        ${pageContent.body ? `
+          <div class="draft-content-row draft-description">
+            <span>${pageContent.bodyContinued ? "續：" : "說明："}</span>
+            <div class="draft-body">${escapeDraftHtml(pageContent.body)}</div>
+          </div>
+        ` : ""}
+        ${isLastPage ? `
+          <section class="draft-distribution-block" aria-label="正本與副本">
+            <div><span>正本：</span><strong>${escapeDraftHtml(data.recipient)}</strong></div>
+            <div><span>副本：</span><strong aria-hidden="true">　</strong></div>
+          </section>
+        ` : ""}
       </section>
-      <div class="draft-page-number">第 ${pageNumber} 頁 / 共 ${totalPages} 頁</div>
+      <div class="draft-page-number" aria-label="第 ${pageNumber} 頁，共 ${totalPages} 頁">第 ${pageNumber} 頁，共 ${totalPages} 頁</div>
       ${renderDraftSealLayer(data, pageNumber)}
     </section>
   `;
@@ -4320,12 +6254,63 @@ function renderOfficialDraftPageHtml(data, body, pageNumber, totalPages, attachm
 
 function renderOfficialDraftPagesHtml(data = composePayload()) {
   const attachmentsText = draftAttachmentText(data);
-  const bodyPages = splitDraftBodyIntoPages(data, attachmentsText);
-  normalizeSealPlacementPages(bodyPages.length);
-  return bodyPages.map((body, index) => {
+  const contentPages = splitDraftContentIntoPages(data, attachmentsText);
+  normalizeSealPlacementPages(contentPages.length);
+  return contentPages.map((content, index) => {
     const pageNumber = index + 1;
-    return renderOfficialDraftPageHtml(data, body, pageNumber, bodyPages.length, attachmentsText);
+    return renderOfficialDraftPageHtml(data, content, pageNumber, contentPages.length, attachmentsText);
   }).join("");
+}
+
+let officialDraftPrintHost = null;
+
+function clearOfficialDraftPrintHost() {
+  officialDraftPrintHost?.remove();
+  officialDraftPrintHost = null;
+  document.body?.classList.remove("official-draft-printing");
+}
+
+async function printOfficialDraft(sourceSelector = "#draftReviewPreview") {
+  const fontLoaded = await ensureOfficialDraftFontReady();
+  if (fontLoaded) {
+    officialDraftFontRerendered = true;
+    draftMeasurePreviewElement?.remove();
+    draftMeasurePreviewElement = null;
+  }
+  renderDraftPreview({ force: true });
+  const source = document.querySelector(sourceSelector);
+  if (!source?.querySelector(".draft-page")) {
+    showToast("目前沒有可列印的函稿預覽。");
+    return;
+  }
+  if (typeof window.print !== "function") {
+    showToast("此瀏覽器不支援列印函稿。");
+    return;
+  }
+  clearOfficialDraftPrintHost();
+  officialDraftPrintHost = document.createElement("section");
+  officialDraftPrintHost.className = "official-draft-print-host";
+  officialDraftPrintHost.setAttribute("aria-label", "正式公文列印內容");
+  officialDraftPrintHost.innerHTML = `
+    <article class="official-draft-preview print" data-official-format="taiwan-letter-a4">
+      ${source.innerHTML}
+    </article>
+  `;
+  document.body.appendChild(officialDraftPrintHost);
+  document.body.classList.add("official-draft-printing");
+
+  const cleanup = () => {
+    window.removeEventListener("afterprint", cleanup);
+    clearOfficialDraftPrintHost();
+  };
+  window.addEventListener("afterprint", cleanup, { once: true });
+  window.requestAnimationFrame(() => {
+    try {
+      window.print();
+    } finally {
+      window.setTimeout(cleanup, 250);
+    }
+  });
 }
 
 function renderDraftPreview(options = {}) {
@@ -4334,7 +6319,9 @@ function renderDraftPreview(options = {}) {
     draftPreviewRenderTimer = null;
   }
   renderComposeCompanyOptions();
+  scheduleOfficialDraftFontRerender();
   const data = composePayload();
+  renderComposeApprovalRoute();
   const previews = document.querySelectorAll("[data-draft-preview]");
   syncDraftPreviewChrome(data);
   if (!previews.length) return;
@@ -4380,14 +6367,18 @@ function composeStepIndex(key = activeComposeStep) {
 }
 
 function composeInputState() {
+  const largeSealType = document.querySelector("#largeSealType")?.value || "無";
+  const smallSealType = document.querySelector("#smallSealType")?.value || "無";
+  const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
   return {
+    ...approvalSelection,
     recipient: document.querySelector("#recipient")?.value.trim() || "",
     subject: document.querySelector("#subject")?.value.trim() || "",
     body: document.querySelector("#bodyText")?.value.trim() || "",
     attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name),
     attachmentDetails: document.querySelector("#attachmentDetails")?.value.trim() || "",
-    largeSealType: document.querySelector("#largeSealType")?.value || "無",
-    smallSealType: document.querySelector("#smallSealType")?.value || "無"
+    largeSealType,
+    smallSealType
   };
 }
 
@@ -4395,6 +6386,16 @@ function composeReadinessChecks() {
   const state = composeInputState();
   const sealTypes = [state.largeSealType, state.smallSealType].filter((item) => item && item !== "無");
   return [
+    {
+      key: "approvalCategory",
+      label: "公文用印文件類型",
+      target: "approvalCategory",
+      required: true,
+      done: Boolean(state.documentCategory && state.approvalRouteCode),
+      detail: state.documentCategory
+        ? `${state.documentCategory}，自動判定為 ${state.approvalRouteName}。`
+        : "請從四大分類下選擇文件細項。"
+    },
     {
       key: "recipient",
       label: "受文者",
@@ -4433,9 +6434,11 @@ function composeReadinessChecks() {
       key: "seal",
       label: "用印",
       target: "seal",
-      required: false,
-      done: true,
-      detail: sealTypes.length ? `已選 ${sealTypes.join("、")}，可在下方預覽拖曳位置。` : "目前不使用印章。"
+      required: true,
+      done: sealTypes.length > 0,
+      detail: sealTypes.length
+        ? `已選 ${sealTypes.join("、")}，可在下方預覽拖曳位置。`
+        : "所有發文都必須選擇印章並標示用印位置。"
     },
     {
       key: "confirm",
@@ -4454,9 +6457,15 @@ function composeBasicBlockers() {
 
 function renderComposeFieldHints() {
   [
+    ["#composeApprovalCategorySelect", "#composeApprovalCategoryHint"],
+    ["#dispatchNo", null],
     ["#recipient", "#recipientHint"],
     ["#subject", "#subjectHint"],
     ["#bodyText", "#bodyTextHint"],
+    ["#contactAddress", null],
+    ["#contactOwner", null],
+    ["#contactPhone", null],
+    ["#contactEmail", null],
     ["#attachmentDetails", "#attachmentDetailsHint"]
   ].forEach(([inputSelector, hintSelector]) => {
     const input = document.querySelector(inputSelector);
@@ -4469,8 +6478,30 @@ function renderComposeFieldHints() {
   });
 }
 
+function setComposeFieldValidity(inputSelector, hintSelector, valid, message = "") {
+  const input = document.querySelector(inputSelector);
+  const hint = hintSelector ? document.querySelector(hintSelector) : null;
+  const state = valid ? "ok" : "needs";
+  if (input) input.dataset.validity = state;
+  if (hint) {
+    hint.dataset.validity = state;
+    hint.textContent = message;
+  }
+}
+
+function focusComposeValidationField(selector) {
+  const element = document.querySelector(selector);
+  if (!element) return;
+  element.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (typeof element.focus === "function") element.focus({ preventScroll: true });
+  element.classList.add("attention-pulse");
+  window.setTimeout(() => element.classList.remove("attention-pulse"), 1400);
+}
+
 function focusComposeReadinessTarget(target) {
   const selectorMap = {
+    dispatchNo: "#dispatchNo",
+    approvalCategory: "#composeApprovalCategorySelect",
     recipient: "#recipient",
     subject: "#subject",
     body: "#bodyText",
@@ -4515,7 +6546,109 @@ function composePanesForStep(key = activeComposeStep) {
   return [composePaneForStep(key)];
 }
 
+function composeValidationData() {
+  const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
+  return {
+    ...approvalSelection,
+    recipient: document.querySelector("#recipient")?.value.trim() || "",
+    subject: document.querySelector("#subject")?.value.trim() || "",
+    body: document.querySelector("#bodyText")?.value.trim() || "",
+    contactAddress: document.querySelector("#contactAddress")?.value.trim() || "",
+    contactOwner: document.querySelector("#contactOwner")?.value.trim() || "",
+    contactPhone: document.querySelector("#contactPhone")?.value.trim() || "",
+    contactEmail: document.querySelector("#contactEmail")?.value.trim() || "",
+    attachmentDetails: document.querySelector("#attachmentDetails")?.value.trim() || ""
+  };
+}
+
+function isValidComposeContactPhone(value = "") {
+  return /^02-66045432\s*#\s*\d{1,10}$/.test(String(value).trim());
+}
+
 function validateComposeStep(step = activeComposeStep) {
+  if (step !== "fill") return true;
+  const data = composeValidationData();
+  const dispatchNo = assignNextDispatchNo(false);
+  const attachmentFiles = [...(document.querySelector("#attachments")?.files || [])];
+  const validations = [
+    {
+      selector: "#composeApprovalCategorySelect",
+      hint: "#composeApprovalCategoryHint",
+      valid: Boolean(data.documentCategory && data.approvalRouteCode),
+      invalid: "請選擇公文用印文件類型的文件細項。",
+      ok: data.approvalRouteCode ? `已自動判定 ${data.approvalRouteName}。` : ""
+    },
+    {
+      selector: "#dispatchNo",
+      hint: null,
+      valid: Boolean(dispatchNo),
+      invalid: "請先產生發文字號。",
+      ok: "發文字號已建立。"
+    },
+    {
+      selector: "#recipient",
+      hint: "#recipientHint",
+      valid: Boolean(data.recipient),
+      invalid: "請填寫受文者。",
+      ok: "受文者已填寫。"
+    },
+    {
+      selector: "#subject",
+      hint: "#subjectHint",
+      valid: data.subject.length >= 8,
+      invalid: `主旨至少 8 個字，目前 ${data.subject.length} 個字。`,
+      ok: "主旨長度足夠。"
+    },
+    {
+      selector: "#bodyText",
+      hint: "#bodyTextHint",
+      valid: data.body.length >= 8,
+      invalid: `說明至少 8 個字，目前 ${data.body.length} 個字。`,
+      ok: "說明長度足夠。"
+    },
+    {
+      selector: "#contactAddress",
+      hint: null,
+      valid: Boolean(data.contactAddress),
+      invalid: "請填寫寄件人地址。",
+      ok: "寄件人地址已填寫。"
+    },
+    {
+      selector: "#contactOwner",
+      hint: null,
+      valid: Boolean(data.contactOwner),
+      invalid: "請填寫寄件承辦人。",
+      ok: "寄件承辦人已填寫。"
+    },
+    {
+      selector: "#contactPhone",
+      hint: null,
+      valid: isValidComposeContactPhone(data.contactPhone),
+      invalid: "電話固定為 02-66045432，請在 # 後填寫分機號碼。",
+      ok: "寄件人電話已填寫。"
+    },
+    {
+      selector: "#contactEmail",
+      hint: null,
+      valid: Boolean(data.contactEmail),
+      invalid: "請填寫寄件人電子信箱。",
+      ok: "寄件人電子信箱已填寫。"
+    },
+    {
+      selector: "#attachmentDetails",
+      hint: "#attachmentDetailsHint",
+      valid: !attachmentFiles.length || Boolean(data.attachmentDetails),
+      invalid: "已選附件檔案時，請填寫附件文字內容或清冊。",
+      ok: attachmentFiles.length || data.attachmentDetails ? "附件資訊已建立。" : "無附件可先送出。"
+    }
+  ];
+  validations.forEach((item) => setComposeFieldValidity(item.selector, item.hint, item.valid, item.valid ? item.ok : item.invalid));
+  const firstInvalid = validations.find((item) => !item.valid);
+  if (firstInvalid) {
+    focusComposeValidationField(firstInvalid.selector);
+    showToast(firstInvalid.invalid);
+    return false;
+  }
   return true;
 }
 
@@ -4617,7 +6750,7 @@ function renderComposeStepper() {
   }
   renderComposeSaveStatus();
   document.querySelectorAll("[data-compose-step]").forEach((button) => {
-    button.addEventListener("click", () => setComposeStep(button.dataset.composeStep, { force: true }));
+    button.addEventListener("click", () => setComposeStep(button.dataset.composeStep));
   });
 }
 
@@ -4632,6 +6765,7 @@ function nextDispatchNo() {
   const numbers = [
     ...dispatchDocs.map((doc) => doc.no),
     ...archiveRecords.map((record) => record.docNo),
+    document.querySelector("#dispatchNo")?.value,
     document.querySelector("#formatDocNo")?.value
   ]
     .filter(Boolean)
@@ -4695,13 +6829,13 @@ function renderPackagePanel(doc = currentDispatchDoc()) {
   document.querySelector("#packagePanel").innerHTML = `
     <div class="doc-detail">
       <dl>
-        <div><dt>封包編號</dt><dd>${doc.packageId || "尚未封裝"}</dd></div>
-        <div><dt>交換號</dt><dd>${doc.exchangeNo}</dd></div>
+        <div><dt>封包編號</dt><dd>${escapeHtml(doc.packageId || "尚未封裝")}</dd></div>
+        <div><dt>交換號</dt><dd>${escapeHtml(doc.exchangeNo)}</dd></div>
         <div><dt>附件數</dt><dd>${doc.attachments.length} 個</dd></div>
-        <div><dt>狀態</dt><dd>${doc.status}</dd></div>
+        <div><dt>狀態</dt><dd>${escapeHtml(doc.status)}</dd></div>
       </dl>
       <div class="attachment-list">
-        ${doc.attachments.map((file) => `<button class="file-chip" type="button" data-dispatch-file="${file}">${file}</button>`).join("")}
+        ${doc.attachments.map((file) => `<button class="file-chip" type="button" data-dispatch-file="${escapeHtml(file)}">${escapeHtml(file)}</button>`).join("")}
       </div>
     </div>
   `;
@@ -4722,20 +6856,20 @@ function renderDispatchBoard() {
     return;
   }
   document.querySelector("#dispatchBoard").innerHTML = docs.map((doc) => `
-    <article class="dispatch-card ${doc.id === selectedDispatchId ? "selected-card" : ""}" data-dispatch-id="${doc.id}">
-      <label class="card-check"><input class="dispatch-check" type="checkbox" value="${doc.id}" /> 選取</label>
-      <span class="badge ${badgeClass(doc.status)}">${doc.status}</span>
+    <article class="dispatch-card ${doc.id === selectedDispatchId ? "selected-card" : ""}" data-dispatch-id="${escapeHtml(doc.id)}">
+      <label class="card-check"><input class="dispatch-check" type="checkbox" value="${escapeHtml(doc.id)}" /> 選取</label>
+      <span class="badge ${safeHtmlClassToken(badgeClass(doc.status), "info")}">${escapeHtml(doc.status)}</span>
       <div>
-        <button class="text-button row-select" type="button" data-select-dispatch="${doc.id}"><strong>${doc.no}</strong></button>
-        <p>${doc.to} · ${doc.agencyCode}</p>
+        <button class="text-button row-select" type="button" data-select-dispatch="${escapeHtml(doc.id)}"><strong>${escapeHtml(doc.no)}</strong></button>
+        <p>${escapeHtml(doc.to)} · ${escapeHtml(doc.agencyCode)}</p>
       </div>
-      <p>${doc.subject}</p>
+      <p>${escapeHtml(doc.subject)}</p>
       <footer>
-        <button class="segment" type="button" data-dispatch-action="validate" data-dispatch-id="${doc.id}">清稿</button>
-        <button class="segment" type="button" data-dispatch-action="package" data-dispatch-id="${doc.id}">封裝</button>
-        <button class="segment" type="button" data-dispatch-action="send" data-dispatch-id="${doc.id}">送交</button>
-        <button class="segment" type="button" data-dispatch-action="query" data-dispatch-id="${doc.id}">查詢</button>
-        <button class="segment" type="button" data-dispatch-action="resend" data-dispatch-id="${doc.id}">重送</button>
+        <button class="segment" type="button" data-dispatch-action="validate" data-dispatch-id="${escapeHtml(doc.id)}">清稿</button>
+        <button class="segment" type="button" data-dispatch-action="package" data-dispatch-id="${escapeHtml(doc.id)}">封裝</button>
+        <button class="segment" type="button" data-dispatch-action="send" data-dispatch-id="${escapeHtml(doc.id)}">送交</button>
+        <button class="segment" type="button" data-dispatch-action="query" data-dispatch-id="${escapeHtml(doc.id)}">查詢</button>
+        <button class="segment" type="button" data-dispatch-action="resend" data-dispatch-id="${escapeHtml(doc.id)}">重送</button>
       </footer>
     </article>
   `).join("");
@@ -4771,18 +6905,18 @@ function renderDispatchDetail() {
   const dispatchStepMarkup = dispatchSteps.map(([label, done], index) => `<article class="next-step ${done ? "done" : ""} ${index === activeDispatchStep ? "active" : ""}"><strong>${index + 1}. ${label}</strong><span>${done ? "已完成" : "下一步"}</span></article>`).join("");
   detail.innerHTML = `
     <div class="doc-detail">
-      <strong>${doc.subject}</strong>
+      <strong>${escapeHtml(doc.subject)}</strong>
       <div class="next-stepper">${dispatchStepMarkup}</div>
       <dl>
-        <div><dt>發文字號</dt><dd>${doc.no}</dd></div>
-        <div><dt>交換號</dt><dd>${doc.exchangeNo}</dd></div>
-        <div><dt>受文者</dt><dd>${doc.to}（${doc.agencyCode}）</dd></div>
-        <div><dt>文別 / 速別</dt><dd>${doc.type} / ${doc.priority}</dd></div>
-        <div><dt>密等</dt><dd>${doc.security}</dd></div>
-        <div><dt>承辦</dt><dd>${doc.owner}</dd></div>
-        <div><dt>jAgent 回覆</dt><dd>${doc.lastReply}</dd></div>
+        <div><dt>發文字號</dt><dd>${escapeHtml(doc.no)}</dd></div>
+        <div><dt>交換號</dt><dd>${escapeHtml(doc.exchangeNo)}</dd></div>
+        <div><dt>受文者</dt><dd>${escapeHtml(doc.to)}（${escapeHtml(doc.agencyCode)}）</dd></div>
+        <div><dt>文別 / 速別</dt><dd>${escapeHtml(doc.type)} / ${escapeHtml(doc.priority)}</dd></div>
+        <div><dt>密等</dt><dd>${escapeHtml(doc.security)}</dd></div>
+        <div><dt>承辦</dt><dd>${escapeHtml(doc.owner)}</dd></div>
+        <div><dt>jAgent 回覆</dt><dd>${escapeHtml(doc.lastReply)}</dd></div>
       </dl>
-      <p>${doc.body}</p>
+      <p>${escapeHtml(doc.body)}</p>
       <div class="detail-actions">
         <button class="primary-button" type="button" id="detailSendDispatchBtn" ${canUseDocAction(doc, "seal") ? "" : "disabled"}>送交 jAgent</button>
         <button class="secondary-button" type="button" id="detailValidateDispatchBtn" ${canUseDocAction(doc, "sign") ? "" : "disabled"}>清稿</button>
@@ -4801,14 +6935,15 @@ function renderDispatchDetail() {
   bindDocumentAclButtons(doc, renderDispatchDetail);
   renderDispatchChecks(doc);
   renderPackagePanel(doc);
+  applyFormalExchangeUiState();
 }
 
 const officialStatusLabels = {
   draft: "草稿",
   pending_applicant_manager: "申請人主管",
-  pending_department_head: "部門主管",
+  pending_department_head: "部門主任",
   pending_admin_director: "行政部門主任",
-  pending_general_affairs_review: "總務審核",
+  pending_general_affairs_review: "總務專員",
   pending_ceo: "執行長",
   approved: "已核准",
   stamping: "用印中",
@@ -4830,17 +6965,18 @@ function officialStatusLabel(status = "") {
 const officialFileTypeLabels = {
   original_pdf: "原始上傳 PDF",
   generated_pdf: "系統產生公文 PDF",
+  prepared_pdf: "PDF 編輯送簽確認版",
   stamped_pdf: "已用印版本",
   attachment: "補充附件",
   dispatch_proof: "寄發證明"
 };
 
 const officialDispatchMethodLabels = {
-  electronic_official_document_by_general_affairs: "總務電子公文系統發文",
+  electronic_official_document_by_general_affairs: "總務於本系統完成寄送節點",
   return_to_applicant_for_manual_send: "回申請人自行寄發",
   email_by_general_affairs: "總務 Email 寄出",
   physical_mail_by_general_affairs: "總務紙本郵寄",
-  no_dispatch_required: "僅用印歸檔"
+  no_dispatch_required: "用印後交申請人確認與下載"
 };
 
 const officialDispatchStatusLabels = {
@@ -4858,7 +6994,7 @@ function officialFileTypeLabel(type = "") {
 function officialApplicationSummary(item = {}) {
   const summary = item.application_package?.summary || {};
   const files = item.application_package?.all_files || item.files || [];
-  const versions = item.application_package?.document_versions || item.document_versions || files.filter((file) => ["original_pdf", "generated_pdf", "stamped_pdf"].includes(file.file_type));
+  const versions = item.application_package?.document_versions || item.document_versions || files.filter((file) => ["original_pdf", "generated_pdf", "prepared_pdf", "stamped_pdf"].includes(file.file_type));
   const attachments = item.application_package?.attachments || item.attachments || files.filter((file) => file.file_type === "attachment");
   const downloadLogs = item.application_package?.download_logs || item.download_logs || (item.logs || []).filter((log) => log.action === "download_file");
   return {
@@ -4894,6 +7030,161 @@ function officialCurrentItem() {
   return officialWorkflowItems.find((item) => item.id === selectedOfficialDocumentId) || officialWorkflowItems[0] || null;
 }
 
+function officialDispatchMethodNeedsExternalNumber(method = "") {
+  return method === "electronic_official_document_by_general_affairs";
+}
+
+function officialDispatchMethodNeedsProof(method = "") {
+  return [
+    "electronic_official_document_by_general_affairs",
+    "email_by_general_affairs",
+    "physical_mail_by_general_affairs",
+    "return_to_applicant_for_manual_send"
+  ].includes(method);
+}
+
+function officialDispatchReadinessTask(item = {}) {
+  const status = item.current_status || "";
+  const record = officialDispatchRecord(item) || {};
+  const method = record.dispatch_method || item.dispatch_method || "";
+  const summary = officialApplicationSummary(item);
+  const proofFileId = record.proof_file_id || record.proof_file?.id || "";
+  const externalNo = record.external_official_document_number || "";
+  const title = item.title || item.subject || item.id;
+  const base = {
+    id: item.id,
+    title,
+    method,
+    methodLabel: record.dispatch_method_label || officialDispatchMethodLabels[method] || method || "未設定寄發方式",
+    recipient: record.recipient || item.recipient || "未指定受文者",
+    owner: record.dispatch_owner_name || item.applicant_name || "未指派",
+    statusLabel: officialStatusLabel(status),
+    severity: "wait",
+    action: "查看",
+    body: "請檢視寄發資訊。",
+    evidence: "",
+    sort: 5
+  };
+  if (status === "stamping_failed") {
+    return {
+      ...base,
+      severity: "issue",
+      statusLabel: "用印失敗",
+      action: "處理用印失敗",
+      body: "主管已核准但自動用印失敗，總務需先修正 Seal Vault、PDF 或章位後重試。",
+      evidence: item.stamp_request?.error_message || item.auto_stamp?.detail || "尚未產生已用印版本。",
+      sort: 0
+    };
+  }
+  if (status === "pending_general_affairs_dispatch") {
+    const missing = [
+      summary.hasStampedPdf ? "" : "缺已用印 PDF",
+      officialDispatchMethodNeedsExternalNumber(method) && !externalNo ? "缺發文字號" : "",
+      officialDispatchMethodNeedsProof(method) && !proofFileId ? "待上傳寄發證明" : ""
+    ].filter(Boolean);
+    return {
+      ...base,
+      severity: missing.includes("缺已用印 PDF") ? "issue" : "wait",
+      statusLabel: "等待總務寄發",
+      owner: record.dispatch_owner_name || "總務",
+      action: "完成發文",
+      body: "已用印版本應由總務下載後正式寄發，並回填寄發資料與證明。",
+      evidence: missing.join("、") || "可回填寄發資訊。",
+      sort: 1
+    };
+  }
+  if (status === "returned_to_applicant_for_send") {
+    return {
+      ...base,
+      statusLabel: "等待申請人自行寄出",
+      owner: item.applicant_name || "申請人",
+      action: "回填寄出",
+      body: "已用印版本已回到申請人，需自行寄出並回填寄送紀錄。",
+      evidence: proofFileId ? "已有寄送證明。" : "可選擇補上寄送證明。",
+      sort: 2
+    };
+  }
+  if (["dispatched", "sent_by_applicant", "stamped"].includes(status) && item.current_step === "applicant_confirm") {
+    const missing = [
+      officialDispatchMethodNeedsExternalNumber(method) && !externalNo ? "缺發文字號" : "",
+      officialDispatchMethodNeedsProof(method) && !proofFileId ? "缺寄發證明" : ""
+    ].filter(Boolean);
+    return {
+      ...base,
+      severity: missing.length ? "issue" : "wait",
+      statusLabel: "等待申請人確認",
+      owner: item.applicant_name || "申請人",
+      action: "申請人確認",
+      body: "寄發階段已完成，申請人需回到申請單確認已用印版本與寄發紀錄後結案。",
+      evidence: missing.join("、") || "寄發資料已完成，待申請人確認。",
+      sort: missing.length ? 1.5 : 3
+    };
+  }
+  const completedButIncomplete = ["dispatched", "sent_by_applicant"].includes(record.dispatch_status)
+    && status !== "closed"
+    && (
+      (officialDispatchMethodNeedsExternalNumber(method) && !externalNo)
+      || (officialDispatchMethodNeedsProof(method) && !proofFileId)
+    );
+  if (completedButIncomplete) {
+    const missing = [
+      officialDispatchMethodNeedsExternalNumber(method) && !externalNo ? "缺發文字號" : "",
+      officialDispatchMethodNeedsProof(method) && !proofFileId ? "缺寄發證明" : ""
+    ].filter(Boolean);
+    return {
+      ...base,
+      severity: "issue",
+      statusLabel: "寄發資料待補",
+      action: "補齊寄發資料",
+      body: "寄發狀態已完成，但稽核需要的發文字號或寄發證明尚未完整。",
+      evidence: missing.join("、"),
+      sort: 2.5
+    };
+  }
+  return null;
+}
+
+function officialDispatchReadinessTasks() {
+  return officialWorkflowItems
+    .map(officialDispatchReadinessTask)
+    .filter(Boolean)
+    .sort((a, b) => a.sort - b.sort || String(a.title).localeCompare(String(b.title), "zh-Hant"))
+    .slice(0, 8);
+}
+
+async function selectOfficialDispatchTask(documentId) {
+  selectedOfficialDocumentId = documentId;
+  if (officialWorkflowScope === "new") officialWorkflowScope = "all";
+  await loadOfficialDocumentDetail(documentId);
+  window.setTimeout(() => document.querySelector(".official-dispatch-box")?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+}
+
+function renderOfficialDispatchReadiness() {
+  const panel = document.querySelector("#officialDispatchReadinessPanel");
+  if (!panel) return;
+  panel.hidden = officialWorkflowScope === "new";
+  if (panel.hidden) return;
+  const tasks = officialDispatchReadinessTasks();
+  const issueCount = tasks.filter((task) => task.severity === "issue").length;
+  const waitCount = tasks.filter((task) => task.severity === "wait").length;
+  document.querySelector("#officialDispatchReadinessStatus").textContent = issueCount ? `${issueCount} 項卡點` : waitCount ? `${waitCount} 件待處理` : "無待寄發";
+  document.querySelector("#officialDispatchReadinessSummary").textContent = tasks.length
+    ? "總務可先處理用印失敗、待寄發、缺發文字號或缺寄發證明的申請單，再交由申請人確認結案。"
+    : "目前沒有寄發卡點；若剛完成用印，請重新整理發文申請單。";
+  document.querySelector("#officialDispatchReadinessList").innerHTML = tasks.length ? tasks.map((task) => `
+    <article class="official-dispatch-readiness-item ${escapeDraftHtml(task.severity)}">
+      <span>${escapeDraftHtml(task.statusLabel)}</span>
+      <strong>${escapeDraftHtml(task.title)}</strong>
+      <p>${escapeDraftHtml(task.body)}</p>
+      <small>${escapeDraftHtml(task.methodLabel)} · ${escapeDraftHtml(task.recipient)} · ${escapeDraftHtml(task.evidence || "無缺件")}</small>
+      <button class="${task.severity === "issue" ? "primary-button" : "secondary-button"}" type="button" data-official-dispatch-task="${escapeDraftHtml(task.id)}">${escapeDraftHtml(task.action)}</button>
+    </article>
+  `).join("") : `<p class="empty-text">沒有待寄發或待確認的發文申請單。</p>`;
+  panel.querySelectorAll("[data-official-dispatch-task]").forEach((button) => {
+    button.addEventListener("click", () => selectOfficialDispatchTask(button.dataset.officialDispatchTask));
+  });
+}
+
 function officialWorkflowEndpoint(scope = officialWorkflowScope) {
   if (scope === "todo") return "/official-documents/my-tasks";
   if (scope === "mine") return "/official-documents/my-requests";
@@ -4916,16 +7207,272 @@ async function loadOfficialWorkflow(scope = officialWorkflowScope) {
     showToast(`發文簽核載入失敗：${error.message}`);
   }
   renderOfficialWorkflow();
+  renderApprovalLog();
+  refreshDashboardWorkEntryPoints();
 }
 
-function renderOfficialCompanyOptions() {
+async function loadApprovalProgressFromBackend() {
+  try {
+    const items = await backendRequest("/official-documents");
+    if (Array.isArray(items)) officialWorkflowItems = items;
+  } catch (error) {
+    showToast(`簽核進度載入失敗：${error.message}`);
+  }
+  renderApprovalLog();
+}
+
+function syncOfficialWorkflowFormMode() {
+  const correcting = Boolean(editingOfficialDocumentId);
+  const title = document.querySelector("#officialWorkflowFormTitle");
+  const mode = document.querySelector("#officialWorkflowFormMode");
+  const submit = document.querySelector("#officialSubmitBtn");
+  const save = document.querySelector("#officialSaveDraftBtn");
+  const cancel = document.querySelector("#officialCancelCorrectionBtn");
+  if (title) title.textContent = correcting ? "補正發文申請單" : "新增發文申請單";
+  if (mode) mode.textContent = correcting ? `案件 ${editingOfficialDocumentId}` : "兩種來源";
+  if (submit) submit.textContent = correcting ? "儲存並重新送簽" : "送出簽核";
+  if (save) save.textContent = correcting ? "儲存補正草稿" : "建立草稿";
+  if (cancel) cancel.hidden = !correcting;
+}
+
+function officialCorrectionStampPositions(item = {}) {
+  const request = item.stamp_request || {};
+  const positions = item.stamp_positions || request.stamp_positions || request.positions || [];
+  if (Array.isArray(positions) && positions.length) return positions;
+  if (request.page || request.x || request.y || request.width || request.height) {
+    return [{
+      seal_id: request.seal_id,
+      page: request.page,
+      x: request.x,
+      y: request.y,
+      width: request.width,
+      height: request.height
+    }];
+  }
+  return [];
+}
+
+function officialComposeMetadata(item = {}) {
+  if (item.metadata && typeof item.metadata === "object") return item.metadata;
+  const parsed = parseJsonMaybe(item.metadata_json);
+  return parsed && typeof parsed === "object" ? parsed : {};
+}
+
+function composeSealTypeFromCategory(category = "") {
+  return {
+    general_seal: "一般章",
+    establishment_seal: "公司設立章",
+    bank_seal: "銀行印鑑章",
+    official_seal: "圖記章"
+  }[category] || "一般章";
+}
+
+function composePlacementFromOfficial(item, metadata, kind) {
+  const saved = metadata.seal_placements?.[kind];
+  if (saved && typeof saved === "object") {
+    return {
+      page: Math.max(1, Math.min(300, Number(saved.page) || 1)),
+      x: clampComposePlacement(saved.x, composeSealPlacements[kind].x),
+      y: clampComposePlacement(saved.y, composeSealPlacements[kind].y)
+    };
+  }
+  const position = officialCorrectionStampPositions(item)[0];
+  if (!position) return { ...composeSealPlacements[kind] };
+  return {
+    page: Math.max(1, Math.min(300, Number(position.page) || 1)),
+    x: clampComposePlacement((Number(position.x) || 0) / 595 * 100, composeSealPlacements[kind].x),
+    y: clampComposePlacement(100 - ((Number(position.y) || 0) / 842 * 100), composeSealPlacements[kind].y)
+  };
+}
+
+function setComposeDraftField(selector, value) {
+  const element = document.querySelector(selector);
+  if (!element || value === undefined || value === null) return;
+  const text = String(value);
+  if (element.tagName === "SELECT" && ![...element.options].some((option) => option.value === text)) return;
+  element.value = text;
+  if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactEmail"].includes(selector)) {
+    element.dataset.autoDefault = "false";
+  }
+}
+
+function beginComposeOfficialCorrection(item) {
+  const metadata = officialComposeMetadata(item);
+  const localId = String(metadata.legacy_document_id || `COMPOSE-${item.id}`);
+  const currentSnapshot = composeRawSnapshot();
+  const replacingAnotherDraft = currentComposeDraftId !== localId && composeSnapshotHasMeaningfulContent(currentSnapshot);
+  if (replacingAnotherDraft && !confirmOperation(
+    "切換系統草稿",
+    "目前撰寫畫面還有未送出的內容。繼續會改載入所選案件；若要保留目前內容，請先取消並按「暫存草稿」。"
+  )) return false;
+
+  editingOfficialDocumentId = "";
+  renderComposeCompanyOptions(true);
+  renderApprovalCategorySelect(
+    "#composeApprovalCategorySelect",
+    item.document_category || metadata.document_category || "",
+    { requireSelection: true }
+  );
+  const sealCategory = item.official_seal?.category_code
+    || item.stamp_request?.seal_category
+    || metadata.official_seal?.category_code
+    || "general_seal";
+  const largeSealType = metadata.large_seal_type || composeSealTypeFromCategory(sealCategory);
+  const smallSealType = metadata.small_seal_type || "無";
+  const values = {
+    "#composeCompanySelect": metadata.company_name || item.company_name || authState?.user?.company_name || "",
+    "#docType": metadata.document_type || "函",
+    "#priority": metadata.priority || "普通件",
+    "#dispatchNo": metadata.dispatch_no || "",
+    "#recipient": item.recipient || "",
+    "#documentPurpose": metadata.purpose || item.request_reason || "",
+    "#contactAddress": metadata.contact_address || authState?.user?.company_address || "",
+    "#contactOwner": metadata.contact_owner || item.handler_name || item.applicant_name || authState?.user?.name || "",
+    "#contactPhone": metadata.contact_phone || composeDefaultContactPhone,
+    "#contactFax": metadata.contact_fax || "(02)2254-4029",
+    "#contactEmail": metadata.contact_email || authState?.user?.email || "",
+    "#largeSealType": largeSealType,
+    "#smallSealType": smallSealType,
+    "#subject": item.subject || item.title || "",
+    "#bodyText": item.description || "",
+    "#attachmentDetails": metadata.attachment_details || item.attachments_summary || ""
+  };
+  Object.entries(values).forEach(([selector, value]) => setComposeDraftField(selector, value));
+  if (!document.querySelector("#dispatchNo")?.value) assignNextDispatchNo(true);
+  Object.assign(composeSealPlacements.large, composePlacementFromOfficial(item, metadata, "large"));
+  Object.assign(composeSealPlacements.small, composePlacementFromOfficial(item, metadata, "small"));
+
+  let localDoc = dispatchDocs.find((entry) => entry.officialDocumentId === item.id || entry.id === localId);
+  if (!localDoc) {
+    localDoc = { id: localId };
+    dispatchDocs.unshift(localDoc);
+  }
+  Object.assign(localDoc, {
+    no: document.querySelector("#dispatchNo")?.value || metadata.dispatch_no || item.id,
+    exchangeNo: item.exchange_id || "尚未交換",
+    companyName: values["#composeCompanySelect"],
+    type: values["#docType"],
+    priority: values["#priority"],
+    documentCategory: item.document_category || metadata.document_category || "",
+    approvalRouteCode: item.approval_route_code || metadata.approval_route_code || "",
+    to: item.recipient || "",
+    subject: item.subject || item.title || "",
+    body: item.description || "",
+    status: "草稿",
+    officialDocumentId: item.id,
+    requiresResubmit: item.current_status === "rejected",
+    owner: item.applicant_name || authState?.user?.name || "",
+    attachments: officialApplicationFiles(item).map((file) => file.file_name).filter(Boolean),
+    checks: { format: false, recipient: Boolean(item.recipient), attachments: true, certificate: true, package: false }
+  });
+  currentComposeDraftId = localDoc.id;
+  selectedDispatchId = localDoc.id;
+  draftConfirmed = false;
+  draftSigned = false;
+  activeComposeStep = "fill";
+  writeComposeAutosave();
+  composeSaveState = {
+    tone: "saved",
+    title: item.current_status === "rejected" ? "已載入退回補正案件" : "已載入系統草稿",
+    detail: `案件 ${item.id} 已回到完整撰寫畫面；既有附件仍保留在案件中，新選的附件會追加上傳。`
+  };
+  renderComposeApprovalRoute();
+  renderDraftPreview();
+  renderComposeSaveStatus();
+  setView("compose");
+  showToast(item.current_status === "rejected" ? "請完成補正並確認函稿後重新送簽。" : "已載入系統草稿，可繼續編輯。");
+  return true;
+}
+
+async function beginOfficialCorrection(item = officialCurrentItem()) {
+  if (!item?.id || !officialDocumentIsApplicant(item) || !["draft", "rejected"].includes(item.current_status)) {
+    return showToast("只有申請人可以編輯草稿或退回案件。");
+  }
+  try {
+    const detail = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}`);
+    if (detail?.id === item.id) {
+      item = detail;
+      const index = officialWorkflowItems.findIndex((entry) => entry.id === item.id);
+      if (index >= 0) officialWorkflowItems[index] = item;
+    }
+  } catch (error) {
+    showToast(`草稿載入失敗：${error.message}`);
+    return;
+  }
+  if (officialComposeMetadata(item).source === "compose_form") {
+    beginComposeOfficialCorrection(item);
+    return;
+  }
+  editingOfficialDocumentId = item.id;
+  officialWorkflowScope = "new";
+  renderOfficialWorkflow();
+  const setValue = (selector, value) => {
+    const node = document.querySelector(selector);
+    if (node) node.value = value ?? "";
+  };
+  setValue("#officialSourceType", item.source_type || "blank_editor");
+  renderOfficialCompanyOptions();
+  setValue("#officialCompanySelect", item.company_id || "");
+  await loadOfficialSealOptions(item.company_id || "");
+  const sealId = item.stamp_request?.seal_id || item.seal_id || item.metadata?.official_seal?.seal_id || "";
+  setValue("#officialSealSelect", sealId);
+  renderApprovalCategorySelect("#officialApprovalCategorySelect", item.document_category || item.metadata?.document_category || "", { requireSelection: true });
+  setValue("#officialRecipientInput", item.recipient || "");
+  setValue("#officialDispatchUnitInput", item.dispatch_unit || item.applicant_department_name || "");
+  setValue("#officialHandlerInput", item.handler_name || item.applicant_name || "");
+  setValue("#officialSubjectInput", item.subject || item.title || "");
+  setValue("#officialDescriptionInput", item.description || "");
+  setValue("#officialMethodInput", item.method || "");
+  setValue("#officialReasonInput", item.request_reason || "");
+  const positions = officialCorrectionStampPositions(item);
+  if (positions.length) {
+    officialStampPositions = positions.map((position, index) => normalizeOfficialStampPosition(position, index));
+    officialStampPositionSeq = officialStampPositions.length + 1;
+    selectedOfficialStampPositionId = officialStampPositions[0].id;
+    syncOfficialStampInputsFromSelected();
+  } else {
+    resetOfficialStampPositions();
+  }
+  syncOfficialSourceMode();
+  renderOfficialApplicationApprovalRoute();
+  updateOfficialSealCurrentHint();
+  updateOfficialStampPreview({ syncInputs: false });
+  syncOfficialWorkflowFormMode();
+  clearOfficialWorkflowValidation();
+  document.querySelector("#officialWorkflowForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  showToast(item.current_status === "rejected" ? "請依駁回原因補正，完成後重新送簽。" : "已載入草稿，可繼續編輯。");
+}
+
+function cancelOfficialCorrection() {
+  editingOfficialDocumentId = "";
+  syncOfficialWorkflowFormMode();
+  void loadOfficialWorkflow("mine");
+}
+
+function renderOfficialCompanyOptions(preferAccount = false) {
   const select = document.querySelector("#officialCompanySelect");
   if (!select) return;
   const previousValue = select.value;
-  const companies = companySealCompanies.length ? companySealCompanies : companySealFallbackCompanies();
-  select.innerHTML = companies.map((item) => `<option value="${item.id}">${item.name}</option>`).join("");
-  if (companies.some((item) => item.id === previousValue)) select.value = previousValue;
-  if (!select.value && companies[0]) select.value = companies[0].id;
+  const allCompanies = availableCompanySealCompanies();
+  const accountCompanyId = authState?.user?.company_id || "";
+  const accountCompanyName = authState?.user?.company_name || "";
+  const companies = launchScopedCompanyOptions(allCompanies).filter(
+    (item) => item.id === accountCompanyId || item.name === accountCompanyName
+  );
+  if (!companies.length) {
+    select.innerHTML = `<option value="">尚未開放可送簽公司</option>`;
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  const scopeNote = launchCompanyScopeSummaryText();
+  select.innerHTML = companies.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}${scopeNote ? "（上線範圍）" : ""}</option>`).join("");
+  const accountCompany = companies.find((item) => item.id === accountCompanyId || item.name === accountCompanyName);
+  const shouldUseAccount = Boolean(accountCompany && (preferAccount || select.dataset.userEdited !== "true"));
+  if (shouldUseAccount) select.value = accountCompany.id;
+  else if (companies.some((item) => item.id === previousValue)) select.value = previousValue;
+  else if (companies[0]) select.value = companies[0].id;
+  if (shouldUseAccount) select.dataset.autoDefault = "true";
 }
 
 async function loadOfficialSealOptions(companyId = document.querySelector("#officialCompanySelect")?.value || "CO-001") {
@@ -4942,12 +7489,55 @@ function renderOfficialSealOptions() {
   const select = document.querySelector("#officialSealSelect");
   if (!select) return;
   const previousValue = select.value;
+  const readySeals = officialSealOptions.filter(officialSealHasCurrentFile);
   if (!officialSealOptions.length) {
     select.innerHTML = `<option value="">請先建立並上傳印章版本</option>`;
+    updateOfficialSealCurrentHint();
     return;
   }
-  select.innerHTML = officialSealOptions.map((item) => `<option value="${item.id}">${item.seal_name || item.id}${item.current_file ? "" : "（尚無版本）"}</option>`).join("");
-  if (officialSealOptions.some((item) => item.id === previousValue)) select.value = previousValue;
+  select.innerHTML = [
+    readySeals.length ? "" : `<option value="">請先上傳 Seal Vault current 版本</option>`,
+    ...officialSealOptions.map((item) => {
+      const ready = officialSealHasCurrentFile(item);
+      return `<option value="${escapeDraftHtml(item.id)}"${ready ? "" : " disabled"}>${escapeDraftHtml(item.seal_name || item.id)}${ready ? "" : "（尚無 current 版本）"}</option>`;
+    })
+  ].join("");
+  if (readySeals.some((item) => item.id === previousValue)) select.value = previousValue;
+  else if (readySeals[0]) select.value = readySeals[0].id;
+  else select.value = "";
+  updateOfficialSealCurrentHint();
+  lockOfficialStampPositionSizesToSelectedSeal({ render: false });
+}
+
+function officialSealHasCurrentFile(seal) {
+  return Boolean(seal?.current_file || seal?.current_file_id || seal?.currentFile || seal?.currentFileId);
+}
+
+function selectedOfficialSealOption() {
+  const sealId = document.querySelector("#officialSealSelect")?.value || "";
+  return officialSealOptions.find((item) => item.id === sealId) || null;
+}
+
+function updateOfficialSealCurrentHint() {
+  const select = document.querySelector("#officialSealSelect");
+  if (!select) return false;
+  const selectedSeal = selectedOfficialSealOption();
+  if (!officialSealOptions.length) {
+    setOfficialFieldValidity("#officialSealSelect", "#officialSealHint", false, "此公司尚未建立可用印章；請先到印鑑管理建立印章並上傳 Seal Vault current 版本。");
+    return false;
+  }
+  if (!selectedSeal) {
+    setOfficialFieldValidity("#officialSealSelect", "#officialSealHint", false, "此公司尚無可送簽的 current 版本印章；請先由總務上傳 Seal Vault current 版本。");
+    return false;
+  }
+  const ready = officialSealHasCurrentFile(selectedSeal);
+  setOfficialFieldValidity(
+    "#officialSealSelect",
+    "#officialSealHint",
+    ready,
+    ready ? "印章 current 版本可用。" : "此印章尚無 current 版本，不能送簽。"
+  );
+  return ready;
 }
 
 function filteredOfficialWorkflowItems() {
@@ -4969,10 +7559,10 @@ function renderOfficialWorkflowList() {
     return;
   }
   target.innerHTML = items.map((item) => `
-    <button class="official-workflow-item ${item.id === selectedOfficialDocumentId ? "active" : ""}" type="button" data-official-id="${item.id}">
-      <strong>${item.title || item.subject || item.id}</strong>
-      <span>${officialStatusLabel(item.current_status)} · ${item.current_step_name || item.current_step || "未送出"}</span>
-      <small>${item.applicant_name || "申請人"} · ${item.recipient || "未指定受文者"} · ${item.created_at || ""}</small>
+    <button class="official-workflow-item ${item.id === selectedOfficialDocumentId ? "active" : ""}" type="button" data-official-id="${escapeHtml(item.id)}">
+      <strong>${escapeHtml(item.title || item.subject || item.id)}</strong>
+      <span>${escapeHtml(officialStatusLabel(item.current_status))} · ${escapeHtml(item.current_step_name || item.current_step || "未送出")}</span>
+      <small>${escapeHtml(item.applicant_name || "申請人")} · ${escapeHtml(item.recipient || "未指定受文者")} · ${escapeHtml(item.created_at || "")}</small>
     </button>
   `).join("");
   target.querySelectorAll("[data-official-id]").forEach((button) => {
@@ -5000,38 +7590,78 @@ function renderOfficialFiles(files = [], documentId = "") {
   return `<div class="official-file-list">${files.map((file) => `
     <article class="official-file-row ${file.is_stamped ? "stamped" : ""}">
       <div>
-        <strong>${file.display_label || officialFileTypeLabel(file.file_type)} · ${file.file_name}</strong>
-        <span>${officialFileTypeLabel(file.file_type)} · v${file.version} · ${file.uploaded_by || "系統"} · ${file.created_at || ""}</span>
+        <strong>${escapeDraftHtml(file.display_label || officialFileTypeLabel(file.file_type))} · ${escapeDraftHtml(file.file_name)}</strong>
+        <span>${escapeDraftHtml(officialFileTypeLabel(file.file_type))} · v${Number(file.version || 0)} · ${escapeDraftHtml(file.uploaded_by || "系統")} · ${escapeDraftHtml(file.created_at || "")}</span>
       </div>
-      <button class="secondary-button" type="button" data-official-download="${file.id}" data-document-id="${documentId}">下載</button>
+      <button class="secondary-button" type="button" data-official-download="${escapeDraftHtml(file.id)}" data-document-id="${escapeDraftHtml(documentId)}">下載</button>
     </article>
   `).join("")}</div>`;
+}
+
+function latestOfficialStampedFile(item = {}) {
+  const stampedFiles = officialApplicationFiles(item).filter((file) => file.file_type === "stamped_pdf");
+  const lockedFileId = String(item.stamped_file_id || item.stampedFileId || "");
+  if (lockedFileId) {
+    const lockedFile = stampedFiles.find((file) => String(file.id || "") === lockedFileId);
+    if (lockedFile) return lockedFile;
+  }
+  return [...stampedFiles].sort((left, right) => {
+    const versionDelta = Number(right.version || 0) - Number(left.version || 0);
+    if (versionDelta) return versionDelta;
+    return String(right.created_at || "").localeCompare(String(left.created_at || ""));
+  })[0] || null;
+}
+
+function renderOfficialFinalStampedDownload(item = {}) {
+  const file = latestOfficialStampedFile(item);
+  const documentId = escapeDraftHtml(item.id || "");
+  if (!file) {
+    return `
+      <section class="official-final-download pending" data-final-stamped-download>
+        <div>
+          <span>最終用印檔</span>
+          <strong>尚未產生</strong>
+          <p>完成用印後，申請人、流程中的簽核人與總務可依同一申請單權限在此下載。</p>
+        </div>
+      </section>
+    `;
+  }
+  return `
+    <section class="official-final-download ready" data-final-stamped-download>
+      <div>
+        <span>最終用印檔</span>
+        <strong>${escapeDraftHtml(file.display_label || file.file_name || "已完成用印 PDF")}</strong>
+        <p>申請人、流程中的簽核人與總務可依同一申請單權限下載；此處提供最新鎖定版本。</p>
+      </div>
+      <button class="primary-button" type="button" data-official-download="${escapeDraftHtml(file.id || "")}" data-document-id="${documentId}">下載最終用印 PDF</button>
+    </section>
+  `;
 }
 
 function renderOfficialSteps(item) {
   const steps = item?.approval_steps || [];
   if (!steps.length) return `<p class="empty-text">尚未建立簽核節點。</p>`;
   return `<div class="official-step-list">${steps.map((step) => `
-    <article class="official-step-row ${step.status || "pending"} ${step.step_key === item.current_step ? "current" : ""}">
-      <time>${step.step_order}</time>
+    <article class="official-step-row ${safeHtmlClassToken(step.status, "pending")} ${step.step_key === item.current_step ? "current" : ""}">
+      <time>${escapeHtml(step.step_order)}</time>
       <div>
-        <strong>${step.step_name}</strong>
-        <span>${step.approver_name || step.approver_role || "未指定"} · ${step.status}</span>
-        ${step.comment ? `<small>${step.comment}</small>` : ""}
+        <strong>${escapeHtml(step.step_name)}</strong>
+        <span>${escapeHtml(step.approver_name || step.approver_role || "未指定")} · ${escapeHtml(step.status)}</span>
+        ${step.comment ? `<small>${escapeHtml(step.comment)}</small>` : ""}
       </div>
-      <span>${step.approved_at || ""}</span>
+      <span>${escapeHtml(step.approved_at || "")}</span>
     </article>
   `).join("")}</div>`;
 }
 
 function renderOfficialLogs(logs = [], emptyText = "尚無紀錄。") {
-  if (!logs.length) return `<p class="empty-text">${emptyText}</p>`;
+  if (!logs.length) return `<p class="empty-text">${escapeHtml(emptyText)}</p>`;
   return `<div class="timeline">${logs.map((log) => `
     <article class="timeline-item">
-      <time>${(log.created_at || "").slice(11, 16)}</time>
+      <time>${escapeHtml((log.created_at || "").slice(11, 16))}</time>
       <div>
-        <strong>${log.action} · ${log.actor_name || ""}</strong>
-        <p>${log.comment || log.file_id || ""}</p>
+        <strong>${escapeHtml(log.action)} · ${escapeHtml(log.actor_name || "")}</strong>
+        <p>${escapeHtml(log.comment || log.file_id || "")}</p>
       </div>
     </article>
   `).join("")}</div>`;
@@ -5041,10 +7671,10 @@ function renderOfficialApplicationSummary(item = {}) {
   const summary = officialApplicationSummary(item);
   return `
     <div class="official-package-summary">
-      <span>文件版本 <strong>${summary.versionCount}</strong></span>
-      <span>補充附件 <strong>${summary.attachmentCount}</strong></span>
-      <span>簽核節點 <strong>${summary.approvalStepCount}</strong></span>
-      <span>下載紀錄 <strong>${summary.downloadCount}</strong></span>
+      <span>文件版本 <strong>${Number(summary.versionCount) || 0}</strong></span>
+      <span>補充附件 <strong>${Number(summary.attachmentCount) || 0}</strong></span>
+      <span>簽核節點 <strong>${Number(summary.approvalStepCount) || 0}</strong></span>
+      <span>下載紀錄 <strong>${Number(summary.downloadCount) || 0}</strong></span>
       <span>${summary.hasStampedPdf ? "已有已用印版本" : "尚未產生已用印版本"}</span>
     </div>
   `;
@@ -5058,31 +7688,42 @@ function renderOfficialDispatchInfo(item = {}) {
   const needsApplicant = item.current_status === "returned_to_applicant_for_send";
   const canComplete = canManage && (needsGeneralAffairs || needsApplicant);
   const proof = record.proof_file;
+  const ownershipNote = method === "electronic_official_document_by_general_affairs"
+    ? "空白撰寫公文由總務在本系統的寄送節點下載最終檔、完成寄送並回填證明；正式電子公文交換 provider 仍未啟用。"
+    : method === "no_dispatch_required"
+      ? "上傳 PDF 用印完成後交申請人確認與下載，不建立公文寄送待辦，也不進入正式電子公文交換佇列。"
+      : "本案依申請單記錄的寄發方式辦理。";
   return `
     <section class="official-dispatch-box">
       <div class="panel-heading tight">
         <h4>寄發資訊</h4>
-        <span class="status-pill">${officialDispatchStatusLabels[record.dispatch_status] || officialStatusLabel(item.current_status)}</span>
+        <span class="status-pill">${escapeHtml(officialDispatchStatusLabels[record.dispatch_status] || officialStatusLabel(item.current_status))}</span>
       </div>
       <div class="official-detail-grid">
-        <div><dt>寄發方式</dt><dd>${record.dispatch_method_label || officialDispatchMethodLabels[method] || method}</dd></div>
-        <div><dt>寄發負責人</dt><dd>${record.dispatch_owner_name || record.dispatch_owner_user_id || (method === "no_dispatch_required" ? "系統" : "尚未指派")}</dd></div>
-        <div><dt>發文字號</dt><dd>${record.external_official_document_number || "尚未回填"}</dd></div>
-        <div><dt>寄發日期</dt><dd>${record.dispatch_date || "尚未回填"}</dd></div>
-        <div><dt>收文對象</dt><dd>${record.recipient || item.recipient || "未指定"}</dd></div>
-        <div><dt>聯絡資訊</dt><dd>${record.recipient_contact || "未填寫"}</dd></div>
-        <div><dt>寄發備註</dt><dd>${record.dispatch_note || "未填寫"}</dd></div>
-        <div><dt>完成時間</dt><dd>${record.completed_at || "尚未完成"}</dd></div>
+        <div><dt>寄發方式</dt><dd>${escapeHtml(record.dispatch_method_label || officialDispatchMethodLabels[method] || method)}</dd></div>
+        <div><dt>寄發負責人</dt><dd>${escapeHtml(record.dispatch_owner_name || record.dispatch_owner_user_id || (method === "no_dispatch_required" ? "系統" : "尚未指派"))}</dd></div>
+        <div><dt>發文字號</dt><dd>${escapeHtml(record.external_official_document_number || "尚未回填")}</dd></div>
+        <div><dt>寄發日期</dt><dd>${escapeHtml(record.dispatch_date || "尚未回填")}</dd></div>
+        <div><dt>收文對象</dt><dd>${escapeHtml(record.recipient || item.recipient || "未指定")}</dd></div>
+        <div><dt>聯絡資訊</dt><dd>${escapeHtml(record.recipient_contact || "未填寫")}</dd></div>
+        <div><dt>寄發備註</dt><dd>${escapeHtml(record.dispatch_note || "未填寫")}</dd></div>
+        <div><dt>完成時間</dt><dd>${escapeHtml(record.completed_at || "尚未完成")}</dd></div>
       </div>
-      ${proof ? `<div class="official-file-list"><article class="official-file-row"><div><strong>${proof.display_label || "寄發證明"} · ${proof.file_name}</strong><span>${officialFileTypeLabel(proof.file_type)} · v${proof.version} · ${proof.created_at || ""}</span></div><button class="secondary-button" type="button" data-official-download="${proof.id}" data-document-id="${item.id}">下載</button></article></div>` : `<p class="empty-text">尚未上傳寄發證明。</p>`}
+      <p class="official-dispatch-ownership-note"><strong>流程歸屬</strong><span>${escapeHtml(ownershipNote)}</span></p>
+      ${proof
+        ? `<div class="official-file-list"><article class="official-file-row"><div><strong>${escapeDraftHtml(proof.display_label || "寄發證明")} · ${escapeDraftHtml(proof.file_name)}</strong><span>${escapeDraftHtml(officialFileTypeLabel(proof.file_type))} · v${Number(proof.version || 0)} · ${escapeDraftHtml(proof.created_at || "")}</span></div><button class="secondary-button" type="button" data-official-download="${escapeDraftHtml(proof.id)}" data-document-id="${escapeDraftHtml(item.id)}">下載</button></article></div>`
+        : method === "no_dispatch_required"
+          ? `<p class="empty-text">本案不建立公文寄送待辦，因此不需上傳寄發證明。</p>`
+          : `<p class="empty-text">尚未上傳寄發證明。</p>`}
       ${canComplete ? `
         <div class="official-dispatch-form">
-          ${needsGeneralAffairs ? `<label>外部發文字號<input id="officialDispatchNumberInput" value="${record.external_official_document_number || ""}" placeholder="外部電子公文發文字號" /></label>` : ""}
-          <label>寄發日期<input id="officialDispatchDateInput" type="date" value="${(record.dispatch_date || "").slice(0, 10)}" /></label>
-          <label>收件人<input id="officialDispatchRecipientInput" value="${record.recipient || item.recipient || ""}" /></label>
-          <label>聯絡資訊<input id="officialDispatchContactInput" value="${record.recipient_contact || ""}" placeholder="Email、地址或聯絡窗口" /></label>
-          <label>寄發備註<textarea id="officialDispatchNoteInput" rows="3">${record.dispatch_note || ""}</textarea></label>
-          <label>寄發證明<input id="officialDispatchProofInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" /></label>
+          ${needsGeneralAffairs ? `<label>外部發文字號<input id="officialDispatchNumberInput" value="${escapeHtml(record.external_official_document_number || "")}" placeholder="外部電子公文發文字號" /></label>` : ""}
+          <label>寄發日期<input id="officialDispatchDateInput" type="date" value="${escapeHtml((record.dispatch_date || "").slice(0, 10))}" /></label>
+          <label>收件人<input id="officialDispatchRecipientInput" value="${escapeHtml(record.recipient || item.recipient || "")}" /></label>
+          <label>聯絡資訊<input id="officialDispatchContactInput" value="${escapeHtml(record.recipient_contact || "")}" placeholder="Email、地址或聯絡窗口" /></label>
+          <label>寄發備註<textarea id="officialDispatchNoteInput" rows="3">${escapeHtml(record.dispatch_note || "")}</textarea></label>
+          <label>寄發證明<input id="officialDispatchProofInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" /><span class="field-hint">目前單檔上限 3 MB。</span></label>
+          <button class="secondary-button launch-smoke-template-button" type="button" id="officialDispatchProofTemplateBtn">下載去識別化寄發證明範本</button>
           <button class="primary-button" type="button" id="officialCompleteDispatchBtn">${needsGeneralAffairs ? "完成發文" : "已自行寄出"}</button>
         </div>
       ` : ""}
@@ -5096,10 +7737,15 @@ function renderOfficialWorkflowDetail() {
   if (!target || !form) return;
   form.classList.toggle("hidden", officialWorkflowScope !== "new");
   if (officialWorkflowScope === "new") {
+    syncOfficialWorkflowFormMode();
+    const handlerInput = document.querySelector("#officialHandlerInput");
+    const unitInput = document.querySelector("#officialDispatchUnitInput");
+    if (handlerInput && !handlerInput.value.trim()) handlerInput.value = authState?.user?.name || "";
+    if (unitInput && !unitInput.value.trim()) unitInput.value = authState?.user?.unit || "";
     target.innerHTML = `
       <div class="doc-detail">
-        <strong>發文申請單是主檔</strong>
-        <p>這裡建立的是一張發文申請單；空白撰寫或上傳 PDF 只是來源版本。送出後，PDF、已用印版本、補充附件、簽核歷程與下載紀錄都會掛在同一張申請單底下。</p>
+        <strong>${editingOfficialDocumentId ? "退回案件補正" : "發文申請單是主檔"}</strong>
+        <p>${editingOfficialDocumentId ? "補正內容會保存到同一張申請單，重新送簽後從第一關開始，舊簽核與版本歷程仍會保留。" : "這裡建立的是一張發文申請單；空白撰寫或上傳 PDF 只是來源版本。送出後，PDF、已用印版本、補充附件、簽核歷程與下載紀錄都會掛在同一張申請單底下。"}</p>
       </div>
     `;
     updateOfficialStampPreview();
@@ -5112,25 +7758,45 @@ function renderOfficialWorkflowDetail() {
   }
   const summary = officialApplicationSummary(item);
   const files = officialApplicationFiles(item);
+  const stampError = item.stamp_request?.error_message || item.auto_stamp?.detail || "";
+  const canCorrectOfficial = officialDocumentIsApplicant(item) && ["draft", "rejected"].includes(item.current_status);
+  const canConfirmOfficial = Boolean(
+    item.can_confirm
+    || (
+      officialDocumentIsApplicant(item)
+      && item.current_step === "applicant_confirm"
+      && ["stamped", "dispatched", "sent_by_applicant"].includes(item.current_status)
+    )
+  );
   target.innerHTML = `
     <div class="doc-detail">
-      <strong>發文申請單 · ${item.title || item.subject || item.id}</strong>
+      <strong>發文申請單 · ${escapeHtml(item.title || item.subject || item.id)}</strong>
       <div class="official-detail-grid">
-        <div><dt>申請單編號</dt><dd>${item.id}</dd></div>
-        <div><dt>狀態</dt><dd>${officialStatusLabel(item.current_status)}</dd></div>
-        <div><dt>目前關卡</dt><dd>${item.current_step_name || item.current_step || "未送出"}</dd></div>
-        <div><dt>申請人</dt><dd>${item.applicant_name || item.applicant_id}</dd></div>
-        <div><dt>受文者</dt><dd>${item.recipient || "未指定"}</dd></div>
+        <div><dt>申請單編號</dt><dd>${escapeHtml(item.id)}</dd></div>
+        <div><dt>狀態</dt><dd>${escapeHtml(officialStatusLabel(item.current_status))}</dd></div>
+        <div><dt>目前關卡</dt><dd>${escapeHtml(item.current_step_name || item.current_step || "未送出")}</dd></div>
+        <div><dt>申請人</dt><dd>${escapeHtml(item.applicant_name || item.applicant_id)}</dd></div>
+        <div><dt>受文者</dt><dd>${escapeHtml(item.recipient || "未指定")}</dd></div>
         <div><dt>來源</dt><dd>${item.source_type === "uploaded_pdf" ? "上傳 PDF" : "空白公文撰寫"}</dd></div>
-        <div><dt>用印原因</dt><dd>${item.request_reason || "未填寫"}</dd></div>
+        <div><dt>用印原因</dt><dd>${escapeHtml(item.request_reason || "未填寫")}</dd></div>
         <div><dt>文件版本</dt><dd>${summary.versionCount} 版${summary.hasStampedPdf ? " · 已用印" : ""}</dd></div>
         <div><dt>下載紀錄</dt><dd>${summary.downloadCount} 筆</dd></div>
       </div>
       ${renderOfficialApplicationSummary(item)}
-      <p>${item.description || item.subject || ""}</p>
+      ${renderOfficialFinalStampedDownload(item)}
+      ${item.current_status === "stamping_failed" ? `
+        <div class="official-risk-note">
+          <strong>自動用印失敗</strong>
+          <span>${escapeHtml(stampError || "請總務確認印章版本、Seal Vault 檔案、PDF 檔案與用印位置後重試。")}</span>
+        </div>
+      ` : ""}
+      <p>${escapeHtml(item.description || item.subject || "")}</p>
       <div class="official-action-bar">
-        ${item.can_act ? `<button class="primary-button" type="button" id="officialApproveBtn">核准</button><button class="secondary-button" type="button" id="officialRejectBtn">駁回</button>` : ""}
-        ${item.current_status === "draft" ? `<button class="primary-button" type="button" id="officialSubmitDraftBtn">送出簽核</button>` : ""}
+        ${officialDocumentHasEditorV2(item) ? `<button class="secondary-button" type="button" data-open-editor-review="${escapeDraftHtml(item.id)}">查看 PDF 編輯版</button>` : ""}
+        ${item.can_act && !canConfirmOfficial ? `<button class="primary-button" type="button" id="officialApproveBtn">核准</button><button class="secondary-button" type="button" id="officialRejectBtn">駁回</button>` : ""}
+        ${canConfirmOfficial ? `<button class="primary-button" type="button" id="officialConfirmBtn">確認結案</button>` : ""}
+        ${canCorrectOfficial ? `<button class="primary-button" type="button" id="officialCorrectBtn">${item.current_status === "rejected" ? "補正並重新送簽" : "編輯草稿"}</button>` : ""}
+        ${item.can_retry_stamp ? `<button class="primary-button" type="button" id="officialRetryStampBtn">重試自動用印</button>` : ""}
       </div>
       ${renderOfficialDispatchInfo(item)}
       <h4>文件版本與附件</h4>
@@ -5143,9 +7809,13 @@ function renderOfficialWorkflowDetail() {
       ${renderOfficialLogs(officialDownloadLogs(item), "尚無下載紀錄。")}
     </div>
   `;
-  document.querySelector("#officialApproveBtn")?.addEventListener("click", () => mutateOfficialDocument("approve"));
-  document.querySelector("#officialRejectBtn")?.addEventListener("click", () => mutateOfficialDocument("reject"));
-  document.querySelector("#officialSubmitDraftBtn")?.addEventListener("click", () => mutateOfficialDocument("submit"));
+  document.querySelector("#officialApproveBtn")?.addEventListener("click", () => openOfficialDecisionDialog(item, "approve", "workflow"));
+  document.querySelector("#officialRejectBtn")?.addEventListener("click", () => openOfficialDecisionDialog(item, "reject", "workflow"));
+  document.querySelector("#officialCorrectBtn")?.addEventListener("click", () => void beginOfficialCorrection(item));
+  document.querySelector("#officialConfirmBtn")?.addEventListener("click", confirmOfficialDocument);
+  document.querySelector("#officialRetryStampBtn")?.addEventListener("click", retryOfficialStamp);
+  target.querySelectorAll("[data-open-editor-review]").forEach((button) => button.addEventListener("click", () => void openOfficialDocumentEditorReview(button.dataset.openEditorReview)));
+  document.querySelector("#officialDispatchProofTemplateBtn")?.addEventListener("click", downloadDispatchProofLaunchSmokeTemplate);
   document.querySelector("#officialCompleteDispatchBtn")?.addEventListener("click", () => completeOfficialDispatch(item.id));
   target.querySelectorAll("[data-official-download]").forEach((button) => {
     button.addEventListener("click", () => downloadOfficialWorkflowFile(button.dataset.documentId, button.dataset.officialDownload));
@@ -5156,31 +7826,556 @@ function renderOfficialWorkflow() {
   document.querySelectorAll("[data-official-scope]").forEach((button) => button.classList.toggle("active", button.dataset.officialScope === officialWorkflowScope));
   renderOfficialCompanyOptions();
   renderOfficialSealOptions();
+  renderOfficialDispatchReadiness();
   renderOfficialWorkflowList();
   renderOfficialWorkflowDetail();
+  syncOfficialSourceMode();
+  renderInternalDispatchDocumentOptions();
 }
 
-function updateOfficialStampPreview() {
-  const box = document.querySelector("#officialStampBox");
+function createOfficialStampPosition(overrides = {}) {
+  const order = officialStampPositionSeq++;
+  const geometry = companySealFixedGeometry(selectedOfficialSealOption() || overrides.seal_size_type || overrides, Math.max(Number(overrides.width || overrides.w || 0), Number(overrides.height || overrides.h || 0)));
+  return {
+    id: `OSTAMP-${order}`,
+    page: 1,
+    x: 420,
+    y: 130 + ((order - 1) * 28),
+    order_index: order,
+    ...overrides,
+    width: geometry.widthPt,
+    height: geometry.heightPt,
+    seal_size_type: geometry.sealSizeType,
+    size_locked: true,
+    order_index: Number(overrides.order_index || order)
+  };
+}
+
+function clampOfficialNumber(value, fallback, min = 0, max = Infinity) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function normalizeOfficialStampPosition(position = {}, index = 0) {
+  const geometry = officialStampPositionFixedGeometry(position);
+  const sourceId = String(position.id || position.position_id || position.positionId || "");
+  const backendPositionId = String(
+    position.backend_position_id
+    || position.backendPositionId
+    || (sourceId && !sourceId.startsWith("OSTAMP-") ? sourceId : "")
+  );
+  const binding = officialStampPositionVersionBinding(position);
+  const normalized = {
+    id: sourceId || `OSTAMP-${index + 1}`,
+    page: Math.max(1, Math.round(clampOfficialNumber(position.page, 1, 1))),
+    x: Math.round(clampOfficialNumber(position.x, 420, 0, 9999)),
+    y: Math.round(clampOfficialNumber(position.y, 130, 0, 9999)),
+    width: geometry.widthPt,
+    height: geometry.heightPt,
+    seal_size_type: geometry.sealSizeType,
+    size_locked: true,
+    order_index: Number(position.order_index || index + 1)
+  };
+  if (backendPositionId) normalized.backend_position_id = backendPositionId;
+  const positionSealId = String(position.seal_id || position.sealId || "");
+  if (positionSealId) normalized.seal_id = positionSealId;
+  const pageRef = String(position.page_ref || position.pageRef || position.pageId || "");
+  if (pageRef) normalized.page_ref = pageRef;
+  normalized.rotation = Number(position.rotation || 0);
+  normalized.opacity = Number.isFinite(Number(position.opacity)) ? Number(position.opacity) : 1;
+  normalized.z_index = Number(position.z_index || position.zIndex || index + 1);
+  if (position.rebind_current || position.rebindCurrent) {
+    normalized.rebind_current = true;
+  } else if (binding.complete) {
+    Object.assign(normalized, {
+      locked_seal_file_id: binding.fileId,
+      locked_seal_sha256: binding.fileSha256,
+      locked_render_width_pt: binding.widthPt,
+      locked_render_height_pt: binding.heightPt,
+      locked_dimension_policy_version: binding.dimensionPolicyVersion
+    });
+  }
+  return normalized;
+}
+
+function officialStampPositionVersionBinding(position = {}) {
+  if (position.rebind_current || position.rebindCurrent) return { complete: false };
+  const fileId = String(position.locked_seal_file_id || position.lockedSealFileId || "");
+  const fileSha256 = String(position.locked_seal_sha256 || position.lockedSealSha256 || "");
+  const lockedWidth = Number(position.locked_render_width_pt ?? position.lockedRenderWidthPt ?? position.width ?? position.w);
+  const lockedHeight = Number(position.locked_render_height_pt ?? position.lockedRenderHeightPt ?? position.height ?? position.h);
+  const complete = Boolean(fileId && fileSha256 && Number.isFinite(lockedWidth) && lockedWidth > 0 && Number.isFinite(lockedHeight) && lockedHeight > 0);
+  return {
+    complete,
+    fileId,
+    fileSha256,
+    widthPt: lockedWidth,
+    heightPt: lockedHeight,
+    dimensionPolicyVersion: String(position.locked_dimension_policy_version || position.lockedDimensionPolicyVersion || "")
+  };
+}
+
+function officialStampPositionFixedGeometry(position = {}) {
+  const binding = officialStampPositionVersionBinding(position);
+  if (binding.complete) {
+    const sealSizeType = companySealSizeType(position.seal_size_type || selectedOfficialSealOption() || position, Math.max(binding.widthPt, binding.heightPt));
+    const validation = validateCompanySealCalibration(
+      sealSizeType,
+      binding.widthPt / pdfPointsPerMm,
+      binding.heightPt / pdfPointsPerMm
+    );
+    if (validation.ok) {
+      return {
+        sealSizeType,
+        label: COMPANY_SEAL_SIZE_POLICY_MM[sealSizeType].label,
+        widthMm: validation.widthMm,
+        heightMm: validation.heightMm,
+        widthPt: binding.widthPt,
+        heightPt: binding.heightPt,
+        aspectRatio: binding.widthPt / binding.heightPt,
+        calibrationSource: "locked_official_position",
+        sizeLocked: true
+      };
+    }
+  }
+  return companySealFixedGeometry(
+    selectedOfficialSealOption() || position.seal_size_type || position,
+    Math.max(Number(position.width || position.w || 0), Number(position.height || position.h || 0))
+  );
+}
+
+function officialStampPositionPayload(position, selectedSealId, index = 0) {
+  const binding = officialStampPositionVersionBinding(position);
+  const backendPositionId = String(position.backend_position_id || position.backendPositionId || "");
+  const payload = {
+    seal_id: position.seal_id || position.sealId || selectedSealId,
+    page: position.page,
+    page_ref: position.page_ref || position.pageRef || "",
+    x: position.x,
+    y: position.y,
+    width: position.width,
+    height: position.height,
+    rotation: Number(position.rotation || 0),
+    opacity: Number.isFinite(Number(position.opacity)) ? Number(position.opacity) : 1,
+    z_index: Number(position.z_index || position.zIndex || index + 1),
+    order_index: index + 1
+  };
+  if (backendPositionId) payload.id = backendPositionId;
+  if (position.rebind_current || position.rebindCurrent) {
+    payload.rebindCurrent = true;
+  } else if (binding.complete) {
+    Object.assign(payload, {
+      lockedSealFileId: binding.fileId,
+      lockedSealSha256: binding.fileSha256,
+      lockedRenderWidthPt: binding.widthPt,
+      lockedRenderHeightPt: binding.heightPt,
+      lockedDimensionPolicyVersion: binding.dimensionPolicyVersion
+    });
+  }
+  return payload;
+}
+
+function rebindOfficialStampPositionsToSelectedSeal() {
+  const selectedSealId = selectedOfficialSealOption()?.id || "";
+  officialStampPositions = officialStampPositions.map((position, index) => {
+    const next = { ...position, seal_id: selectedSealId };
+    [
+      "locked_seal_file_id",
+      "lockedSealFileId",
+      "locked_seal_sha256",
+      "lockedSealSha256",
+      "locked_render_width_pt",
+      "lockedRenderWidthPt",
+      "locked_render_height_pt",
+      "lockedRenderHeightPt",
+      "locked_dimension_policy_version",
+      "lockedDimensionPolicyVersion"
+    ].forEach((field) => delete next[field]);
+    if (next.backend_position_id || next.backendPositionId) next.rebind_current = true;
+    return normalizeOfficialStampPosition(next, index);
+  });
+}
+
+function normalizeOfficialStampPositions() {
+  if (!officialStampPositions.length) officialStampPositions = [createOfficialStampPosition()];
+  officialStampPositions = officialStampPositions.map((position, index) => normalizeOfficialStampPosition(position, index));
+  if (!officialStampPositions.some((position) => position.id === selectedOfficialStampPositionId)) {
+    selectedOfficialStampPositionId = officialStampPositions[0].id;
+  }
+  return officialStampPositions;
+}
+
+function currentOfficialStampPosition() {
+  const positions = normalizeOfficialStampPositions();
+  return positions.find((position) => position.id === selectedOfficialStampPositionId) || positions[0];
+}
+
+function syncOfficialStampInputsFromSelected() {
+  const position = currentOfficialStampPosition();
+  [
+    ["#officialStampPageInput", position.page],
+    ["#officialStampXInput", position.x],
+    ["#officialStampYInput", position.y],
+    ["#officialStampWidthInput", formatCompanySealMeasurement(position.width)],
+    ["#officialStampHeightInput", formatCompanySealMeasurement(position.height)]
+  ].forEach(([selector, value]) => {
+    const input = document.querySelector(selector);
+    if (input) input.value = value;
+  });
+}
+
+function syncSelectedOfficialStampPositionFromInputs() {
+  const selected = currentOfficialStampPosition();
+  if (!selected) return;
+  Object.assign(selected, normalizeOfficialStampPosition({
+    ...selected,
+    page: document.querySelector("#officialStampPageInput")?.value,
+    x: document.querySelector("#officialStampXInput")?.value,
+    y: document.querySelector("#officialStampYInput")?.value
+  }, officialStampPositions.findIndex((position) => position.id === selected.id)));
+}
+
+function lockOfficialStampPositionSizesToSelectedSeal({ render = true } = {}) {
+  officialStampPositions = officialStampPositions.map((position, index) => normalizeOfficialStampPosition(position, index));
+  syncOfficialStampInputsFromSelected();
+  const geometry = companySealFixedGeometry(selectedOfficialSealOption() || officialStampPositions[0]?.seal_size_type || "large_seal");
+  const hint = document.querySelector("#officialStampSizeLock");
+  if (hint) hint.textContent = `印章尺寸已鎖定：${geometry.label} ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（${formatCompanySealMeasurement(geometry.widthPt)} × ${formatCompanySealMeasurement(geometry.heightPt)} pt），只能移動章位。`;
+  if (render) updateOfficialStampPreview({ syncInputs: false });
+}
+
+function resetOfficialStampPositions() {
+  officialStampPositionSeq = 1;
+  officialStampPositions = [createOfficialStampPosition()];
+  selectedOfficialStampPositionId = officialStampPositions[0].id;
+  syncOfficialStampInputsFromSelected();
+  updateOfficialStampPreview({ syncInputs: false });
+}
+
+function selectOfficialStampPosition(id, options = {}) {
+  if (!officialStampPositions.some((position) => position.id === id)) return;
+  selectedOfficialStampPositionId = id;
+  syncOfficialStampInputsFromSelected();
+  if (options.preview === false) {
+    renderOfficialStampPositionList();
+    document.querySelectorAll("[data-official-stamp-box]").forEach((box) => {
+      box.classList.toggle("active", box.dataset.officialStampBox === selectedOfficialStampPositionId);
+    });
+    return;
+  }
+  updateOfficialStampPreview({ syncInputs: false });
+}
+
+function addOfficialStampPosition() {
+  syncSelectedOfficialStampPositionFromInputs();
+  const base = currentOfficialStampPosition();
+  const next = createOfficialStampPosition({
+    page: base?.page || 1,
+    x: Math.min(520, (base?.x || 420) + 36),
+    y: Math.min(360, (base?.y || 130) + 36),
+    seal_size_type: base?.seal_size_type
+  });
+  officialStampPositions.push(next);
+  selectedOfficialStampPositionId = next.id;
+  syncOfficialStampInputsFromSelected();
+  updateOfficialStampPreview({ syncInputs: false });
+}
+
+function removeOfficialStampPosition(id) {
+  if (officialStampPositions.length <= 1) {
+    showToast("至少需要保留一個用印位置。");
+    return;
+  }
+  officialStampPositions = officialStampPositions.filter((position) => position.id !== id);
+  if (selectedOfficialStampPositionId === id) selectedOfficialStampPositionId = officialStampPositions[0].id;
+  syncOfficialStampInputsFromSelected();
+  updateOfficialStampPreview({ syncInputs: false });
+}
+
+function renderOfficialStampPositionList() {
+  const target = document.querySelector("#officialStampPositionsList");
+  if (!target) return;
+  const positions = normalizeOfficialStampPositions();
+  target.innerHTML = positions.map((position, index) => `
+    <article class="official-stamp-position-row ${position.id === selectedOfficialStampPositionId ? "active" : ""}">
+      <button class="official-stamp-position-select text-button" type="button" data-official-stamp-select="${position.id}">
+        <strong>位置 ${index + 1}</strong>
+        <span>第 ${position.page} 頁 · X ${position.x} / Y ${position.y} · ${position.width} × ${position.height}</span>
+      </button>
+      <button class="icon-button" type="button" data-official-stamp-remove="${position.id}" aria-label="刪除位置 ${index + 1}">×</button>
+    </article>
+  `).join("");
+  target.querySelectorAll("[data-official-stamp-select]").forEach((button) => {
+    button.addEventListener("click", () => selectOfficialStampPosition(button.dataset.officialStampSelect));
+  });
+  target.querySelectorAll("[data-official-stamp-remove]").forEach((button) => {
+    button.addEventListener("click", () => removeOfficialStampPosition(button.dataset.officialStampRemove));
+  });
+}
+
+function officialStampBoxStyle(position) {
+  return [
+    `left:${Math.min(88, Math.max(0, position.x / 6))}%`,
+    `top:${Math.min(82, Math.max(0, position.y / 5))}%`,
+    `width:${Math.max(36, Math.min(140, position.width))}px`,
+    `height:${Math.max(36, Math.min(140, position.height))}px`
+  ].join(";");
+}
+
+function bindOfficialStampBoxDrag(box) {
+  box.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    const id = box.dataset.officialStampBox;
+    selectOfficialStampPosition(id, { preview: false });
+    const preview = document.querySelector("#officialStampPreview");
+    const position = officialStampPositions.find((item) => item.id === id);
+    if (!preview || !position) return;
+    const rect = preview.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLeft = Math.min(88, Math.max(0, position.x / 6));
+    const startTop = Math.min(82, Math.max(0, position.y / 5));
+    box.classList.add("dragging");
+    box.setPointerCapture?.(event.pointerId);
+    const move = (moveEvent) => {
+      const leftPct = Math.min(88, Math.max(0, startLeft + ((moveEvent.clientX - startX) / rect.width) * 100));
+      const topPct = Math.min(82, Math.max(0, startTop + ((moveEvent.clientY - startY) / rect.height) * 100));
+      position.x = Math.round(leftPct * 6);
+      position.y = Math.round(topPct * 5);
+      box.style.left = `${leftPct}%`;
+      box.style.top = `${topPct}%`;
+      syncOfficialStampInputsFromSelected();
+    };
+    const stop = () => {
+      box.classList.remove("dragging");
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", stop);
+      updateOfficialStampPreview({ syncInputs: false });
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", stop, { once: true });
+  });
+}
+
+function renderOfficialStampPreviewBoxes() {
   const preview = document.querySelector("#officialStampPreview");
-  if (!box || !preview) return;
-  const x = Number(document.querySelector("#officialStampXInput")?.value || 420);
-  const y = Number(document.querySelector("#officialStampYInput")?.value || 130);
-  const w = Number(document.querySelector("#officialStampWidthInput")?.value || 85);
-  const h = Number(document.querySelector("#officialStampHeightInput")?.value || 85);
-  box.style.left = `${Math.min(88, Math.max(0, x / 6))}%`;
-  box.style.top = `${Math.min(82, Math.max(0, y / 5))}%`;
-  box.style.width = `${Math.max(36, Math.min(140, w))}px`;
-  box.style.height = `${Math.max(36, Math.min(140, h))}px`;
+  if (!preview) return;
+  const positions = normalizeOfficialStampPositions();
+  preview.innerHTML = positions.map((position, index) => `
+    <button class="official-stamp-box ${position.id === selectedOfficialStampPositionId ? "active" : ""}" type="button" data-official-stamp-box="${position.id}" style="${officialStampBoxStyle(position)}">
+      位置 ${index + 1}
+    </button>
+  `).join("");
+  preview.querySelectorAll("[data-official-stamp-box]").forEach((box) => bindOfficialStampBoxDrag(box));
+}
+
+function updateOfficialStampPreview(options = {}) {
+  if (options.syncInputs !== false) syncSelectedOfficialStampPositionFromInputs();
+  normalizeOfficialStampPositions();
+  renderOfficialStampPositionList();
+  renderOfficialStampPreviewBoxes();
+}
+
+function officialSourceType() {
+  return document.querySelector("#officialSourceType")?.value || "blank_editor";
+}
+
+function syncOfficialSourceMode(options = {}) {
+  const sourceType = officialSourceType();
+  const pdfField = document.querySelector("#officialPdfField");
+  const pdfInput = document.querySelector("#officialPdfInput");
+  const smokePdfButton = document.querySelector("#officialSmokePdfTemplateBtn");
+  const dispatchMethod = document.querySelector("#officialDispatchMethodSelect");
+  const dispatchHint = document.querySelector("#officialDispatchMethodHint");
+  if (pdfField) pdfField.hidden = sourceType !== "uploaded_pdf";
+  if (smokePdfButton) smokePdfButton.hidden = sourceType !== "uploaded_pdf";
+  if (dispatchMethod) dispatchMethod.value = sourceType === "blank_editor"
+    ? "electronic_official_document_by_general_affairs"
+    : "no_dispatch_required";
+  if (dispatchHint) dispatchHint.textContent = sourceType === "blank_editor"
+    ? "用印完成後由總務在本系統內下載最終檔、寄送並回填證明；正式電子公文交換 provider 仍未啟用。"
+    : "上傳 PDF 用印不進入公文寄送待辦；總務完成用印後，交申請人確認與下載最終檔。";
+  if (pdfInput) {
+    pdfInput.toggleAttribute("required", sourceType === "uploaded_pdf" && !editingOfficialDocumentId);
+    if (options.clearPdf && sourceType !== "uploaded_pdf") {
+      pdfInput.value = "";
+      officialPdfA4Validation = { fileKey: "", state: "idle", report: null };
+      setOfficialPdfA4Status("idle", "尚未檢查 PDF 頁面尺寸。");
+    }
+  }
+}
+
+function setOfficialFieldValidity(inputSelector, hintSelector, valid, message = "") {
+  const input = inputSelector ? document.querySelector(inputSelector) : null;
+  const hint = hintSelector ? document.querySelector(hintSelector) : null;
+  const state = valid ? "ok" : "needs";
+  if (input) input.dataset.validity = state;
+  if (hint) {
+    hint.dataset.validity = state;
+    hint.textContent = message;
+  }
+}
+
+function clearOfficialWorkflowValidation() {
+  [
+    ["#officialApprovalCategorySelect", "#officialApprovalCategoryHint"],
+    ["#officialSealSelect", "#officialSealHint"],
+    ["#officialRecipientInput", "#officialRecipientHint"],
+    ["#officialSubjectInput", "#officialSubjectHint"],
+    ["#officialDescriptionInput", "#officialDescriptionHint"],
+    ["#officialReasonInput", "#officialReasonHint"],
+    ["#officialPdfInput", "#officialPdfHint"],
+    [null, "#officialStampPositionsHint"]
+  ].forEach(([inputSelector, hintSelector]) => {
+    const input = inputSelector ? document.querySelector(inputSelector) : null;
+    const hint = hintSelector ? document.querySelector(hintSelector) : null;
+    if (input) delete input.dataset.validity;
+    if (hint) {
+      delete hint.dataset.validity;
+      hint.textContent = "";
+    }
+  });
+}
+
+function focusOfficialWorkflowField(selector) {
+  const element = document.querySelector(selector);
+  if (!element) return;
+  element.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (typeof element.focus === "function") element.focus({ preventScroll: true });
+  element.classList.add("attention-pulse");
+  window.setTimeout(() => element.classList.remove("attention-pulse"), 1400);
+}
+
+function validateOfficialWorkflowForm(submit = true) {
+  syncSelectedOfficialStampPositionFromInputs();
+  const sourceType = officialSourceType();
+  const approvalSelection = approvalSelectionForSelect("#officialApprovalCategorySelect");
+  const companyId = document.querySelector("#officialCompanySelect")?.value || "";
+  const sealId = document.querySelector("#officialSealSelect")?.value || "";
+  const selectedSeal = selectedOfficialSealOption();
+  const sealReady = Boolean(sealId && selectedSeal && officialSealHasCurrentFile(selectedSeal));
+  const recipient = document.querySelector("#officialRecipientInput")?.value.trim() || "";
+  const subject = document.querySelector("#officialSubjectInput")?.value.trim() || "";
+  const description = document.querySelector("#officialDescriptionInput")?.value.trim() || "";
+  const reason = document.querySelector("#officialReasonInput")?.value.trim() || "";
+  const pdfFile = document.querySelector("#officialPdfInput")?.files?.[0] || null;
+  const positions = normalizeOfficialStampPositions();
+  const isPdf = pdfFile ? (pdfFile.type === "application/pdf" || /\.pdf$/i.test(pdfFile.name)) : false;
+  if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) {
+    setOfficialFieldValidity("#officialApprovalCategorySelect", "#officialApprovalCategoryHint", false, "請選擇公文用印文件類型的文件細項。");
+    focusOfficialWorkflowField("#officialApprovalCategorySelect");
+    showToast("請先選擇公文用印文件類型。");
+    return false;
+  }
+  if (!submit) {
+    const hasDraftIdentity = Boolean(subject || recipient);
+    if (!hasDraftIdentity) {
+      setOfficialFieldValidity("#officialSubjectInput", "#officialSubjectHint", false, "草稿至少需填主旨或受文者。");
+      focusOfficialWorkflowField("#officialSubjectInput");
+      showToast("草稿至少需填主旨或受文者。");
+      return false;
+    }
+    clearOfficialWorkflowValidation();
+    return true;
+  }
+  const validations = [
+    {
+      selector: "#officialApprovalCategorySelect",
+      hint: "#officialApprovalCategoryHint",
+      valid: Boolean(approvalSelection.documentCategory && approvalSelection.approvalRouteCode),
+      invalid: "請選擇公文用印文件類型的文件細項。",
+      ok: `已自動判定 ${approvalSelection.approvalRouteName}。`
+    },
+    {
+      selector: "#officialCompanySelect",
+      hint: "#officialSealHint",
+      valid: Boolean(companyId),
+      invalid: "目前沒有開放可送簽公司；請先由 IT 設定上線公司範圍，或由總務補齊公司印章 current 版本。",
+      ok: launchCompanyScopeSummaryText() || "公司可送簽。"
+    },
+    {
+      selector: "#officialSealSelect",
+      hint: "#officialSealHint",
+      valid: sealReady,
+      invalid: "請選擇已有 Seal Vault current 版本的印章；缺版本請先由總務上傳。",
+      ok: "印章 current 版本可用。"
+    },
+    {
+      selector: "#officialRecipientInput",
+      hint: "#officialRecipientHint",
+      valid: Boolean(recipient),
+      invalid: "請填寫受文者。",
+      ok: "受文者已填寫。"
+    },
+    {
+      selector: "#officialSubjectInput",
+      hint: "#officialSubjectHint",
+      valid: subject.length >= 8,
+      invalid: `主旨至少 8 個字，目前 ${subject.length} 個字。`,
+      ok: "主旨長度足夠。"
+    },
+    {
+      selector: "#officialDescriptionInput",
+      hint: "#officialDescriptionHint",
+      valid: sourceType !== "blank_editor" || description.length >= 8,
+      invalid: `空白公文的說明至少 8 個字，目前 ${description.length} 個字。`,
+      ok: sourceType === "blank_editor" ? "說明長度足夠。" : "上傳 PDF 模式可用說明補充背景。"
+    },
+    {
+      selector: "#officialReasonInput",
+      hint: "#officialReasonHint",
+      valid: reason.length >= 4,
+      invalid: `用印原因至少 4 個字，目前 ${reason.length} 個字。`,
+      ok: "用印原因已填寫。"
+    },
+    {
+      selector: "#officialPdfInput",
+      hint: "#officialPdfHint",
+      valid: sourceType !== "uploaded_pdf" || Boolean(pdfFile && isPdf) || Boolean(editingOfficialDocumentId),
+      invalid: "上傳 PDF 用印時，請選擇 PDF 檔案。",
+      ok: sourceType === "uploaded_pdf"
+        ? (pdfFile ? "PDF 檔案已選擇。" : "沿用原始 PDF；如需更換可重新選擇檔案。")
+        : "空白撰寫不需上傳 PDF。"
+    },
+    {
+      selector: "#officialStampPreview",
+      hint: "#officialStampPositionsHint",
+      valid: positions.length > 0 && positions.every((position) => position.page >= 1 && position.width > 0 && position.height > 0),
+      invalid: "請至少保留一個有效用印位置。",
+      ok: `已設定 ${positions.length} 個用印位置。`
+    }
+  ];
+  validations.forEach((item) => setOfficialFieldValidity(item.selector, item.hint, item.valid, item.valid ? item.ok : item.invalid));
+  const firstInvalid = validations.find((item) => !item.valid);
+  if (firstInvalid) {
+    focusOfficialWorkflowField(firstInvalid.selector);
+    showToast(firstInvalid.invalid);
+    return false;
+  }
+  return true;
 }
 
 async function officialFormPayload(submit = true) {
+  if (!validateOfficialWorkflowForm(submit)) return null;
   const sourceType = document.querySelector("#officialSourceType").value;
+  const approvalSelection = approvalSelectionForSelect("#officialApprovalCategorySelect");
+  syncSelectedOfficialStampPositionFromInputs();
+  const sealId = document.querySelector("#officialSealSelect").value;
+  const stampPositions = normalizeOfficialStampPositions().map((position, index) => officialStampPositionPayload(position, sealId, index));
   const payload = {
     source_type: sourceType,
+    document_category: approvalSelection.documentCategory,
+    document_category_group: approvalSelection.documentCategoryGroup,
+    approval_route_code: approvalSelection.approvalRouteCode,
+    approval_route_name: approvalSelection.approvalRouteName,
+    approval_flow_nodes: [...approvalSelection.approvalFlowNodes],
+    workflow_template_key: approvalSelection.workflowTemplateKey,
     company_id: document.querySelector("#officialCompanySelect").value,
-    seal_id: document.querySelector("#officialSealSelect").value,
-    dispatch_method: document.querySelector("#officialDispatchMethodSelect").value,
+    seal_id: sealId,
+    dispatch_method: sourceType === "blank_editor"
+      ? "electronic_official_document_by_general_affairs"
+      : "no_dispatch_required",
     title: document.querySelector("#officialSubjectInput").value.trim() || "未命名發文申請",
     subject: document.querySelector("#officialSubjectInput").value.trim(),
     description: document.querySelector("#officialDescriptionInput").value.trim(),
@@ -5189,61 +8384,299 @@ async function officialFormPayload(submit = true) {
     dispatch_unit: document.querySelector("#officialDispatchUnitInput").value.trim() || activeUnit(),
     handler_name: document.querySelector("#officialHandlerInput").value.trim() || authState?.user?.name || activeRole(),
     request_reason: document.querySelector("#officialReasonInput").value.trim(),
-    submit,
-    stamp_position: {
-      page: Number(document.querySelector("#officialStampPageInput").value || 1),
-      x: Number(document.querySelector("#officialStampXInput").value || 420),
-      y: Number(document.querySelector("#officialStampYInput").value || 130),
-      width: Number(document.querySelector("#officialStampWidthInput").value || 85),
-      height: Number(document.querySelector("#officialStampHeightInput").value || 85)
-    }
+    metadata: {
+      source: "official_workflow_form",
+      document_category: approvalSelection.documentCategory,
+      document_category_group: approvalSelection.documentCategoryGroup,
+      approval_route_code: approvalSelection.approvalRouteCode,
+      approval_route_name: approvalSelection.approvalRouteName,
+      workflow_template_key: approvalSelection.workflowTemplateKey,
+      approval_flow_nodes: [...approvalSelection.approvalFlowNodes]
+    },
+    submit: false,
+    stamp_position: stampPositions[0],
+    stamp_positions: stampPositions
   };
   if (sourceType === "uploaded_pdf") {
     const file = document.querySelector("#officialPdfInput").files?.[0];
-    if (!file) throw new Error("請選擇要上傳用印的 PDF。");
-    payload.file_name = file.name;
-    payload.content_base64 = await fileToBase64(file);
+    if (file) {
+      requireInlineJsonUploadSize(file, "這個發文 PDF");
+      await ensureOfficialPdfA4(file);
+      payload.file_name = file.name;
+      payload.content_base64 = await fileToBase64(file);
+    } else if (!editingOfficialDocumentId) {
+      throw new Error("請選擇要上傳用印的 PDF。");
+    }
   }
   return payload;
+}
+
+async function uploadOfficialDocumentAttachments(documentId, files = []) {
+  const uploaded = [];
+  for (const file of files) {
+    requireInlineJsonUploadSize(file, "補充附件");
+    if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+      try {
+        await inspectPdfFileA4(file);
+      } catch (error) {
+        throw new Error(`${file.name}：${pdfA4UiErrorMessage(error)}`);
+      }
+    }
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/files`, {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: file.name,
+        file_mime_type: file.type || "application/octet-stream",
+        content_base64: await fileToBase64(file)
+      })
+    });
+    uploaded.push(result.file);
+  }
+  return uploaded;
 }
 
 async function createOfficialWorkflow(submit = true) {
   try {
     const payload = await officialFormPayload(submit);
-    const result = await backendRequest("/official-documents", { method: "POST", body: JSON.stringify(payload) });
+    if (!payload) return;
+    const correctionId = editingOfficialDocumentId;
+    let result = correctionId
+      ? await backendRequest(`/official-documents/${encodeURIComponent(correctionId)}`, { method: "PATCH", body: JSON.stringify(payload) })
+      : await backendRequest("/official-documents", { method: "POST", body: JSON.stringify(payload) });
+    const attachments = [...(document.querySelector("#officialAttachmentsInput")?.files || [])];
+    if (attachments.length) await uploadOfficialDocumentAttachments(result.id, attachments);
+    if (submit) {
+      const action = correctionId ? "resubmit" : "submit";
+      result = await backendRequest(`/official-documents/${encodeURIComponent(result.id)}/${action}`, {
+        method: "POST",
+        body: JSON.stringify({ comment: correctionId ? "申請人完成補正並重新送簽" : "申請人確認附件完整後送出" })
+      });
+    }
+    const attachmentInput = document.querySelector("#officialAttachmentsInput");
+    if (attachmentInput) attachmentInput.value = "";
     selectedOfficialDocumentId = result.id;
+    editingOfficialDocumentId = "";
     officialWorkflowScope = "mine";
     await loadOfficialWorkflow("mine");
-    showToast(submit ? "已送出發文用印簽核。" : "已建立發文草稿。");
+    showToast(submit
+      ? (correctionId ? "補正完成，已從第一關重新送簽。" : "已送出發文用印簽核。")
+      : (correctionId ? "補正草稿已確實保存。" : "已建立發文草稿。"));
   } catch (error) {
-    showToast(error.message || "建立發文失敗。");
+    showToast(`資料未保存：${error.message || "建立發文失敗，請保留畫面內容後重試。"}`);
   }
 }
 
-async function mutateOfficialDocument(action) {
-  const item = officialCurrentItem();
-  if (!item) return showToast("請先選擇發文申請單。");
-  const comment = action === "reject" ? prompt("請輸入駁回原因") : "";
-  if (action === "reject" && !comment) return;
+function officialDecisionIntegrity(item = {}) {
+  const request = item.stamp_request || {};
+  const revision = item.editor_revision || {};
+  const preparedFile = officialApplicationFiles(item).find((file) => file.file_type === "prepared_pdf");
+  return {
+    preparedSha256: request.prepared_sha256 || item.prepared_sha256 || revision.preparedSha256 || preparedFile?.file_hash || "",
+    manifestSha256: request.editor_manifest_sha256 || item.editor_manifest_sha256 || revision.manifestSha256 || item.editor_state?.manifestSha256 || ""
+  };
+}
+
+function closeOfficialDecisionDialog() {
+  const modal = document.querySelector("#officialDecisionModal");
+  if (modal) modal.classList.add("hidden");
+  officialDecisionState = { documentId: "", action: "", source: "workflow" };
+  if (!document.querySelector(".modal-backdrop:not(.hidden)")) document.body.classList.remove("modal-open");
+}
+
+function openOfficialDecisionDialog(item, action, source = "workflow") {
+  if (!item?.id || !["approve", "reject"].includes(action)) return showToast("找不到可處理的簽核案件。");
+  const pendingStep = (item.approval_steps || []).find((step) => step.step_key === item.current_step && step.status === "pending");
+  if (!pendingStep?.id) return showToast("簽核關卡已更新，請重新整理後再操作。");
+  officialDecisionState = { documentId: item.id, action, source };
+  const modal = document.querySelector("#officialDecisionModal");
+  const form = document.querySelector("#officialDecisionForm");
+  const approval = document.querySelector("#officialApprovalReviewFields");
+  const rejection = document.querySelector("#officialRejectionFields");
+  const error = document.querySelector("#officialDecisionError");
+  if (!modal || !form || !approval || !rejection) return showToast("簽核確認視窗載入失敗。");
+  form.reset();
+  if (error) {
+    error.hidden = true;
+    error.textContent = "";
+  }
+  const isApprove = action === "approve";
+  approval.hidden = !isApprove;
+  rejection.hidden = isApprove;
+  approval.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = !isApprove; });
+  rejection.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = isApprove; });
+  document.querySelector("#officialDecisionModalTitle").textContent = isApprove ? "確認核准" : "退回補正";
+  document.querySelector("#officialDecisionSubmitBtn").textContent = isApprove ? "確認核准" : "確認駁回並通知申請人";
+  const dueDate = document.querySelector("#officialCorrectionDueDate");
+  if (dueDate) {
+    const today = new Date();
+    const minDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    dueDate.min = minDate;
+  }
+  const integrity = officialDecisionIntegrity(item);
+  const summary = officialApplicationSummary(item);
+  document.querySelector("#officialDecisionSummary").innerHTML = `
+    <strong>${escapeHtml(item.title || item.subject || item.id)}</strong>
+    <p>${escapeHtml(item.id)} · ${escapeHtml(item.current_step_name || pendingStep.step_name || item.current_step)}</p>
+    <small>原稿／版本 ${summary.versionCount} · 附件 ${summary.attachmentCount} · prepared SHA-256：${escapeHtml(integrity.preparedSha256 || "非 PDF Editor V2 案件")} · manifest SHA-256：${escapeHtml(integrity.manifestSha256 || "非 PDF Editor V2 案件")}</small>
+  `;
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => document.querySelector(isApprove ? "#officialReviewOriginal" : "#officialRejectCategory")?.focus(), 0);
+}
+
+async function mutateOfficialDocument(action, decisionPayload = {}, item = officialCurrentItem(), source = "workflow") {
+  if (!item) {
+    showToast("請先選擇發文申請單。");
+    return false;
+  }
+  const pendingStep = (item.approval_steps || []).find((step) => step.step_key === item.current_step && step.status === "pending");
+  if (!pendingStep?.id) {
+    showToast("簽核關卡已更新，請重新整理後再操作。");
+    return false;
+  }
   try {
-    const result = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}/${action}`, { method: "POST", body: JSON.stringify({ comment }) });
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ ...decisionPayload, expected_step_id: pendingStep.id })
+    });
     selectedOfficialDocumentId = result.id;
     const index = officialWorkflowItems.findIndex((entry) => entry.id === result.id);
     if (index >= 0) officialWorkflowItems[index] = result;
     else officialWorkflowItems.unshift(result);
     renderOfficialWorkflow();
-    showToast("發文簽核狀態已更新。");
+    if (source === "approvalLog") {
+      selectedWorkflowTaskId = result.id;
+      renderApprovalLog();
+    }
+    refreshDashboardWorkEntryPoints();
+    showToast(action === "approve" ? "已完成核准並保存檢閱證據。" : "已駁回並通知申請人補正。");
+    return true;
   } catch (error) {
     showToast(error.message || "簽核操作失敗。");
+    return false;
+  }
+}
+
+async function submitOfficialDecision(event) {
+  event.preventDefault();
+  const { documentId, action, source } = officialDecisionState;
+  const item = officialWorkflowItems.find((entry) => entry.id === documentId);
+  const error = document.querySelector("#officialDecisionError");
+  const submit = document.querySelector("#officialDecisionSubmitBtn");
+  if (!item || !["approve", "reject"].includes(action)) return closeOfficialDecisionDialog();
+  const integrity = officialDecisionIntegrity(item);
+  let payload;
+  if (action === "approve") {
+    const comment = document.querySelector("#officialApprovalComment")?.value.trim() || "";
+    const acknowledgements = {
+      original_reviewed: Boolean(document.querySelector("#officialReviewOriginal")?.checked),
+      attachments_reviewed: Boolean(document.querySelector("#officialReviewAttachments")?.checked),
+      edited_version_reviewed: Boolean(document.querySelector("#officialReviewEdited")?.checked)
+    };
+    if (!Object.values(acknowledgements).every(Boolean)) {
+      if (error) {
+        error.hidden = false;
+        error.textContent = "請逐項確認原稿、附件與 PDF 編輯版後才能核准。";
+      }
+      return;
+    }
+    if (comment.length < 2) {
+      if (error) {
+        error.hidden = false;
+        error.textContent = "請填寫至少 2 個字的核准意見，留下本次判斷依據。";
+      }
+      document.querySelector("#officialApprovalComment")?.focus();
+      return;
+    }
+    payload = {
+      comment,
+      prepared_sha256: integrity.preparedSha256,
+      manifest_sha256: integrity.manifestSha256,
+      review_acknowledgements: acknowledgements
+    };
+  } else {
+    const reasonCategory = document.querySelector("#officialRejectCategory")?.value || "";
+    const comment = document.querySelector("#officialRejectComment")?.value.trim() || "";
+    const missingItems = [...document.querySelectorAll('[name="officialMissingItem"]:checked')].map((node) => node.value);
+    const correctionDueDate = document.querySelector("#officialCorrectionDueDate")?.value || "";
+    if (!reasonCategory || comment.length < 6) {
+      if (error) {
+        error.hidden = false;
+        error.textContent = "請選擇原因分類，並輸入至少 6 個字的具體補正內容。";
+      }
+      return;
+    }
+    if (correctionDueDate && !isValidFutureOrToday(correctionDueDate)) {
+      if (error) {
+        error.hidden = false;
+        error.textContent = "補正期限不可早於今天。";
+      }
+      return;
+    }
+    payload = {
+      comment,
+      reason_category: reasonCategory,
+      missing_items: missingItems,
+      correction_due_date: correctionDueDate
+    };
+  }
+  if (submit) submit.disabled = true;
+  const ok = await mutateOfficialDocument(action, payload, item, source);
+  if (submit) submit.disabled = false;
+  if (ok) closeOfficialDecisionDialog();
+}
+
+async function confirmOfficialDocument() {
+  const item = officialCurrentItem();
+  if (!item) return showToast("請先選擇發文申請單。");
+  try {
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ comment: "申請人確認完成並結案" })
+    });
+    selectedOfficialDocumentId = result.id;
+    const index = officialWorkflowItems.findIndex((entry) => entry.id === result.id);
+    if (index >= 0) officialWorkflowItems[index] = result;
+    else officialWorkflowItems.unshift(result);
+    renderOfficialWorkflow();
+    refreshDashboardWorkEntryPoints();
+    showToast("已確認完成並結案。");
+  } catch (error) {
+    showToast(`確認結案失敗：${error.message}`);
+  }
+}
+
+async function retryOfficialStamp() {
+  const item = officialCurrentItem();
+  if (!item) return showToast("請先選擇發文申請單。");
+  if (!item.can_retry_stamp) return showToast("目前帳號沒有重試自動用印權限。");
+  try {
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}/retry-stamp`, {
+      method: "POST",
+      body: JSON.stringify({ comment: "總務修正後重試自動用印" })
+    });
+    selectedOfficialDocumentId = result.id;
+    const index = officialWorkflowItems.findIndex((entry) => entry.id === result.id);
+    if (index >= 0) officialWorkflowItems[index] = result;
+    else officialWorkflowItems.unshift(result);
+    renderOfficialWorkflow();
+    refreshDashboardWorkEntryPoints();
+    if (result.auto_stamp?.ok === false) {
+      showToast(`自動用印仍失敗：${result.auto_stamp.detail || "請檢查 Seal Vault 與 PDF 檔案。"}`);
+      return;
+    }
+    showToast("已重新產生已用印版本。");
+  } catch (error) {
+    showToast(`重試自動用印失敗：${error.message}`);
   }
 }
 
 async function completeOfficialDispatch(documentId) {
   try {
     const file = document.querySelector("#officialDispatchProofInput")?.files?.[0];
-    let proofFileId = officialDispatchRecord(officialCurrentItem() || {})?.proof_file_id || "";
     if (file) {
-      const upload = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/dispatch/proof-files`, {
+      requireInlineJsonUploadSize(file, "寄發證明");
+      await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/dispatch/proof-files`, {
         method: "POST",
         body: JSON.stringify({
           file_name: file.name,
@@ -5251,15 +8684,13 @@ async function completeOfficialDispatch(documentId) {
           content_base64: await fileToBase64(file)
         })
       });
-      proofFileId = upload.file?.id || upload.dispatch_record?.proof_file_id || proofFileId;
     }
     const payload = {
       external_official_document_number: document.querySelector("#officialDispatchNumberInput")?.value?.trim() || "",
       dispatch_date: document.querySelector("#officialDispatchDateInput")?.value || "",
       recipient: document.querySelector("#officialDispatchRecipientInput")?.value?.trim() || "",
       recipient_contact: document.querySelector("#officialDispatchContactInput")?.value?.trim() || "",
-      dispatch_note: document.querySelector("#officialDispatchNoteInput")?.value?.trim() || "",
-      proof_file_id: proofFileId
+      dispatch_note: document.querySelector("#officialDispatchNoteInput")?.value?.trim() || ""
     };
     const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/dispatch/complete`, {
       method: "POST",
@@ -5270,6 +8701,7 @@ async function completeOfficialDispatch(documentId) {
     if (index >= 0) officialWorkflowItems[index] = result;
     else officialWorkflowItems.unshift(result);
     renderOfficialWorkflow();
+    refreshDashboardWorkEntryPoints();
     showToast("寄發資訊已完成並寫入申請單紀錄。");
   } catch (error) {
     showToast(`完成寄發失敗：${error.message}`);
@@ -5279,7 +8711,8 @@ async function completeOfficialDispatch(documentId) {
 async function downloadOfficialWorkflowFile(documentId, fileId) {
   try {
     const response = await fetch(`${backendApiBase}/official-documents/${encodeURIComponent(documentId)}/files/${encodeURIComponent(fileId)}/download`, {
-      headers: isHeaderSafeToken(authState?.token) ? { Authorization: `Bearer ${authState.token}` } : {}
+      headers: isHeaderSafeToken(authState?.token) ? { Authorization: `Bearer ${authState.token}` } : {},
+      cache: "no-store"
     });
     if (!response.ok) throw new Error((await response.text()).slice(0, 160) || `HTTP ${response.status}`);
     const blob = await response.blob();
@@ -5293,6 +8726,395 @@ async function downloadOfficialWorkflowFile(documentId, fileId) {
     URL.revokeObjectURL(url);
   } catch (error) {
     showToast(`下載失敗：${error.message}`);
+  }
+}
+
+function internalDispatchStatusLabel(status = "") {
+  return {
+    sent: "已派發",
+    pending: "待回文",
+    reply_completed: "已完成回文",
+    closed: "已結案",
+    cancelled: "已取消"
+  }[status] || status || "未建立";
+}
+
+function internalDispatchCurrentItem() {
+  return internalDispatchItems.find((item) => item.id === selectedInternalDispatchId) || internalDispatchItems[0] || null;
+}
+
+function internalDispatchCurrentRecipient(item = {}) {
+  const userId = authState?.user?.id || "";
+  return (item.recipients || []).find((entry) => entry.recipient_user_id === userId) || null;
+}
+
+function internalDispatchReplyAttachment(reply = {}) {
+  const embedded = reply.attachment || reply.attachment_file || reply.file || {};
+  const id = reply.attachment_file_id || embedded.id || embedded.file_id || "";
+  if (!id) return null;
+  return {
+    id,
+    name: reply.attachment_file_name || reply.file_name || embedded.file_name || embedded.name || "回文附件",
+    mimeType: reply.attachment_mime_type || reply.file_mime_type || embedded.mime_type || embedded.file_mime_type || "",
+    size: Number(reply.attachment_file_size || reply.file_size || embedded.file_size || embedded.size || 0)
+  };
+}
+
+function internalDispatchFileSizeLabel(size = 0) {
+  const bytes = Number(size || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function markInternalDispatchRead(dispatchId, options) {
+  const settings = options || {};
+  const item = internalDispatchItems.find((entry) => entry.id === dispatchId);
+  const recipient = internalDispatchCurrentRecipient(item || {});
+  if (!dispatchId || !recipient || recipient.read_at) return item || null;
+  try {
+    const result = await backendRequest(`/internal-dispatches/${encodeURIComponent(dispatchId)}/read`, {
+      method: "PATCH",
+      body: "{}"
+    });
+    const index = internalDispatchItems.findIndex((entry) => entry.id === result.id);
+    if (index >= 0) internalDispatchItems[index] = result;
+    else internalDispatchItems.unshift(result);
+    renderInternalDispatchList();
+    renderInternalDispatchDetail();
+    refreshDashboardWorkEntryPoints();
+    return result;
+  } catch (error) {
+    if (!settings.silent) showToast(`已讀狀態同步失敗：${error.message}`);
+    return null;
+  }
+}
+
+async function downloadInternalDispatchReplyAttachment(dispatchId, replyId, fallbackName = "回文附件") {
+  try {
+    const result = await downloadBinaryFile(
+      `/internal-dispatches/${encodeURIComponent(dispatchId)}/replies/${encodeURIComponent(replyId)}/attachment/download`,
+      fallbackName
+    );
+    showToast(`已下載回文附件：${result.fileName || fallbackName}`);
+    return result;
+  } catch (error) {
+    showToast(`回文附件下載失敗：${error.message}`);
+    return null;
+  }
+}
+
+function renderInternalDispatchDocumentOptions() {
+  const select = document.querySelector("#internalDispatchDocumentSelect");
+  if (!select) return;
+  const selected = select.value;
+  select.innerHTML = `<option value="">請選擇已收錄公文</option>${inboundDocs.map((item) => `
+    <option value="${item.id}">${escapeDraftHtml(item.receiveNo || item.id)}｜${escapeDraftHtml(item.subject || "未命名")}</option>
+  `).join("")}`;
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+}
+
+function renderInternalDispatchRecipientOptions() {
+  const picker = document.querySelector("#internalDispatchRecipientsPicker");
+  if (!picker) return;
+  if (!canCreateInternalDispatch()) {
+    picker.innerHTML = "";
+    return;
+  }
+  const currentUserId = authState?.user?.id || "";
+  const users = internalDispatchRecipientDirectory.filter((account) => account.id !== currentUserId);
+  if (!users.length) {
+    picker.innerHTML = `<p class="empty-text">目前沒有可選擇的正式同仁帳號。</p>`;
+    return;
+  }
+  picker.innerHTML = users.map((account) => `
+    <div class="internal-dispatch-recipient-row">
+      <label class="internal-dispatch-recipient-identity">
+        <input class="internal-dispatch-recipient-check" type="checkbox" value="${escapeHtml(account.id)}" data-recipient-name="${escapeDraftHtml(account.name || "未命名")}" />
+        <span><strong>${escapeDraftHtml(account.name || "未命名")}</strong><small>${escapeDraftHtml(account.unit || "未設定單位")}｜${escapeDraftHtml(account.role || "員工")}</small></span>
+      </label>
+      <select class="internal-dispatch-recipient-action" data-recipient-action-for="${escapeHtml(account.id)}" disabled aria-label="${escapeDraftHtml(account.name || "收件人")}處理要求">
+        <option value="required">需要處理</option>
+        <option value="informed">僅供知悉</option>
+      </select>
+    </div>
+  `).join("");
+  picker.querySelectorAll(".internal-dispatch-recipient-check").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const action = picker.querySelector(`[data-recipient-action-for="${CSS.escape(checkbox.value)}"]`);
+      if (action) action.disabled = !checkbox.checked;
+    });
+  });
+}
+
+async function loadInternalDispatches(silent = false) {
+  try {
+    const [items, directory] = await Promise.all([
+      backendRequest("/internal-dispatches"),
+      canCreateInternalDispatch() ? backendRequest("/internal-dispatches/recipients") : Promise.resolve([])
+    ]);
+    internalDispatchItems = items;
+    internalDispatchRecipientDirectory = directory;
+    if (!internalDispatchItems.some((item) => item.id === selectedInternalDispatchId)) {
+      selectedInternalDispatchId = internalDispatchItems[0]?.id || "";
+    }
+    renderInternalDispatchModule();
+    refreshDashboardWorkEntryPoints();
+  } catch (error) {
+    internalDispatchItems = [];
+    internalDispatchRecipientDirectory = [];
+    renderInternalDispatchModule();
+    refreshDashboardWorkEntryPoints();
+    if (!silent) showToast(`內部派文載入失敗：${error.message}`);
+  }
+}
+
+function renderInternalDispatchList() {
+  const list = document.querySelector("#internalDispatchList");
+  const count = document.querySelector("#internalDispatchCount");
+  if (!list || !count) return;
+  count.textContent = `${internalDispatchItems.length} 件`;
+  if (!internalDispatchItems.length) {
+    list.innerHTML = `<p class="empty-text">尚無內部派發紀錄。</p>`;
+    return;
+  }
+  list.innerHTML = internalDispatchItems.map((item) => {
+    const recipients = item.recipients || [];
+    const required = recipients.filter((recipient) => Boolean(recipient.action_required));
+    const informed = recipients.length - required.length;
+    const replied = required.filter((recipient) => recipient.status === "replied").length;
+    return `
+      <button class="internal-dispatch-item ${item.id === selectedInternalDispatchId ? "active" : ""}" type="button" data-internal-dispatch-id="${escapeHtml(item.id)}">
+        <strong>${escapeDraftHtml(item.subject || item.title || item.id)}</strong>
+        <span>${escapeHtml(internalDispatchStatusLabel(item.status))} · ${required.length ? `處理 ${replied}/${required.length}` : "全部僅供知悉"}${informed ? ` · 知悉 ${informed}` : ""}</span>
+        <small>${escapeHtml(item.sender_name || "建立者")} · ${escapeHtml(item.due_at || "無期限")}</small>
+      </button>
+    `;
+  }).join("");
+  list.querySelectorAll("[data-internal-dispatch-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedInternalDispatchId = button.dataset.internalDispatchId;
+      renderInternalDispatchModule();
+      void markInternalDispatchRead(selectedInternalDispatchId);
+    });
+  });
+}
+
+function canReplyInternalDispatch(item) {
+  const userId = authState?.user?.id || "";
+  const recipient = (item?.recipients || []).find((entry) => entry.recipient_user_id === userId);
+  return Boolean(
+    item?.reply_required
+    && item.status !== "closed"
+    && recipient
+    && Boolean(recipient.action_required)
+    && recipient.status !== "replied"
+  );
+}
+
+function canCloseInternalDispatch(item) {
+  const userId = authState?.user?.id || "";
+  return Boolean(item && item.status !== "closed" && (item.sender_user_id === userId || (authState?.permissions || []).includes("official_documents.all_todo")));
+}
+
+function renderInternalDispatchDetail() {
+  const target = document.querySelector("#internalDispatchDetail");
+  if (!target) return;
+  const item = internalDispatchCurrentItem();
+  if (!item) {
+    target.innerHTML = `<p class="empty-text">請選擇一筆派文查看回覆狀態。</p>`;
+    return;
+  }
+  const recipients = item.recipients || [];
+  const replies = item.replies || [];
+  const linkedInbound = item.inbound_document || null;
+  const linkedAttachments = linkedInbound?.attachments || [];
+  const requiredRecipients = recipients.filter((recipient) => Boolean(recipient.action_required));
+  target.innerHTML = `
+    <article class="internal-dispatch-card">
+      <div class="panel-heading tight">
+        <div>
+          <h3>${escapeDraftHtml(item.subject || item.title || item.id)}</h3>
+          <small>${linkedInbound ? `關聯收錄 ${escapeDraftHtml(linkedInbound.receive_no || linkedInbound.id)}` : "未關聯收錄公文"} · ${escapeHtml(item.created_at || "")}</small>
+        </div>
+        <span class="status-pill">${escapeHtml(internalDispatchStatusLabel(item.status))}</span>
+      </div>
+      <p>${escapeDraftHtml(item.body || "未填寫內容。")}</p>
+      <div class="official-detail-grid">
+        <div><dt>建立者</dt><dd>${escapeDraftHtml(item.sender_name || "未記錄")}</dd></div>
+        <div><dt>處理要求</dt><dd>${requiredRecipients.length ? `${requiredRecipients.length} 人需要處理` : "全部僅供知悉"}</dd></div>
+        <div><dt>期限</dt><dd>${escapeHtml(item.due_at || "未設定")}</dd></div>
+        <div><dt>回文狀態</dt><dd>${escapeHtml(item.reply_status || "未建立")}</dd></div>
+      </div>
+      ${linkedInbound ? `
+        <div class="internal-dispatch-source-document">
+          <strong>${escapeDraftHtml(linkedInbound.subject || "已收錄公文")}</strong>
+          <span>${inboundSourceLabel(linkedInbound.source_type)}｜${escapeDraftHtml(linkedInbound.sender_name || "未記錄來文單位")}</span>
+          <div class="attachment-list">
+            ${linkedAttachments.length ? linkedAttachments.map((attachment) => `<button class="file-chip" type="button" data-dispatch-inbound-id="${escapeHtml(linkedInbound.id)}" data-dispatch-attachment-id="${escapeHtml(attachment.id)}" data-dispatch-attachment-name="${escapeDraftHtml(inboundAttachmentName(attachment))}">${escapeDraftHtml(inboundAttachmentName(attachment))}</button>`).join("") : `<span class="empty-text">此收錄公文沒有附件。</span>`}
+          </div>
+        </div>
+      ` : ""}
+      <div class="internal-dispatch-recipients">
+        <strong>收件人</strong>
+        ${recipients.length ? recipients.map((recipient) => `
+          <span class="internal-dispatch-chip ${recipient.status === "replied" ? "replied" : ""}">
+            ${escapeDraftHtml(recipient.recipient_name || recipient.recipient_user_id || "未命名")}
+            <small>${recipient.action_required ? (recipient.status === "replied" ? "已處理回覆" : "需要處理") : "僅供知悉"} · ${recipient.read_at ? `已讀 ${escapeHtml(recipient.read_at)}` : "尚未讀取"}</small>
+          </span>
+        `).join("") : `<p class="empty-text">尚無收件人。</p>`}
+      </div>
+      <div class="internal-dispatch-replies">
+        <strong>回文紀錄</strong>
+        ${replies.length ? replies.map((reply) => {
+          const attachment = internalDispatchReplyAttachment(reply);
+          const attachmentMeta = attachment ? [attachment.mimeType, internalDispatchFileSizeLabel(attachment.size)].filter(Boolean).join(" · ") : "";
+          return `
+            <article class="timeline-item">
+              <time>${escapeHtml((reply.created_at || "").slice(11, 16))}</time>
+              <div>
+                <strong>${escapeDraftHtml(reply.replier_name || "回覆者")}</strong>
+                <p>${escapeDraftHtml(reply.reply_text || "未填寫回覆內容。")}</p>
+                ${attachment ? `
+                  <button class="file-chip" type="button"
+                    data-dispatch-reply-download="${escapeHtml(reply.id)}"
+                    data-dispatch-reply-file-name="${escapeHtml(attachment.name)}">
+                    下載：${escapeHtml(attachment.name)}${attachmentMeta ? `（${escapeHtml(attachmentMeta)}）` : ""}
+                  </button>
+                ` : ""}
+              </div>
+            </article>
+          `;
+        }).join("") : `<p class="empty-text">尚無回文。</p>`}
+      </div>
+      ${canReplyInternalDispatch(item) ? `
+        <form class="internal-dispatch-reply-form" id="internalDispatchReplyForm">
+          <label>回文內容<textarea id="internalDispatchReplyText" rows="3" placeholder="請輸入回覆內容"></textarea></label>
+          <label>回文附件<input id="internalDispatchReplyFile" type="file" /></label>
+          <button class="primary-button" type="submit">送出回文</button>
+        </form>
+      ` : ""}
+      ${canCloseInternalDispatch(item) ? `<button class="secondary-button" id="internalDispatchCloseBtn" type="button">結案</button>` : ""}
+    </article>
+  `;
+  document.querySelector("#internalDispatchReplyForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void replyInternalDispatch(item.id);
+  });
+  target.querySelectorAll("[data-dispatch-attachment-id]").forEach((button) => {
+    button.addEventListener("click", () => void downloadInboundAttachment(
+      button.dataset.dispatchInboundId,
+      button.dataset.dispatchAttachmentId,
+      button.dataset.dispatchAttachmentName
+    ));
+  });
+  target.querySelectorAll("[data-dispatch-reply-download]").forEach((button) => {
+    button.addEventListener("click", () => void downloadInternalDispatchReplyAttachment(
+      item.id,
+      button.dataset.dispatchReplyDownload,
+      button.dataset.dispatchReplyFileName
+    ));
+  });
+  document.querySelector("#internalDispatchCloseBtn")?.addEventListener("click", () => closeInternalDispatch(item.id));
+}
+
+function renderInternalDispatchModule() {
+  const createArea = document.querySelector("#internalDispatchCreateArea");
+  const layout = document.querySelector(".internal-dispatch-layout");
+  if (createArea) createArea.hidden = !canCreateInternalDispatch();
+  layout?.classList.toggle("view-only", !canCreateInternalDispatch());
+  renderInternalDispatchDocumentOptions();
+  renderInternalDispatchRecipientOptions();
+  renderInternalDispatchList();
+  renderInternalDispatchDetail();
+  renderLaunchChecklist();
+}
+
+async function createInternalDispatchFromForm() {
+  if (!canCreateInternalDispatch()) return showToast("只有總務、行政部門主任或執行長可以建立內部派發。");
+  const selectedRecipients = [...document.querySelectorAll(".internal-dispatch-recipient-check:checked")];
+  const inboundDocumentId = document.querySelector("#internalDispatchDocumentSelect")?.value || "";
+  const title = document.querySelector("#internalDispatchTitleInput")?.value.trim() || "";
+  const body = document.querySelector("#internalDispatchBodyInput")?.value.trim() || "";
+  if (!inboundDocumentId) return showToast("請先選擇要派發的已收錄公文。");
+  if (!title) return showToast("請填寫內部派文主旨。");
+  if (!body) return showToast("請填寫內部派文內容。");
+  if (!selectedRecipients.length) return showToast("請至少選擇一位收件同仁。");
+  const recipients = selectedRecipients.map((checkbox) => {
+    const action = document.querySelector(`[data-recipient-action-for="${CSS.escape(checkbox.value)}"]`)?.value || "required";
+    return {
+      user_id: checkbox.value,
+      recipient_name: checkbox.dataset.recipientName || "",
+      action_required: action === "required"
+    };
+  });
+  const replyRequired = recipients.some((recipient) => recipient.action_required);
+  const dueDays = Number(document.querySelector("#internalDispatchDueDaysInput")?.value || 0);
+  if (replyRequired && dueDays < 1) return showToast("有人需要處理時，期限天數至少為 1 天。");
+  try {
+    const result = await backendRequest("/internal-dispatches", {
+      method: "POST",
+      body: JSON.stringify({
+        inbound_document_id: inboundDocumentId,
+        title,
+        subject: title,
+        body,
+        reply_required: replyRequired,
+        reply_due_days: replyRequired ? dueDays : 0,
+        recipients
+      })
+    });
+    selectedInternalDispatchId = result.id;
+    document.querySelector("#internalDispatchTitleInput").value = "";
+    document.querySelector("#internalDispatchBodyInput").value = "";
+    document.querySelectorAll(".internal-dispatch-recipient-check").forEach((checkbox) => { checkbox.checked = false; });
+    document.querySelectorAll(".internal-dispatch-recipient-action").forEach((select) => { select.disabled = true; select.value = "required"; });
+    await loadInternalDispatches(true);
+    showToast("內部派發已送出。");
+    return result;
+  } catch (error) {
+    showToast(`內部派發失敗：${error.message}`);
+  }
+}
+
+async function replyInternalDispatch(dispatchId) {
+  const text = document.querySelector("#internalDispatchReplyText")?.value.trim() || "";
+  const file = document.querySelector("#internalDispatchReplyFile")?.files?.[0];
+  if (!text && !file) return showToast("請填寫回文內容或上傳附件。");
+  try {
+    const payload = { reply_text: text };
+    if (file) {
+      requireInlineJsonUploadSize(file, "回文附件");
+      payload.file_name = file.name;
+      payload.file_mime_type = file.type || "application/octet-stream";
+      payload.content_base64 = await fileToBase64(file);
+    }
+    const result = await backendRequest(`/internal-dispatches/${encodeURIComponent(dispatchId)}/replies`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    selectedInternalDispatchId = result.id;
+    await loadInternalDispatches(true);
+    showToast("回文已送出。");
+    return result;
+  } catch (error) {
+    showToast(`回文失敗：${error.message}`);
+  }
+}
+
+async function closeInternalDispatch(dispatchId) {
+  try {
+    const result = await backendRequest(`/internal-dispatches/${encodeURIComponent(dispatchId)}/close`, {
+      method: "POST",
+      body: JSON.stringify({ comment: "內部派文結案。" })
+    });
+    selectedInternalDispatchId = result.id;
+    await loadInternalDispatches(true);
+    showToast("內部派文已結案。");
+    return result;
+  } catch (error) {
+    showToast(`結案失敗：${error.message}`);
   }
 }
 
@@ -5341,6 +9163,12 @@ function dispatchDocSnapshot(doc) {
     companyName: doc.companyName || "",
     type: doc.type || "",
     priority: doc.priority || "",
+    documentCategory: doc.documentCategory || "",
+    documentCategoryGroup: doc.documentCategoryGroup || "",
+    approvalRouteCode: doc.approvalRouteCode || "",
+    approvalRouteName: doc.approvalRouteName || "",
+    workflowTemplateKey: doc.workflowTemplateKey || "",
+    approvalFlowNodes: [...(doc.approvalFlowNodes || [])],
     security: doc.security || "普通",
     to: doc.to || "",
     agencyCode: doc.agencyCode || "",
@@ -5417,6 +9245,7 @@ function guardDispatchAction(action, docs) {
 }
 
 function runDispatchAction(action, ids) {
+  if (["send", "resend"].includes(action) && !guardFormalExchangeUi(action === "send" ? "送交 jAgent" : "重送 jAgent")) return;
   const targetIds = dispatchTargetIds(ids);
   if (!targetIds.length) return showToast("請先選取要作業的發文。");
   const actionNames = { validate: "清稿檢核", package: "附件封裝", send: "送交 jAgent", query: "查詢狀態", resend: "重送" };
@@ -5497,7 +9326,148 @@ function createWorkflowTaskForDispatch(doc, status) {
   addWorkflowAudit("建立簽核流程", `${doc.no} 已送簽，流程紀錄可於側欄「簽核紀錄」查詢。`);
 }
 
+function composeCompanyForOfficialApplication(companyName) {
+  return companyRegistry.find((item) => item.name === companyName)
+    || companyRegistry.find((item) => item.id === authState?.user?.company_id)
+    || (authState?.user?.company_id && authState?.user?.company_name
+      ? { id: authState.user.company_id, name: authState.user.company_name }
+      : null)
+    || null;
+}
+
+function composeSealCategory(sealType) {
+  return {
+    "一般章": "general_seal",
+    "公司設立章": "establishment_seal",
+    "銀行印鑑章": "bank_seal",
+    "圖記章": "official_seal"
+  }[sealType] || "";
+}
+
+async function createOfficialApplicationFromCompose(doc, data, options = {}) {
+  const company = composeCompanyForOfficialApplication(data.companyName);
+  if (!company?.id) throw new Error("登入帳號尚未連動 Finance 公司，請先聯絡管理員更新人員主檔。");
+  const requiresStamp = true;
+  let sealId = "";
+  let stampPositions = [];
+  if (requiresStamp) {
+    const primaryKind = data.largeSealType !== "無" ? "large" : data.smallSealType !== "無" ? "small" : "";
+    if (!primaryKind && options.submit !== false) throw new Error("所有發文都必須選擇要使用的印章。");
+    if (primaryKind) {
+      const sealType = primaryKind === "large" ? data.largeSealType : data.smallSealType;
+      const category = composeSealCategory(sealType);
+      const sizeType = primaryKind === "large" ? "large_seal" : "small_seal";
+      const seals = await backendRequest(`/companies/${encodeURIComponent(company.id)}/seals`);
+      const matchingSeals = (Array.isArray(seals) ? seals : []).filter((item) => (
+        item.seal_category === category
+        && item.seal_size_type === sizeType
+        && item.is_active !== false
+        && item.is_active !== 0
+      ));
+      const seal = matchingSeals.find(officialSealHasCurrentFile) || (options.submit === false ? matchingSeals[0] : null);
+      if (!seal && options.submit !== false) throw new Error(`${sealType}${primaryKind === "large" ? "大章" : "小章"}尚未上傳可用版本，請先由總務至印章檔案庫上傳。`);
+      if (seal) {
+        sealId = seal.id;
+        const placement = data.sealPlacements[primaryKind];
+        const geometry = companySealFixedGeometry(seal || sizeType);
+        stampPositions = [{
+          seal_id: seal.id,
+          page: Math.max(1, Number(placement.page) || 1),
+          x: Math.round((Number(placement.x) || 70) / 100 * 595),
+          y: Math.round((100 - (Number(placement.y) || 80)) / 100 * 842),
+          width: geometry.widthPt,
+          height: geometry.heightPt,
+          seal_size_type: geometry.sealSizeType,
+          size_locked: true,
+          order_index: 1
+        }];
+      }
+    }
+  }
+  const payload = {
+    source_type: "blank_editor",
+    document_type: "outgoing_official_document",
+    company_id: company.id,
+    seal_id: sealId || undefined,
+    requires_stamp: requiresStamp,
+    document_category: data.documentCategory,
+    document_category_group: data.documentCategoryGroup,
+    approval_route_code: data.approvalRouteCode,
+    approval_route_name: data.approvalRouteName,
+    approval_flow_nodes: [...data.approvalFlowNodes],
+    workflow_template_key: data.workflowTemplateKey,
+    dispatch_method: "electronic_official_document_by_general_affairs",
+    title: data.subject,
+    subject: data.subject,
+    description: data.body,
+    recipient: data.recipient,
+    dispatch_unit: activeUnit(),
+    handler_name: data.contactOwner,
+    request_reason: data.purpose || "公文發文與用印申請",
+    attachments_summary: data.attachmentDetails || data.attachments.join("、"),
+    stamp_position: stampPositions[0],
+    stamp_positions: stampPositions,
+    metadata: {
+      source: "compose_form",
+      legacy_document_id: doc.id,
+      dispatch_no: data.no,
+      company_name: data.companyName,
+      document_type: data.type,
+      priority: data.priority,
+      large_seal_type: data.largeSealType,
+      small_seal_type: data.smallSealType,
+      seal_placements: {
+        large: { ...data.sealPlacements.large },
+        small: { ...data.sealPlacements.small }
+      },
+      document_category: data.documentCategory,
+      document_category_group: data.documentCategoryGroup,
+      approval_route_code: data.approvalRouteCode,
+      approval_route_name: data.approvalRouteName,
+      workflow_template_key: data.workflowTemplateKey,
+      approval_flow_nodes: [...data.approvalFlowNodes],
+      purpose: data.purpose,
+      attachment_details: data.attachmentDetails,
+      contact_address: data.contactAddress,
+      contact_owner: data.contactOwner,
+      contact_phone: data.contactPhone,
+      contact_fax: data.contactFax,
+      contact_email: data.contactEmail
+    },
+    submit: false
+  };
+  const documentId = options.documentId || doc.officialDocumentId || "";
+  let result = documentId
+    ? await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`, { method: "PATCH", body: JSON.stringify(payload) })
+    : await backendRequest("/official-documents", { method: "POST", body: JSON.stringify(payload) });
+  const attachments = [...(document.querySelector("#attachments")?.files || [])];
+  if (attachments.length) {
+    await uploadOfficialDocumentAttachments(result.id, attachments);
+    const attachmentInput = document.querySelector("#attachments");
+    if (attachmentInput) attachmentInput.value = "";
+  }
+  if (options.submit !== false) {
+    const action = options.resubmit ? "resubmit" : "submit";
+    result = await backendRequest(`/official-documents/${encodeURIComponent(result.id)}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({
+        comment: options.resubmit
+          ? "申請人已完成退回案件補正，確認函稿與附件完整後重新送簽"
+          : "申請人確認函稿與附件完整後送出"
+      })
+    });
+  }
+  return result;
+}
+
 async function createDispatchFromForm(status = "草稿") {
+  const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
+  if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) {
+    setComposeFieldValidity("#composeApprovalCategorySelect", "#composeApprovalCategoryHint", false, "請選擇公文用印文件類型的文件細項。");
+    focusComposeValidationField("#composeApprovalCategorySelect");
+    showToast("請先選擇公文用印文件類型。");
+    return null;
+  }
   if (status !== "草稿" && !draftConfirmed) {
     showToast("請先在即時函稿預覽確認內容後再加入發文佇列。");
     return null;
@@ -5517,6 +9487,12 @@ async function createDispatchFromForm(status = "草稿") {
     companyName: data.companyName,
     type: data.type,
     priority: data.priority,
+    documentCategory: data.documentCategory,
+    documentCategoryGroup: data.documentCategoryGroup,
+    approvalRouteCode: data.approvalRouteCode,
+    approvalRouteName: data.approvalRouteName,
+    workflowTemplateKey: data.workflowTemplateKey,
+    approvalFlowNodes: [...data.approvalFlowNodes],
     security: "普通",
     to: data.recipient,
     agencyCode: "待查詢",
@@ -5529,6 +9505,7 @@ async function createDispatchFromForm(status = "草稿") {
     contactFax: data.contactFax,
     contactEmail: data.contactEmail,
     sealPlan: {
+      mode: data.deliveryMode,
       large: {
         type: data.largeSealType,
         placement: { ...composeSealPlacements.large }
@@ -5552,18 +9529,39 @@ async function createDispatchFromForm(status = "草稿") {
     requiresReapproval: false
   });
   if (!existingDoc) dispatchDocs.unshift(doc);
-  const docPath = `/documents/${doc.id.startsWith("DOC-") ? doc.id : `DOC-${doc.id}`}`;
-  await persistToBackend(existingDoc ? docPath : "/documents", backendDocumentPayload(doc), existingDoc ? "PATCH" : "POST");
-  if (!existingDoc) {
-    upsertDocumentAcl(doc, activeRole(), { view: true, sign: false, download: false, seal: false, delegate: false, reason: "撰寫者建立函稿，可檢視與補正內容。" });
-    upsertDocumentAcl(doc, "行政部主任", { view: true, sign: true, download: true, seal: true, delegate: true, reason: "送簽清稿與用印前核准。" });
-    upsertDocumentAcl(doc, "總務", { view: true, sign: false, download: true, seal: true, delegate: false, reason: "清稿後封裝、用印與送交 jAgent。" });
+  try {
+    const officialApplication = await createOfficialApplicationFromCompose(doc, data, {
+      documentId: existingDoc?.officialDocumentId || "",
+      submit: status !== "草稿",
+      resubmit: Boolean(existingDoc?.requiresResubmit)
+    });
+    doc.requiresResubmit = false;
+    doc.officialDocumentId = officialApplication.id;
+    selectedOfficialDocumentId = officialApplication.id;
+    const officialIndex = officialWorkflowItems.findIndex((item) => item.id === officialApplication.id);
+    if (officialIndex >= 0) officialWorkflowItems[officialIndex] = officialApplication;
+    else officialWorkflowItems.unshift(officialApplication);
+  } catch (error) {
+    if (!existingDoc) {
+      const insertedIndex = dispatchDocs.indexOf(doc);
+      if (insertedIndex >= 0) dispatchDocs.splice(insertedIndex, 1);
+    }
+    else doc.status = "草稿";
+    draftSigned = false;
+    composeSaveState = {
+      tone: "error",
+      title: "草稿尚未保存",
+      detail: `${error.message || "後端保存失敗"}；目前輸入仍保留在此瀏覽器，請勿關閉頁面並稍後重試。`
+    };
+    renderComposeSaveStatus();
+    showToast(`${status === "草稿" ? "草稿保存" : "送出簽核"}失敗：${error.message || "請確認公司、印章與附件設定。"}`);
+    return null;
   }
   selectedDispatchId = doc.id;
   if (status === "草稿") currentComposeDraftId = doc.id;
-  createWorkflowTaskForDispatch(doc, status);
   if (status !== "草稿") {
     currentComposeDraftId = "";
+    clearComposeAutosave();
     assignNextDispatchNo(true);
     setDraftConfirmed(false);
     draftSigned = false;
@@ -5610,6 +9608,15 @@ async function saveComposeDraft() {
       renderComposeStepper();
       showToast(existingDraft ? `發文草稿已更新：${doc.no}` : `發文草稿已儲存：${doc.no}`);
     }
+  } catch (error) {
+    writeComposeAutosave();
+    composeSaveState = {
+      tone: "error",
+      title: "草稿尚未保存到系統",
+      detail: `${error.message || "後端保存失敗"}；目前輸入只保留在此瀏覽器，請勿關閉頁面並稍後重試。`
+    };
+    renderComposeSaveStatus();
+    showToast(`草稿保存失敗：${error.message || "請稍後重試。"}`);
   } finally {
     if (activeButton) activeButton.disabled = false;
   }
@@ -5695,16 +9702,10 @@ function activeAccountForRole(role) {
   return userAccounts.find((account) => account.role === role && account.status === "啟用");
 }
 
-function activeProxyForRole(role) {
-  return workflowProxies.find((proxy) => proxy.from === role && proxy.status === "啟用" && activeAccountForRole(proxy.to));
-}
-
 function resolveApprovalAssignee(role) {
   if (!role) return { ok: false, role: "", message: "簽核角色未設定" };
   if (activeAccountForRole(role)) return { ok: true, role, message: "" };
-  const proxy = activeProxyForRole(role);
-  if (proxy) return { ok: true, role: proxy.to, proxyFrom: role, message: `${role} 無啟用帳號，已套用代理 ${proxy.to}` };
-  return { ok: false, role, message: `${role} 沒有啟用帳號，也沒有可用代理人` };
+  return { ok: false, role, message: `${role} 沒有啟用帳號` };
 }
 
 function applyApprovalAssigneeResolution(approval, auditFn = null) {
@@ -5788,20 +9789,16 @@ function contractApprovalTemplate(contract) {
   const requester = contract.owner || activeRole() || "申請人";
   const steps = [
     { step: "申請人送出", role: requester, status: "完成", comment: `申請人已建立${contract.type || "用印"}資料，路由：${route.name}。` },
-    { step: "申請人主管審核", role: "主管", status: "待簽核", comment: "依 Logging 職位規劃，由申請人直屬主管確認需求與附件。" },
-    { step: "部門主管審核", role: "主任", status: "待簽核", comment: "確認部門權責、對外承諾、履約範圍與風險。" }
+    { step: "申請人主管", role: "主管", status: "待簽核", comment: "依 Finance 組織關係，由申請人直屬主管確認需求與附件。" },
+    { step: "部門主任", role: "主任", status: "待簽核", comment: "依 Finance 簽核主管關係確認部門權責、對外承諾、履約範圍與風險。" }
   ];
-  if (route.requiresAccounting) {
-    steps.push({ step: "會計複核", role: "會計", status: "待簽核", comment: "確認費用、付款條件、預算與稅務資料。" });
-  }
-  steps.push({ step: "行政部門主任核定", role: "行政部主任", status: "待簽核", comment: "確認文件完整性、用印類別、法遵留存與行政用印核准。" });
   if (route.requiresCeo) {
-    steps.push({ step: "執行長核定", role: "執行長", status: "待簽核", comment: "最高層代表、重大治理或高風險用印最終核定。" });
+    steps.push({ step: "執行長", role: "執行長", status: "待簽核", comment: "最高層代表、重大治理或高風險用印核定。" });
   }
+  steps.push({ step: "行政部門主任", role: "行政部主任", status: "待簽核", comment: "確認文件完整性、用印類別、法遵留存與行政用印核准。" });
   steps.push(
-    { step: "總務用印登錄", role: "總務", status: "待用印", comment: "核准後執行用印、留存用印影像、版本與雜湊。" },
-    { step: "申請人確認", role: requester, status: "待確認", comment: "用印完成後回到申請人確認內容、合約影像與後續辦理。" },
-    { step: "歸檔保存", role: "行政部主任", status: "待歸檔", comment: "結案後建立保存包、audit log、雜湊與續約提醒。" }
+    { step: "總務專員", role: "總務", status: "待用印", comment: "核准後執行用印、留存用印影像、版本與雜湊。" },
+    { step: "申請人收件", role: requester, status: "待確認", comment: "用印完成後回到申請人下載並確認用印檔案。" }
   );
   return steps;
 }
@@ -6762,10 +10759,10 @@ function renderContractApprovalSteps() {
   document.querySelector("#contractApprovalStatus").textContent = current ? `${route?.code || ""} · ${current.role}待處理` : contract ? `${route?.code || ""} · 流程完成` : "未選取";
   document.querySelector("#contractApprovalSteps").innerHTML = steps.length ? steps.map((approval) => `
     <article class="approval-step ${/完成|已簽署|已歸檔/.test(approval.status) ? "done" : /退回/.test(approval.status) ? "returned" : approval.id === current?.id ? "current" : ""}">
-      <time>${String(approval.stepNo).padStart(2, "0")}</time>
-      <strong>${approval.step}</strong>
-      <span>${approval.role} · ${approval.status}</span>
-      <p>${approval.comment || "等待簽核意見。"}${approval.signedAt ? ` / ${approval.signedAt}` : ""}</p>
+      <time>${escapeHtml(String(approval.stepNo).padStart(2, "0"))}</time>
+      <strong>${escapeHtml(approval.step)}</strong>
+      <span>${escapeHtml(approval.role)} · ${escapeHtml(approval.status)}</span>
+      <p>${escapeHtml(approval.comment || "等待簽核意見。")}${approval.signedAt ? ` / ${escapeHtml(approval.signedAt)}` : ""}</p>
     </article>
   `).join("") : `<p class="empty-text">尚未建立簽核流程，送簽核後系統會依文件/用印類別產生 A/B/C/D 路由。</p>`;
 }
@@ -6828,6 +10825,7 @@ function renderJagentStatus() {
   document.querySelector("#addressBookStatus").textContent = jagentState.addressResults.length ? "已查詢" : "待查詢";
   document.querySelector("#addressBookCount").textContent = `${jagentState.addressResults.length} 筆結果`;
   renderServiceGrid();
+  applyFormalExchangeUiState();
 }
 
 function renderServiceGrid() {
@@ -6846,6 +10844,7 @@ function renderServiceGrid() {
 }
 
 function certLogin() {
+  if (!guardFormalExchangeUi("憑證登入 jAgent")) return;
   jagentState.certificate = "已登入";
   jagentState.certificateNote = "憑證序號 SYC-EDOC-2026，總務";
   jagentState.token = `tk_${Date.now()}`;
@@ -6866,6 +10865,7 @@ function logoutJagent() {
 }
 
 function refreshToken() {
+  if (!guardFormalExchangeUi("刷新 jAgent Token")) return;
   if (jagentState.certificate !== "已登入") return showToast("請先完成憑證登入。");
   jagentState.token = `tk_${Date.now()}`;
   jagentState.tokenExpiresAt = Date.now() + 8 * 60 * 60 * 1000;
@@ -6875,6 +10875,7 @@ function refreshToken() {
 }
 
 function validateToken() {
+  if (!guardFormalExchangeUi("驗證 jAgent Token")) return;
   const valid = jagentState.token && jagentState.tokenExpiresAt > Date.now();
   addExchangeEvent("驗證 Token", valid ? "Token 驗證通過，可呼叫 jAgent API。" : "Token 無效或已過期。");
   showToast(valid ? "Token 驗證通過。" : "Token 無效，請重新登入。");
@@ -6891,6 +10892,7 @@ function revokeToken() {
 }
 
 function connectCenter() {
+  if (!guardFormalExchangeUi("連線交換中心")) return;
   jagentState.center = "已連線";
   jagentState.latency = `${Math.floor(38 + Math.random() * 42)}ms`;
   renderJagentStatus();
@@ -6899,6 +10901,7 @@ function connectCenter() {
 }
 
 function syncCenter() {
+  if (!guardFormalExchangeUi("同步交換中心")) return;
   if (jagentState.center !== "已連線") return showToast("請先完成交換中心連線測試。");
   jagentState.latency = `${Math.floor(35 + Math.random() * 38)}ms`;
   renderJagentStatus();
@@ -6961,6 +10964,88 @@ function renderTimeline(selector, items) {
   `).join("");
 }
 
+function archiveRecordFromOfficialDocument(item = {}) {
+  const files = Array.isArray(item.files) ? item.files : [];
+  const original = files.find((file) => ["original_pdf", "rendered_pdf", "prepared_pdf"].includes(file.file_type)) || files[0] || null;
+  const attachments = files.filter((file) => file.file_type === "attachment").map((file) => ({
+    id: file.id || "",
+    name: file.file_name || "附件",
+    version: `v${Number(file.version || 1)}`,
+    hash: file.file_hash || file.sha256 || "待驗證",
+    status: "待驗證"
+  }));
+  const logs = Array.isArray(item.logs) ? item.logs : [];
+  return {
+    id: item.id || "",
+    docNo: item.document_number || item.doc_no || item.id || "未編號",
+    direction: "發文",
+    agency: item.recipient || "未指定受文者",
+    subject: item.subject || item.title || "未命名公文",
+    status: item.disposition_status === "destroyed" ? "已銷毀" : officialStatusLabel(item.current_status || "draft"),
+    retention: item.retention_until ? `保存至 ${String(item.retention_until).slice(0, 10)}` : "保存期限待核定",
+    sealedAt: item.locked_at || item.updated_at || "-",
+    original: original?.file_name || "尚無可下載原文",
+    originalFileId: original?.id || "",
+    originalHash: original?.file_hash || original?.sha256 || "待驗證",
+    packageHash: item.archivePackageHash || "尚未建立保存包",
+    attachments,
+    exchangeEvents: [],
+    operationTrail: logs.map((log) => log.action || log.comment || "流程紀錄").filter(Boolean),
+    hashStatus: item.archiveVerificationHash ? "雜湊通過" : "尚未驗證",
+    verificationHash: item.archiveVerificationHash || "",
+    sourceRecord: item
+  };
+}
+
+async function hydrateArchiveRecord(documentId) {
+  const detail = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
+  const previous = archiveRecords.find((item) => item.id === documentId) || {};
+  const mapped = archiveRecordFromOfficialDocument({
+    ...detail,
+    archivePackageHash: previous.packageHash !== "尚未建立保存包" ? previous.packageHash : "",
+    archiveVerificationHash: previous.verificationHash || ""
+  });
+  const index = archiveRecords.findIndex((item) => item.id === documentId);
+  if (index >= 0) archiveRecords.splice(index, 1, mapped);
+  return mapped;
+}
+
+async function loadArchiveRecordsFromBackend(term = archiveSearchTerm) {
+  archiveLoadError = "";
+  try {
+    const params = new URLSearchParams({
+      q: String(term || "").trim(),
+      category: "official_documents",
+      page: "1",
+      page_size: "100"
+    });
+    const response = await backendRequest(`/search?${params}`);
+    if (!response || !Array.isArray(response.results)) throw new Error("正式歸檔清單格式不正確");
+    const mapped = response.results.map((result) => archiveRecordFromOfficialDocument(result.record || result));
+    archiveRecords.splice(0, archiveRecords.length, ...mapped);
+    archiveTotal = Number(response.total || mapped.length);
+    archiveBackendLoaded = true;
+    if (!archiveRecords.some((item) => item.id === selectedArchiveId)) selectedArchiveId = archiveRecords[0]?.id || "";
+    if (selectedArchiveId) {
+      try {
+        await hydrateArchiveRecord(selectedArchiveId);
+      } catch (error) {
+        archiveLoadError = `清單已載入，但所選公文詳情讀取失敗：${error.message}`;
+      }
+    }
+  } catch (error) {
+    archiveRecords.splice(0, archiveRecords.length);
+    archiveTotal = 0;
+    archiveBackendLoaded = true;
+    archiveLoadError = `正式歸檔資料載入失敗：${error.message}`;
+    showToast(archiveLoadError);
+  }
+  renderArchiveSummary();
+  renderArchiveRows();
+  renderArchiveDetail();
+  renderArchiveGrid();
+}
+
 function renderArchiveGrid() {
   const item = currentArchiveRecord();
   const items = item ? [
@@ -6972,8 +11057,8 @@ function renderArchiveGrid() {
   ] : archiveItems;
   document.querySelector("#archiveGrid").innerHTML = items.map(([label, value]) => `
     <article class="archive-card">
-      <span>${label}</span>
-      <strong>${value}</strong>
+      <span>${escapeDraftHtml(label)}</span>
+      <strong>${escapeDraftHtml(value)}</strong>
     </article>
   `).join("");
 }
@@ -7002,7 +11087,7 @@ function filteredArchiveRecords() {
 }
 
 function renderArchiveSummary() {
-  const originalCount = archiveRecords.length;
+  const originalCount = archiveBackendLoaded ? archiveTotal : archiveRecords.length;
   const attachmentCount = archiveRecords.reduce((sum, item) => sum + item.attachments.length, 0);
   const exchangeCount = archiveRecords.reduce((sum, item) => sum + item.exchangeEvents.length, 0);
   const hashCount = archiveRecords.filter((item) => item.hashStatus === "雜湊通過").length;
@@ -7014,29 +11099,36 @@ function renderArchiveSummary() {
 
 function renderArchiveRows() {
   const rows = filteredArchiveRecords();
-  document.querySelector("#archiveRecordCount").textContent = `${rows.length} 件`;
-  document.querySelector("#archiveRows").innerHTML = rows.map((item) => `
+  document.querySelector("#archiveRecordCount").textContent = archiveLoadError ? "載入失敗" : `${rows.length}${archiveTotal > rows.length ? ` / ${archiveTotal}` : ""} 件`;
+  document.querySelector("#archiveRows").innerHTML = archiveLoadError
+    ? `<tr><td colspan="8"><p class="empty-text">${escapeDraftHtml(archiveLoadError)}</p></td></tr>`
+    : rows.map((item) => `
     <tr class="${item.id === selectedArchiveId ? "selected-row" : ""}">
-      <td><input class="archive-check" type="checkbox" value="${item.id}" aria-label="選取 ${item.docNo}" /></td>
-      <td><button class="text-button row-select" type="button" data-archive-select="${item.id}">${item.docNo}</button><small>${item.direction} · ${item.id}</small></td>
-      <td>${item.agency}</td>
-      <td>${item.subject}</td>
-      <td>${item.original}<small>${item.attachments.length} 個附件</small></td>
-      <td>${item.hashStatus}<small>${item.packageHash}</small></td>
-      <td><span class="badge ${badgeClass(item.status)}">${item.status}</span></td>
+      <td><input class="archive-check" type="checkbox" value="${escapeDraftHtml(item.id)}" aria-label="選取 ${escapeDraftHtml(item.docNo)}" /></td>
+      <td><button class="text-button row-select" type="button" data-archive-select="${escapeDraftHtml(item.id)}">${escapeDraftHtml(item.docNo)}</button><small>${escapeDraftHtml(item.direction)} · ${escapeDraftHtml(item.id)}</small></td>
+      <td>${escapeDraftHtml(item.agency)}</td>
+      <td>${escapeDraftHtml(item.subject)}</td>
+      <td>${escapeDraftHtml(item.original)}<small>${item.attachments.length} 個附件</small></td>
+      <td>${escapeDraftHtml(item.hashStatus)}<small>${escapeDraftHtml(item.packageHash)}</small></td>
+      <td><span class="badge ${badgeClass(item.status)}">${escapeDraftHtml(item.status)}</span></td>
       <td>
         <div class="row-actions">
-          <button class="segment" type="button" data-archive-action="open" data-archive-id="${item.id}">原文</button>
-          <button class="segment" type="button" data-archive-action="verify" data-archive-id="${item.id}">驗證</button>
-          <button class="segment" type="button" data-archive-action="seal" data-archive-id="${item.id}">封存</button>
-          <button class="segment" type="button" data-archive-action="export" data-archive-id="${item.id}">匯出</button>
+          <button class="segment" type="button" data-archive-action="open" data-archive-id="${escapeDraftHtml(item.id)}">原文</button>
+          <button class="segment" type="button" data-archive-action="verify" data-archive-id="${escapeDraftHtml(item.id)}">驗證</button>
+          <button class="segment" type="button" data-archive-action="seal" data-archive-id="${escapeDraftHtml(item.id)}" disabled title="保存政策處分流程尚未開放">封存</button>
+          <button class="segment" type="button" data-archive-action="export" data-archive-id="${escapeDraftHtml(item.id)}">匯出</button>
         </div>
       </td>
     </tr>
   `).join("");
   document.querySelectorAll("[data-archive-select]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       selectedArchiveId = button.dataset.archiveSelect;
+      try {
+        await hydrateArchiveRecord(selectedArchiveId);
+      } catch (error) {
+        showToast(`公文詳情載入失敗：${error.message}`);
+      }
       renderArchiveRows();
       renderArchiveDetail();
       renderArchiveGrid();
@@ -7058,59 +11150,61 @@ function renderArchiveDetail() {
   document.querySelector("#selectedArchiveStatus").textContent = item.status;
   detail.innerHTML = `
     <div class="doc-detail">
-      <strong>${item.subject}</strong>
+      <strong>${escapeDraftHtml(item.subject)}</strong>
       <dl>
-        <div><dt>文號</dt><dd>${item.docNo}</dd></div>
-        <div><dt>方向</dt><dd>${item.direction}</dd></div>
-        <div><dt>機關</dt><dd>${item.agency}</dd></div>
-        <div><dt>原文</dt><dd>${item.original}</dd></div>
-        <div><dt>原文雜湊</dt><dd>${item.originalHash}</dd></div>
-        <div><dt>封包雜湊</dt><dd>${item.packageHash}</dd></div>
-        <div><dt>保存年限</dt><dd>${item.retention}</dd></div>
-        <div><dt>保存狀態</dt><dd>${item.status}</dd></div>
-        <div><dt>封存時間</dt><dd>${item.sealedAt}</dd></div>
+        <div><dt>文號</dt><dd>${escapeDraftHtml(item.docNo)}</dd></div>
+        <div><dt>方向</dt><dd>${escapeDraftHtml(item.direction)}</dd></div>
+        <div><dt>機關</dt><dd>${escapeDraftHtml(item.agency)}</dd></div>
+        <div><dt>原文</dt><dd>${escapeDraftHtml(item.original)}</dd></div>
+        <div><dt>原文雜湊</dt><dd>${escapeDraftHtml(item.originalHash)}</dd></div>
+        <div><dt>封包雜湊</dt><dd>${escapeDraftHtml(item.packageHash)}</dd></div>
+        <div><dt>保存年限</dt><dd>${escapeDraftHtml(item.retention)}</dd></div>
+        <div><dt>保存狀態</dt><dd>${escapeDraftHtml(item.status)}</dd></div>
+        <div><dt>封存時間</dt><dd>${escapeDraftHtml(item.sealedAt)}</dd></div>
       </dl>
       <div class="archive-detail-list">
         <strong>附件清冊</strong>
-        ${item.attachments.map((attachment) => `<button class="file-chip" type="button" data-archive-attachment="${attachment.name}">${attachment.name} · ${attachment.version} · ${attachment.hash} · ${attachment.status}</button>`).join("")}
+        ${item.attachments.length ? item.attachments.map((attachment) => `<button class="file-chip" type="button" data-archive-attachment="${escapeDraftHtml(attachment.id || "")}">${escapeDraftHtml(attachment.name)} · ${escapeDraftHtml(attachment.version)} · ${escapeDraftHtml(attachment.hash)} · ${escapeDraftHtml(attachment.status)}</button>`).join("") : `<p>無附件</p>`}
       </div>
       <div class="archive-detail-list">
         <strong>交換事件</strong>
-        <p>${item.exchangeEvents.join(" → ")}</p>
+        <p>${escapeDraftHtml(item.exchangeEvents.join(" → ") || "正式交換 provider 尚未啟用，無交換事件。")}</p>
       </div>
       <div class="archive-detail-list">
         <strong>操作軌跡</strong>
-        <p>${item.operationTrail.join(" → ")}</p>
+        <p>${escapeDraftHtml(item.operationTrail.join(" → ") || "尚無流程紀錄。")}</p>
       </div>
       <div class="detail-actions">
-        <button class="primary-button" type="button" id="detailArchiveSealBtn" ${canUseDocAction(item, "seal") ? "" : "disabled"}>封存</button>
+        <button class="primary-button" type="button" id="detailArchiveSealBtn" disabled title="保存政策處分流程尚未開放">封存</button>
         <button class="secondary-button" type="button" id="detailArchiveVerifyBtn">驗證雜湊</button>
-        <button class="secondary-button" type="button" id="detailArchiveOpenBtn" ${canUseDocAction(item, "view") ? "" : "disabled"}>檢視原文</button>
-        <button class="secondary-button" type="button" id="detailArchiveExportBtn" ${canUseDocAction(item, "download") ? "" : "disabled"}>匯出保存包</button>
+        <button class="secondary-button" type="button" id="detailArchiveOpenBtn">檢視原文</button>
+        <button class="secondary-button" type="button" id="detailArchiveExportBtn">匯出保存包</button>
       </div>
-      ${renderDocumentAclPanel(item)}
+      ${archiveBackendLoaded
+        ? `<p class="empty-text">檢視、驗證、附件與保存包下載皆由後端依正式流程參與者及權限即時判斷。</p>`
+        : renderDocumentAclPanel(item)}
     </div>
   `;
   document.querySelectorAll("[data-archive-attachment]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (!canUseDocAction(item, "download")) return showToast("此角色未取得本保存件附件下載/檢視權限。");
-      showToast(`已開啟附件保存檢視：${button.dataset.archiveAttachment}`);
+      if (!button.dataset.archiveAttachment) return showToast("此附件尚無正式檔案識別碼，無法下載。");
+      void downloadOfficialWorkflowFile(item.id, button.dataset.archiveAttachment);
     });
   });
   document.querySelector("#detailArchiveSealBtn").addEventListener("click", () => runArchiveAction("seal", [item.id]));
   document.querySelector("#detailArchiveVerifyBtn").addEventListener("click", () => runArchiveAction("verify", [item.id]));
   document.querySelector("#detailArchiveOpenBtn").addEventListener("click", () => runArchiveAction("open", [item.id]));
   document.querySelector("#detailArchiveExportBtn").addEventListener("click", () => runArchiveAction("export", [item.id]));
-  bindDocumentAclButtons(item, renderArchiveDetail);
+  if (!archiveBackendLoaded) bindDocumentAclButtons(item, renderArchiveDetail);
 }
 
 function renderArchiveAuditLog() {
   document.querySelector("#archiveAuditLog").innerHTML = archiveAuditLog.map(([time, title, body]) => `
     <article class="timeline-item">
-      <time>${time}</time>
+      <time>${escapeDraftHtml(time)}</time>
       <div>
-        <strong>${title}</strong>
-        <p>${body}</p>
+        <strong>${escapeDraftHtml(title)}</strong>
+        <p>${escapeDraftHtml(body)}</p>
       </div>
     </article>
   `).join("");
@@ -7128,41 +11222,70 @@ function mutateArchive(ids, handler, auditTitle, auditBody) {
   addArchiveAudit(auditTitle, auditBody);
 }
 
-function runArchiveAction(action, ids) {
+async function runArchiveAction(action, ids) {
   const targetIds = ids?.length ? ids : selectedArchiveIds();
   if (!targetIds.length) return showToast("請先選取要歸檔保存的公文。");
-  const requiredAcl = { open: "view", export: "download", seal: "seal" }[action];
-  if (requiredAcl) {
-    const denied = targetIds.map((id) => archiveRecords.find((record) => record.id === id)).filter((item) => item && !canUseDocAction(item, requiredAcl));
-    if (denied.length) return showToast("此角色未取得部分歸檔公文的作業權限。");
+  if (action === "seal") {
+    return showToast("封存／處分仍須完成法務凍結、屆期清冊與雙人核准流程；目前不開放，系統不會假裝封存成功。");
   }
   if (action === "open") {
     const item = archiveRecords.find((record) => record.id === targetIds[0]);
-    addArchiveAudit("檢視原文", `已開啟 ${item?.docNo || "選取公文"} 的原文、附件與封包索引。`);
-    return showToast(`已開啟原文檢視：${item?.original || "保存檔"}`);
+    if (!item) return showToast("找不到選取的正式公文。");
+    selectedOfficialDocumentId = item.id;
+    setView(isRouteAllowed("dispatch") ? "dispatch" : "notifications");
+    await loadOfficialDocumentDetail(item.id);
+    addArchiveAudit("檢視正式公文", `已轉至 ${item.docNo} 的正式詳情與授權下載區。`);
+    return;
   }
   if (action === "verify") {
-    mutateArchive(targetIds, (item) => {
-      item.hashStatus = "雜湊通過";
-      item.attachments = item.attachments.map((attachment) => ({ ...attachment, status: "雜湊通過" }));
-      if (item.status === "需複核") item.status = "待封存";
-      item.operationTrail.push("雜湊驗證");
-    }, "完成檔案雜湊驗證", `已驗證 ${targetIds.length} 件原文、附件與交換封包 SHA-256。`);
-    return showToast("檔案雜湊驗證完成。");
-  }
-  if (action === "seal") {
-    mutateArchive(targetIds, (item) => {
-      item.status = "已封存";
-      item.hashStatus = "雜湊通過";
-      item.sealedAt = new Date().toLocaleString("zh-TW", { hour12: false });
-      item.attachments = item.attachments.map((attachment) => ({ ...attachment, status: "雜湊通過" }));
-      item.operationTrail.push("歸檔封存");
-    }, "完成歸檔封存", `已封存 ${targetIds.length} 件，包含原文、附件、交換事件、操作軌跡與雜湊。`);
-    return showToast("歸檔封存完成。");
+    try {
+      for (const id of targetIds) {
+        const result = await backendRequest(`/official-documents/${encodeURIComponent(id)}/archive-verify`, { method: "POST", body: "{}" });
+        if (!result?.ok || !result.verification_sha256) throw new Error("後端未回傳可驗證的 SHA-256 證據");
+        const item = archiveRecords.find((record) => record.id === id);
+        if (item) {
+          item.hashStatus = "雜湊通過";
+          item.verificationHash = result.verification_sha256;
+          item.attachments = item.attachments.map((attachment) => ({ ...attachment, status: "雜湊通過" }));
+          item.operationTrail.push(`後端雜湊驗證 ${result.verification_sha256}`);
+        }
+      }
+      renderArchiveSummary();
+      renderArchiveRows();
+      renderArchiveDetail();
+      renderArchiveGrid();
+      addArchiveAudit("完成後端雜湊驗證", `已由後端逐檔重讀並驗證 ${targetIds.length} 件正式公文來源。`);
+      return showToast("正式檔案雜湊驗證完成。");
+    } catch (error) {
+      addArchiveAudit("雜湊驗證失敗", error.message);
+      return showToast(`雜湊驗證失敗：${error.message}`);
+    }
   }
   if (action === "export") {
-    addArchiveAudit("匯出保存包", `已匯出 ${targetIds.length} 件保存包，內含原文、附件、交換事件、操作軌跡與 hash manifest。`);
-    return showToast("保存包已產生。");
+    try {
+      for (const id of targetIds) {
+        const item = archiveRecords.find((record) => record.id === id);
+        if (isProductionEdocHost()) {
+          const result = await backendRequest(`/official-documents/${encodeURIComponent(id)}/archive-export`, { method: "POST", body: "{}" });
+          if (!result?.download_url || !result?.export?.package_sha256) throw new Error("後端未回傳保存包下載證據");
+          const link = document.createElement("a");
+          link.href = result.download_url;
+          link.rel = "noopener noreferrer";
+          link.click();
+          if (item) item.packageHash = result.export.package_sha256;
+        } else {
+          await downloadBinaryFile(`/official-documents/${encodeURIComponent(id)}/archive-export`, `${id}-archive.zip`, { method: "POST" });
+        }
+      }
+      renderArchiveRows();
+      renderArchiveDetail();
+      renderArchiveGrid();
+      addArchiveAudit("匯出正式保存包", `後端已產生並下載 ${targetIds.length} 件保存包；內含 manifest 與整包 SHA-256。`);
+      return showToast("正式保存包已產生並開始下載。");
+    } catch (error) {
+      addArchiveAudit("保存包匯出失敗", error.message);
+      return showToast(`保存包匯出失敗：${error.message}`);
+    }
   }
 }
 
@@ -7817,6 +11940,417 @@ function syncRoleOptions() {
   });
 }
 
+function accountLaunchAccessReadiness() {
+  const internalReadiness = goLiveAuditState?.internalReadiness || {};
+  const smokeReport = goLiveAuditState?.launchSmokeReport || internalReadiness.launchSmokeReport || {};
+  return smokeReport.accessReadiness || launchDataReadinessChecks().accessReadiness || {};
+}
+
+function accountRequiredLaunchRoles() {
+  return ["員工", "主管", "行政部主任", "總務"];
+}
+
+function accountFormalRoleTasks() {
+  if (accountReadinessPackage?.roleTasks?.length) {
+    return accountReadinessPackage.roleTasks.map((item) => ({
+      role: item.role,
+      required: Boolean(item.required),
+      activeCount: item.activeCount || 0,
+      formalAccountCount: item.formalAccountCount || 0,
+      demoSeedCount: item.demoSeedCount || 0,
+      hasFormalAccount: Boolean(item.hasFormalAccount),
+      status: item.status || "",
+      severity: item.severity || "",
+      nextAction: item.nextAction || "",
+      doneWhen: item.doneWhen || "",
+      suggestedProfile: item.suggestedProfile || {}
+    }));
+  }
+  const access = accountLaunchAccessReadiness();
+  const roleChecks = access.roleChecks || access.checks?.roleChecks || [];
+  const required = accountRequiredLaunchRoles();
+  return roleChecks
+    .filter((item) => required.includes(item.role) || !item.hasFormalAccount)
+    .map((item) => ({
+      role: item.role,
+      required: required.includes(item.role),
+      activeCount: item.activeCount || 0,
+      formalAccountCount: item.formalAccountCount || 0,
+      demoSeedCount: item.demoSeedCount || 0,
+      hasFormalAccount: Boolean(item.hasFormalAccount)
+    }));
+}
+
+function accountLaunchRoleDefaults(role = "員工") {
+  const packageProfile = (accountReadinessPackage?.roleTasks || []).find((item) => item.role === role)?.suggestedProfile || {};
+  const fallback = {
+    員工: { name: "正式員工帳號", email: "staff@suiyuecare.com", unit: "行政部", title: "承辦人", jobLevel: "職員" },
+    主管: { name: "正式主管帳號", email: "manager@suiyuecare.com", unit: "營運管理部", title: "申請人主管", jobLevel: "課長" },
+    行政部主任: { name: "行政部主任", email: "admin.director@suiyuecare.com", unit: "行政部", title: "行政部主任", jobLevel: "部長" },
+    總務: { name: "總務正式帳號", email: "general.affairs@suiyuecare.com", unit: "總務", title: "總務", jobLevel: "職員" },
+    業務助理: { name: "業務助理正式帳號", email: "assistant@suiyuecare.com", unit: "業務部", title: "業務助理", jobLevel: "職員" }
+  }[role] || { name: `${role}正式帳號`, email: `${role}@suiyuecare.com`, unit: role, title: role, jobLevel: jobLevelForRole(role) };
+  return { ...fallback, ...packageProfile };
+}
+
+async function ensureAccountLaunchAudit() {
+  if ((accountLaunchAccessReadiness().roleChecks || accountLaunchAccessReadiness().checks?.roleChecks || []).length && accountReadinessPackage) return goLiveAuditState;
+  try {
+    const [result, accountResult] = await Promise.all([
+      fetchOpsJson("/production/go-live-audit"),
+      fetchOpsJson("/production/account-readiness-package").catch((error) => ({ ok: false, data: null, error }))
+    ]);
+    if (result.ok && result.data) {
+      goLiveAuditState = result.data;
+      renderGoLiveAuditViews();
+    }
+    if (accountResult.ok && accountResult.data?.reportType === "edoc_account_launch_readiness") {
+      accountReadinessPackage = accountResult.data;
+    }
+    return goLiveAuditState;
+  } catch (error) {
+    addAccountAudit("讀取正式帳號缺口失敗", error.message || "go-live audit api failed");
+  }
+  return null;
+}
+
+function prefillFormalAccountRole(role = "員工") {
+  const defaults = accountLaunchRoleDefaults(role);
+  const fields = {
+    "#accountName": defaults.name,
+    "#accountEmail": defaults.email,
+    "#accountUnit": defaults.unit,
+    "#accountTitleInput": defaults.title,
+    "#accountJobLevel": defaults.jobLevel,
+    "#accountRoleSelect": role,
+    "#accountProvider": "Google Workspace",
+    "#accountMfa": "待設定"
+  };
+  Object.entries(fields).forEach(([selector, value]) => {
+    const element = document.querySelector(selector);
+    if (element) element.value = value;
+  });
+  syncAccountJobLevelWithRole(false);
+  document.querySelector("#accountForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  document.querySelector("#accountName")?.focus({ preventScroll: true });
+  addAccountAudit("帶入正式帳號資料", `${role} 的正式帳號欄位已帶入，請改成實際同仁姓名與公司 Email。`);
+  showToast(`已帶入 ${role} 正式帳號範本。`);
+}
+
+function accountRosterTemplateRows() {
+  if (accountReadinessPackage?.rosterImportTemplate?.rows?.length) {
+    return accountReadinessPackage.rosterImportTemplate.rows;
+  }
+  return accountFormalRoleTasks()
+    .filter((task) => !task.hasFormalAccount)
+    .map((task) => {
+      const defaults = accountLaunchRoleDefaults(task.role);
+      return {
+        role: task.role,
+        required: task.required ? "true" : "false",
+        name: "",
+        email: "",
+        unit: defaults.unit || task.role,
+        title: defaults.title || task.role,
+        job_level: defaults.jobLevel || jobLevelForRole(task.role),
+        provider: defaults.provider || "Google Workspace",
+        mfa_status: "待設定",
+        status: "啟用",
+        account_source: "formal_roster",
+        done_when: task.doneWhen || `${task.role} formalAccountCount >= 1`,
+        notes: "請填公司正式姓名與 Email；不可使用 demo/seed 帳號或共用信箱。"
+      };
+    });
+}
+
+async function exportFormalAccountRosterTemplate() {
+  await ensureAccountLaunchAudit();
+  const template = accountReadinessPackage?.rosterImportTemplate || {};
+  const headers = template.headers || ["role", "required", "name", "email", "unit", "title", "job_level", "provider", "mfa_status", "status", "account_source", "done_when", "notes"];
+  const rows = accountRosterTemplateRows();
+  if (!rows.length) {
+    showToast("目前沒有缺正式帳號的角色需要匯出。");
+    return;
+  }
+  const csv = [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => csvCell(row[header] ?? "")).join(","))
+  ].join("\n");
+  const fileName = template.fileName || `edoc-formal-account-import-template-${launchSmokeDateValue()}.csv`;
+  downloadTextFile(fileName, csv, "text/csv;charset=utf-8");
+  addAccountAudit("匯出正式帳號範本", `${fileName} 已匯出，共 ${rows.length} 個角色待補；CSV 不含密碼與實際使用者 Email。`);
+  showToast(`已匯出 ${rows.length} 筆正式帳號補件範本。`);
+}
+
+function parseCsvRows(text = "") {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (quoted) {
+      if (char === "\"" && next === "\"") {
+        cell += "\"";
+        index += 1;
+      } else if (char === "\"") {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+    } else if (char === "\"") {
+      quoted = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (char !== "\r") {
+      cell += char;
+    }
+  }
+  row.push(cell);
+  if (row.some((value) => value.trim())) rows.push(row);
+  const headers = (rows.shift() || []).map((header) => header.trim());
+  return rows
+    .filter((values) => values.some((value) => String(value || "").trim()))
+    .map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
+}
+
+function mergeImportedFormalAccounts(imported = []) {
+  imported.forEach((item) => {
+    const user = item.user || {};
+    if (!user.email) return;
+    const existing = userAccounts.find((account) => account.email === user.email);
+    const account = {
+      id: user.id || existing?.id || `USR-${Date.now()}`,
+      name: user.name || existing?.name || user.email,
+      email: user.email,
+      unit: user.unit || existing?.unit || "",
+      title: user.title || existing?.title || user.role || "",
+      jobLevel: user.job_level || existing?.jobLevel || jobLevelForRole(user.role),
+      role: user.role || existing?.role || "員工",
+      provider: user.provider || existing?.provider || "Google Workspace",
+      mfa: user.mfa_status || existing?.mfa || "待設定",
+      status: user.status || existing?.status || "啟用",
+      lastLogin: user.last_login_at || existing?.lastLogin || "尚未登入",
+      ip: existing?.ip || "-",
+      device: existing?.device || "尚未綁定"
+    };
+    if (existing) Object.assign(existing, account);
+    else userAccounts.unshift(account);
+    selectedAccountId = account.id;
+  });
+}
+
+async function importFormalAccountRosterRows(rows = []) {
+  if (!rows.length) return showToast("CSV 沒有可匯入的帳號列。");
+  if (!hasAuthenticatedBackendSession()) {
+    addAccountAudit("正式帳號匯入被阻擋", "請先用具備 system_permissions.manage 的正式帳號登入，再匯入 roster。");
+    return showToast("請先用系統管理員或行政部主任正式帳號登入。");
+  }
+  if (!confirmOperation("匯入正式帳號", `即將匯入 ${rows.length} 筆帳號 metadata。CSV 不可包含密碼、PIN、API key 或私人金鑰。`)) return;
+  try {
+    const result = await backendRequest("/production/formal-account-roster/import", {
+      method: "POST",
+      body: JSON.stringify({ rows, actor: authState?.user?.email || activeRole() })
+    });
+    mergeImportedFormalAccounts(result.imported || []);
+    if (result.accountReadinessPackage) accountReadinessPackage = result.accountReadinessPackage;
+    await ensureAccountLaunchAudit();
+    renderAccounts();
+    addAccountAudit("匯入正式帳號 roster", `成功 ${result.summary?.imported || 0} 筆、失敗 ${result.summary?.failed || 0} 筆；不含密碼。`);
+    showToast(`正式帳號匯入完成：成功 ${result.summary?.imported || 0} 筆。`);
+    if (result.errors?.length) {
+      addAccountAudit("正式帳號匯入部分失敗", result.errors.map((item) => `第 ${item.row} 列：${item.error}`).join("；"));
+    }
+  } catch (error) {
+    addAccountAudit("匯入正式帳號失敗", error.message);
+    showToast(`匯入失敗：${error.message}`);
+  }
+}
+
+function handleFormalAccountRosterImportFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const rows = parseCsvRows(String(reader.result || ""));
+    void importFormalAccountRosterRows(rows);
+  };
+  reader.onerror = () => showToast("讀取 CSV 失敗，請重新選檔。");
+  reader.readAsText(file, "utf-8");
+}
+
+function mergeImportedCompanyLaunchRoster(imported = []) {
+  imported.forEach((item) => {
+    const company = item.company || {};
+    if (!company.id || !company.name) return;
+    const status = company.status === "active" || company.status === "啟用" ? "啟用" : "停用";
+    const registryCompany = {
+      id: company.id,
+      name: company.name,
+      taxId: company.tax_id || company.taxId || "待設定",
+      tax_id: company.tax_id || company.taxId || "待設定",
+      status
+    };
+    const existingRegistry = companyRegistry.find((row) => row.id === registryCompany.id);
+    if (existingRegistry) Object.assign(existingRegistry, registryCompany);
+    else companyRegistry.unshift(registryCompany);
+
+    const sealCompany = {
+      id: company.id,
+      name: company.name,
+      tax_id: registryCompany.tax_id,
+      status: status === "啟用" ? "active" : "inactive"
+    };
+    const existingSealCompany = companySealCompanies.find((row) => row.id === sealCompany.id);
+    if (existingSealCompany) Object.assign(existingSealCompany, sealCompany);
+    else companySealCompanies.unshift(sealCompany);
+  });
+}
+
+async function importCompanyLaunchRosterRows(rows = []) {
+  if (!rows.length) return showToast("CSV 沒有可匯入的公司列。");
+  if (!hasAuthenticatedBackendSession()) {
+    addOpsAudit("公司名冊匯入被阻擋", "請先用具備 companies 管理權限的正式帳號登入；CSV 只允許公司 metadata。");
+    return showToast("請先用行政部主任、總務或系統管理員正式帳號登入。");
+  }
+  if (!confirmOperation("匯入公司上線名冊", `即將匯入 ${rows.length} 筆公司 metadata。CSV 不可包含密碼、API key、service role key、原章圖檔、公開連結或正式公文內容。`)) return;
+  try {
+    const result = await backendRequest("/production/company-launch-roster/import", {
+      method: "POST",
+      body: JSON.stringify({ rows, actor: authState?.user?.email || activeRole() })
+    });
+    mergeImportedCompanyLaunchRoster(result.imported || []);
+    if (result.sealVaultReadiness?.reportType === "seal_vault_launch_readiness") companySealVaultReadinessReport = result.sealVaultReadiness;
+    if (result.launchCutoverPackage?.productionCutoverReadiness?.reportType === "edoc_production_cutover_readiness") {
+      productionCutoverReadinessPackage = result.launchCutoverPackage.productionCutoverReadiness;
+    } else {
+      productionCutoverReadinessPackage = null;
+      await ensureProductionCutoverReadinessPackage();
+    }
+    addOpsAudit("匯入公司上線名冊", `成功 ${result.summary?.imported || 0} 筆、失敗 ${result.summary?.failed || 0} 筆；不含 secret、原章與正式文件內容。`);
+    if (result.errors?.length) {
+      addOpsAudit("公司名冊匯入部分失敗", result.errors.map((item) => `第 ${item.row} 列：${item.error}`).join("；"));
+    }
+    renderOpsProductionChecklist();
+    renderCompanySealGlobalReadiness();
+    renderCompanySealModule();
+    showToast(`公司名冊匯入完成：成功 ${result.summary?.imported || 0} 筆。`);
+  } catch (error) {
+    addOpsAudit("匯入公司上線名冊失敗", error.message);
+    showToast(`匯入失敗：${error.message}`);
+  }
+}
+
+function handleCompanyLaunchRosterImportFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const rows = parseCsvRows(String(reader.result || ""));
+    void importCompanyLaunchRosterRows(rows);
+  };
+  reader.onerror = () => showToast("讀取公司名冊 CSV 失敗，請重新選檔。");
+  reader.readAsText(file, "utf-8");
+}
+
+function focusAccountRole(role = "") {
+  accountFilter = "all";
+  accountSearchTerm = role;
+  const search = document.querySelector("#accountSearch");
+  if (search) search.value = role;
+  document.querySelectorAll("[data-account-filter]").forEach((item) => item.classList.toggle("active", item.dataset.accountFilter === "all"));
+  renderAccounts();
+  document.querySelector("#accountRows")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function renderAccountLaunchReadiness() {
+  const panel = document.querySelector("#accountLaunchReadinessPanel");
+  const status = document.querySelector("#accountLaunchReadinessStatus");
+  const summary = document.querySelector("#accountLaunchReadinessSummary");
+  const list = document.querySelector("#accountLaunchReadinessList");
+  if (!panel || !status || !summary || !list) return;
+  const access = accountLaunchAccessReadiness();
+  const tasks = accountFormalRoleTasks();
+  const counts = accountReadinessPackage?.summary || access.counts || access.checks || {};
+  const policyTasks = accountReadinessPackage?.policyTasks || [];
+  if (!tasks.length) {
+    status.textContent = "待檢查";
+    summary.textContent = "系統正在讀取 Finance 人員主檔與同步狀態；eDoc 不另建第二份名冊。";
+    list.innerHTML = `
+      <article class="account-readiness-card wait">
+        <div>
+          <span>正式帳號</span>
+          <strong>尚未取得上線檢核</strong>
+          <p>讀取後會列出申請人、主管、行政部主任與總務是否已由 Finance 正確同步。</p>
+        </div>
+        <button class="secondary-button" type="button" data-account-readiness-refresh="true">讀取檢核</button>
+      </article>
+    `;
+  } else {
+    const requiredMissing = tasks.filter((item) => item.required && !item.hasFormalAccount);
+    const optionalMissing = tasks.filter((item) => !item.required && !item.hasFormalAccount);
+    status.textContent = requiredMissing.length ? `${requiredMissing.length} 個角色缺正式帳號` : "正式角色可登入";
+    summary.textContent = requiredMissing.length
+      ? `下週一核心流程尚缺 ${requiredMissing.map((item) => item.role).join("、")} 的正式帳號；demo 帳號 ${counts.demoSeedUserCount || 0} 個，正式站必須關閉測試登入。`
+      : `核心角色皆已有正式帳號；demo 帳號 ${counts.demoSeedUserCount || 0} 個，demo 停用狀態：${counts.demoAccountsDisabled ? "已停用" : "待確認"}。${accountReadinessPackage ? ` 補件包：${accountReadinessPackage.decision}` : ""}`;
+    list.innerHTML = [
+      accountReadinessPackage ? `
+        <article class="account-readiness-card ${accountReadinessPackage.decision === "BLOCKED" ? "issue" : accountReadinessPackage.decision === "WARN" ? "wait" : "pass"}">
+          <div>
+            <span>Account Package</span>
+            <strong>正式帳號補件包</strong>
+            <p>角色 ${counts.readyRequiredRoleCount || 0}/${counts.requiredRoleCount || 4} 就緒 · blocker ${counts.blockerCount || 0} · warning ${counts.warningCount || 0} · 匯入範本 ${accountReadinessPackage.rosterImportTemplate?.rows?.length || 0} 筆</p>
+          </div>
+          <button class="secondary-button" type="button" data-account-readiness-refresh="true">重新讀取</button>
+        </article>
+      ` : "",
+      ...tasks.map((task) => {
+        const tone = task.hasFormalAccount ? "pass" : task.required ? "issue" : "wait";
+        const statusText = task.status || (task.hasFormalAccount ? "已有正式帳號" : task.required ? "缺正式帳號" : "建議補正式帳號");
+        return `
+          <article class="account-readiness-card ${tone}">
+            <div>
+              <span>${escapeDraftHtml(statusText)}</span>
+              <strong>${escapeDraftHtml(task.role)}</strong>
+              <p>啟用 ${task.activeCount} · 正式 ${task.formalAccountCount} · seed/demo ${task.demoSeedCount}${task.doneWhen ? ` · ${escapeDraftHtml(task.doneWhen)}` : ""}</p>
+            </div>
+            <button class="secondary-button" type="button" data-account-readiness-role="${escapeDraftHtml(task.role)}" data-account-readiness-ready="${task.hasFormalAccount ? "true" : "false"}">${task.hasFormalAccount ? "檢視同步結果" : "請至會計系統維護"}</button>
+          </article>
+        `;
+      }),
+      ...policyTasks.map((task) => `
+        <article class="account-readiness-card ${task.severity === "blocker" ? "issue" : task.severity === "warning" ? "wait" : "pass"}">
+          <div>
+            <span>${escapeDraftHtml(task.status || "待確認")}</span>
+            <strong>${escapeDraftHtml(task.title || task.key)}</strong>
+            <p>${escapeDraftHtml(task.nextAction || task.doneWhen || task.evidence || "")}</p>
+          </div>
+          <button class="secondary-button" type="button" data-account-readiness-refresh="true">重新檢查</button>
+        </article>
+      `),
+      optionalMissing.length ? "" : ""
+    ].join("");
+  }
+  list.querySelectorAll("[data-account-readiness-refresh]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await ensureAccountLaunchAudit();
+      renderAccounts();
+    });
+  });
+  list.querySelectorAll("[data-account-readiness-role]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const role = button.dataset.accountReadinessRole;
+      if (button.dataset.accountReadinessReady === "true") focusAccountRole(role);
+      else showToast(`${role} 尚未由 Finance 同步；請只在會計系統新增或修正人員資料。`);
+    });
+  });
+}
+
 function renderAccountSummary() {
   const enabled = userAccounts.filter((account) => account.status === "啟用").length;
   const mfaReady = userAccounts.filter((account) => account.mfa === "已啟用").length;
@@ -7825,8 +12359,8 @@ function renderAccountSummary() {
   document.querySelector("#accountUserNote").textContent = `${userAccounts.length - enabled} 個停用帳號`;
   document.querySelector("#accountMfaCount").textContent = `${Math.round((mfaReady / Math.max(userAccounts.length, 1)) * 100)}%`;
   document.querySelector("#accountMfaNote").textContent = `${mfaReady} 個帳號已啟用 MFA`;
-  document.querySelector("#accountSsoStatus").textContent = accountSsoState.status;
-  document.querySelector("#accountSsoNote").textContent = `${ssoUsers} 個 SSO 帳號 · ${accountSsoState.provider}`;
+  document.querySelector("#accountSsoStatus").textContent = authState?.user ? "已沿用登入" : "等待 Finance 登入";
+  document.querySelector("#accountSsoNote").textContent = `${ssoUsers} 個同步帳號 · Finance Google SSO`;
   document.querySelector("#accountDeviceCount").textContent = accountDevices.length;
   document.querySelector("#accountDeviceNote").textContent = `${accountIpRules.filter((rule) => rule.status === "允許").length} 條允許 IP 規則`;
 }
@@ -7842,13 +12376,7 @@ function renderAccountRows() {
       <td>${account.role}</td>
       <td>${account.provider}<small>MFA：${account.mfa}</small></td>
       <td><span class="status-pill ${badgeClass(account.status)}">${account.status}</span></td>
-      <td>
-        <div class="row-actions">
-          <button class="segment" type="button" data-account-action="enable" data-account-id="${account.id}">啟用</button>
-          <button class="segment" type="button" data-account-action="disable" data-account-id="${account.id}">停用</button>
-          <button class="segment" type="button" data-account-action="resetMfa" data-account-id="${account.id}">重設 MFA</button>
-        </div>
-      </td>
+      <td><span class="status-pill">${String(account.account_source || "finance").toLowerCase() === "finance" ? "Finance 自動同步" : "歷史唯讀"}</span></td>
     </tr>
   `).join("");
   document.querySelectorAll("[data-account-select]").forEach((button) => {
@@ -7856,9 +12384,6 @@ function renderAccountRows() {
       selectedAccountId = button.dataset.accountSelect;
       renderAccounts();
     });
-  });
-  document.querySelectorAll("[data-account-action]").forEach((button) => {
-    button.addEventListener("click", () => runAccountAction(button.dataset.accountAction, [button.dataset.accountId]));
   });
 }
 
@@ -7937,10 +12462,10 @@ function renderAccountIpRules() {
 
 function renderSsoStatus() {
   const statusItems = [
-    ["提供者", accountSsoState.provider],
-    ["網域 / Tenant", accountSsoState.domain],
-    ["連線狀態", accountSsoState.status],
-    ["最近測試", accountSsoState.lastTest]
+    ["提供者", "Finance Google SSO"],
+    ["人員主檔", "會計系統（唯一來源）"],
+    ["連線狀態", authState?.user ? "已沿用同一登入" : "等待登入"],
+    ["修改方式", "僅在會計系統修改一次"]
   ];
   document.querySelector("#ssoStatusGrid").innerHTML = statusItems.map(([label, value]) => `
     <article class="archive-card">
@@ -7965,6 +12490,7 @@ function renderAccountAuditLog() {
 function renderAccounts() {
   syncRoleOptions();
   renderAccountSummary();
+  renderAccountLaunchReadiness();
   renderAccountRows();
   renderAccountDetail();
   renderSsoStatus();
@@ -7973,47 +12499,36 @@ function renderAccounts() {
   renderAccountAuditLog();
 }
 
+async function refreshFinanceAccountProjection() {
+  if (!authState?.token) return showToast("請先由會計系統入口登入。");
+  const button = document.querySelector("#accountRefreshBtn");
+  if (button) button.disabled = true;
+  try {
+    const current = await backendRequest("/auth/me");
+    authState = { ...current, token: authState.token, bridge: current.bridge || authState.bridge };
+    persistAuthenticatedSession(authState);
+    syncUserAccountFromSession(authState, "Finance Google SSO");
+    applyAuthUser();
+    await Promise.all([loadFinanceCompanyDirectory(), ensureAccountLaunchAudit()]);
+    renderAccounts();
+    addAccountAudit("重新載入 Finance 同步資料", "已重新驗證目前帳號、公司、部門、職級、主管與權限快照。");
+    showToast("已重新載入會計系統同步資料。");
+  } catch (error) {
+    addAccountAudit("Finance 同步資料載入失敗", error.message || "finance_sync_refresh_failed");
+    showToast("暫時無法重新載入；系統會在下次操作時再次自動同步。");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function runAccountAction(action, ids = selectedAccountIds()) {
-  const label = { enable: "啟用帳號", disable: "停用帳號", resetMfa: "重設 MFA", forceMfa: "強制 MFA" }[action] || "更新帳號";
-  ids.forEach((id) => {
-    const account = userAccounts.find((item) => item.id === id);
-    if (!account) return;
-    if (action === "enable") account.status = "啟用";
-    if (action === "disable") account.status = "停用";
-    if (action === "resetMfa") account.mfa = "強制重設";
-    if (action === "forceMfa" && account.mfa !== "已啟用") account.mfa = "待設定";
-  });
-  renderAccounts();
-  addAccountAudit(label, `已處理 ${ids.length} 個使用者帳號。`);
-  showToast(`${label}完成。`);
+  void action;
+  void ids;
+  showToast("帳號啟用、停用與登入設定請只在會計系統修改；eDoc 會自動同步。");
 }
 
 function createAccountFromForm() {
-  const name = document.querySelector("#accountName").value.trim();
-  const email = document.querySelector("#accountEmail").value.trim();
-  const unit = document.querySelector("#accountUnit").value.trim();
-  const title = document.querySelector("#accountTitleInput").value.trim();
-  const rawRole = document.querySelector("#accountRoleSelect").value;
-  const jobLevel = normalizeRosterJobLevel(document.querySelector("#accountJobLevel")?.value || jobLevelForRole(rawRole));
-  const derivedRole = deriveRoleFromRosterProfile({ jobLevel, title, unit });
-  const role = rolePermissions[rawRole] ? rawRole : derivedRole;
-  const provider = document.querySelector("#accountProvider").value;
-  const mfa = document.querySelector("#accountMfa").value;
-  if (!name || !email || !unit || !title) return showToast("請輸入姓名、Email、單位與職稱。");
-  if (!rolePermissions[role]) rolePermissions[role] = ["view_assigned"];
-  const existing = userAccounts.find((account) => account.email === email);
-  if (existing) {
-    Object.assign(existing, { name, unit, title, jobLevel, role, provider, mfa, status: "啟用" });
-    selectedAccountId = existing.id;
-    addAccountAudit("更新使用者", `${name} 的單位、職稱、職等、角色與登入方式已更新。`);
-  } else {
-    const id = `USR-${String(userAccounts.length + 1).padStart(3, "0")}`;
-    userAccounts.unshift({ id, name, email, unit, title, jobLevel, role, provider, mfa, status: "啟用", lastLogin: "尚未登入", ip: "-", device: "尚未綁定" });
-    selectedAccountId = id;
-    addAccountAudit("建立使用者", `${name} 已建立為 ${role}（${jobLevel}），登入方式 ${provider}。`);
-  }
-  renderAccounts();
-  showToast("使用者帳號已儲存。");
+  showToast("請在會計系統新增或編輯人員；eDoc 不維護第二份人員主檔。");
 }
 
 function connectSso() {
@@ -8075,15 +12590,7 @@ function mutateAccountIpRule(id, action) {
 }
 
 function syncAccountsFromRoles() {
-  syncRoleOptions();
-  const missingRoles = Object.keys(rolePermissions).filter((role) => !userAccounts.some((account) => account.role === role));
-  missingRoles.forEach((role) => {
-    const id = `USR-${String(userAccounts.length + 1).padStart(3, "0")}`;
-    userAccounts.push({ id, name: `${role}帳號`, email: `${role}@suiyuecare.local`, unit: "系統預設", title: role, jobLevel: jobLevelForRole(role), role, provider: "本機帳號", mfa: "待設定", status: "停用", lastLogin: "尚未登入", ip: "-", device: "尚未綁定" });
-  });
-  renderAccounts();
-  addAccountAudit("同步角色權限", missingRoles.length ? `已補入 ${missingRoles.length} 個角色預設帳號。` : "角色、使用者與 RBAC 權限已是最新。");
-  showToast("帳號角色已同步。");
+  showToast("角色與簽核關係會由 Finance 自動同步，不會在 eDoc 建立預設或 demo 帳號。");
 }
 
 function recordLogin(email, provider = "本機帳號") {
@@ -8680,13 +13187,13 @@ function renderSettingsWorkflowTemplates() {
   if (!list) return;
   list.innerHTML = workflowTemplateConfigs.map((item) => `
     <article class="address-card">
-      <strong>${item.name}</strong>
-      <span>${item.key} · ${approvalRouteTypes[item.routeCode]?.name || item.routeCode} · ${item.status}</span>
-      <p>${(item.steps || []).join(" → ")}</p>
+      <strong>${escapeHtml(item.name)}</strong>
+      <span>${escapeHtml(item.key)} · ${escapeHtml(approvalRouteTypes[item.routeCode]?.name || item.routeCode)} · ${escapeHtml(item.status)}</span>
+      <p>${escapeHtml((item.steps || []).join(" → "))}</p>
       <div class="row-actions">
-        <button class="segment" type="button" data-workflow-template-action="apply" data-workflow-template-key="${item.key}">套用</button>
-        <button class="segment" type="button" data-workflow-template-action="edit" data-workflow-template-key="${item.key}">編輯</button>
-        <button class="segment" type="button" data-workflow-template-action="toggle" data-workflow-template-key="${item.key}">${item.status === "停用" ? "啟用" : "停用"}</button>
+        <button class="segment" type="button" data-workflow-template-action="apply" data-workflow-template-key="${escapeHtml(item.key)}">套用</button>
+        <button class="segment" type="button" data-workflow-template-action="edit" data-workflow-template-key="${escapeHtml(item.key)}">編輯</button>
+        <button class="segment" type="button" data-workflow-template-action="toggle" data-workflow-template-key="${escapeHtml(item.key)}">${item.status === "停用" ? "啟用" : "停用"}</button>
       </div>
     </article>
   `).join("") || `<p class="empty-text">尚未建立流程模板。</p>`;
@@ -9120,6 +13627,7 @@ async function fetchOpsJson(path, options = {}) {
 function goLiveTone(audit = goLiveAuditState) {
   if (!audit) return "idle";
   if (audit.formalGo) return "ok";
+  if (audit.internalGo) return "ok";
   if (audit.internalPilotAllowed) return "warn";
   return "issue";
 }
@@ -9127,8 +13635,220 @@ function goLiveTone(audit = goLiveAuditState) {
 function goLiveDecisionText(audit = goLiveAuditState) {
   if (!audit) return "未檢查";
   if (audit.formalGo) return "GO";
+  if (audit.internalGo) return "INTERNAL GO";
   if (audit.internalPilotAllowed) return "NO-GO · 僅內部演練";
   return "NO-GO";
+}
+
+function launchFixTone(severity = "") {
+  if (severity === "blocker") return "issue";
+  if (severity === "warning") return "wait";
+  return "pass";
+}
+
+function renderLaunchExecutionPlan(smokeReport) {
+  const plan = smokeReport?.executionPlan || [];
+  if (!plan.length) return "";
+  const pendingCount = plan.filter((item) => !item.ready).length;
+  return `
+    <div class="launch-execution-plan">
+      <div class="launch-execution-head">
+        <div>
+          <span>Operator Runbook</span>
+          <strong>週一使用者走測劇本</strong>
+        </div>
+        <small>${pendingCount ? `${pendingCount} 條待補測` : "全部已有系統證據"}</small>
+      </div>
+      ${plan.slice(0, 5).map((item) => {
+        const preflight = item.preflight || {};
+        const blockers = preflight.blockers || item.blockedBy || [];
+        const warnings = preflight.warnings || [];
+        const tone = item.ready ? "pass" : blockers.length ? "issue" : "wait";
+        const steps = (item.steps || []).slice(0, 3).map((step) => `<li>${escapeDraftHtml(step)}</li>`).join("");
+        const statusLabel = preflight.statusLabel || (item.ready ? "已完成走測" : "待走測");
+        return `
+          <article class="launch-execution-card ${tone}" data-launch-step="${escapeDraftHtml(item.key || "")}">
+            <div>
+              <span>${escapeDraftHtml(`Step ${item.order || ""} · ${statusLabel} · ${item.operatorRole || "未指定"}`)}</span>
+              <strong>${escapeDraftHtml(item.title || item.actionLabel || "上線走測")}</strong>
+              <p>${escapeDraftHtml(item.entryPoint || item.actionLabel || "依畫面入口完成走測。")}</p>
+              ${steps ? `<ol>${steps}</ol>` : ""}
+              ${blockers.length ? `<p class="launch-execution-blocker">卡點：${escapeDraftHtml(blockers.slice(0, 2).join("；"))}</p>` : ""}
+              ${warnings.length ? `<p class="launch-execution-warning">提醒：${escapeDraftHtml(warnings.slice(0, 2).join("；"))}</p>` : ""}
+              <small>完成：${escapeDraftHtml(item.doneWhen || "走測報告顯示 ready=true。")}</small>
+              ${item.apiEndpoint ? `<small>API：${escapeDraftHtml(item.apiEndpoint)}</small>` : ""}
+            </div>
+            <button class="${tone === "issue" ? "primary-button" : "secondary-button"}" type="button" data-launch-target="${escapeDraftHtml(item.target || "dashboard")}" data-launch-action="${escapeDraftHtml(item.launchAction || "")}">${escapeDraftHtml(item.targetLabel || "前往走測")}</button>
+          </article>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderLaunchDutyBoard(smokeReport) {
+  const board = smokeReport?.dutyBoard || {};
+  const items = board.items || [];
+  if (!items.length) return "";
+  const summary = board.summary || {};
+  const ownerText = (board.ownerSummary || []).slice(0, 3).map((owner) => {
+    const p0 = owner.p0 ? `P0 ${owner.p0}` : "";
+    const p1 = owner.p1 ? `P1 ${owner.p1}` : "";
+    return `${owner.owner} ${[p0, p1].filter(Boolean).join("/")}`;
+  }).join("、");
+  return `
+    <div class="launch-duty-board">
+      <div class="launch-duty-head">
+        <div>
+          <span>Duty Board</span>
+          <strong>上線值班待辦表</strong>
+        </div>
+        <small>${summary.p0 || 0} 個 P0 · ${summary.p1 || 0} 個 P1${ownerText ? ` · ${escapeDraftHtml(ownerText)}` : ""}</small>
+      </div>
+      ${items.slice(0, 8).map((item) => {
+        const tone = item.priority === "P0" ? "issue" : "wait";
+        const blockers = item.blockedBy || [];
+        return `
+          <article class="launch-duty-item ${tone}" data-launch-duty="${escapeDraftHtml(item.key || "")}">
+            <div>
+              <span>${escapeDraftHtml(`${item.priority || "P1"} · ${item.owner || "未指定"} · ${item.status || "待處理"}`)}</span>
+              <strong>${escapeDraftHtml(item.title || "上線待辦")}</strong>
+              <p>${escapeDraftHtml(blockers[0] || item.action || "依值班表處理。")}</p>
+              <small>完成：${escapeDraftHtml(item.doneWhen || "完成後重新執行 Go / No-Go。")}</small>
+            </div>
+            <button class="${item.priority === "P0" ? "primary-button" : "secondary-button"}" type="button" data-launch-target="${escapeDraftHtml(item.target || "dashboard")}" data-launch-action="${escapeDraftHtml(item.launchAction || "")}">${escapeDraftHtml(item.targetLabel || "前往處理")}</button>
+          </article>
+        `;
+      }).join("")}
+      <p class="launch-duty-note">${escapeDraftHtml(board.handoffNote || "請先處理 P0，再處理 P1 走測。")}</p>
+    </div>
+  `;
+}
+
+function renderLaunchUserPerspectiveGaps(smokeReport) {
+  const perspective = smokeReport?.userPerspectiveGaps || {};
+  const items = perspective.items || [];
+  if (!items.length) return "";
+  const summary = perspective.summary || {};
+  return `
+    <div class="launch-user-perspective">
+      <div class="launch-user-perspective-head">
+        <div>
+          <span>User Perspective</span>
+          <strong>週一同仁會卡在哪</strong>
+        </div>
+        <small>${summary.blocked || 0} 個會卡住 · ${summary.warning || 0} 個需走測 · ${summary.ready || 0} 個可使用</small>
+      </div>
+      ${items.slice(0, 6).map((item) => {
+        const tone = item.severity === "blocker" ? "issue" : item.severity === "warning" ? "wait" : "pass";
+        const evidence = item.blockingEvidence?.[0] || item.warnings?.[0] || item.doneWhen || "目前沒有缺口。";
+        return `
+          <article class="launch-user-perspective-item ${tone}" data-launch-user-gap="${escapeDraftHtml(item.key || "")}">
+            <div>
+              <span>${escapeDraftHtml(`${item.status || "待檢查"} · ${item.actor || "未指定角色"}`)}</span>
+              <strong>${escapeDraftHtml(item.userQuestion || item.actor || "週一使用情境")}</strong>
+              <p>${escapeDraftHtml(evidence)}</p>
+              <small>${escapeDraftHtml(item.entryPoint || "依畫面入口操作")} · 完成：${escapeDraftHtml(item.doneWhen || "重新執行 Go / No-Go。")}</small>
+            </div>
+            <button class="${tone === "issue" ? "primary-button" : "secondary-button"}" type="button" data-launch-target="${escapeDraftHtml(item.target || "dashboard")}" data-launch-action="${escapeDraftHtml(item.launchAction || "")}">${escapeDraftHtml(item.targetLabel || "前往處理")}</button>
+          </article>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+async function handleLaunchNavigation(target = "dashboard", action = "") {
+  if (action === "goLive") {
+    await runOpsGoLiveAudit();
+    return;
+  }
+  setView(isRouteAllowed(target) ? target : "dashboard");
+  if (action === "newOfficial") {
+    openOfficialWorkflowCreate("blank_editor");
+  }
+  if (action === "newOfficialPdf") {
+    prefillUploadedPdfLaunchSmokeTest();
+  }
+  if (action === "createUploadedPdfSmoke") {
+    await createBackendUploadedPdfLaunchSmokeTest();
+  }
+  if (action === "dispatchTasks") {
+    await prefillGeneralAffairsDispatchLaunchSmokeTest();
+  }
+  if (action === "completeDispatchSmoke") {
+    await completeBackendGeneralAffairsDispatchLaunchSmokeTest();
+  }
+  if (action === "inboundRegister") {
+    prefillInboundAssignmentLaunchSmokeTest();
+  }
+  if (action === "createInboundSmoke") {
+    await createBackendInboundLaunchSmokeTest();
+  }
+  if (action === "internalDispatch") {
+    focusInternalDispatchJourney();
+  }
+}
+
+function renderLaunchFixQueue(smokeReport) {
+  const queue = document.querySelector("#launchFixQueue");
+  if (!queue) return;
+  const fixes = smokeReport?.nextFixes || [];
+  const ownerGroups = smokeReport?.ownerActions || [];
+  const executionPlanHtml = renderLaunchExecutionPlan(smokeReport);
+  const dutyBoardHtml = renderLaunchDutyBoard(smokeReport);
+  const userPerspectiveHtml = renderLaunchUserPerspectiveGaps(smokeReport);
+  if (!fixes.length) {
+    queue.innerHTML = `
+      ${userPerspectiveHtml}
+      ${executionPlanHtml}
+      ${dutyBoardHtml}
+      <article class="launch-fix-item pass">
+        <div>
+          <span>優先修正</span>
+          <strong>目前沒有未完成派工</strong>
+          <p>${smokeReport ? "走測報告沒有列出 blocker 或 warning。" : "重新檢查後會產生 IT、總務與申請人的派工清單。"}</p>
+        </div>
+      </article>
+    `;
+    queue.querySelectorAll("[data-launch-target]").forEach((button) => {
+      button.addEventListener("click", () => handleLaunchNavigation(button.dataset.launchTarget, button.dataset.launchAction));
+    });
+    return;
+  }
+  const ownerSummary = ownerGroups.slice(0, 3).map((group) => {
+    const count = (group.blockerCount || 0) + (group.warningCount || 0);
+    return `${group.owner} ${count}`;
+  }).join("、");
+  queue.innerHTML = `
+    ${userPerspectiveHtml}
+    ${executionPlanHtml}
+    ${dutyBoardHtml}
+    <div class="launch-fix-head">
+      <div>
+        <span>Priority Queue</span>
+        <strong>上線前優先修正</strong>
+      </div>
+      <small>${escapeDraftHtml(ownerSummary || "依負責人排序")}</small>
+    </div>
+    ${fixes.slice(0, 5).map((fix, index) => {
+      const tone = launchFixTone(fix.severity);
+      return `
+        <article class="launch-fix-item ${tone}">
+          <div>
+            <span>${escapeDraftHtml(fix.severity === "blocker" ? `P0 · ${fix.owner || "未指定"}` : `P1 · ${fix.owner || "未指定"}`)}</span>
+            <strong>${index + 1}. ${escapeDraftHtml(fix.title || "未命名任務")}</strong>
+            <p>${escapeDraftHtml(fix.evidence || fix.impact || "等待檢查結果。")}</p>
+            <small>完成條件：${escapeDraftHtml(fix.doneWhen || fix.action || "完成後重新匯出走測報告。")}</small>
+          </div>
+          <button class="${tone === "issue" ? "primary-button" : "secondary-button"}" type="button" data-launch-target="${escapeDraftHtml(fix.target || "dashboard")}" data-launch-action="${escapeDraftHtml(fix.launchAction || "")}">${escapeDraftHtml(fix.targetLabel || "前往處理")}</button>
+        </article>
+      `;
+    }).join("")}
+  `;
+  queue.querySelectorAll("[data-launch-target]").forEach((button) => {
+    button.addEventListener("click", () => handleLaunchNavigation(button.dataset.launchTarget, button.dataset.launchAction));
+  });
 }
 
 function renderGoLiveGate() {
@@ -9146,16 +13866,21 @@ function renderGoLiveGate() {
   document.querySelector("#goLiveDecisionSummary").textContent = audit?.summary || "尚未讀取正式部署檢查。";
   const blockers = audit?.formalBlockers || [];
   const categories = audit?.categories || [];
+  const smokeReport = audit?.launchSmokeReport || audit?.internalReadiness?.launchSmokeReport || null;
+  const smokeSummary = smokeReport?.summary || {};
+  const firstFix = smokeReport?.nextFixes?.[0] || null;
   document.querySelector("#goLiveGateGrid").innerHTML = audit ? [
-    ["正式判定", goLiveDecisionText(audit), audit.environment || "未檢查"],
+    ["上線模式", goLiveDecisionText(audit), audit.launchScope || audit.environment || "未檢查"],
     ["正式資料庫", audit.databaseMode || "未檢查", categories.find((item) => item.key === "database")?.status || "未檢查"],
-    ["阻塞項", blockers.length, blockers[0] || "目前沒有 formal blocker"],
-    ["內部演練", audit.internalPilotAllowed ? "可開" : "不建議", audit.internalPilotAllowed ? "不得正式交換" : "需先處理 blocker"]
+    ["Formal 阻塞", blockers.length, blockers[0] || "正式交換目前未開啟"],
+    ["內部正式", audit.internalGo ? "可上線" : "未通過", audit.internalGo ? "不得正式交換" : (audit.internalBlockers?.[0] || "需先處理 blocker")],
+    ["走測報告", smokeReport ? `${smokeSummary.journeyReady || 0}/${smokeSummary.journeyTotal || 0} 條` : "待產生", smokeReport?.reportHash ? `hash ${String(smokeReport.reportHash).slice(0, 12)}` : "重新檢查後可匯出"],
+    ["下一步", firstFix ? firstFix.owner || "未指定" : "待檢查", firstFix ? `${firstFix.title}：${firstFix.evidence || firstFix.action}` : "重新檢查後產生派工清單"]
   ].map(([label, value, note]) => `
     <article class="go-live-mini-card">
-      <span>${label}</span>
-      <strong>${value}</strong>
-      <p>${note}</p>
+      <span>${escapeDraftHtml(label)}</span>
+      <strong>${escapeDraftHtml(value)}</strong>
+      <p>${escapeDraftHtml(note)}</p>
     </article>
   `).join("") : `
     <article class="go-live-mini-card">
@@ -9164,6 +13889,1643 @@ function renderGoLiveGate() {
       <p>請按重新檢查。</p>
     </article>
   `;
+  renderLaunchFixQueue(smokeReport);
+}
+
+function currentLaunchSmokeReport() {
+  return goLiveAuditState?.launchSmokeReport || goLiveAuditState?.internalReadiness?.launchSmokeReport || null;
+}
+
+const launchJourneyAttestationStorageKey = "suiyuecare-edoc-launch-journey-attestations";
+
+function readLaunchJourneyAttestations() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(launchJourneyAttestationStorageKey) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (error) {
+    localStorage.removeItem(launchJourneyAttestationStorageKey);
+    return {};
+  }
+}
+
+function writeLaunchJourneyAttestations(records) {
+  localStorage.setItem(launchJourneyAttestationStorageKey, JSON.stringify(records));
+}
+
+function defaultLaunchSigner() {
+  return authState?.user?.name || authState?.user?.email || activeRole() || "上線走測人員";
+}
+
+function updateLaunchJourneyAttestation(key, patch = {}) {
+  if (!key) return;
+  const records = readLaunchJourneyAttestations();
+  const current = records[key] || {};
+  records[key] = {
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+    actor: patch.actor || current.actor || defaultLaunchSigner()
+  };
+  writeLaunchJourneyAttestations(records);
+}
+
+function updateLaunchJourneyCriterion(key, index, checked) {
+  const records = readLaunchJourneyAttestations();
+  const current = records[key] || {};
+  const criteria = { ...(current.criteria || {}) };
+  criteria[index] = checked;
+  updateLaunchJourneyAttestation(key, { criteria });
+}
+
+function launchJourneyOperatorSummary(report = currentLaunchSmokeReport()) {
+  const records = readLaunchJourneyAttestations();
+  const journeys = report?.userJourneys || [];
+  const items = journeys.map((journey) => {
+    const record = records[journey.key] || {};
+    const criteria = journey.acceptanceCriteria || [];
+    const checkedCriteria = criteria.filter((_, index) => record.criteria?.[index]).length;
+    return {
+      key: journey.key,
+      title: journey.title,
+      systemReady: Boolean(journey.ready),
+      operatorVerified: Boolean(record.verified),
+      actor: record.actor || "",
+      note: record.note || "",
+      updatedAt: record.updatedAt || "",
+      criteriaChecked: checkedCriteria,
+      criteriaTotal: criteria.length,
+      missing: journey.missing || [],
+      nextAction: journey.nextAction || ""
+    };
+  });
+  return {
+    source: "frontend_operator_signoff",
+    generatedAt: new Date().toISOString(),
+    completeCount: items.filter((item) => item.systemReady && item.operatorVerified).length,
+    operatorVerifiedCount: items.filter((item) => item.operatorVerified).length,
+    total: items.length,
+    items
+  };
+}
+
+function launchJourneyOperatorSanitizedSummary(report = currentLaunchSmokeReport()) {
+  const summary = launchJourneyOperatorSummary(report);
+  return {
+    ...summary,
+    source: "frontend_operator_signoff_sanitized",
+    sanitized: true,
+    sensitiveFieldsOmitted: ["actor", "note"],
+    items: (summary.items || []).map((item) => ({
+      key: item.key,
+      systemReady: item.systemReady,
+      operatorVerified: item.operatorVerified,
+      actor: item.actor ? "已填寫" : "",
+      note: item.note ? "[redacted]" : "",
+      actorProvided: Boolean(item.actor),
+      noteProvided: Boolean(item.note),
+      updatedAt: item.updatedAt || "",
+      criteriaChecked: item.criteriaChecked,
+      criteriaTotal: item.criteriaTotal,
+      missingCount: (item.missing || []).length,
+      hasNextAction: Boolean(item.nextAction)
+    }))
+  };
+}
+
+function renderLaunchJourneyAttestation(report = currentLaunchSmokeReport()) {
+  const panel = document.querySelector("#launchJourneyAttestationPanel");
+  const status = document.querySelector("#launchJourneyAttestationStatus");
+  const list = document.querySelector("#launchJourneyAttestationList");
+  if (!panel || !status || !list) return;
+  const journeys = report?.userJourneys || [];
+  if (!journeys.length) {
+    status.textContent = "待檢查";
+    list.innerHTML = `
+      <article class="launch-journey-attestation-card wait">
+        <div>
+          <span>尚未取得走測報告</span>
+          <strong>請先重新檢查 Go / No-Go</strong>
+          <p>系統會載入五條上線旅程、缺口、驗收條件與操作入口。</p>
+        </div>
+        <button class="secondary-button" type="button" data-launch-journey-action="goLive">重新檢查</button>
+      </article>
+    `;
+  } else {
+    const records = readLaunchJourneyAttestations();
+    const verifiedCount = journeys.filter((journey) => records[journey.key]?.verified).length;
+    const systemReadyCount = journeys.filter((journey) => journey.ready).length;
+    status.textContent = `${verifiedCount}/${journeys.length} 已簽收 · 系統 ${systemReadyCount}/${journeys.length}`;
+    list.innerHTML = journeys.map((journey) => {
+      const record = records[journey.key] || {};
+      const criteria = journey.acceptanceCriteria || [];
+      const criteriaHtml = criteria.length ? `
+        <div class="launch-journey-criteria">
+          ${criteria.map((criterion, index) => `
+            <label>
+              <input type="checkbox" data-launch-journey="${escapeDraftHtml(journey.key)}" data-launch-criterion="${index}" ${record.criteria?.[index] ? "checked" : ""} />
+              <span>${escapeDraftHtml(criterion)}</span>
+            </label>
+          `).join("")}
+        </div>
+      ` : "";
+      const tone = journey.ready && record.verified ? "pass" : journey.ready ? "wait" : "issue";
+      const missing = journey.ready ? (journey.evidence || []).join("、") : (journey.missing || []).join("、");
+      return `
+        <article class="launch-journey-attestation-card ${tone}">
+          <div class="launch-journey-main">
+            <span>${journey.ready ? "系統證據已具備" : "系統證據不足"}</span>
+            <strong>${escapeDraftHtml(journey.title || journey.key)}</strong>
+            <p>${escapeDraftHtml(journey.actor || "未指定角色")} · ${escapeDraftHtml(missing || "無缺口")}</p>
+            ${criteriaHtml}
+            <div class="launch-journey-fields">
+              <label>驗收人<input data-launch-journey-actor="${escapeDraftHtml(journey.key)}" value="${escapeDraftHtml(record.actor || defaultLaunchSigner())}" /></label>
+              <label>備註<input data-launch-journey-note="${escapeDraftHtml(journey.key)}" value="${escapeDraftHtml(record.note || "")}" placeholder="例如：正式帳號完成、附件可下載、總務已回填" /></label>
+            </div>
+          </div>
+          <div class="launch-journey-actions">
+            <label class="launch-journey-check">
+              <input type="checkbox" data-launch-journey-verified="${escapeDraftHtml(journey.key)}" ${record.verified ? "checked" : ""} />
+              <span>現場已驗收</span>
+            </label>
+            <button class="${journey.ready ? "secondary-button" : "primary-button"}" type="button" data-launch-target="${escapeDraftHtml(launchActionTargetForJourney(journey.key).target)}" data-launch-action="${escapeDraftHtml(launchActionTargetForJourney(journey.key).action)}">${escapeDraftHtml(journey.ready ? "查看證據" : "前往補測")}</button>
+          </div>
+        </article>
+      `;
+    }).join("");
+  }
+  list.querySelectorAll("[data-launch-journey-action='goLive']").forEach((button) => {
+    button.addEventListener("click", () => handleLaunchNavigation("ops", "goLive"));
+  });
+  list.querySelectorAll("[data-launch-criterion]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => updateLaunchJourneyCriterion(checkbox.dataset.launchJourney, checkbox.dataset.launchCriterion, checkbox.checked));
+  });
+  list.querySelectorAll("[data-launch-journey-verified]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      updateLaunchJourneyAttestation(checkbox.dataset.launchJourneyVerified, { verified: checkbox.checked, verifiedAt: checkbox.checked ? new Date().toISOString() : "" });
+      renderLaunchJourneyAttestation(report);
+    });
+  });
+  list.querySelectorAll("[data-launch-journey-actor]").forEach((input) => {
+    input.addEventListener("change", () => updateLaunchJourneyAttestation(input.dataset.launchJourneyActor, { actor: input.value.trim() || defaultLaunchSigner() }));
+  });
+  list.querySelectorAll("[data-launch-journey-note]").forEach((input) => {
+    input.addEventListener("change", () => updateLaunchJourneyAttestation(input.dataset.launchJourneyNote, { note: input.value.trim() }));
+  });
+  list.querySelectorAll("[data-launch-target]").forEach((button) => {
+    button.addEventListener("click", () => handleLaunchNavigation(button.dataset.launchTarget, button.dataset.launchAction));
+  });
+}
+
+function launchActionTargetForJourney(key = "") {
+  return {
+    blank_official_document: { target: "dispatch", action: "newOfficial" },
+    uploaded_pdf_stamping: { target: "dispatch", action: "newOfficialPdf" },
+    general_affairs_dispatch: { target: "dispatch", action: "dispatchTasks" },
+    inbound_assignment: { target: "inbound", action: "inboundRegister" },
+    internal_dispatch_reply: { target: "inbound", action: "internalDispatch" }
+  }[key] || { target: "dashboard", action: "" };
+}
+
+async function exportLaunchSmokeReport() {
+  let report = currentLaunchSmokeReport();
+  if (!report) {
+    try {
+      const result = await fetchOpsJson("/production/launch-smoke-report");
+      if (result.ok && result.data?.reportType) {
+        report = result.data;
+        goLiveAuditState = { ...(goLiveAuditState || {}), launchSmokeReport: report };
+        renderGoLiveGate();
+      }
+    } catch (error) {
+      addOpsAudit("匯出上線走測報告失敗", error.message || "launch smoke report api failed");
+    }
+  }
+  if (!report) {
+    showToast("請先重新檢查 Go / No-Go，再匯出走測報告。");
+    return;
+  }
+  const date = new Date().toISOString().slice(0, 10);
+  const fileName = `edoc-launch-smoke-report-${date}.json`;
+  const operatorSignoff = launchJourneyOperatorSanitizedSummary(report);
+  const reportWithOperatorSignoff = {
+    ...report,
+    operatorJourneySignoff: operatorSignoff
+  };
+  downloadTextFile(fileName, JSON.stringify(reportWithOperatorSignoff, null, 2));
+  addOpsAudit("匯出上線走測報告", `${fileName} 已產生，hash ${String(report.reportHash || "").slice(0, 12)}。`);
+  try {
+    const attest = await fetchOpsJson("/production/launch-smoke-report/attest", {
+      method: "POST",
+      body: JSON.stringify({
+        report_hash: report.reportHash,
+        operatorJourneySignoff: operatorSignoff
+      })
+    });
+    if (attest.ok) {
+      addOpsAudit("上線走測報告後端留存", `audit log 已寫入，hash ${String(report.reportHash || "").slice(0, 12)}。`);
+    } else {
+      addOpsAudit("上線走測報告後端留存失敗", `HTTP ${attest.status}，請確認帳號具備 audit_logs.export 權限。`);
+    }
+  } catch (error) {
+    addOpsAudit("上線走測報告後端留存失敗", error.message || "attest api failed");
+  }
+  showToast("上線走測報告已匯出。");
+}
+
+async function ensureLaunchCutoverAudit() {
+  if (goLiveAuditState?.launchSmokeReport || goLiveAuditState?.internalReadiness?.launchSmokeReport) {
+    return goLiveAuditState;
+  }
+  try {
+    const result = await fetchOpsJson("/production/go-live-audit");
+    if (result.ok && result.data) {
+      goLiveAuditState = result.data;
+      renderGoLiveAuditViews();
+      return goLiveAuditState;
+    }
+  } catch (error) {
+    addOpsAudit("讀取上線交接資料失敗", error.message || "go-live audit api failed");
+  }
+  return goLiveAuditState;
+}
+
+async function exportLaunchCutoverPackage() {
+  await ensureLaunchCutoverAudit();
+  await ensureCompanySealLaunchAudit();
+  await ensureAccountLaunchAudit();
+  await ensureProductionCutoverReadinessPackage();
+  const audit = goLiveAuditState || {};
+  const report = currentLaunchSmokeReport();
+  if (!report) {
+    showToast("請先重新檢查 Go / No-Go，再匯出上線交接包。");
+    return;
+  }
+  const date = new Date().toISOString().slice(0, 10);
+  const operatorSignoff = launchJourneyOperatorSanitizedSummary(report);
+  let packagePayload = null;
+  try {
+    const result = await fetchOpsJson("/production/launch-cutover-package");
+    if (result.ok && result.data?.reportType === "edoc_internal_launch_cutover_package") {
+      packagePayload = {
+        ...result.data,
+        operatorJourneySignoff: operatorSignoff,
+        frontendExportedAt: new Date().toISOString()
+      };
+    }
+  } catch (error) {
+    addOpsAudit("讀取後端上線交接包失敗", error.message || "launch cutover package api failed");
+  }
+  if (!packagePayload) packagePayload = {
+    reportType: "edoc_internal_launch_cutover_package",
+    generatedAt: new Date().toISOString(),
+    launchDate: audit.targetLaunchDate || report.targetLaunchDate || "2026-07-13",
+    launchScope: audit.launchScope || report.launchScope || "internal_official",
+    decision: audit.decision || report.decision || goLiveDecisionText(audit),
+    internalGo: Boolean(audit.internalGo || report.internalGo),
+    formalGo: false,
+    safetyBoundary: "內部正式使用；政府 jAgent 正式交換與法定電子簽章未啟用；印章原始檔不可放 public/GitHub。",
+    goLiveSummary: {
+      summary: audit.summary || "",
+      databaseMode: audit.databaseMode || report.databaseMode || "",
+      environment: audit.environment || report.environment || "",
+      internalBlockers: audit.internalBlockers || [],
+      warnings: audit.warnings || []
+    },
+    smokeReportHash: report.reportHash || "",
+    dutyBoard: report.dutyBoard || {},
+    executionPlan: report.executionPlan || [],
+    nextFixes: report.nextFixes || [],
+    ownerActions: report.ownerActions || [],
+    productionChecklist: opsProductionChecklistItems(audit),
+    productionCutoverReadiness: productionCutoverReadinessPackage || {},
+    sealMissingManifest: companySealMissingManifestRows(),
+    sealVaultReadiness: companySealVaultReadinessReport || {},
+    accountReadinessPackage: accountReadinessPackage || {},
+    accessReadiness: report.accessReadiness || {},
+    operatorJourneySignoff: operatorSignoff,
+    handoffChecklist: [
+      "先處理 dutyBoard P0，再處理 P1。",
+      "完成每一項後重新執行 Go / No-Go。",
+      "五條 userJourneys 皆 ready=true 後匯出走測報告並留存 reportHash。",
+      "正式 jAgent 交換維持關閉；不得把原始印章圖檔交給前端或放進 repo。"
+    ]
+  };
+  const fileName = `edoc-internal-launch-cutover-${date}.json`;
+  downloadTextFile(fileName, JSON.stringify(packagePayload, null, 2));
+  addOpsAudit("匯出上線交接包", `${fileName} 已產生，P0 ${packagePayload.dutyBoard?.summary?.p0 || 0} 項、缺章 ${packagePayload.sealMissingManifest.length} 項。`);
+  try {
+    const attest = await fetchOpsJson("/production/launch-cutover-package/attest", {
+      method: "POST",
+      body: JSON.stringify({
+        package_hash: packagePayload.packageHash,
+        operatorJourneySignoff: operatorSignoff
+      })
+    });
+    if (attest.ok) {
+      addOpsAudit("上線交接包後端留存", `audit log 已寫入，hash ${String(packagePayload.packageHash || "").slice(0, 12)}。`);
+    } else {
+      addOpsAudit("上線交接包後端留存失敗", `HTTP ${attest.status}，請確認帳號具備 audit_logs.export 權限。`);
+    }
+  } catch (error) {
+    addOpsAudit("上線交接包後端留存失敗", error.message || "cutover attest api failed");
+  }
+  showToast("上線交接包已匯出。");
+}
+
+function launchChecklistItems() {
+  const audit = goLiveAuditState;
+  const internalReadiness = audit?.internalReadiness || {};
+  const dataReadiness = audit?.dataReadiness || internalReadiness?.dataReadiness || null;
+  const dataBlockers = dataReadiness?.blockers || [];
+  const activeAccounts = userAccounts.filter((account) => account.status === "啟用");
+  const requiredRoles = ["員工", "主管", "行政部主任", "總務"];
+  const missingRoles = requiredRoles.filter((role) => !activeAccounts.some((account) => account.role === role));
+  const sealReady = officialSealOptions.some((seal) => seal.current_file) || companySealLibrary.some((seal) => seal.current_file || seal.current_file_id);
+  const stampedFlow = officialWorkflowItems.some((item) => ["pending_general_affairs_dispatch", "returned_to_applicant_for_send", "closed", "dispatched", "sent_by_applicant"].includes(item.current_status) || item.stamped_file_id || item.application_package?.summary?.hasStampedPdf);
+  const dispatchFlow = officialWorkflowItems.some((item) => {
+    const record = item.dispatch_record || item.dispatchRecord || {};
+    return ["dispatched", "sent_by_applicant", "closed"].includes(item.current_status)
+      || ["dispatched", "sent_by_applicant", "closed"].includes(record.dispatch_status)
+      || Boolean(record.completed_at || record.proof_file_id);
+  });
+  const inboundFlow = inboundDocs.some((doc) => doc.owner || doc.dept || ["已分派", "辦理中", "結案", "已結案"].includes(doc.status));
+  const internalFlow = internalDispatchItems.some((item) => ["reply_completed", "closed"].includes(item.status) || (item.replies || []).length);
+  const formalDisabled = audit ? !audit.formalGo && audit.launchScope === "internal_official" : true;
+  const userLaunchChecklist = audit?.internalReadiness?.userLaunchChecklist || audit?.userLaunchChecklist || [];
+  const userJourneyChecklist = audit?.internalReadiness?.userJourneyChecklist || dataReadiness?.checks?.userJourneys || [];
+  if (userLaunchChecklist.length) {
+    const toneMap = { blocker: "issue", warning: "wait", pass: "pass" };
+    const targetMap = {
+      login_access: "accounts",
+      applicant: "dispatch",
+      approvers: "dispatch",
+      general_affairs: "dispatch",
+      seal_admin: "seals",
+      ops: "ops",
+      notifications: "notifications",
+      user_journeys: "ops",
+      formal_exchange_scope: "ops"
+    };
+    const readinessCards = userLaunchChecklist.map((item) => ({
+      title: item.title,
+      tone: toneMap[item.severity] || "wait",
+      status: item.status || "待檢查",
+      body: [
+        item.owner ? `負責：${item.owner}。` : "",
+        item.impact || "",
+        item.evidence && item.evidence !== "無" ? `缺口：${item.evidence}` : ""
+      ].filter(Boolean).join(" "),
+      action: item.action || "查看",
+      target: targetMap[item.key] || "dashboard",
+      launchAction: item.key === "applicant" ? "newOfficial" : item.key === "ops" ? "goLive" : ""
+    }));
+    const journeyCards = userJourneyChecklist.map((item) => ({
+      title: `走測：${item.title}`,
+      tone: item.ready ? "pass" : "wait",
+      status: item.status || (item.ready ? "已完成走測" : "待走測"),
+      body: [
+        item.actor ? `對象：${item.actor}。` : "",
+        item.impact || "",
+        item.ready ? `證據：${item.evidenceText || (item.evidence || []).join("、")}` : `缺口：${item.missingText || (item.missing || []).join("、")}`,
+        item.acceptanceText && item.acceptanceText !== "無" ? `驗收：${item.acceptanceText}` : ""
+      ].filter(Boolean).join(" "),
+      action: item.nextAction || "查看流程",
+      target: item.target || "dispatch",
+      launchAction: launchActionForUserJourney(item.key)
+    }));
+    return [
+      ...readinessCards,
+      ...journeyCards,
+      {
+        title: "發文簽核與自動用印",
+        tone: stampedFlow ? "pass" : "wait",
+        status: stampedFlow ? "已有用印流程" : "待完整走測",
+        body: stampedFlow ? "已有流程進入用印後狀態，可回頭查附件與紀錄。" : "請用正式角色走一次空白公文與上傳 PDF 用印。",
+        action: "新增申請單",
+        target: "dispatch",
+        launchAction: "newOfficial"
+      },
+      {
+        title: "總務寄發與申請人確認",
+        tone: dispatchFlow ? "pass" : "wait",
+        status: dispatchFlow ? "已有完成證據" : "待總務走測",
+        body: dispatchFlow ? "已看到寄發完成、證明附件或結案證據。" : "總務需測下載已用印 PDF、回填發文字號、證明附件與結案。",
+        action: "看待寄發",
+        target: "dispatch"
+      },
+      {
+        title: "收文登錄與分派",
+        tone: inboundFlow ? "pass" : "wait",
+        status: inboundFlow ? "已有分派資料" : "待建立收文",
+        body: inboundFlow ? "已有收文分派或承辦證據，可繼續測附件與結案。" : "請建立一筆收文，測分派承辦、期限與附件。",
+        action: "收文管理",
+        target: "inbound"
+      },
+      {
+        title: "內部派文與回文",
+        tone: internalFlow ? "pass" : "wait",
+        status: internalFlow ? "已有回文證據" : "待建立派文",
+        body: internalFlow ? "已看到同仁回文或結案證據，能支援期限回覆流程。" : "請派給一位同仁並設定 N 日內回文，收件人完成回覆後才算通過。",
+        action: "建立派文",
+        target: "dispatch",
+        launchAction: "internalDispatch"
+      }
+    ];
+  }
+  return [
+    {
+      title: "正式帳號與角色",
+      tone: missingRoles.length ? "issue" : "pass",
+      status: missingRoles.length ? "需補帳號" : "可走流程",
+      body: missingRoles.length ? `缺少角色：${missingRoles.join("、")}。` : `已啟用 ${activeAccounts.length} 個帳號，基本簽核角色齊全。`,
+      action: "帳號權限",
+      target: "accounts"
+    },
+    {
+      title: "公司印章與 Seal Vault",
+      tone: sealReady ? "pass" : "wait",
+      status: sealReady ? "已有可用印章" : "待確認版本",
+      body: sealReady ? "前台可選擇公司印章，原章仍由後端私有儲存讀取。" : "請確認便章、公司設立章、關防印、銀行章皆有目前版本。",
+      action: "印鑑管理",
+      target: "seals"
+    },
+    {
+      title: "正式帳號/印章資料",
+      tone: !audit ? "wait" : dataReadiness?.ready ? "pass" : "issue",
+      status: !audit ? "待檢查" : dataReadiness?.ready ? "資料可上線" : "資料未齊",
+      body: !audit
+        ? "請先執行 Go / No-Go 檢查，系統會讀取正式帳號、簽核角色與 Seal Vault current 版本。"
+        : dataReadiness?.ready
+          ? "正式資料已具備申請人、主管、行政部主任、總務與必要印章 current 版本。"
+          : (dataBlockers[0] || "正式帳號、主管關係或印章 current 版本尚未齊備。"),
+      action: "重新檢查",
+      target: "ops",
+      launchAction: "goLive"
+    },
+    {
+      title: "發文簽核與自動用印",
+      tone: stampedFlow ? "pass" : "wait",
+      status: stampedFlow ? "已有用印流程" : "待完整走測",
+      body: stampedFlow ? "已有流程進入用印後狀態，可回頭查附件與紀錄。" : "請用正式角色走一次空白公文與上傳 PDF 用印。",
+      action: "新增申請單",
+      target: "dispatch",
+      launchAction: "newOfficial"
+    },
+    {
+      title: "總務寄發與申請人確認",
+      tone: dispatchFlow ? "pass" : "wait",
+      status: dispatchFlow ? "已有完成證據" : "待總務走測",
+      body: dispatchFlow ? "已看到寄發完成、證明附件或結案證據。" : "總務需測下載已用印 PDF、回填發文字號、證明附件與結案。",
+      action: "看待寄發",
+      target: "dispatch"
+    },
+    {
+      title: "收文登錄與分派",
+      tone: inboundFlow ? "pass" : "wait",
+      status: inboundFlow ? "已有分派資料" : "待建立收文",
+      body: inboundFlow ? "已有收文分派或承辦證據，可繼續測附件與結案。" : "請建立一筆收文，測分派承辦、期限與附件。",
+      action: "收文管理",
+      target: "inbound"
+    },
+    {
+      title: "內部派文與回文",
+      tone: internalFlow ? "pass" : "wait",
+      status: internalFlow ? "已有回文證據" : "待建立派文",
+      body: internalFlow ? "已看到同仁回文或結案證據，能支援期限回覆流程。" : "請派給一位同仁並設定 N 日內回文，收件人完成回覆後才算通過。",
+      action: "建立派文",
+      target: "dispatch",
+      launchAction: "internalDispatch"
+    },
+    {
+      title: "內部正式範圍",
+      tone: formalDisabled ? "pass" : "issue",
+      status: formalDisabled ? "政府交換未啟用" : "需重新確認",
+      body: formalDisabled ? "維持內部正式使用，不宣稱政府正式交換。" : "正式交換狀態與 launch scope 不一致，請維運確認。",
+      action: "維運中心",
+      target: "ops"
+    },
+    {
+      title: "Production 環境",
+      tone: audit?.internalGo ? "pass" : "wait",
+      status: audit ? (audit.internalGo ? "INTERNAL GO" : "待補環境") : "待檢查",
+      body: audit ? (audit.internalGo ? "internal-readiness 已通過。" : (audit.internalBlockers?.[0] || "請執行重新檢查。")) : "請先執行 Go / No-Go 檢查。",
+      action: "重新檢查",
+      target: "ops",
+      launchAction: "goLive"
+    }
+  ];
+}
+
+function launchActionForUserJourney(key = "") {
+  return {
+    blank_official_document: "newOfficial",
+    uploaded_pdf_stamping: "createUploadedPdfSmoke",
+    general_affairs_dispatch: "completeDispatchSmoke",
+    inbound_assignment: "createInboundSmoke",
+    internal_dispatch_reply: "internalDispatch"
+  }[key] || "";
+}
+
+function launchSmokeDateValue(daysFromToday = 0) {
+  const date = new Date();
+  date.setDate(date.getDate() + daysFromToday);
+  return date.toISOString().slice(0, 10);
+}
+
+function launchSmokeSetFieldValue(selector, value, options = {}) {
+  const element = document.querySelector(selector);
+  if (!element) return false;
+  if (options.onlyIfEmpty !== false && element.value) return false;
+  if (element.tagName === "SELECT" && ![...element.options].some((option) => option.value === value)) {
+    return false;
+  }
+  element.value = value;
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
+}
+
+function launchSmokePulse(selector) {
+  const element = document.querySelector(selector);
+  if (!element) return;
+  element.scrollIntoView({ behavior: "smooth", block: "center" });
+  element.classList.add("attention-pulse");
+  window.setTimeout(() => element.classList.remove("attention-pulse"), 1400);
+}
+
+function selectCurrentOfficialSealForLaunchSmoke() {
+  const select = document.querySelector("#officialSealSelect");
+  if (!select) return;
+  const current = officialSealOptions.find(officialSealHasCurrentFile);
+  if (current?.id) select.value = current.id;
+  setOfficialFieldValidity(
+    "#officialSealSelect",
+    "#officialSealHint",
+    Boolean(current),
+    current
+      ? "走測已選擇有 current 版本的印章。"
+      : "目前沒有 current 版本印章；送出前需由總務補 Seal Vault。"
+  );
+}
+
+function applyUploadedPdfLaunchStampPositions() {
+  officialStampPositionSeq = 1;
+  officialStampPositions = [
+    createOfficialStampPosition({ id: "OSTAMP-1", page: 1, x: 420, y: 640, order_index: 1 }),
+    createOfficialStampPosition({ id: "OSTAMP-2", page: 1, x: 300, y: 640, order_index: 2 })
+  ];
+  selectedOfficialStampPositionId = officialStampPositions[0].id;
+  syncOfficialStampInputsFromSelected();
+  updateOfficialStampPreview({ syncInputs: false });
+  setOfficialFieldValidity("#officialStampPreview", "#officialStampPositionsHint", true, "走測已帶入 2 個用印位置；送出前可拖拉微調。");
+}
+
+async function downloadUploadedPdfLaunchSmokeTemplate() {
+  try {
+    const result = await downloadBinaryFile("/production/smoke-test-pdf", "edoc-uploaded-pdf-smoke-template.pdf");
+    showToast(`已下載去識別化 PDF 範本：${result.fileName}`);
+  } catch (error) {
+    showToast(`PDF 範本下載失敗：${error.message}`);
+  }
+}
+
+async function downloadDispatchProofLaunchSmokeTemplate() {
+  try {
+    const result = await downloadBinaryFile("/production/dispatch-proof-template", "edoc-dispatch-proof-smoke-template.pdf");
+    showToast(`已下載去識別化寄發證明範本：${result.fileName}`);
+  } catch (error) {
+    showToast(`寄發證明範本下載失敗：${error.message}`);
+  }
+}
+
+async function createBackendUploadedPdfLaunchSmokeTest() {
+  if (!hasAuthenticatedBackendSession()) {
+    showToast("請先用可建立發文申請的正式帳號登入，再建立 PDF 用印走測。");
+    return;
+  }
+  try {
+    const result = await backendRequest("/production/launch-smoke/uploaded-pdf-stamping", {
+      method: "POST",
+      body: JSON.stringify({ source: "frontend_launch_smoke_test" })
+    });
+    const detail = result.document || {};
+    selectedOfficialDocumentId = detail.id || selectedOfficialDocumentId;
+    officialWorkflowScope = "mine";
+    await loadOfficialWorkflow("mine");
+    if (detail.id) await loadOfficialDocumentDetail(detail.id);
+    showToast("已建立去識別化 PDF 用印走測單，請依序完成主管、行政部主任與總務簽核。");
+  } catch (error) {
+    if (error.rawMessage === "launch_smoke_current_seal_required" || error.code === "launch_smoke_current_seal_required") {
+      setView("seals");
+      showToast("找不到已有 Seal Vault current 版本的可用印章，請先由總務補章後再建立 PDF 用印走測。");
+      return;
+    }
+    showToast(`建立 PDF 用印走測失敗：${error.message}`);
+    prefillUploadedPdfLaunchSmokeTest();
+  }
+}
+
+async function completeBackendGeneralAffairsDispatchLaunchSmokeTest() {
+  if (!hasAuthenticatedBackendSession()) {
+    showToast("請先用總務正式帳號登入，再完成總務寄發走測。");
+    return;
+  }
+  try {
+    const result = await backendRequest("/production/launch-smoke/general-affairs-dispatch", {
+      method: "POST",
+      body: JSON.stringify({ source: "frontend_launch_smoke_test" })
+    });
+    const detail = result.document || {};
+    selectedOfficialDocumentId = detail.id || selectedOfficialDocumentId;
+    officialWorkflowScope = "all";
+    officialWorkflowStatusFilter = "";
+    const filter = document.querySelector("#officialWorkflowStatusFilter");
+    if (filter) filter.value = "";
+    await loadOfficialWorkflow("all");
+    if (detail.id) await loadOfficialDocumentDetail(detail.id);
+    showToast("已用去識別化寄發證明完成總務寄發走測，請由申請人確認結案。");
+  } catch (error) {
+    if (["launch_smoke_dispatch_candidate_required", "official_document_not_pending_general_affairs_dispatch"].includes(error.rawMessage || error.code)) {
+      showToast("目前沒有已用印且等待總務寄發的去識別化走測單，請先完成 PDF 用印走測。");
+      await prefillGeneralAffairsDispatchLaunchSmokeTest();
+      return;
+    }
+    if (error.status === 403 || /forbidden|權限/.test(error.message)) {
+      showToast("目前帳號不能完成總務寄發，請切換總務或系統管理員正式帳號。");
+      return;
+    }
+    showToast(`完成總務寄發走測失敗：${error.message}`);
+    await prefillGeneralAffairsDispatchLaunchSmokeTest();
+  }
+}
+
+function prefillUploadedPdfLaunchSmokeTest() {
+  openOfficialWorkflowCreate("uploaded_pdf");
+  window.setTimeout(() => {
+    selectCurrentOfficialSealForLaunchSmoke();
+    launchSmokeSetFieldValue("#officialDispatchMethodSelect", "electronic_official_document_by_general_affairs", { onlyIfEmpty: false });
+    launchSmokeSetFieldValue("#officialRecipientInput", "測試收文機關（去識別化）", { onlyIfEmpty: false });
+    launchSmokeSetFieldValue("#officialDispatchUnitInput", activeUnit() || "總管理處", { onlyIfEmpty: false });
+    launchSmokeSetFieldValue("#officialHandlerInput", authState?.user?.name || "上線走測承辦", { onlyIfEmpty: false });
+    launchSmokeSetFieldValue("#officialSubjectInput", "去識別化 PDF 用印走測申請", { onlyIfEmpty: false });
+    launchSmokeSetFieldValue(
+      "#officialDescriptionInput",
+      "本申請僅用於下週一內部正式上線前走測，確認 PDF 上傳、簽核、後端套印、已用印版本與下載紀錄均可追蹤。",
+      { onlyIfEmpty: false }
+    );
+    launchSmokeSetFieldValue("#officialMethodInput", "請依固定流程簽核；核准後由系統自動產生已用印 PDF，並交由總務完成寄發紀錄。", { onlyIfEmpty: false });
+    launchSmokeSetFieldValue("#officialReasonInput", "內部上線走測用印", { onlyIfEmpty: false });
+    applyUploadedPdfLaunchStampPositions();
+    setOfficialFieldValidity("#officialPdfInput", "#officialPdfHint", false, "請選擇去識別化 PDF 走測檔；可先下載範本，系統不會自動放入正式文件。");
+    launchSmokePulse("#officialSmokePdfTemplateBtn");
+    showToast("已帶入 PDF 用印走測資料，可下載範本後選檔送簽。");
+  }, 120);
+}
+
+function openOfficialWorkflowCreate(sourceType = "blank_editor") {
+  officialWorkflowScope = "new";
+  resetOfficialStampPositions();
+  renderOfficialWorkflow();
+  const sourceSelect = document.querySelector("#officialSourceType");
+  if (sourceSelect) sourceSelect.value = sourceType;
+  syncOfficialSourceMode({ clearPdf: false });
+  clearOfficialWorkflowValidation();
+  window.setTimeout(() => {
+    const selector = sourceType === "uploaded_pdf" ? "#officialPdfInput" : "#officialWorkflowForm";
+    document.querySelector(selector)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    document.querySelector(selector)?.focus?.({ preventScroll: true });
+  }, 80);
+}
+
+async function focusOfficialDispatchTasks() {
+  officialWorkflowScope = "all";
+  officialWorkflowStatusFilter = "pending_general_affairs_dispatch";
+  const filter = document.querySelector("#officialWorkflowStatusFilter");
+  if (filter) filter.value = officialWorkflowStatusFilter;
+  await loadOfficialWorkflow("all");
+  window.setTimeout(() => document.querySelector("#officialDispatchReadinessPanel")?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+}
+
+function prefillOfficialDispatchCompletionFields() {
+  const item = officialCurrentItem();
+  const hasCompletionForm = Boolean(document.querySelector("#officialCompleteDispatchBtn"));
+  if (!item || !hasCompletionForm) {
+    showToast("已定位寄發任務；目前帳號或狀態不能回填，請切換總務或先完成用印。");
+    return;
+  }
+  const dateCompact = launchSmokeDateValue().replaceAll("-", "");
+  launchSmokeSetFieldValue("#officialDispatchNumberInput", `TEST-EDOC-${dateCompact}-001`, { onlyIfEmpty: true });
+  launchSmokeSetFieldValue("#officialDispatchDateInput", launchSmokeDateValue(), { onlyIfEmpty: false });
+  launchSmokeSetFieldValue("#officialDispatchRecipientInput", item.recipient || "測試收件對象（去識別化）", { onlyIfEmpty: true });
+  launchSmokeSetFieldValue("#officialDispatchContactInput", "recipient@example.invalid", { onlyIfEmpty: true });
+  launchSmokeSetFieldValue(
+    "#officialDispatchNoteInput",
+    "去識別化走測：已確認已用印 PDF 可下載，寄發證明需由總務上傳後才能完成驗收。",
+    { onlyIfEmpty: true }
+  );
+  launchSmokePulse("#officialDispatchProofTemplateBtn");
+  showToast("已帶入總務寄發回填範例；可下載去識別化寄發證明範本後上傳。");
+}
+
+async function prefillGeneralAffairsDispatchLaunchSmokeTest() {
+  await focusOfficialDispatchTasks();
+  const candidate = officialDispatchReadinessTasks()[0]
+    || officialWorkflowItems.find((item) => ["pending_general_affairs_dispatch", "returned_to_applicant_for_send", "stamping_failed"].includes(item.current_status));
+  if (!candidate) {
+    showToast("目前沒有待總務寄發案件；請先完成 PDF 用印走測並產生已用印版本。");
+    return;
+  }
+  await selectOfficialDispatchTask(candidate.id);
+  window.setTimeout(prefillOfficialDispatchCompletionFields, 160);
+}
+
+function focusInboundRegisterJourney() {
+  const advanced = document.querySelector(".inbound-advanced");
+  if (advanced) advanced.open = true;
+  window.setTimeout(() => {
+    document.querySelector("#registerForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    document.querySelector("#registerDate")?.focus?.({ preventScroll: true });
+  }, 80);
+}
+
+function prefillInboundAssignmentLaunchSmokeTest() {
+  focusInboundRegisterJourney();
+  if (!selectedInboundId && inboundDocs[0]) selectedInboundId = inboundDocs[0].id;
+  renderInboundRows();
+  renderInboundDetail();
+  const doc = currentInboundDoc();
+  if (!doc) {
+    launchSmokePulse("#createInboundSmokeTestBtn");
+    showToast("目前沒有可登錄的收文；可按「建立去識別化收文走測」寫入後端。");
+    return;
+  }
+  launchSmokeSetFieldValue("#registerDate", launchSmokeDateValue(), { onlyIfEmpty: false });
+  launchSmokeSetFieldValue("#registerDept", "總管理處", { onlyIfEmpty: false });
+  launchSmokeSetFieldValue("#retentionYears", "10 年", { onlyIfEmpty: false });
+  launchSmokeSetFieldValue("#registerNote", "去識別化走測：確認收文登錄、附件檢視、分派承辦與期限追蹤，不含真實個資。", { onlyIfEmpty: false });
+  launchSmokeSetFieldValue("#assignOwner", "王督導", { onlyIfEmpty: false });
+  launchSmokeSetFieldValue("#assignDueDate", launchSmokeDateValue(3), { onlyIfEmpty: false });
+  launchSmokeSetFieldValue("#assignNote", "請於期限前完成內部處理回覆；本筆為下週一上線前收文分派走測。", { onlyIfEmpty: false });
+  launchSmokePulse("#registerForm");
+  showToast(`已帶入收文登錄與分派走測資料，請先登錄 ${doc.receiveNo || doc.id} 再分派。`);
+}
+
+function focusInternalDispatchJourney() {
+  if (isRouteAllowed("inbound")) setView("inbound");
+  setInboundSection("dispatch");
+  window.setTimeout(() => {
+    document.querySelector("#internalDispatchForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    document.querySelector("#internalDispatchTitleInput")?.focus?.({ preventScroll: true });
+  }, 80);
+}
+
+function renderLaunchChecklist() {
+  const grid = document.querySelector("#launchChecklistGrid");
+  const status = document.querySelector("#launchChecklistStatus");
+  if (!grid || !status) return;
+  const items = launchChecklistItems();
+  const issueCount = items.filter((item) => item.tone === "issue").length;
+  const waitCount = items.filter((item) => item.tone === "wait").length;
+  status.textContent = issueCount ? `${issueCount} 項需處理` : waitCount ? `${waitCount} 項待走測` : "可內部上線";
+  grid.innerHTML = items.map((item) => `
+    <article class="launch-check-item ${escapeDraftHtml(item.tone)}">
+      <span>${escapeDraftHtml(item.status)}</span>
+      <strong>${escapeDraftHtml(item.title)}</strong>
+      <p>${escapeDraftHtml(item.body)}</p>
+      <button class="${item.tone === "issue" ? "primary-button" : "secondary-button"}" type="button" data-launch-target="${escapeDraftHtml(item.target)}" data-launch-action="${escapeDraftHtml(item.launchAction || "")}">${escapeDraftHtml(item.action)}</button>
+    </article>
+  `).join("");
+  grid.querySelectorAll("[data-launch-target]").forEach((button) => {
+    button.addEventListener("click", () => handleLaunchNavigation(button.dataset.launchTarget, button.dataset.launchAction));
+  });
+  renderLaunchJourneyAttestation(currentLaunchSmokeReport());
+}
+
+function formalExchangeUiBlocked() {
+  if (!goLiveAuditState) return isProductionEdocHost();
+  return Boolean(!goLiveAuditState.formalGo);
+}
+
+function formalExchangeDisabledReason() {
+  if (!formalExchangeUiBlocked()) return "";
+  return goLiveAuditState?.summary || "目前為內部正式使用，政府電子交換與正式 jAgent 送交未啟用。";
+}
+
+function guardFormalExchangeUi(operation = "正式電子交換") {
+  if (!formalExchangeUiBlocked()) return true;
+  const reason = formalExchangeDisabledReason();
+  addExchangeEvent(`${operation}已停用`, reason);
+  showToast("內部正式使用模式：政府電子交換未啟用。");
+  return false;
+}
+
+function applyFormalExchangeUiState() {
+  const blocked = formalExchangeUiBlocked();
+  const title = blocked ? formalExchangeDisabledReason() : "";
+	  [
+	    "#sendDispatchBtn",
+	    "#resendDispatchBtn",
+	    "#sendQueueBtn",
+	    "#detailSendDispatchBtn",
+	    "#detailResendDispatchBtn",
+	    "#pullInboundBtn",
+	    "#pullJagentBtn",
+	    "#loginJagentBtn",
+	    "#certLoginBtn",
+    "#refreshTokenBtn",
+    "#validateTokenBtn",
+    "#connectCenterBtn",
+    "#syncCenterBtn",
+    "#retryFailedBtn"
+  ].forEach((selector) => {
+    const button = document.querySelector(selector);
+    if (!button) return;
+    if (!button.dataset.originalLabel) button.dataset.originalLabel = button.textContent.trim();
+    button.disabled = blocked;
+    button.classList.toggle("formal-disabled", blocked);
+	    if (blocked && ["#sendDispatchBtn", "#resendDispatchBtn", "#detailSendDispatchBtn", "#detailResendDispatchBtn", "#pullInboundBtn", "#pullJagentBtn"].includes(selector)) {
+	      button.textContent = "正式交換未啟用";
+    } else if (button.dataset.originalLabel) {
+      button.textContent = button.dataset.originalLabel;
+    }
+    if (blocked) button.title = title;
+    else button.removeAttribute("title");
+  });
+  const exchangeNav = document.querySelector("#exchangeNavItem");
+  if (exchangeNav) {
+    exchangeNav.textContent = blocked ? "交換介接（未啟用）" : "交換介接";
+    exchangeNav.title = blocked ? title : "";
+    exchangeNav.classList.toggle("formal-disabled", blocked);
+  }
+  document.body?.classList.toggle("formal-exchange-disabled", blocked);
+}
+
+function demoLoginDisabledByPolicy() {
+  const checks = goLiveAuditState?.internalReadiness?.checks || goLiveAuditState?.checks || {};
+  return Boolean(
+    isProductionEdocHost()
+    || (goLiveAuditState?.launchScope === "internal_official" && checks.demoAccountsDisabled)
+  );
+}
+
+function demoLoginDisabledReason() {
+  return "公文系統不提供獨立或測試帳號，請從 Finance 公司共用入口使用 Google 帳號登入。";
+}
+
+function roleSwitchDisabledByPolicy() {
+  return hasAuthenticatedBackendSession();
+}
+
+function applyProductionLoginSafetyState() {
+  const demoDisabled = demoLoginDisabledByPolicy();
+  const roleLocked = roleSwitchDisabledByPolicy();
+  const roleSelect = document.querySelector("#roleSelect");
+  if (roleSelect) {
+    roleSelect.disabled = true;
+    roleSelect.title = "角色由 Finance 人員名冊與 Google 登入帳號決定。";
+  }
+  document.body?.classList.toggle("demo-login-disabled", demoDisabled);
+  renderLoginReadinessBanner();
+}
+
+function loginReleaseDecisionView(release = productionLoginReleaseDecisionPackage) {
+  if (release?.reportType !== "edoc_login_release_decision") return null;
+  const decisionLabels = {
+    LOCKED_ENV: "前台全鎖",
+    SETUP_ONLY: "只開放補件人員",
+    LOCKED_INTERNAL_BLOCKERS: "前台暫不放行",
+    EMPLOYEE_LOGIN_GO: "可開放同仁登入"
+  };
+  const decisionTone = release.decision === "EMPLOYEE_LOGIN_GO" ? "ok" : "issue";
+  const allowedActors = release.allowedActors || [];
+  const blockedActors = release.blockedActors || [];
+  return {
+    tone: decisionTone,
+    decision: release.decision || "UNKNOWN",
+    statusLabel: release.statusLabel || decisionLabels[release.decision] || "待判定",
+    title: `登入放行：${release.statusLabel || decisionLabels[release.decision] || "待判定"}`,
+    body: release.userImpact || "請依登入放行決策與下一步行動卡處理。",
+    allowedText: allowedActors.length ? allowedActors.slice(0, 4).join("、") : "目前無人可從前台登入",
+    blockedText: blockedActors.length ? blockedActors.slice(0, 4).join("、") : "無",
+    primaryAction: release.primaryAction?.title || "",
+    verifyApi: release.primaryAction?.verifyApi || "GET /api/production/login-release-decision",
+  };
+}
+
+function employeeLaunchNoticeView(notice = productionEmployeeLaunchNoticePackage) {
+  if (notice?.reportType !== "edoc_employee_launch_notice") return null;
+  return {
+    availability: notice.availability || "blocked",
+    subject: notice.subject || "電子公文系統暫未開放一般使用",
+    headline: notice.headline || notice.statusLabel || "請等待行政部或總務通知",
+    body: notice.body || "請等待正式開放通知，急件請先依既有流程處理。",
+    actions: (notice.employeeActions || []).slice(0, 3),
+    support: (notice.supportRouting || []).slice(0, 3).map((item) => `${item.topic}：${item.owner}`),
+  };
+}
+
+function loginReadinessSummary(readiness) {
+  const releaseView = loginReleaseDecisionView();
+  const noticeView = employeeLaunchNoticeView();
+  if (releaseView) {
+    const currentState = productionLoginReleaseDecisionPackage?.currentState || {};
+    const details = [
+      ...(currentState.missing || []).map((item) => `缺少 ${item}`),
+      ...(currentState.blockers || []),
+      ...(currentState.warnings || [])
+    ].slice(0, 5);
+    return {
+      tone: releaseView.tone,
+      title: releaseView.title,
+      body: noticeView?.body || releaseView.body,
+      details: noticeView ? [] : details
+    };
+  }
+  if (!readiness) {
+    return {
+      tone: "checking",
+      title: "正在檢查正式站上線設定",
+      body: "系統正在確認 Supabase、private storage、Seal Vault 與正式帳號政策，請稍候。",
+      details: []
+    };
+  }
+  const internalReady = Boolean(readiness.internalGo || readiness.ready);
+  const missing = (readiness.missing || []).map((item) => `缺少 ${item}`);
+  const blockers = readiness.blockers || [];
+  const warnings = readiness.warnings || [];
+  const setupLoginAllowed = loginReadinessAllowsSetupLogin(readiness);
+  if (internalReady) {
+    return {
+      tone: "ok",
+      title: "內部正式使用已可登入",
+      body: readiness.scopeNote || "請使用公司正式帳號或 Logging Portal 登入；政府電子交換與法定電子簽章仍維持未啟用。",
+      details: warnings.slice(0, 2)
+    };
+  }
+  if (setupLoginAllowed) {
+    return {
+      tone: "issue",
+      title: "正式站補件模式",
+      body: "正式 Auth / Supabase 已可用，但公司、帳號、印章或使用者走測尚未齊備；目前只開放行政部主任、總務、執行長或系統補件權限帳號登入處理 P0。",
+      details: [...blockers, ...warnings].slice(0, 5)
+    };
+  }
+  return {
+    tone: "issue",
+    title: "正式站尚未完成上線設定",
+    body: "目前不建議讓同仁登入使用，請先補齊 P0 底座，避免輸入帳密後才遇到資料庫、Seal Vault 或正式帳號錯誤。",
+    details: [...missing, ...blockers].slice(0, 5)
+  };
+}
+
+function loginCutoverActionItems(readiness = loginReadinessState || goLiveAuditState?.internalReadiness) {
+  const next = productionNextActionPackage?.primaryAction;
+  if (next?.title) {
+    const evaluation = next.signalEvaluation;
+    const signalText = evaluation?.evaluated
+      ? ` 目前 ${evaluation.passCount || 0}/${evaluation.total || 0} 項驗收通過。`
+      : "";
+    const actions = [{
+      title: `下一步：${next.title}`,
+      body: `${next.userImpact || next.doneWhen || "請依下一步行動卡完成目前 P0。"}${signalText}`
+    }];
+    (productionNextActionPackage?.nextExpectedActions || []).slice(0, 2).forEach((item) => {
+      actions.push({
+        title: `接著：${item.title}`,
+        body: `${item.doneWhen || "完成後重新檢查上線狀態。"}${item.verifyApi ? ` 驗收：${item.verifyApi}` : ""}`
+      });
+    });
+    return actions;
+  }
+  const packageTasks = (productionCutoverReadinessPackage?.tasks || [])
+    .filter((item) => item.severity === "issue" || item.priority === "P0")
+    .slice(0, 3)
+    .map((item) => ({
+      title: item.title,
+      body: item.evidence || item.nextAction || item.action || "待補上線設定"
+    }));
+  if (packageTasks.length) return packageTasks;
+  const missing = readiness?.missing || [];
+  const items = [];
+  if (missing.some((name) => ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"].includes(name))) {
+    items.push({ title: "建立 eDoc Supabase production", body: "設定 SUPABASE_URL 與 server-side service role key，套用 migrations 並驗證 RLS / GRANT。" });
+  }
+  if (missing.includes("EDOC_OBJECT_STORAGE_URL")) {
+    items.push({ title: "接上 private object storage", body: "建立 edoc-private 與 edoc-seal-vault private bucket，所有檔案只走後端 API。" });
+  }
+  items.push({ title: "重跑內部上線判定", body: "補齊後重新部署，確認 internal-readiness 變成 internalGo=true、formalGo=false。" });
+  return items.slice(0, 3);
+}
+
+function loginReadinessHasAuthFoundation(readiness = loginReadinessState || goLiveAuditState?.internalReadiness) {
+  if (!readiness) return false;
+  const missing = new Set(readiness.missing || []);
+  const checks = readiness.checks || {};
+  const dataError = readiness.dataReadiness?.checks?.error || readiness.dataReadiness?.error || "";
+  return Boolean(
+    readiness.databaseMode === "supabase"
+    && checks.supabase
+    && !missing.has("SUPABASE_URL")
+    && !missing.has("SUPABASE_SERVICE_ROLE_KEY")
+    && dataError !== "supabase_runtime_env_missing"
+  );
+}
+
+function loginReadinessAllowsSetupLogin(readiness = loginReadinessState || goLiveAuditState?.internalReadiness) {
+  if (!isProductionEdocHost()) return false;
+  if (productionLoginReleaseDecisionPackage?.reportType === "edoc_login_release_decision") {
+    return productionLoginReleaseDecisionPackage.decision === "SETUP_ONLY";
+  }
+  if (!readiness || readiness.internalGo || readiness.ready) return false;
+  const checks = readiness.checks || {};
+  return Boolean(
+    loginReadinessHasAuthFoundation(readiness)
+    && checks.demoAccountsDisabled
+    && checks.formalExchangeDisabled
+  );
+}
+
+function renderLoginReadinessBanner(readiness = loginReadinessState || goLiveAuditState?.internalReadiness) {
+  const banner = document.querySelector("#loginReadinessBanner");
+  if (!banner) return;
+  if (!isProductionEdocHost() && !readiness) {
+    banner.className = "login-readiness-banner hidden";
+    banner.innerHTML = "";
+    applyLoginReadinessFormState(readiness);
+    return;
+  }
+  const summary = loginReadinessSummary(readiness);
+  banner.className = `login-readiness-banner ${summary.tone}`;
+  const releaseView = loginReleaseDecisionView();
+  const noticeView = employeeLaunchNoticeView();
+  const blocked = loginReadinessBlocksLogin(readiness);
+  const operationRestrictions = productionLoginReleaseDecisionPackage?.operationRestrictions || [];
+  const headline = blocked
+    ? noticeView?.headline || "系統正在完成正式環境設定"
+    : operationRestrictions.length ? "公司帳號可以登入；部分作業仍受限" : "公司帳號可以登入";
+  const body = blocked
+    ? "目前暫停登入，避免帳號進入後遇到資料或權限不完整。請聯絡行政部或 IT，不需要下載任何設定檔。"
+    : operationRestrictions.length
+      ? "角色與部門會由 Finance 人員名冊帶入；檔案上傳、PDF 編輯、送簽或用印若尚未通過安全檢查，系統會明確阻擋並顯示原因。"
+      : "請使用與 Finance 系統相同的公司帳號登入；角色與部門會由人員名冊自動帶入。";
+  banner.innerHTML = `
+    <strong>${escapeDraftHtml(headline)}</strong>
+    <p>${escapeDraftHtml(body)}</p>
+    ${!blocked && operationRestrictions.length ? `<small>受限項目：${escapeDraftHtml(operationRestrictions.map((item) => item.reason).slice(0, 2).join("；"))}</small>` : ""}
+    ${blocked && releaseView?.statusLabel ? `<small>目前狀態：${escapeDraftHtml(releaseView.statusLabel)}</small>` : ""}
+  `;
+  applyLoginReadinessFormState(readiness);
+}
+
+function loginReadinessBlocksLogin(readiness = loginReadinessState || goLiveAuditState?.internalReadiness) {
+  if (!isProductionEdocHost()) return false;
+  if (productionLoginReleaseDecisionPackage?.reportType === "edoc_login_release_decision") {
+    return !["SETUP_ONLY", "EMPLOYEE_LOGIN_GO"].includes(productionLoginReleaseDecisionPackage.decision);
+  }
+  if (!readiness) return true;
+  return !Boolean(readiness.internalGo || readiness.ready || loginReadinessAllowsSetupLogin(readiness));
+}
+
+function loginReadinessBlockReason(readiness = loginReadinessState || goLiveAuditState?.internalReadiness) {
+  const releaseView = loginReleaseDecisionView();
+  if (releaseView && loginReadinessBlocksLogin(readiness)) {
+    return `${releaseView.title}。${releaseView.body}`;
+  }
+  if (!readiness) return "正在檢查正式站上線設定，請稍候。";
+  const missing = (readiness.missing || []).slice(0, 3).join("、");
+  const blocker = (readiness.blockers || [])[0] || "";
+  return missing
+    ? `正式站尚未完成上線設定，缺少 ${missing}。`
+    : blocker || "正式站尚未完成上線設定，請 IT 先補齊 Supabase、private storage 與 Seal Vault。";
+}
+
+function applyLoginReadinessFormState(readiness = loginReadinessState || goLiveAuditState?.internalReadiness) {
+  const blocked = loginReadinessBlocksLogin(readiness);
+  const checking = isProductionEdocHost() && !readiness;
+  const setupMode = loginReadinessAllowsSetupLogin(readiness);
+  const reason = loginReadinessBlockReason(readiness);
+  const submitButton = document.querySelector("#loginSubmitBtn");
+  const portalButton = document.querySelector("#portalLoginBtn");
+  if (submitButton) {
+    if (!submitButton.dataset.originalLabel) submitButton.dataset.originalLabel = submitButton.textContent.trim();
+    submitButton.disabled = blocked;
+    submitButton.classList.toggle("login-readiness-disabled", blocked);
+    submitButton.textContent = blocked
+      ? checking ? "檢查上線設定中" : "待 IT 完成上線設定"
+      : setupMode ? "補件人員登入"
+      : submitButton.dataset.originalLabel;
+    submitButton.title = blocked ? reason : "";
+    submitButton.setAttribute("aria-disabled", blocked ? "true" : "false");
+  }
+  if (portalButton) {
+    portalButton.disabled = blocked;
+    portalButton.classList.toggle("login-readiness-disabled", blocked);
+    portalButton.title = blocked ? `${reason} 前台帳號登入暫停。` : setupMode ? "正式站補件模式只允許補件角色登入。" : "";
+    portalButton.setAttribute("aria-disabled", blocked ? "true" : "false");
+  }
+  ["#loginEmail", "#loginPassword"].forEach((selector) => {
+    const field = document.querySelector(selector);
+    if (!field) return;
+    field.disabled = blocked;
+    field.title = blocked ? reason : "";
+  });
+  document.body?.classList.toggle("login-readiness-blocked", blocked);
+  document.body?.classList.toggle("login-readiness-setup-mode", setupMode);
+}
+
+async function syncLoginReadinessBanner() {
+  if (!document.querySelector("#loginReadinessBanner")) return null;
+  if (!isProductionEdocHost()) {
+    renderLoginReadinessBanner();
+    return null;
+  }
+  renderLoginReadinessBanner();
+  const nextActionPromise = ensureProductionNextActionPackage().then(() => {
+    renderLoginReadinessBanner(loginReadinessState);
+  }).catch(() => {});
+  const releaseDecisionPromise = ensureProductionLoginReleaseDecisionPackage().then(() => {
+    renderLoginReadinessBanner(loginReadinessState);
+  }).catch(() => {});
+  const employeeNoticePromise = ensureProductionEmployeeLaunchNoticePackage().then(() => {
+    renderLoginReadinessBanner(loginReadinessState);
+  }).catch(() => {});
+  try {
+    const result = await fetchOpsJson("/production/internal-readiness");
+    loginReadinessState = result.data;
+    renderLoginReadinessBanner(loginReadinessState);
+    nextActionPromise.then(() => {});
+    releaseDecisionPromise.then(() => {});
+    employeeNoticePromise.then(() => {});
+    ensureProductionCutoverReadinessPackage().then(() => {
+      renderLoginReadinessBanner(loginReadinessState);
+    }).catch(() => {});
+    return loginReadinessState;
+  } catch (error) {
+    loginReadinessState = {
+      ready: false,
+      internalGo: false,
+      blockers: ["無法讀取正式站上線狀態，請 IT 檢查 Vercel API 與 production env。"],
+      warnings: [error.message || "internal-readiness request failed"]
+    };
+    ensureProductionNextActionPackage().then(() => {
+      renderLoginReadinessBanner(loginReadinessState);
+    }).catch(() => {});
+    ensureProductionLoginReleaseDecisionPackage().then(() => {
+      renderLoginReadinessBanner(loginReadinessState);
+    }).catch(() => {});
+    ensureProductionEmployeeLaunchNoticePackage().then(() => {
+      renderLoginReadinessBanner(loginReadinessState);
+    }).catch(() => {});
+    renderLoginReadinessBanner(loginReadinessState);
+    return loginReadinessState;
+  }
+}
+
+function hasMissingEnv(readiness, names = []) {
+  const missing = new Set(readiness?.missing || []);
+  return names.filter((name) => missing.has(name));
+}
+
+async function ensureProductionNextActionPackage() {
+  if (productionNextActionPackage?.reportType === "edoc_production_next_action") {
+    return productionNextActionPackage;
+  }
+  try {
+    const result = await fetchOpsJson("/production/next-action");
+    if (result.ok && result.data?.reportType === "edoc_production_next_action") {
+      productionNextActionPackage = result.data;
+      return productionNextActionPackage;
+    }
+  } catch (error) {
+    addOpsAudit("讀取 Production 下一步行動卡失敗", error.message || "next action api failed");
+  }
+  return productionNextActionPackage;
+}
+
+async function ensureProductionLoginReleaseDecisionPackage() {
+  if (productionLoginReleaseDecisionPackage?.reportType === "edoc_login_release_decision") {
+    return productionLoginReleaseDecisionPackage;
+  }
+  try {
+    const result = await fetchOpsJson("/production/login-release-decision");
+    if (result.ok && result.data?.reportType === "edoc_login_release_decision") {
+      productionLoginReleaseDecisionPackage = result.data;
+      return productionLoginReleaseDecisionPackage;
+    }
+  } catch (error) {
+    addOpsAudit("讀取登入放行決策失敗", error.message || "login release decision api failed");
+  }
+  return productionLoginReleaseDecisionPackage;
+}
+
+async function ensureProductionEmployeeLaunchNoticePackage() {
+  if (productionEmployeeLaunchNoticePackage?.reportType === "edoc_employee_launch_notice") {
+    return productionEmployeeLaunchNoticePackage;
+  }
+  try {
+    const result = await fetchOpsJson("/production/employee-launch-notice");
+    if (result.ok && result.data?.reportType === "edoc_employee_launch_notice") {
+      productionEmployeeLaunchNoticePackage = result.data;
+      return productionEmployeeLaunchNoticePackage;
+    }
+  } catch (error) {
+    addOpsAudit("讀取同仁公告稿失敗", error.message || "employee launch notice api failed");
+  }
+  return productionEmployeeLaunchNoticePackage;
+}
+
+async function ensureProductionCutoverReadinessPackage() {
+  if (productionCutoverReadinessPackage?.reportType === "edoc_production_cutover_readiness") {
+    return productionCutoverReadinessPackage;
+  }
+  try {
+    const result = await fetchOpsJson("/production/cutover-readiness-package");
+    if (result.ok && result.data?.reportType === "edoc_production_cutover_readiness") {
+      productionCutoverReadinessPackage = result.data;
+      return productionCutoverReadinessPackage;
+    }
+  } catch (error) {
+    addOpsAudit("讀取 Production 底座補件包失敗", error.message || "cutover readiness api failed");
+  }
+  return productionCutoverReadinessPackage;
+}
+
+function opsProductionChecklistItems(audit = goLiveAuditState) {
+  if (productionCutoverReadinessPackage?.tasks?.length) {
+    return productionCutoverReadinessPackage.tasks.map((item) => ({
+      key: item.key,
+      title: item.title,
+      owner: item.owner,
+      priority: item.priority || (item.severity === "pass" ? "Ready" : item.severity === "warn" ? "P1" : "P0"),
+      severity: item.severity || "issue",
+      evidence: item.evidence || "待檢查",
+      action: item.nextAction || item.action || "",
+      doneWhen: item.doneWhen || "",
+      command: item.verificationCommand || item.command || item.api || "",
+      notes: item.notes || [],
+      requiredEnv: item.requiredEnv || {}
+    }));
+  }
+  const readiness = audit?.internalReadiness || {};
+  const checks = readiness.checks || {};
+  const missing = readiness.missing || [];
+  const databaseMissing = hasMissingEnv(readiness, ["EDOC_DB_MODE", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]);
+  if (readiness.databaseMode !== "supabase" && !databaseMissing.includes("EDOC_DB_MODE")) databaseMissing.unshift("EDOC_DB_MODE=supabase");
+  const storageMissing = hasMissingEnv(readiness, [
+    "EDOC_STORAGE_PROVIDER",
+    "EDOC_STORAGE_BUCKET",
+    "EDOC_SEAL_STORAGE_BUCKET",
+    "EDOC_OBJECT_STORAGE_URL",
+    "EDOC_STORAGE_ACCESS_MODE",
+    "EDOC_FILE_ENCRYPTION_KEY"
+  ]);
+  const launchMissing = hasMissingEnv(readiness, ["EDOC_DEPLOYMENT_ENV", "EDOC_PUBLIC_BASE_URL", "EDOC_LAUNCH_SCOPE"]);
+	  const notificationMissing = [
+	    ...(!checks.smtp ? ["RESEND_API_KEY / MAIL_FROM"] : []),
+	    ...(!checks.line ? ["LINE_WEBHOOK_URL"] : [])
+	  ];
+	  const demoPolicyExplicit = Boolean(checks.demoAccountsExplicitlyDisabled);
+	  const demoPolicySafeDefault = Boolean(checks.demoAccountsSafeDefault);
+	  const demoPolicyEvidence = checks.demoAccountsDisabled
+	    ? (demoPolicyExplicit ? "EDOC_DISABLE_DEMO_ACCOUNTS=true" : "正式站安全預設已阻擋 demo；仍需設定 EDOC_DISABLE_DEMO_ACCOUNTS=true")
+	    : "EDOC_DISABLE_DEMO_ACCOUNTS 未啟用";
+	  return [
+    {
+      key: "vercel_env",
+      title: "Vercel Production Env",
+      owner: "IT",
+      severity: launchMissing.length || missing.length ? "issue" : "pass",
+      evidence: launchMissing.length ? launchMissing.join("、") : "production scope 變數已具備",
+      action: "在 Vercel Production environment variables 設定後重新部署；env 變更不會套用到舊 deployment。",
+      doneWhen: "EDOC_DEPLOYMENT_ENV=production、EDOC_LAUNCH_SCOPE=internal_official、EDOC_PUBLIC_BASE_URL 指向正式網址。",
+      command: "vercel env ls production"
+    },
+    {
+      key: "supabase_db",
+      title: "Supabase Production DB",
+      owner: "IT",
+      severity: checks.supabase && readiness.databaseMode === "supabase" ? "pass" : "issue",
+      evidence: databaseMissing.length ? databaseMissing.join("、") : `databaseMode=${readiness.databaseMode || "unknown"}`,
+      action: "切到獨立 eDoc Supabase production project，套用 migrations，並確認 public table 的 Data API/RLS 權限。",
+      doneWhen: "Go / No-Go 顯示 databaseMode=supabase，internal-readiness 不再缺 SUPABASE_URL / SERVICE_ROLE_KEY。",
+      command: "python3 backend.py --launch-smoke-report"
+    },
+    {
+      key: "private_storage",
+      title: "Private Storage / Seal Vault",
+      owner: "IT、總務",
+      severity: checks.privateStorage && checks.encryption ? "pass" : "issue",
+      evidence: storageMissing.length ? storageMissing.join("、") : `bucket=${checks.documentBucket || "edoc-private"} / seal=${checks.sealVaultBucket || "edoc-seal-vault"}`,
+      action: "建立 edoc-private 與 edoc-seal-vault private bucket；印章原檔只允許後端 API 存取。",
+      doneWhen: "privateStorage=true、encryption=true，且 Seal Vault current 版本可用。",
+      command: "檢查 Supabase Storage buckets: edoc-private, edoc-seal-vault"
+    },
+	    {
+	      key: "demo_policy",
+	      title: "Demo / Quick Login 關閉",
+	      owner: "IT、行政部主任",
+	      severity: checks.demoAccountsDisabled ? (demoPolicySafeDefault && !demoPolicyExplicit ? "warn" : "pass") : "issue",
+	      evidence: demoPolicyEvidence,
+	      action: "正式站不可允許測試密碼、快速角色切換或 seed/demo 帳號作為正式登入。",
+	      doneWhen: "正式站 demo login 被阻擋，正式帳號或 Logging Portal 可登入。",
+      command: "EDOC_DISABLE_DEMO_ACCOUNTS=true"
+    },
+    {
+      key: "notifications",
+      title: "通知與稽催",
+      owner: "IT、總務",
+      severity: notificationMissing.length ? "warn" : "pass",
+      evidence: notificationMissing.length ? notificationMissing.join("、") : "Resend / LINE 已設定",
+      action: "站內通知是最低門檻；若要避免漏簽與逾期未回文，補 Resend / LINE 並測一筆。",
+      doneWhen: "待簽核、退回、用印完成與逾期提醒至少能在站內看到；Email/LINE 視上線策略啟用。",
+      command: "測試通知：建立一筆待簽核與一筆逾期回文"
+    },
+    {
+      key: "formal_exchange_guard",
+      title: "正式電子交換邊界",
+      owner: "總務、行政部主任",
+      severity: checks.formalExchangeDisabled ? "pass" : "issue",
+      evidence: `provider=${checks.exchangeProvider || "unknown"} / env=${checks.exchangeEnvironment || "unknown"}`,
+      action: "維持 mock/sandbox；未取得 jAgent/API/SDK/封包規格前不得開正式交換。",
+      doneWhen: "formalGo=false、正式送交按鈕禁用，UI 顯示政府電子交換未啟用。",
+      command: "EDOC_EXCHANGE_PROVIDER=mock 或 sandbox"
+    }
+  ];
+}
+
+function renderOpsProductionChecklist() {
+  const grid = document.querySelector("#opsProductionChecklistGrid");
+  if (!grid) return;
+  const items = opsProductionChecklistItems();
+  const packageSummary = productionCutoverReadinessPackage?.summary || null;
+  const supabaseMatrix = productionCutoverReadinessPackage?.supabaseVerificationMatrix || null;
+  const packageCard = productionCutoverReadinessPackage ? `
+    <article class="ops-production-check ${productionCutoverReadinessPackage.decision === "PASS" ? "pass" : productionCutoverReadinessPackage.decision === "WARN" ? "warn" : "issue"}">
+      <span>Production 底座補件包 · ${escapeDraftHtml(productionCutoverReadinessPackage.decision || "UNKNOWN")}</span>
+      <strong>週一內部上線底座</strong>
+      <p>P0 ${packageSummary?.blockerCount || 0} · P1 ${packageSummary?.warningCount || 0} · 缺 env ${packageSummary?.missingEnvCount || 0} · 缺 current 章 ${packageSummary?.sealVaultMissingCount || 0}</p>
+	      ${supabaseMatrix ? `<small>Supabase 驗證矩陣：${supabaseMatrix.tableGroups?.length || 0} 組流程 table、${supabaseMatrix.storageBuckets?.length || 0} 個 private bucket、${supabaseMatrix.safeSqlChecks?.length || 0} 組 SQL 檢核。</small>` : ""}
+	      ${supabaseMatrix?.safeSqlArtifact?.path ? `<small>SQL artifact：${escapeDraftHtml(supabaseMatrix.safeSqlArtifact.path)}</small>` : ""}
+	      <small>完成條件：internalGo=true、formalGo=false、Supabase/private storage/demo policy/Seal Vault current 皆通過。</small>
+	      <code>GET /api/production/cutover-readiness-package</code>
+	      <button class="secondary-button" type="button" id="opsProductionArtifactIndexBtn">下載補件索引</button>
+	      <button class="secondary-button" type="button" id="opsLoginReleaseDecisionBtn">下載登入放行決策</button>
+	      <button class="secondary-button" type="button" id="opsEnvironmentUnlockHandoffBtn">下載環境解鎖交接包</button>
+	      <button class="secondary-button" type="button" id="opsEmployeeLaunchNoticeBtn">下載同仁公告稿</button>
+	      <button class="secondary-button" type="button" id="opsEmergencyManualIntakeTemplateBtn">下載急件人工處理表</button>
+	      <button class="secondary-button" type="button" id="opsFirstAdminBootstrapBtn">下載首位管理者 bootstrap</button>
+	      <button class="secondary-button" type="button" id="opsSealVaultCustodyTemplateBtn">下載印章收檔模板</button>
+	      <button class="secondary-button" type="button" id="opsUnblockRunbookBtn">下載解除阻擋 runbook</button>
+	      <button class="secondary-button" type="button" id="opsVercelEnvTemplateBtn">下載 Vercel env 模板</button>
+	      <button class="secondary-button" type="button" id="opsSupabaseBootstrapChecklistBtn">下載 Supabase bootstrap 清單</button>
+	      <button class="secondary-button" type="button" id="opsCutoverReadinessPackageBtn">下載上線補件包</button>
+	      <button class="secondary-button" type="button" id="opsSupabaseCutoverSqlBtn">下載 Supabase 驗收 SQL</button>
+	    </article>
+	  ` : "";
+  grid.innerHTML = packageCard + items.map((item) => `
+    <article class="ops-production-check ${escapeDraftHtml(item.severity)}">
+      <span>${escapeDraftHtml(item.owner)} · ${escapeDraftHtml(item.priority || (item.severity === "pass" ? "已具備" : item.severity === "warn" ? "P1" : "P0"))}</span>
+      <strong>${escapeDraftHtml(item.title)}</strong>
+      <p>${escapeDraftHtml(item.evidence || "待檢查")}</p>
+      <small>完成條件：${escapeDraftHtml(item.doneWhen)}</small>
+      <code>${escapeDraftHtml(item.command || item.action)}</code>
+	      ${item.notes?.length ? `<small>${item.notes.map((note) => escapeDraftHtml(note)).join(" · ")}</small>` : ""}
+	    </article>
+	  `).join("");
+  document.querySelector("#opsProductionArtifactIndexBtn")?.addEventListener("click", downloadProductionArtifactIndex);
+  document.querySelector("#opsLoginReleaseDecisionBtn")?.addEventListener("click", downloadProductionLoginReleaseDecision);
+  document.querySelector("#opsEnvironmentUnlockHandoffBtn")?.addEventListener("click", downloadProductionEnvironmentUnlockHandoff);
+  document.querySelector("#opsEmployeeLaunchNoticeBtn")?.addEventListener("click", downloadProductionEmployeeLaunchNotice);
+  document.querySelector("#opsEmergencyManualIntakeTemplateBtn")?.addEventListener("click", downloadProductionEmergencyManualIntakeTemplate);
+  document.querySelector("#opsFirstAdminBootstrapBtn")?.addEventListener("click", downloadProductionFirstAdminBootstrap);
+  document.querySelector("#opsSealVaultCustodyTemplateBtn")?.addEventListener("click", downloadProductionSealVaultCustodyTemplate);
+  document.querySelector("#opsUnblockRunbookBtn")?.addEventListener("click", downloadProductionUnblockRunbook);
+  document.querySelector("#opsVercelEnvTemplateBtn")?.addEventListener("click", downloadProductionVercelEnvTemplate);
+  document.querySelector("#opsSupabaseBootstrapChecklistBtn")?.addEventListener("click", downloadProductionSupabaseBootstrapChecklist);
+  document.querySelector("#opsCutoverReadinessPackageBtn")?.addEventListener("click", downloadProductionCutoverReadinessPackage);
+  document.querySelector("#opsSupabaseCutoverSqlBtn")?.addEventListener("click", downloadSupabaseCutoverSql);
+}
+
+async function downloadProductionUnblockRunbook() {
+  try {
+    const result = await downloadBinaryFile("/production/unblock-runbook", "edoc-production-unblock-runbook.json");
+    addOpsAudit("下載 Production 解除阻擋 runbook", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("Production 解除阻擋 runbook 已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Production 解除阻擋 runbook 失敗", error.message || "unblock runbook download failed");
+    showToast(error.message || "Production 解除阻擋 runbook 下載失敗。");
+  }
+}
+
+async function downloadProductionArtifactIndex() {
+  try {
+    const result = await downloadBinaryFile("/production/artifact-index", "edoc-production-artifact-index.json");
+    addOpsAudit("下載 Production 補件索引", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("Production 補件索引已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Production 補件索引失敗", error.message || "artifact index download failed");
+    showToast(error.message || "Production 補件索引下載失敗。");
+  }
+}
+
+async function downloadProductionLoginReleaseDecision() {
+  try {
+    const result = await downloadBinaryFile("/production/login-release-decision", "edoc-login-release-decision.json");
+    productionLoginReleaseDecisionPackage = null;
+    addOpsAudit("下載登入放行決策", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("登入放行決策已下載。");
+  } catch (error) {
+    addOpsAudit("下載登入放行決策失敗", error.message || "login release decision download failed");
+    showToast(error.message || "登入放行決策下載失敗。");
+  }
+}
+
+async function downloadProductionEnvironmentUnlockHandoff() {
+  try {
+    const result = await downloadBinaryFile("/production/environment-unlock-handoff", "edoc-environment-unlock-handoff.json");
+    addOpsAudit("下載環境解鎖交接包", `${result.fileName} 已下載，${result.size} bytes；此檔不含任何 server-side credential 實值。`);
+    showToast("環境解鎖交接包已下載。");
+  } catch (error) {
+    addOpsAudit("下載環境解鎖交接包失敗", error.message || "environment unlock handoff download failed");
+    showToast(error.message || "環境解鎖交接包下載失敗。");
+  }
+}
+
+async function downloadProductionEmployeeLaunchNotice() {
+  try {
+    const result = await downloadBinaryFile("/production/employee-launch-notice", "edoc-employee-launch-notice.json");
+    productionEmployeeLaunchNoticePackage = null;
+    addOpsAudit("下載同仁公告稿", `${result.fileName} 已下載，${result.size} bytes；此檔不含 env 名稱、密鑰、正式文件內容或原章資訊。`);
+    showToast("同仁公告稿已下載。");
+  } catch (error) {
+    addOpsAudit("下載同仁公告稿失敗", error.message || "employee launch notice download failed");
+    showToast(error.message || "同仁公告稿下載失敗。");
+  }
+}
+
+async function downloadProductionEmergencyManualIntakeTemplate() {
+  try {
+    const result = await downloadBinaryFile("/production/emergency-manual-intake-template", "edoc-emergency-manual-intake-template.csv");
+    addOpsAudit("下載急件人工處理表", `${result.fileName} 已下載，${result.size} bytes；只填 metadata，不收正式文件本文、附件內容或原章檔。`);
+    showToast("急件人工處理表已下載。");
+  } catch (error) {
+    addOpsAudit("下載急件人工處理表失敗", error.message || "emergency intake template download failed");
+    showToast(error.message || "急件人工處理表下載失敗。");
+  }
+}
+
+async function downloadProductionNextAction() {
+  try {
+    const result = await downloadBinaryFile("/production/next-action", "edoc-production-next-action.json");
+    addOpsAudit("下載 Production 下一步行動卡", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("Production 下一步行動卡已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Production 下一步行動卡失敗", error.message || "next action download failed");
+    showToast(error.message || "Production 下一步行動卡下載失敗。");
+  }
+}
+
+async function downloadProductionDayOneSupportBrief() {
+  try {
+    const result = await downloadBinaryFile("/production/day-one-support-brief", "edoc-day-one-support-brief.json");
+    addOpsAudit("下載第一天值班支援卡", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("第一天值班支援卡已下載。");
+  } catch (error) {
+    addOpsAudit("下載第一天值班支援卡失敗", error.message || "day-one support brief download failed");
+    showToast(error.message || "第一天值班支援卡下載失敗。");
+  }
+}
+
+async function downloadProductionHandoffNote() {
+  try {
+    const result = await downloadBinaryFile("/production/handoff-note", "edoc-production-handoff-note.json");
+    addOpsAudit("下載 Production 上線交辦訊息", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("Production 上線交辦訊息已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Production 上線交辦訊息失敗", error.message || "handoff note download failed");
+    showToast(error.message || "Production 上線交辦訊息下載失敗。");
+  }
+}
+
+async function downloadProductionCompanyLaunchRosterTemplate() {
+  try {
+    const result = await downloadBinaryFile("/production/company-launch-roster/template", "edoc-company-launch-roster-template.csv");
+    addOpsAudit("下載公司上線名冊模板", `${result.fileName} 已下載，${result.size} bytes；模板不含真實統編。`);
+    showToast("公司上線名冊模板已下載。");
+  } catch (error) {
+    addOpsAudit("下載公司上線名冊模板失敗", error.message || "company launch roster template download failed");
+    showToast(error.message || "公司上線名冊模板下載失敗。");
+  }
+}
+
+async function downloadProductionFormalAccountRosterTemplate() {
+  try {
+    const result = await downloadBinaryFile("/production/formal-account-roster/template", "edoc-formal-account-import-template.csv");
+    addOpsAudit("下載正式帳號 roster 模板", `${result.fileName} 已下載，${result.size} bytes；模板不含密碼。`);
+    showToast("正式帳號 roster 模板已下載。");
+  } catch (error) {
+    addOpsAudit("下載正式帳號 roster 模板失敗", error.message || "formal account template download failed");
+    showToast(error.message || "正式帳號 roster 模板下載失敗。");
+  }
+}
+
+async function downloadProductionSealVaultCustodyTemplate() {
+  try {
+    const result = await downloadBinaryFile("/production/seal-vault-custody-template", "edoc-seal-vault-custody-intake-template.csv");
+    addOpsAudit("下載 Seal Vault 收檔模板", `${result.fileName} 已下載，${result.size} bytes；模板不含原章檔。`);
+    showToast("Seal Vault 收檔模板已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Seal Vault 收檔模板失敗", error.message || "seal custody template download failed");
+    showToast(error.message || "Seal Vault 收檔模板下載失敗。");
+  }
+}
+
+async function downloadSupabaseCutoverSql() {
+  try {
+    const result = await downloadBinaryFile("/production/supabase-cutover-sql", "edoc-production-cutover-checks.sql");
+    addOpsAudit("下載 Supabase 驗收 SQL", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("Supabase 驗收 SQL 已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Supabase 驗收 SQL 失敗", error.message || "download failed");
+    showToast(error.message || "Supabase 驗收 SQL 下載失敗。");
+  }
+}
+
+async function downloadProductionVercelEnvTemplate() {
+  try {
+    const result = await downloadBinaryFile("/production/vercel-env-template", "edoc-production-vercel-env.template");
+    addOpsAudit("下載 Vercel env 補件模板", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("Vercel env 補件模板已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Vercel env 補件模板失敗", error.message || "vercel env template download failed");
+    showToast(error.message || "Vercel env 補件模板下載失敗。");
+  }
+}
+
+async function downloadProductionSupabaseBootstrapChecklist() {
+  try {
+    const result = await downloadBinaryFile("/production/supabase-bootstrap-checklist", "edoc-supabase-production-bootstrap-checklist.json");
+    addOpsAudit("下載 Supabase bootstrap 清單", `${result.fileName} 已下載，${result.size} bytes。`);
+    showToast("Supabase bootstrap 清單已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Supabase bootstrap 清單失敗", error.message || "supabase bootstrap checklist download failed");
+    showToast(error.message || "Supabase bootstrap 清單下載失敗。");
+  }
+}
+
+async function downloadProductionFirstAdminBootstrap() {
+  try {
+    const result = await downloadBinaryFile("/production/first-admin-bootstrap", "edoc-first-admin-bootstrap.json");
+    addOpsAudit("下載首位補件管理者 bootstrap", `${result.fileName} 已下載，${result.size} bytes；此檔只含 placeholder SQL 與 Logging Portal handoff 步驟。`);
+    showToast("首位補件管理者 bootstrap 已下載。");
+  } catch (error) {
+    addOpsAudit("下載首位補件管理者 bootstrap 失敗", error.message || "first admin bootstrap download failed");
+    showToast(error.message || "首位補件管理者 bootstrap 下載失敗。");
+  }
+}
+
+async function downloadProductionCutoverReadinessPackage() {
+  try {
+    const payload = await ensureProductionCutoverReadinessPackage() || {
+      reportType: "edoc_production_cutover_readiness_fallback",
+      generatedAt: new Date().toISOString(),
+      launchScope: loginReadinessState?.launchScope || goLiveAuditState?.launchScope || "internal_official",
+      decision: "BLOCKED",
+      internalGo: false,
+      formalGo: false,
+      missing: loginReadinessState?.missing || [],
+      blockers: loginReadinessState?.blockers || [],
+      actions: loginCutoverActionItems(loginReadinessState),
+      securityPolicy: {
+        metadataOnly: true,
+        containsSecrets: false,
+        containsSealOriginals: false,
+        containsDocumentContents: false
+      }
+    };
+    const date = new Date().toISOString().slice(0, 10);
+    downloadTextFile(`edoc-production-cutover-readiness-${date}.json`, JSON.stringify(payload, null, 2));
+    addOpsAudit("下載 Production 上線補件包", `${payload.reportType || "cutover package"} 已下載。`);
+    showToast("Production 上線補件包已下載。");
+  } catch (error) {
+    addOpsAudit("下載 Production 上線補件包失敗", error.message || "cutover package download failed");
+    showToast(error.message || "Production 上線補件包下載失敗。");
+  }
+}
+
+async function exportOpsProductionChecklist() {
+  await ensureProductionCutoverReadinessPackage();
+  const payload = productionCutoverReadinessPackage || {
+    reportType: "edoc_production_setup_checklist",
+    generatedAt: new Date().toISOString(),
+    launchScope: goLiveAuditState?.launchScope || "internal_official",
+    decision: goLiveDecisionText(goLiveAuditState),
+    items: opsProductionChecklistItems()
+  };
+  downloadTextFile(`edoc-production-setup-checklist-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2));
+  const exportedItems = payload.tasks || payload.items || [];
+  addOpsAudit("匯出 Production 補件清單", `${exportedItems.filter((item) => item.severity !== "pass").length} 項需處理。`);
+  showToast("Production 補件清單已匯出。");
 }
 
 function renderOpsGoLiveAudit() {
@@ -9179,7 +15541,7 @@ function renderOpsGoLiveAudit() {
       <strong>${goLiveDecisionText(audit)}</strong>
       <p>${audit.summary}</p>
     </div>
-    <small>${audit.checkedAt || "尚未檢查"} · ${audit.environment || "unknown"} · formal blockers ${audit.formalBlockers?.length || 0}</small>
+    <small>${audit.checkedAt || "尚未檢查"} · ${audit.launchScope || audit.environment || "unknown"} · formal blockers ${audit.formalBlockers?.length || 0}</small>
   ` : `
     <div>
       <span>尚未檢查</span>
@@ -9197,11 +15559,15 @@ function renderOpsGoLiveAudit() {
       <small>${item.action}</small>
     </article>
   `).join("") || `<article class="go-live-category warn"><strong>尚未取得檢查資料</strong><p>請重新判定。</p></article>`;
+  renderOpsProductionChecklist();
 }
 
 function renderGoLiveAuditViews() {
   renderGoLiveGate();
+  renderLaunchChecklist();
   renderOpsGoLiveAudit();
+  applyFormalExchangeUiState();
+  applyProductionLoginSafetyState();
 }
 
 async function syncGoLiveAuditFromBackend(silent = false) {
@@ -9210,7 +15576,7 @@ async function syncGoLiveAuditFromBackend(silent = false) {
     goLiveAuditState = result.data;
     renderGoLiveAuditViews();
     if (!silent) {
-      showToast(result.data.formalGo ? "Go / No-Go 判定通過。" : "Go / No-Go 判定未通過，請查看阻塞項。");
+      showToast(result.data.formalGo || result.data.internalGo ? "上線判定通過。" : "上線判定未通過，請查看阻塞項。");
     }
     return result.data;
   } catch (error) {
@@ -9303,16 +15669,23 @@ async function runOpsHealthCheck() {
 
 async function runOpsReadinessCheck() {
   const started = performance.now();
-  const [readiness, deployment] = await Promise.all([
+  const [readiness, internalReadiness, deployment, cutoverReadiness] = await Promise.all([
     fetchOpsJson("/production/readiness"),
-    fetchOpsJson("/production/deployment")
+    fetchOpsJson("/production/internal-readiness"),
+    fetchOpsJson("/production/deployment"),
+    fetchOpsJson("/production/cutover-readiness-package").catch((error) => ({ ok: false, data: null, error }))
   ]);
-  opsState.readiness = readiness.data;
+  opsState.readiness = internalReadiness.data || readiness.data;
+  opsState.formalReadiness = readiness.data;
   opsState.deployment = deployment.data;
-  opsState.environment = readiness.data.environment || opsState.environment;
-  opsApiLogs.unshift({ time: nowTime(), service: "Production", api: "GET /production/readiness", status: readiness.status, duration: `${Math.round(performance.now() - started)}ms`, code: readiness.ok ? "READY" : "NOT-READY", message: readiness.data.ready ? "正式部署檢查通過" : `尚缺 ${readiness.data.missing?.length || 0} 項設定` });
+  if (cutoverReadiness.ok && cutoverReadiness.data?.reportType === "edoc_production_cutover_readiness") {
+    productionCutoverReadinessPackage = cutoverReadiness.data;
+  }
+  opsState.environment = internalReadiness.data.environment || readiness.data.environment || opsState.environment;
+  opsApiLogs.unshift({ time: nowTime(), service: "Production", api: "GET /production/internal-readiness", status: internalReadiness.status, duration: `${Math.round(performance.now() - started)}ms`, code: internalReadiness.ok ? "INTERNAL-READY" : "INTERNAL-NOT-READY", message: internalReadiness.data.ready ? "內部正式使用檢查通過" : `內部仍缺 ${internalReadiness.data.missing?.length || 0} 項設定` });
+  opsApiLogs.unshift({ time: nowTime(), service: "Production", api: "GET /production/readiness", status: readiness.status, duration: `${Math.round(performance.now() - started)}ms`, code: readiness.ok ? "FORMAL-READY" : "FORMAL-NOT-READY", message: readiness.data.ready ? "formal readiness 通過" : `formal 尚缺 ${readiness.data.missing?.length || 0} 項設定` });
   renderOps();
-  addOpsAudit("正式部署檢查", readiness.data.ready ? "Production readiness 通過。" : `尚需補齊：${(readiness.data.missing || []).join("、") || "blockers / warnings"}`);
+  addOpsAudit("內部正式部署檢查", internalReadiness.data.ready ? "Internal readiness 通過；formal exchange 仍保持關閉。" : `尚需補齊：${(internalReadiness.data.missing || []).join("、") || "blockers / warnings"}`);
   showToast("部署檢查完成。");
 }
 
@@ -9320,18 +15693,20 @@ async function runOpsGoLiveAudit() {
   const started = performance.now();
   const audit = await syncGoLiveAuditFromBackend(true);
   if (!audit) return;
+  productionCutoverReadinessPackage = null;
+  await ensureProductionCutoverReadinessPackage();
   opsApiLogs.unshift({
     time: nowTime(),
     service: "GoLive",
     api: "GET /production/go-live-audit",
-    status: audit.formalGo ? 200 : 503,
+    status: (audit.formalGo || audit.internalGo) ? 200 : 503,
     duration: `${Math.round(performance.now() - started)}ms`,
     code: audit.decision || "GO-LIVE",
     message: `${goLiveDecisionText(audit)} · ${audit.formalBlockers?.length || 0} blockers`
   });
   renderOps();
   addOpsAudit("上線 Go / No-Go 判定", `${goLiveDecisionText(audit)}：${audit.summary}`);
-  showToast(audit.formalGo ? "上線判定：GO。" : "上線判定：NO-GO，請查看阻塞項。");
+  showToast(audit.formalGo || audit.internalGo ? `上線判定：${goLiveDecisionText(audit)}。` : "上線判定：NO-GO，請查看阻塞項。");
 }
 
 async function runOpsMonitoringCheck() {
@@ -9844,7 +16219,7 @@ function notificationPayload(item, forceChannel = item.channel) {
     status: item.status || "未讀",
     priority: item.priority || "中",
     source: item.source || "",
-    body: item.body || "請確認電子公文交換待辦事項。"
+    body: item.body || "請確認公文收發電子用印系統待辦事項。"
   };
 }
 
@@ -9878,7 +16253,7 @@ async function deliverNotification(item, forceChannel = item.channel) {
   } catch (error) {
     item.status = "派送失敗";
     item.deliveryReceipt = `後端通知派送失敗：${error.message}`;
-    notificationGatewayState.emailStatus = /SMTP|Email/i.test(error.message) ? "失敗" : notificationGatewayState.emailStatus;
+    notificationGatewayState.emailStatus = /Resend|SMTP|Email/i.test(error.message) ? "失敗" : notificationGatewayState.emailStatus;
     notificationGatewayState.lineStatus = /LINE|Line/i.test(error.message) ? "失敗" : notificationGatewayState.lineStatus;
     addNotificationDelivery(item.type, `${item.title}｜後端通知派送失敗：${error.message}`);
     renderNotifications();
@@ -9951,7 +16326,7 @@ async function refreshNotificationGatewayStatus(silent = false) {
     notificationGatewayState.emailStatus = status.email?.status || "未設定";
     notificationGatewayState.lineStatus = status.line?.status || "未設定";
     notificationGatewayState.inboxStatus = status.systemInbox?.status || "啟用";
-    notificationGatewayState.emailApi = `${status.email?.host || "未設定"}:${status.email?.port || "587"} · ${status.email?.from || "未設定"}`;
+    notificationGatewayState.emailApi = `${status.email?.provider || "Email"} · ${status.email?.from || "未設定"}`;
     notificationGatewayState.lineWebhook = status.line?.webhook || "未設定";
     notificationGatewayState.credentials = status.credentials?.length ? status.credentials : notificationGatewayState.credentials;
     notificationGatewayState.lastGatewayCheck = new Date().toLocaleString("zh-TW", { hour12: false });
@@ -9988,27 +16363,102 @@ async function validateNotificationCredentials() {
 function renderNotificationDeliveryLog() {
   document.querySelector("#notificationDeliveryLog").innerHTML = notificationDeliveryLog.map(([time, title, body]) => `
     <article class="timeline-item">
-      <time>${time}</time>
+      <time>${escapeHtml(time)}</time>
       <div>
-        <strong>${title}</strong>
-        <p>${body}</p>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(body)}</p>
       </div>
     </article>
   `).join("");
 }
 
 function renderSystemInbox() {
-  document.querySelector("#notificationInboxList").innerHTML = systemInboxItems.map((item) => `
+  const target = document.querySelector("#notificationInboxList");
+  if (!target) return;
+  target.innerHTML = systemInboxItems.map((item) => `
     <article class="address-card">
-      <strong>${item.title}</strong>
-      <p>${item.target} · ${item.status}</p>
-      <small>${item.createdAt} · ${item.id}</small>
+      <strong>${escapeHtml(item.title)}</strong>
+      <p>${escapeHtml(item.target)} · ${escapeHtml(item.status)}</p>
+      ${item.body ? `<span>${escapeHtml(item.body)}</span>` : ""}
+      <small>${escapeHtml(item.createdAt)} · ${escapeHtml(item.id)}</small>
+      <button class="text-button" type="button" data-inbox-open="${escapeHtml(item.id)}">開啟案件</button>
     </article>
   `).join("");
+  target.querySelectorAll("[data-inbox-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const inbox = systemInboxItems.find((item) => item.id === button.dataset.inboxOpen);
+      const notice = notificationItems.find((item) => item.id === inbox?.notificationId);
+      void openNotificationSource(notice || inbox);
+    });
+  });
 }
 
 function currentNotification() {
   return notificationItems.find((item) => item.id === selectedNotificationId) || notificationItems[0] || null;
+}
+
+function notificationSourceReference(item = {}) {
+  const actionUrl = String(item.actionUrl || "");
+  const officialMatch = actionUrl.match(/official-documents\/([^/?#]+)/);
+  const rawSourceId = officialMatch?.[1] || item.sourceId || item.source || "";
+  let sourceId = String(rawSourceId);
+  try {
+    sourceId = decodeURIComponent(sourceId);
+  } catch (_error) {
+    // Keep the opaque source id; malformed percent escapes must not break the notification center.
+  }
+  const sourceType = item.sourceType || (sourceId.startsWith("OD-") ? "official_document" : "");
+  return { sourceId, sourceType };
+}
+
+async function openNotificationSource(item = currentNotification()) {
+  if (!item) return showToast("找不到通知來源。");
+  const { sourceId, sourceType } = notificationSourceReference(item);
+  if (item.id && notificationItems.some((notice) => notice.id === item.id) && item.status !== "已讀") {
+    await runNotificationAction("read", [item.id]);
+  }
+  if (sourceType === "official_document" || sourceId.startsWith("OD-")) {
+    try {
+      const detail = await backendRequest(`/official-documents/${encodeURIComponent(sourceId)}`);
+      const index = officialWorkflowItems.findIndex((entry) => entry.id === detail.id);
+      if (index >= 0) officialWorkflowItems[index] = detail;
+      else officialWorkflowItems.unshift(detail);
+      selectedOfficialDocumentId = detail.id;
+      selectedWorkflowTaskId = detail.id;
+      approvalLogFilter = approvalProgressCategory({ officialDocument: detail, task: { status: detail.current_status } });
+      setView(isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
+      renderApprovalLog();
+      return;
+    } catch (error) {
+      return showToast(`案件載入失敗：${error.message}`);
+    }
+  }
+  const flow = buildUnifiedDocumentFlows().find((entry) => (
+    entry.id === sourceId
+    || entry.sourceId === sourceId
+    || entry.sourceNo === sourceId
+  ));
+  if (flow) return openUnifiedFlowSource(flow.id);
+  if (sourceId && (
+    internalDispatchItems.some((entry) => entry.id === sourceId)
+    || sourceId.startsWith("IDISP-")
+    || /internal[_ -]?dispatch|內部派文/i.test(sourceType)
+  )) {
+    try {
+      if (!internalDispatchItems.some((entry) => entry.id === sourceId)) {
+        const detail = await backendRequest(`/internal-dispatches/${encodeURIComponent(sourceId)}`);
+        internalDispatchItems.unshift(detail);
+      }
+      selectedInternalDispatchId = sourceId;
+      setInboundSection("dispatch");
+      setView(isRouteAllowed("inbound") ? "inbound" : "notifications");
+      renderInternalDispatchModule();
+      return;
+    } catch (error) {
+      return showToast(`內部派文載入失敗：${error.message}`);
+    }
+  }
+  showToast("這則通知尚未提供可開啟的來源案件。");
 }
 
 function selectedNotificationIds() {
@@ -10102,14 +16552,23 @@ function renderReminderLanes() {
         <h4>${title}</h4>
         ${items.length ? items.map((item) => `
           <article class="reminder-task ${key === "failed" || key === "dueSoon" || key === "returned" ? "issue" : ""}">
-            <strong>${item.title}</strong>
-            <span>${item.type} · ${item.target || "系統"}</span>
-            <p>${item.body}</p>
+            <strong>${escapeHtml(item.title)}</strong>
+            <span>${escapeHtml(item.type)} · ${escapeHtml(item.target || "系統")}</span>
+            <p>${escapeHtml(item.body)}</p>
+            <button class="text-button" type="button" data-reminder-open="${escapeHtml(item.id)}" data-reminder-source="${escapeHtml(item.source || "")}">開啟案件</button>
           </article>
         `).join("") : `<article class="reminder-task"><strong>目前沒有待辦</strong><p>此分類暫無需要處理的提醒。</p></article>`}
       </section>
     `;
   }).join("");
+  document.querySelectorAll("[data-reminder-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = notificationItems.find((notice) => notice.id === button.dataset.reminderOpen)
+        || notificationItems.find((notice) => notice.source === button.dataset.reminderSource)
+        || { id: button.dataset.reminderOpen, source: button.dataset.reminderSource };
+      void openNotificationSource(item);
+    });
+  });
 }
 
 function renderNotificationRows() {
@@ -10117,17 +16576,18 @@ function renderNotificationRows() {
   document.querySelector("#notificationCount").textContent = `${rows.length} 則`;
   document.querySelector("#notificationRows").innerHTML = rows.map((item) => `
     <tr class="${item.id === selectedNotificationId ? "selected-row" : ""}">
-      <td><input class="notification-check" type="checkbox" value="${item.id}" aria-label="選取 ${item.title}" /></td>
-      <td><button class="text-button row-select" type="button" data-notification-select="${item.id}">${item.title}</button><small>${item.source} · ${item.priority}</small></td>
-      <td>${item.type}</td>
-      <td>${item.target}</td>
-      <td>${item.channel}</td>
-      <td><span class="badge ${badgeClass(item.status)}">${item.status}</span></td>
+      <td><input class="notification-check" type="checkbox" value="${escapeHtml(item.id)}" aria-label="選取 ${escapeHtml(item.title)}" /></td>
+      <td><button class="text-button row-select" type="button" data-notification-select="${escapeHtml(item.id)}">${escapeHtml(item.title)}</button><small>${escapeHtml(item.source)} · ${escapeHtml(item.priority)}</small></td>
+      <td>${escapeHtml(item.type)}</td>
+      <td>${escapeHtml(item.target)}</td>
+      <td>${escapeHtml(item.channel)}</td>
+      <td><span class="badge ${safeHtmlClassToken(badgeClass(item.status), "info")}">${escapeHtml(item.status)}</span></td>
       <td>
         <div class="row-actions">
-          <button class="segment" type="button" data-notification-action="read" data-notification-id="${item.id}">已讀</button>
-          <button class="segment" type="button" data-notification-action="send" data-notification-id="${item.id}">派送</button>
-          <button class="segment" type="button" data-notification-action="track" data-notification-id="${item.id}">稽催</button>
+          <button class="segment" type="button" data-notification-open="${escapeHtml(item.id)}">開啟</button>
+          <button class="segment" type="button" data-notification-action="read" data-notification-id="${escapeHtml(item.id)}">已讀</button>
+          <button class="segment" type="button" data-notification-action="send" data-notification-id="${escapeHtml(item.id)}">派送</button>
+          <button class="segment" type="button" data-notification-action="track" data-notification-id="${escapeHtml(item.id)}">稽催</button>
         </div>
       </td>
     </tr>
@@ -10142,6 +16602,12 @@ function renderNotificationRows() {
   document.querySelectorAll("[data-notification-action]").forEach((button) => {
     button.addEventListener("click", () => runNotificationAction(button.dataset.notificationAction, [button.dataset.notificationId]));
   });
+  document.querySelectorAll("[data-notification-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = notificationItems.find((notice) => notice.id === button.dataset.notificationOpen);
+      void openNotificationSource(item);
+    });
+  });
 }
 
 function renderNotificationDetail() {
@@ -10154,24 +16620,26 @@ function renderNotificationDetail() {
   document.querySelector("#selectedNotificationStatus").textContent = item.status;
   document.querySelector("#notificationDetail").innerHTML = `
     <div class="doc-detail">
-      <strong>${item.title}</strong>
+      <strong>${escapeHtml(item.title)}</strong>
       <dl>
-        <div><dt>通知類型</dt><dd>${item.type}</dd></div>
-        <div><dt>通知對象</dt><dd>${item.target}</dd></div>
-        <div><dt>通道</dt><dd>${item.channel}</dd></div>
-        <div><dt>來源</dt><dd>${item.source}</dd></div>
-        <div><dt>優先度</dt><dd>${item.priority}</dd></div>
-        <div><dt>狀態</dt><dd>${item.status}</dd></div>
-        <div><dt>派送回條</dt><dd>${item.deliveryReceipt || "尚未派送"}</dd></div>
+        <div><dt>通知類型</dt><dd>${escapeHtml(item.type)}</dd></div>
+        <div><dt>通知對象</dt><dd>${escapeHtml(item.target)}</dd></div>
+        <div><dt>通道</dt><dd>${escapeHtml(item.channel)}</dd></div>
+        <div><dt>來源</dt><dd>${escapeHtml(item.source)}</dd></div>
+        <div><dt>優先度</dt><dd>${escapeHtml(item.priority)}</dd></div>
+        <div><dt>狀態</dt><dd>${escapeHtml(item.status)}</dd></div>
+        <div><dt>派送回條</dt><dd>${escapeHtml(item.deliveryReceipt || "尚未派送")}</dd></div>
       </dl>
-      <p>${item.body}</p>
+      <p>${escapeHtml(item.body)}</p>
       <div class="detail-actions">
+        <button class="primary-button" type="button" id="detailNotificationOpenBtn">開啟來源案件</button>
         <button class="primary-button" type="button" id="detailNotificationSendBtn">派送通知</button>
         <button class="secondary-button" type="button" id="detailNotificationReadBtn">標記已讀</button>
         <button class="secondary-button" type="button" id="detailNotificationTrackBtn">建立稽催</button>
       </div>
     </div>
   `;
+  document.querySelector("#detailNotificationOpenBtn").addEventListener("click", () => void openNotificationSource(item));
   document.querySelector("#detailNotificationSendBtn").addEventListener("click", () => runNotificationAction("send", [item.id]));
   document.querySelector("#detailNotificationReadBtn").addEventListener("click", () => runNotificationAction("read", [item.id]));
   document.querySelector("#detailNotificationTrackBtn").addEventListener("click", () => runNotificationAction("track", [item.id]));
@@ -10187,8 +16655,8 @@ function renderNotificationRules() {
   ];
   document.querySelector("#notificationRuleGrid").innerHTML = rules.map(([label, value]) => `
     <article class="archive-card">
-      <span>${label}</span>
-      <strong>${value}</strong>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
     </article>
   `).join("");
 }
@@ -10196,10 +16664,10 @@ function renderNotificationRules() {
 function renderNotificationAuditLog() {
   document.querySelector("#notificationAuditLog").innerHTML = notificationAuditLog.map(([time, title, body]) => `
     <article class="timeline-item">
-      <time>${time}</time>
+      <time>${escapeHtml(time)}</time>
       <div>
-        <strong>${title}</strong>
-        <p>${body}</p>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(body)}</p>
       </div>
     </article>
   `).join("");
@@ -10235,7 +16703,7 @@ async function runNotificationAction(action, ids) {
       const item = notificationItems.find((notice) => notice.id === id);
       if (item) item.status = "已讀";
       try {
-        await backendRequest(`/notifications/${id}`, { method: "PATCH", body: JSON.stringify({ status: "已讀" }) });
+        await backendRequest(`/notifications/${encodeURIComponent(id)}/read`, { method: "PATCH", body: "{}" });
       } catch (error) {
         addNotificationAudit("後端已讀更新失敗", `${id}：${error.message}`);
       }
@@ -10693,11 +17161,12 @@ async function syncDashboardFromBackend(silent = false) {
 }
 
 async function backendRequest(path, options = {}) {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const { headers: optionHeaders = {}, ...fetchOptions } = options;
+  const headers = { "Content-Type": "application/json", ...optionHeaders };
   if (isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
   const response = await fetch(`${backendApiBase}${path}`, {
-    headers,
-    ...options
+    ...fetchOptions,
+    headers
   });
   const raw = await response.text();
   let data = {};
@@ -10707,13 +17176,149 @@ async function backendRequest(path, options = {}) {
     throw new Error(`後端回傳格式錯誤：${raw.slice(0, 120) || response.status}`);
   }
   if (!response.ok) {
-    const error = new Error(data.detail || data.error || `HTTP ${response.status}`);
+    const rawMessage = data.detail || data.error || `HTTP ${response.status}`;
+    const error = new Error(friendlyBackendErrorMessage(rawMessage, response.status));
     error.status = response.status;
     error.code = data.error || "";
     error.detail = data.detail || "";
+    error.rawMessage = rawMessage;
     throw error;
   }
   return data;
+}
+
+function friendlyBackendErrorMessage(message = "", status = 0) {
+  const text = String(message || "");
+  const map = {
+    demo_login_disabled: "正式站已關閉測試帳號，請使用公司正式帳號或 Logging Portal 登入。",
+    supabase_not_configured: "正式站資料庫尚未完成設定，請 IT 補齊 eDoc Supabase production 環境變數後再登入。",
+    supabase_runtime_env_missing: "正式站資料庫尚未完成設定，請 IT 補齊 eDoc Supabase production 環境變數後再登入。",
+    formal_roster_rows_required: "請先選擇包含正式帳號資料的 CSV。",
+    formal_roster_rows_limit_exceeded: "一次最多匯入 200 筆正式帳號，請分批處理。",
+    contains_secret_fields: "CSV 含有密碼、PIN、API key 或私鑰欄位，請移除後再匯入。",
+    required_fields_missing: "CSV 有列缺少姓名、Email、單位或職稱。",
+    invalid_email: "CSV 有 Email 格式不正確。",
+    demo_email_forbidden: "CSV 使用了 demo/seed 帳號 Email，正式 roster 不可匯入測試帳號。",
+    role_forbidden: "CSV 有角色不在公文收發電子用印系統授權角色清單內。",
+    formal_exchange_disabled: "目前為內部正式使用模式，政府電子交換與正式 jAgent 送交未啟用。",
+    company_not_in_launch_scope: "這間公司目前不在內部上線範圍內，請先由 IT 調整 EDOC_LAUNCH_COMPANY_IDS 或由總務補齊印章後再開放。",
+    finance_company_required: "登入帳號尚未連動 Finance 公司，請先由管理員補齊公司資料。",
+    finance_personnel_master_read_only: "人員主檔請只在會計系統修改，eDoc 會自動同步。",
+    finance_company_master_read_only: "公司主檔請只在會計系統修改，eDoc 會自動同步。",
+    official_document_company_forbidden: "只能為登入帳號所屬的 Finance 公司建立公文或用印申請。",
+    official_document_create_forbidden: "你目前沒有建立發文申請單的權限。",
+    official_seal_document_category_required: "請選擇公文用印文件類型後再送出。",
+    invalid_official_seal_document_category: "公文用印文件類型不在允許清單中，請重新選擇。",
+    official_seal_route_mismatch: "文件類型與 A／B／C／D 簽核流程不一致，請重新整理後再送出。",
+    official_seal_route_actor_unresolved: "簽核流程中有部門找不到可指派成員，請聯絡系統管理員確認人員設定。",
+    official_document_access_denied: "你不在這張申請單的流程或授權名單內，無法查看。",
+    official_document_download_forbidden: "你沒有下載這份文件的權限。",
+    official_document_seal_required: "請先選擇有效印章，才能送出用印簽核。",
+    official_document_stamp_required: "所有發文都必須依文件類型完成用印，不提供免用印繞過模式。",
+    official_document_not_submittable: "這張申請單目前不能送簽，請確認是否已送出、已結案或狀態不允許。",
+    official_document_current_step_not_pending: "目前沒有可操作的待簽核關卡，請重新整理後再試。",
+    official_document_not_pending_approval: "這張申請單目前不是待簽核狀態。",
+    official_document_approval_expected_step_required: "缺少簽核關卡版本，請重新整理後再操作。",
+    official_document_approval_already_claimed: "這一關已由另一個請求完成，請重新整理查看最新簽核進度。",
+    official_document_review_session_not_started: "找不到本關簽核開始時間，請重新整理案件後再試。",
+    official_document_review_access_required: "請先開啟或下載原稿、編輯版與全部附件，再送出簽核決定。",
+    official_document_decision_file_metadata_invalid: "文件證據資料不完整，系統已停止簽核，請聯絡管理員檢查檔案版本。",
+    official_document_editor_decision_lock_incomplete: "PDF 編輯版的鎖定資料不完整，系統已停止簽核。",
+    editor_locked_revision_missing: "找不到送簽時鎖定的 PDF 編輯版本，系統已停止簽核。",
+    editor_manifest_hash_mismatch: "PDF 編輯清單雜湊不一致，系統已停止簽核並保留紀錄。",
+    editor_source_hash_mismatch: "PDF 原始來源雜湊不一致，系統已停止簽核並保留紀錄。",
+    official_document_prepared_sha256_mismatch: "PDF 編輯版雜湊不一致，系統已停止簽核並保留紀錄。",
+    editor_preflight_not_completed: "PDF 編輯版尚未完成後端檢查，不能進行簽核。",
+    applicant_cannot_self_approve: "申請人不能核准或駁回自己的簽核關卡，請通知系統管理員修正會計系統的簽核關係。",
+    official_workflow_existing_steps_invalid: "既有簽核關卡與目前會計系統規則不一致，已停止送簽；請通知系統管理員檢查案件歷程。",
+    official_workflow_delegation_company_required: "登入帳號尚未連動公司，無法設定簽核代理。",
+    official_workflow_delegation_manage_forbidden: "一般使用者只能替自己設定或撤銷代理。",
+    official_workflow_delegation_actor_not_found: "原簽核人或代理人不是同公司啟用帳號，請重新整理名單。",
+    official_workflow_delegation_finance_actor_ineligible: "簽核代理僅限已完成 Finance 身分、職稱與職級連動的啟用帳號。",
+    official_workflow_delegation_manager_role_ineligible: "只有具備簽核代理管理權限的行政部主任可代他人設定代理。",
+    official_workflow_delegation_manager_self_assignment_forbidden: "管理者不可把自己設為其他簽核人的代理人。",
+    official_workflow_delegation_role_qualification_mismatch: "代理人必須與原簽核人的 Finance 角色及職級完全相符。",
+    official_workflow_delegation_self_forbidden: "原簽核人與代理人不可為同一人。",
+    official_workflow_delegation_company_forbidden: "原簽核人、代理人與操作者必須屬於同一公司。",
+    official_workflow_delegation_period_invalid: "代理結束時間必須晚於開始時間。",
+    official_workflow_delegation_period_expired: "代理結束時間必須在現在之後。",
+    official_workflow_delegation_period_too_long: "單次代理期間不可超過 180 天。",
+    official_workflow_delegation_reason_required: "請填寫至少 2 個字的代理原因。",
+    official_workflow_delegation_overlap: "這位原簽核人在指定期間已有生效中的代理，請調整日期或先撤銷舊授權。",
+    official_document_next_step_missing: "簽核流程設定不完整，請通知系統管理員檢查流程模板。",
+    official_document_stamp_request_required: "找不到這張申請單的用印設定，請回到申請單重新選擇印章與位置。",
+    official_document_stamp_request_not_found: "找不到用印申請資料，請重新整理後再試。",
+    official_document_source_pdf_required: "找不到待用印的 PDF 版本，請重新產生公文 PDF 或上傳原始 PDF。",
+    original_pdf_required: "請先上傳 PDF 檔案。",
+    original_pdf_must_be_pdf: "上傳檔案不是有效 PDF，請重新選擇 PDF 檔。",
+    original_pdf_inline_upload_too_large_use_pdf_editor: "這個發文 PDF 超過一般 JSON 上傳的 3 MB 上限，請改用電子用印 PDF 編輯器私密直傳。",
+    official_document_attachment_too_large: "補充附件目前單檔上限 3 MB；大型 PDF 請改用電子用印 PDF 編輯器私密直傳。",
+    pdf_page_not_a4: PDF_A4_INVALID_MESSAGE,
+    only_applicant_can_submit: "只有申請人可以送出這張申請單。",
+    only_applicant_can_cancel: "只有申請人可以取消這張申請單。",
+    only_applicant_can_confirm: "只有申請人可以完成最後確認。",
+    only_applicant_can_update_stamp_position: "送簽前只有申請人可以調整用印位置。",
+    not_current_official_document_approver: "目前還沒輪到你簽核，或這一關指定給其他人。",
+    official_dispatch_access_denied: "你沒有查看這筆寄發資訊的權限。",
+    official_dispatch_update_forbidden: "你不是這筆寄發任務的負責人，不能修改寄發資訊。",
+    official_dispatch_complete_forbidden: "你不是這筆寄發任務的負責人，不能完成寄發。",
+    official_document_not_pending_general_affairs_dispatch: "這張申請單目前不是總務待寄發狀態。",
+    official_document_not_returned_to_applicant_for_send: "這張申請單目前不是申請人自行寄發狀態。",
+    dispatch_proof_file_required: "請上傳寄發證明或截圖。",
+    dispatch_proof_mime_type_not_allowed: "寄發證明只接受 PDF、PNG、JPG 或 WebP。",
+    dispatch_proof_file_too_large: "寄發證明目前單檔上限 3 MB，請壓縮後再上傳。",
+    seal_file_mime_type_not_allowed: "印章檔案格式不支援，請使用 PNG、JPG 或 WebP。",
+    seal_file_extension_not_allowed: "印章副檔名不支援，請使用 PNG、JPG 或 WebP。",
+    seal_file_mime_type_mismatch: "印章副檔名與檔案類型不一致，請重新匯出 PNG、JPG 或 WebP。",
+    seal_file_content_invalid: "印章檔案內容不是有效的 PNG、JPG 或 WebP，請重新匯出後再上傳。",
+    unsafe_svg_rejected: "Seal Vault 不接受 SVG，請改用 PNG、JPG 或 WebP。",
+    seal_file_too_large: "印章檔案太大，請壓縮後再上傳。",
+    seal_file_content_required: "請選擇要上傳的印章檔案。",
+    seal_file_object_required: "找不到印章原始檔，請確認 Seal Vault 目前版本已上傳。",
+    seal_image_resolution_too_low: "印章圖檔解析度不足；系統會依校準後實體尺寸，以 250 DPI 動態計算最低像素（預設大章 296 px、小章 178 px）。請重新掃描或匯出原尺寸圖檔後再上傳。",
+    seal_image_aspect_ratio_invalid: "印章圖檔畫布比例不符校準尺寸；機構大章與小章都必須接近 1:1，長寬誤差不得超過 1%。請裁切多餘留白後重新上傳，請勿拉伸圖片。",
+    seal_render_size_invalid: "請輸入有效的印章實際尺寸（mm）後再上傳。",
+    seal_render_size_out_of_range: "印章實際尺寸超出安全範圍：大章請輸入 25–35 mm，小章請輸入 15–22 mm。",
+    seal_render_size_not_square: "系統收到的印章寬、高不一致。請重新輸入單一實際尺寸，系統會自動同步寬高以避免變形。",
+    seal_render_size_conflict: "印章版本或尺寸已被更新。請重新整理後，再輸入一個實際尺寸重新上傳。",
+    seal_size_locked: "這個印章版本的實體尺寸已鎖定；PDF 編輯器只能調整位置或旋轉，尺寸校準僅能由執行長或行政部門主任在 Seal Vault 完成。",
+    current_seal_file_dimension_validation_required: "目前印章版本尚未完成尺寸與比例驗證，不能預覽或用印。請由印鑑管理人員重新上傳符合解析度及 1:1 比例的圖檔。",
+    current_seal_file_antivirus_required: "目前印章版本尚未通過防毒掃描，不能預覽、放置或用印。",
+    seal_file_antivirus_required: "此印章版本尚未通過防毒掃描，不能設為目前版本或執行用印。",
+    seal_file_antivirus_rejected: "印章檔案未通過防毒掃描，系統未將它設為可用版本。",
+    editor_antivirus_not_ready: "正式防毒服務尚未就緒，系統已阻止檔案上傳。",
+    editor_antivirus_scan_failed: "正式防毒掃描失敗，系統未將檔案設為可用版本。",
+    official_file_antivirus_required: "公文來源檔或附件尚未通過防毒掃描，不能送簽、預覽用印或下載。",
+    official_file_antivirus_rejected: "公文來源檔或附件未通過防毒掃描，系統未保存為可用檔案。",
+    official_file_quarantined: "公文來源檔或附件已被防毒系統隔離，不能送簽、用印或下載。",
+    official_file_hash_mismatch: "公文檔案雜湊或大小不一致，系統已阻止下載與用印，請通知系統管理員。",
+    source_pdf_antivirus_required: "PDF 原始檔尚未通過防毒掃描，不能送出或用印。",
+    source_pdf_antivirus_rejected: "PDF 原始檔未通過防毒掃描，系統已阻止送出。",
+    source_pdf_quarantined: "PDF 原始檔已被防毒系統隔離，不能送出或用印。",
+    seal_file_hash_mismatch: "印章檔案雜湊不一致，系統已阻止用印，請通知系統管理員。",
+    seal_request_must_be_approved_before_stamp: "用印申請尚未核准，不能執行套印。",
+    inbound_document_not_found: "找不到這筆收文資料，請重新整理後再試。",
+    inbound_document_view_forbidden: "你不是這筆收錄的建立者、承辦人或內部派發收件人，無法查看。",
+    inbound_archive_create_forbidden: "總務可收錄 Email 或總務來文；其他同仁只能收錄所屬地方單位收到的實體信件或公文。",
+    inbound_attachment_required: "請選擇收文附件。",
+    inbound_attachment_too_large: "收文附件目前單檔上限 3 MB，請壓縮後再上傳。",
+    inbound_attachment_download_forbidden: "你沒有查看或下載這份收錄附件的權限。",
+    inbound_attachment_upload_forbidden: "你不是這筆收錄的建立者、承辦人或管理角色，不能新增附件。",
+    internal_dispatch_recipients_required: "請至少選擇一位內部派文收件人。",
+    invalid_internal_dispatch_recipient: "內部派文收件人資料格式不正確，請重新選擇收件同仁。",
+    internal_dispatch_create_forbidden: "只有總務、行政部門主任或執行長可以建立內部派發。",
+    internal_dispatch_reply_forbidden: "你不是這筆內部派文的收件人，不能回覆。",
+    internal_dispatch_reply_not_required: "這筆公文對你標示為僅供知悉，不需要回覆。",
+    internal_dispatch_reply_attachment_too_large: "回文附件目前單檔上限 3 MB，請壓縮後再上傳。",
+    internal_dispatch_close_forbidden: "只有派文建立者或管理者可以結案。"
+  };
+  const matchedKey = Object.keys(map).find((key) => text.includes(key));
+  if (matchedKey) return map[matchedKey];
+  if (status === 401) return "登入狀態已失效，請重新登入。";
+  if (status === 403) return "目前帳號沒有權限執行這個操作。";
+  if (status === 404) return "找不到資料，請重新整理後再試。";
+  if (status >= 500) return "系統暫時無法完成操作，請稍後再試或通知系統管理員。";
+  return text || "操作失敗，請確認資料後再試。";
 }
 
 function isForbiddenError(error) {
@@ -10756,6 +17361,12 @@ function backendDocumentPayload(doc) {
       lockedAttachmentHash: doc.lockedAttachmentHash || "",
       attachmentDetails: doc.attachmentDetails || "",
       attachmentManifest: doc.attachments || [],
+      documentCategory: doc.documentCategory || "",
+      documentCategoryGroup: doc.documentCategoryGroup || "",
+      approvalRouteCode: doc.approvalRouteCode || "",
+      approvalRouteName: doc.approvalRouteName || "",
+      workflowTemplateKey: doc.workflowTemplateKey || "",
+      approvalFlowNodes: [...(doc.approvalFlowNodes || [])],
       versionStatus: doc.versionStatus || "",
       requiresReapproval: Boolean(doc.requiresReapproval),
       contact: {
@@ -11053,6 +17664,14 @@ function applyPersistentDocuments(rows = []) {
       companyName: row.company_name || "歲悅長照股份有限公司",
       type: row.doc_type,
       priority: row.priority,
+      documentCategory: metadata.documentCategory || metadata.document_category || "",
+      documentCategoryGroup: metadata.documentCategoryGroup || metadata.document_category_group || "",
+      approvalRouteCode: metadata.approvalRouteCode || metadata.approval_route_code || "",
+      approvalRouteName: metadata.approvalRouteName || metadata.approval_route_name || "",
+      workflowTemplateKey: metadata.workflowTemplateKey || metadata.workflow_template_key || "",
+      approvalFlowNodes: Array.isArray(metadata.approvalFlowNodes)
+        ? [...metadata.approvalFlowNodes]
+        : Array.isArray(metadata.approval_flow_nodes) ? [...metadata.approval_flow_nodes] : [],
       security: row.security_level,
       to: row.agency_name,
       agencyCode: row.agency_code || "待查詢",
@@ -11170,6 +17789,9 @@ function mapBackendNotification(row) {
     status: row.status,
     priority: row.priority,
     source: row.source,
+    sourceType: row.source_type || row.sourceType || "",
+    sourceId: row.source_id || row.sourceId || row.source || "",
+    actionUrl: row.action_url || row.actionUrl || "",
     body: row.body,
     deliveryReceipt: row.delivery_receipt,
     sentAt: row.sent_at
@@ -11179,33 +17801,46 @@ function mapBackendNotification(row) {
 function mapBackendInbox(row) {
   return {
     id: row.id,
+    notificationId: row.notification_id || row.notificationId || "",
     target: row.target_role,
     title: row.title,
+    body: row.body || "",
     status: row.status,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    source: row.source || "",
+    sourceType: row.source_type || row.sourceType || "",
+    sourceId: row.source_id || row.sourceId || row.source || "",
+    actionUrl: row.action_url || row.actionUrl || ""
   };
 }
 
 async function syncNotificationsFromBackend(silent = false) {
   try {
-    const [notifications, deliveries, inbox] = await Promise.all([
-      backendRequest("/notifications"),
-      backendRequest("/notification_deliveries"),
-      backendRequest("/system_inbox")
-    ]);
-  notificationItems.splice(0, notificationItems.length, ...notifications.map(mapBackendNotification));
-  systemInboxItems.splice(0, systemInboxItems.length, ...inbox.map(mapBackendInbox));
-  notificationDeliveryLog.splice(0, notificationDeliveryLog.length, ...deliveries.slice(0, 30).map((row) => [
+    const result = await backendRequest("/notifications/inbox");
+    const notifications = Array.isArray(result?.notifications) ? result.notifications : [];
+    const deliveries = Array.isArray(result?.deliveries) ? result.deliveries : [];
+    const inbox = Array.isArray(result?.inbox) ? result.inbox : [];
+    notificationItems.splice(0, notificationItems.length, ...notifications.map(mapBackendNotification));
+    systemInboxItems.splice(0, systemInboxItems.length, ...inbox.map(mapBackendInbox));
+    notificationDeliveryLog.splice(0, notificationDeliveryLog.length, ...deliveries.slice(0, 30).map((row) => [
       row.created_at?.slice(11, 16) || nowTime(),
       `${row.channel}｜${row.status}`,
       `${row.target} · ${row.receipt || row.error || row.notification_id || ""}`
     ]));
-  selectedNotificationId = notificationItems[0]?.id || selectedNotificationId;
-  await refreshNotificationGatewayStatus(true);
-  renderNotifications();
+    selectedNotificationId = notificationItems.some((item) => item.id === selectedNotificationId)
+      ? selectedNotificationId
+      : notificationItems[0]?.id || "";
+    // Gateway credentials and provider health are maintenance data. Ordinary
+    // employees only need their inbox; requesting this admin-only endpoint on
+    // every login created a pointless 403 and delayed the first usable paint.
+    if (hasBackendPermission("settings.system_manage") || hasBackendPermission("settings.manage")) {
+      await refreshNotificationGatewayStatus(true);
+    }
+    renderNotifications();
     if (!silent) addNotificationAudit("同步後端通知", `已同步 ${notifications.length} 則通知、${deliveries.length} 筆派送紀錄、${inbox.length} 則站內通知。`);
   } catch (error) {
-    if (!silent) addNotificationAudit("同步後端通知失敗", error.message);
+    addNotificationAudit("同步後端通知失敗", error.message);
+    if (!silent) showToast(`待辦載入失敗：${error.message}`);
   }
 }
 
@@ -11250,9 +17885,18 @@ async function syncDatabaseFromBackend(silent = false) {
       fetchBackendTable("/attachments", "attachments"),
       fetchBackendTable("/exchange_tasks", "exchangeTasks"),
       fetchBackendTable("/exchange_events", "exchangeEvents"),
-      fetchBackendTable("/audit_logs", "auditLogs")
+      fetchBackendTable("/inbound-documents", "inboundDocuments")
     ]);
-    const [documents, companies, departments, sealTypes, workflowRows, contracts, contractParties, contractApprovalsRows, recipients, attachments, tasks, events, audits] = tables;
+    const audits = canSyncAuditLogs()
+      ? await fetchBackendTable("/audit_logs", "auditLogs")
+      : null;
+    if (!audits) {
+      databaseAccessState.auditLogs = {
+        status: "restricted",
+        detail: "目前角色未開啟稽核紀錄權限；系統已跳過背景同步，避免不必要的權限錯誤。"
+      };
+    }
+    const [documents, companies, departments, sealTypes, workflowRows, contracts, contractParties, contractApprovalsRows, recipients, attachments, tasks, events, inboundBackendRows] = tables;
     const safeDocuments = documents || [];
     const safeCompanies = companies || [];
     const safeDepartments = departments || [];
@@ -11265,9 +17909,20 @@ async function syncDatabaseFromBackend(silent = false) {
     const safeAttachments = attachments || [];
     const safeTasks = tasks || [];
     const safeEvents = events || [];
+    const safeInboundBackendRows = inboundBackendRows || [];
     const safeAudits = audits || [];
     applyPersistentDocuments(safeDocuments);
+    applyPersistentInboundDocuments(safeInboundBackendRows);
     databaseTables.documents = safeDocuments.map(mapBackendDocument);
+    databaseTables.inboundDocuments = safeInboundBackendRows.map((row) => ({
+      id: row.id,
+      receiveNo: row.receive_no,
+      sender: row.sender_name,
+      subject: row.subject,
+      status: row.status,
+      assignee: row.assignee_name,
+      dueAt: row.due_at
+    }));
     databaseTables.companyRegistry = safeCompanies.map(mapBackendCompany);
     databaseTables.departmentRegistry = safeDepartments.map(mapBackendDepartment);
     databaseTables.sealTypeRegistry = safeSealTypes.map(mapBackendSealType);
@@ -11289,7 +17944,7 @@ async function syncDatabaseFromBackend(silent = false) {
     renderUnifiedFlows();
     if (!silent) {
       const restricted = Object.entries(databaseAccessState).filter(([, state]) => state.status === "restricted").map(([table]) => databaseLabels[table] || table);
-      addDatabaseAudit("同步後端資料庫", `已同步 ${safeDocuments.length} 筆公文、${safeContracts.length} 筆合約、${safeWorkflowRows.length} 筆簽核流程。${restricted.length ? `受限：${restricted.join("、")}。` : ""}`);
+      addDatabaseAudit("同步後端資料庫", `已同步 ${safeDocuments.length} 筆公文、${safeInboundBackendRows.length} 筆收文、${safeContracts.length} 筆合約、${safeWorkflowRows.length} 筆簽核流程。${restricted.length ? `受限：${restricted.join("、")}。` : ""}`);
       showToast("已同步真正後端資料庫。");
     }
   } catch (error) {
@@ -11435,25 +18090,82 @@ function approvalRecordRows() {
   return [...workflowRows, ...sealRows, ...contractRows];
 }
 
+function documentSearchRows() {
+  const officialRows = officialWorkflowItems.map((item) => ({
+    id: item.id,
+    sourceId: item.id,
+    docNo: item.document_number || item.doc_no || officialDispatchRecord(item)?.external_official_document_number || "",
+    title: item.title || item.subject || "未命名發文",
+    subject: item.subject || item.title || "未命名發文",
+    agency: item.recipient || "未指定受文者",
+    status: officialStatusLabel(item.current_status || ""),
+    owner: item.applicant_name || item.handler_name || "",
+    dept: item.applicant_department_name || item.dispatch_unit || "",
+    direction: "發文",
+    createdAt: item.created_at || item.updated_at || ""
+  }));
+  const inboundRows = scopedInboundDocs().map((item) => ({
+    id: item.id,
+    sourceId: item.id,
+    docNo: item.receiveNo || item.id,
+    subject: item.subject || "未命名收文",
+    agency: item.agency || "未記錄來文單位",
+    status: item.status || "",
+    owner: item.owner || "",
+    dept: item.dept || "",
+    direction: "收文",
+    createdAt: item.receivedAt || ""
+  }));
+  const dispatchRows = scopedDispatchDocs().map((item) => ({
+    id: item.id,
+    sourceId: item.id,
+    docNo: item.no || item.id,
+    subject: item.subject || "未命名發文",
+    agency: item.to || "未指定受文者",
+    status: item.status || "",
+    owner: item.owner || "",
+    dept: item.dept || "",
+    direction: "發文",
+    createdAt: item.createdAt || ""
+  }));
+  const unique = new Map();
+  [...officialRows, ...inboundRows, ...dispatchRows].forEach((item) => {
+    const key = `${item.direction}:${item.docNo || item.id}`;
+    if (!unique.has(key)) unique.set(key, item);
+  });
+  return [...unique.values()];
+}
+
+function documentSearchAttachmentRows() {
+  const officialFiles = officialWorkflowItems.flatMap((item) => officialApplicationFiles(item).map((file, index) => ({
+    id: file.id || `${item.id}-FILE-${index + 1}`,
+    documentId: item.id,
+    fileName: file.file_name || file.name || "附件",
+    subject: item.subject || item.title || "發文附件",
+    status: file.file_type_label || file.file_type || "附件",
+    owner: item.applicant_name || "",
+    dept: item.applicant_department_name || item.dispatch_unit || "",
+    createdAt: file.created_at || ""
+  })));
+  const inboundFiles = scopedInboundDocs().flatMap((item) => (item.attachments || []).map((file, index) => ({
+    id: typeof file === "object" && file.id ? file.id : `${item.id}-FILE-${index + 1}`,
+    documentId: item.id,
+    fileName: typeof file === "object" ? file.fileName || file.file_name || file.name || "附件" : String(file),
+    subject: item.subject || "收文附件",
+    status: "附件",
+    owner: item.owner || "",
+    dept: item.dept || "",
+    createdAt: typeof file === "object" ? file.createdAt || file.created_at || "" : ""
+  })));
+  return [...officialFiles, ...inboundFiles];
+}
+
 function localUnifiedSearch(term, category = "all", status = "", limit = 80) {
-  syncDatabaseTables(true);
   const specs = [
-    ["documents", "公文", databaseTables.documents],
-    ["document_flows", "文件流程", databaseTables.documentFlows],
-    ["document_type_configs", "文件類型設定", databaseTables.documentTypeConfigs],
-    ["workflow_template_configs", "流程模板設定", databaseTables.workflowTemplateConfigs],
-    ["permission_matrix", "權限矩陣", databaseTables.permissionMatrix],
-    ["format_template_configs", "格式模板設定", databaseTables.formatTemplateConfigs],
+    ["documents", "公文", documentSearchRows()],
     ["approval_records", "簽核進度", approvalRecordRows()],
-    ["contracts", "合約", databaseTables.contracts],
-    ["contract_approvals", "合約簽核", databaseTables.contractApprovals],
-    ["attachments", "附件", databaseTables.attachments],
-    ["exchange_tasks", "交換任務", databaseTables.exchangeTasks],
-    ["exchange_events", "交換事件", databaseTables.exchangeEvents],
-    ["audit_logs", "稽核紀錄", databaseTables.auditLogs],
-    ["notifications", "通知", notificationItems],
-    ["attachment_security", "附件安全", fileSecurityItems],
-    ["file_access_logs", "檔案存取", fileAccessLog.map(([time, title, body], index) => ({ id: `FLOG-FE-${index}`, createdAt: time, action: title, detail: body, status: title }))]
+    ["contracts", "合約", visibleContracts()],
+    ["attachments", "附件", documentSearchAttachmentRows()]
   ];
   const keyword = term.trim().toLowerCase();
   const state = status.trim().toLowerCase();
@@ -11466,9 +18178,9 @@ function localUnifiedSearch(term, category = "all", status = "", limit = 80) {
       id: row.id,
       category: label,
       table,
-      title: row.docNo || row.fileName || row.title || row.name || row.action || row.id,
-      subtitle: row.subject || row.agency || row.body || row.detail || row.message || "",
-      status: row.status || row.scanStatus || row.result || "",
+      title: row.docNo || row.receiveNo || row.contractNo || row.fileName || row.title || row.id,
+      subtitle: row.subject || row.agency || row.counterparty || row.detail || row.summary || "",
+      status: row.status || row.scanStatus || "",
       createdAt: row.createdAt || row.updatedAt || "",
       record: row
     }));
@@ -11478,6 +18190,7 @@ function localUnifiedSearch(term, category = "all", status = "", limit = 80) {
 function filterSearchResultsForRole(results) {
   if (["行政部主任", "總務", "執行長"].includes(activeRole())) return results;
   const visibleKeys = new Set([
+    ...officialWorkflowItems.flatMap((item) => [item.id, item.document_number, item.doc_no, item.title, item.subject]),
     ...scopedInboundDocs().flatMap((doc) => [doc.id, doc.receiveNo, doc.subject]),
     ...scopedDispatchDocs().flatMap((doc) => [doc.id, doc.no, doc.subject]),
     ...visibleContracts().flatMap((contract) => [contract.id, contract.contractNo, contract.title, contract.counterparty])
@@ -11489,6 +18202,7 @@ function filterSearchResultsForRole(results) {
       item.title,
       item.subtitle,
       record.sourceId,
+      record.documentId,
       record.docNo,
       record.docId,
       record.contractNo,
@@ -11504,100 +18218,118 @@ function filterSearchResultsForRole(results) {
   });
 }
 
+function searchResultKey(item = {}) {
+  return `${item.table || "record"}:${item.id || "unknown"}`;
+}
+
+function searchResultDetailRows(item = {}) {
+  const record = item.record || {};
+  return [
+    ["編號", record.docNo || record.receiveNo || record.contractNo || record.fileName || item.id],
+    ["類型", item.category],
+    ["狀態", item.status || "未標示"],
+    ["日期", item.createdAt || "未記錄"],
+    ["單位或對象", record.agency || record.counterparty || record.recipient || "未記錄"]
+  ];
+}
+
 function renderSearch() {
-  const counts = searchResults.reduce((acc, item) => {
-    if (["documents", "contracts"].includes(item.table)) acc.docs += 1;
-    else if (["attachments", "attachment_security", "file_access_logs"].includes(item.table)) acc.files += 1;
-    else acc.events += 1;
-    return acc;
-  }, { docs: 0, files: 0, events: 0 });
-  document.querySelector("#searchResultCount").textContent = searchResults.length;
-  document.querySelector("#searchDocCount").textContent = counts.docs;
-  document.querySelector("#searchFileCount").textContent = counts.files;
-  document.querySelector("#searchEventCount").textContent = counts.events;
-  document.querySelector("#searchResultNote").textContent = document.querySelector("#searchQuery")?.value || "全部條件";
-  document.querySelector("#searchStatusPill").textContent = searchResults.length ? "已查詢" : "無結果";
+  const count = document.querySelector("#searchResultCount");
+  const note = document.querySelector("#searchResultNote");
+  const query = document.querySelector("#searchQuery")?.value.trim() || "";
+  const category = document.querySelector("#searchCategory")?.selectedOptions?.[0]?.textContent || "全部";
+  const status = document.querySelector("#searchStatus")?.selectedOptions?.[0]?.textContent || "全部";
+  const activeFilters = [
+    query ? `關鍵字「${query}」` : "",
+    category !== "全部" ? category : "",
+    status !== "全部" ? status : ""
+  ].filter(Boolean);
+  if (count) count.textContent = searchHasRun && !searchError ? `${searchTotal} 筆` : "0 筆";
+  if (note) note.textContent = searchHasRun
+    ? searchError || `${activeFilters.join(" · ") || "顯示可查看的全部資料"}${searchHasMore ? ` · 目前顯示前 ${searchResults.length} 筆` : ""}`
+    : "尚未查詢";
   const list = document.querySelector("#searchResults");
-  list.innerHTML = searchResults.length ? searchResults.map((item) => `
-    <article class="address-card ${item.id === selectedSearchId ? "selected-card" : ""}">
-      <strong>${item.title}</strong>
-      <span>${item.category} · ${item.status || "無狀態"} · ${item.id}</span>
-      <p>${item.subtitle || "無摘要"}</p>
-      <div class="row-actions">
-        <button class="segment" type="button" data-search-select="${item.id}">檢視</button>
-        <button class="segment" type="button" data-search-open="${item.table}">開啟模組</button>
-      </div>
-    </article>
-  `).join("") : `<article class="address-card"><strong>沒有符合條件的結果</strong><p>可改用文號、機關代碼、附件名稱、雜湊或狀態查詢。</p></article>`;
-  document.querySelectorAll("[data-search-select]").forEach((button) => {
+  if (!list) return;
+  if (!searchHasRun) {
+    list.innerHTML = `<div class="search-empty-state"><strong>尚未查詢</strong></div>`;
+    return;
+  }
+  if (searchError) {
+    list.innerHTML = `<div class="search-empty-state"><strong>正式資料查詢失敗</strong><p>${escapeDraftHtml(searchError)}</p></div>`;
+    return;
+  }
+  list.innerHTML = searchResults.length ? searchResults.map((item) => {
+    const key = searchResultKey(item);
+    const expanded = key === selectedSearchId;
+    const details = searchResultDetailRows(item);
+    return `
+      <article class="search-result-item ${expanded ? "expanded" : ""}">
+        <div class="search-result-content">
+          <div class="search-result-heading">
+            <span class="badge ${badgeClass(item.status)}">${escapeDraftHtml(item.category)}</span>
+            <small>${escapeDraftHtml(item.status || "未標示狀態")}</small>
+          </div>
+          <strong>${escapeDraftHtml(item.title || "未命名資料")}</strong>
+          <p>${escapeDraftHtml(item.subtitle || "無摘要")}</p>
+          ${item.createdAt ? `<small>${escapeDraftHtml(item.createdAt)}</small>` : ""}
+        </div>
+        <button class="text-button search-result-toggle" type="button" data-search-select="${escapeDraftHtml(key)}" aria-expanded="${expanded}">${expanded ? "收合" : "查看詳情"}</button>
+        ${expanded ? `<dl class="search-result-details">${details.map(([label, value]) => `<div><dt>${escapeDraftHtml(label)}</dt><dd>${escapeDraftHtml(value)}</dd></div>`).join("")}</dl>` : ""}
+      </article>
+    `;
+  }).join("") : `<div class="search-empty-state"><strong>沒有符合條件的公文</strong></div>`;
+  list.querySelectorAll("[data-search-select]").forEach((button) => {
     button.addEventListener("click", () => {
-      selectedSearchId = button.dataset.searchSelect;
+      selectedSearchId = selectedSearchId === button.dataset.searchSelect ? "" : button.dataset.searchSelect;
       renderSearch();
     });
   });
-  document.querySelectorAll("[data-search-open]").forEach((button) => {
-    button.addEventListener("click", () => openSearchResultModule(button.dataset.searchOpen));
-  });
-  renderSearchDetail();
-}
-
-function renderSearchDetail() {
-  const item = searchResults.find((result) => result.id === selectedSearchId) || searchResults[0] || null;
-  if (!item) {
-    document.querySelector("#selectedSearchStatus").textContent = "未選取";
-    document.querySelector("#searchDetail").innerHTML = `<p class="empty-text">尚無搜尋結果。</p>`;
-    return;
-  }
-  selectedSearchId = item.id;
-  document.querySelector("#selectedSearchStatus").textContent = item.status || item.category;
-  document.querySelector("#searchDetail").innerHTML = `
-    <div class="doc-detail">
-      <strong>${item.title}</strong>
-      <p>${item.subtitle || "無摘要"}</p>
-      <dl>
-        <div><dt>類別</dt><dd>${item.category}</dd></div>
-        <div><dt>來源表</dt><dd>${item.table}</dd></div>
-        <div><dt>狀態</dt><dd>${item.status || "無"}</dd></div>
-        <div><dt>時間</dt><dd>${item.createdAt || "未記錄"}</dd></div>
-      </dl>
-    </div>
-    <div class="archive-grid">
-      ${Object.entries(item.record || {}).slice(0, 12).map(([key, value]) => `<article class="archive-card"><span>${key}</span><strong>${String(value ?? "")}</strong></article>`).join("")}
-    </div>
-  `;
-}
-
-function openSearchResultModule(table) {
-  const routeMap = {
-    documents: "database",
-    contracts: "contracts",
-    contract_approvals: "contracts",
-    attachments: "database",
-    attachment_security: "fileSecurity",
-    file_access_logs: "fileSecurity",
-    exchange_tasks: "exchange",
-    exchange_events: "exchange",
-    notifications: "notifications",
-    audit_logs: "archive"
-  };
-  setView(routeMap[table] || "database");
 }
 
 async function runUnifiedSearch() {
   const q = document.querySelector("#searchQuery").value.trim();
-  const category = document.querySelector("#searchCategory").value;
+  const requestedCategory = document.querySelector("#searchCategory").value;
   const status = document.querySelector("#searchStatus").value.trim();
-  const limit = document.querySelector("#searchLimit").value;
-  try {
-    const params = new URLSearchParams({ q, category, status, limit });
-    const result = await backendRequest(`/search?${params.toString()}`);
-    searchResults = result.results || [];
-    if (!searchResults.length) searchResults = localUnifiedSearch(q, category, status, limit);
-  } catch (error) {
-    searchResults = localUnifiedSearch(q, category, status, limit);
+  const pageSize = Math.min(100, Math.max(1, Number(document.querySelector("#searchLimit").value) || 80));
+  const categoryMap = {
+    all: "all",
+    documents: "公文",
+    approval_records: "official_documents",
+    attachments: "公文"
+  };
+  searchHasRun = true;
+  searchError = "";
+  searchResults = [];
+  searchTotal = 0;
+  searchHasMore = false;
+  selectedSearchId = "";
+  renderSearch();
+  if (!categoryMap[requestedCategory]) {
+    searchError = "此類型尚未納入正式後端調閱，系統不會以瀏覽器暫存資料冒充完整結果。";
+    renderSearch();
+    showToast(searchError);
+    return;
   }
-  searchResults = filterSearchResultsForRole(searchResults);
-  selectedSearchId = searchResults[0]?.id || "";
+  const params = new URLSearchParams({
+    q,
+    category: categoryMap[requestedCategory],
+    status,
+    page: "1",
+    page_size: String(pageSize)
+  });
+  try {
+    const response = await backendRequest(`/search?${params}`);
+    if (!response || !Array.isArray(response.results) || !Number.isFinite(Number(response.total))) {
+      throw new Error("正式搜尋回傳格式不正確");
+    }
+    searchResults = response.results;
+    searchTotal = Number(response.total);
+    searchHasMore = Boolean(response.has_more);
+  } catch (error) {
+    searchError = `無法讀取完整正式資料：${error.message}`;
+    showToast(searchError);
+  }
+  searchHasRun = true;
   renderSearch();
 }
 
@@ -11678,7 +18410,7 @@ function renderDatabaseDetail() {
       <div class="doc-detail restricted-detail">
         <strong>${databaseLabels[activeDatabaseTable]}已受 RBAC 保護</strong>
         <p>${restriction.detail || "目前登入角色沒有查看此資料表的權限。"}</p>
-        <p>請改用角色首頁、簽核紀錄或公文紀錄處理日常作業；後台資料需由行政部主任或授權管理者查看。</p>
+        <p>請改用角色首頁、簽核進度或公文查詢處理日常作業；後台資料需由行政部主任或授權管理者查看。</p>
       </div>
     `;
     return;
@@ -11936,30 +18668,91 @@ function renderWorkflowRole() {
   document.querySelector("#permissionGrid").innerHTML = Object.entries(permissionLabels).map(([key, label]) => `
     <article class="permission-chip ${permissions.includes(key) ? "allowed" : ""}">
       <strong>${permissions.includes(key) ? "允許" : "限制"}</strong>
-      <span>${label}</span>
+      <span>${escapeHtml(label)}</span>
     </article>
   `).join("");
   document.querySelector("#workflowRoleDetail").innerHTML = `
-    <strong>${workflowRole}</strong>
-    <p>${roleNotes[workflowRole]}</p>
+    <strong>${escapeHtml(workflowRole)}</strong>
+    <p>${escapeHtml(roleNotes[workflowRole] || "依角色設定")}</p>
     <dl>
       <div><dt>權限數</dt><dd>${permissions.length} 項</dd></div>
-      <div><dt>主要責任</dt><dd>${workflowSteps.find(([, role]) => role === workflowRole)?.[2] || "依角色設定"}</dd></div>
+      <div><dt>主要責任</dt><dd>${escapeHtml(workflowSteps.find(([, role]) => role === workflowRole)?.[2] || "依角色設定")}</dd></div>
     </dl>
   `;
+}
+
+function selectedOfficialWorkflowSteps() {
+  return [...document.querySelectorAll("[data-official-workflow-step]")]
+    .filter((input) => input.checked)
+    .map((input) => input.dataset.officialWorkflowStep);
+}
+
+function renderOfficialWorkflowConfig() {
+  const panel = document.querySelector("#officialWorkflowConfigPanel");
+  if (!panel) return;
+  const policyLocked = officialWorkflowConfig.locked === true;
+  const canManage = !policyLocked && (activeRole() === "執行長" || hasBackendPermission("settings.system_manage") || hasBackendPermission("system_permissions.manage"));
+  const enabled = new Set(officialWorkflowConfig.enabled_steps || []);
+  document.querySelectorAll("[data-official-workflow-step]").forEach((input) => {
+    input.checked = enabled.has(input.dataset.officialWorkflowStep);
+    const required = ["applicant_manager", "department_head", "admin_director", "general_affairs_review", "applicant_confirm"].includes(input.dataset.officialWorkflowStep);
+    input.disabled = policyLocked || required || !canManage;
+  });
+  const saveButton = document.querySelector("#officialWorkflowConfigSaveBtn");
+  if (saveButton) saveButton.hidden = !canManage;
+  const status = document.querySelector("#officialWorkflowConfigStatus");
+  if (status) status.textContent = policyLocked ? "組織固定流程" : canManage ? "可調整" : "僅可檢視";
+  const steps = (officialWorkflowConfig.steps?.length
+    ? officialWorkflowConfig.steps.map((step) => step.key)
+    : officialWorkflowConfig.enabled_steps || []);
+  document.querySelector("#officialWorkflowConfigPreview").innerHTML = steps.map((key, index) => `
+    <article class="approval-progress-card compact">
+      <span>第 ${index + 1} 關</span>
+      <strong>${escapeDraftHtml(officialWorkflowStepLabels[key] || key)}</strong>
+      <small>${key === "applicant_confirm" ? "用印後回到申請人" : "前一關核准後才可處理"}</small>
+    </article>
+  `).join("");
+  renderComposeApprovalRoute();
+}
+
+async function loadOfficialWorkflowConfig(silent = true) {
+  if (!hasAuthenticatedBackendSession()) return;
+  try {
+    officialWorkflowConfig = await backendRequest("/official-workflow-config");
+    renderOfficialWorkflowConfig();
+  } catch (error) {
+    if (!silent) showToast(`簽核流程讀取失敗：${error.message}`);
+  }
+}
+
+async function saveOfficialWorkflowConfig() {
+  if (activeRole() !== "執行長" && !hasBackendPermission("settings.system_manage") && !hasBackendPermission("system_permissions.manage")) {
+    return showToast("只有執行長或系統管理員可以調整發文簽核流程。");
+  }
+  try {
+    officialWorkflowConfig = await backendRequest("/official-workflow-config", {
+      method: "PATCH",
+      body: JSON.stringify({ enabled_steps: selectedOfficialWorkflowSteps() })
+    });
+    renderOfficialWorkflowConfig();
+    addWorkflowAudit("更新發文簽核流程", (officialWorkflowConfig.steps || []).map((step) => step.name).join(" → "));
+    showToast("發文簽核流程已儲存，將套用到之後新送出的申請單。");
+  } catch (error) {
+    showToast(`簽核流程儲存失敗：${error.message}`);
+  }
 }
 
 function renderWorkflowTasks() {
   document.querySelector("#workflowTaskCount").textContent = `${workflowTasks.length} 件`;
   document.querySelector("#workflowTaskRows").innerHTML = workflowTasks.map((task) => `
     <tr class="${task.id === selectedWorkflowTaskId ? "selected-row" : ""}">
-      <td><input class="workflow-check" type="checkbox" value="${task.id}" /></td>
-      <td><button class="text-button row-select" type="button" data-workflow-select="${task.id}">${task.title}</button><small>${task.id}</small></td>
-      <td>${task.type}</td>
-      <td>${task.step}</td>
-      <td>${task.role}</td>
-      <td><span class="badge ${badgeClass(task.status)}">${task.status}</span></td>
-      <td><div class="row-actions"><button class="segment" data-workflow-progress="${task.id}" type="button">進度</button><button class="segment" data-workflow-approve="${task.id}" type="button">授權</button><button class="segment" data-workflow-reject="${task.id}" type="button">退回</button></div></td>
+      <td><input class="workflow-check" type="checkbox" value="${escapeHtml(task.id)}" /></td>
+      <td><button class="text-button row-select" type="button" data-workflow-select="${escapeHtml(task.id)}">${escapeHtml(task.title)}</button><small>${escapeHtml(task.id)}</small></td>
+      <td>${escapeHtml(task.type)}</td>
+      <td>${escapeHtml(task.step)}</td>
+      <td>${escapeHtml(task.role)}</td>
+      <td><span class="badge ${safeHtmlClassToken(badgeClass(task.status), "info")}">${escapeHtml(task.status)}</span></td>
+      <td><div class="row-actions"><button class="segment" data-workflow-progress="${escapeHtml(task.id)}" type="button">進度</button><button class="segment" data-workflow-approve="${escapeHtml(task.id)}" type="button">授權</button><button class="segment" data-workflow-reject="${escapeHtml(task.id)}" type="button">退回</button></div></td>
     </tr>
   `).join("");
   document.querySelectorAll("[data-workflow-select]").forEach((button) => {
@@ -11992,10 +18785,10 @@ function renderWorkflowTasks() {
 function renderWorkflowSteps() {
   document.querySelector("#workflowStepList").innerHTML = workflowSteps.map(([no, role, body]) => `
     <article class="timeline-item">
-      <time>${no}</time>
+      <time>${escapeHtml(no)}</time>
       <div>
-        <strong>${role}</strong>
-        <p>${body}</p>
+        <strong>${escapeHtml(role)}</strong>
+        <p>${escapeHtml(body)}</p>
       </div>
     </article>
   `).join("");
@@ -12021,7 +18814,7 @@ function approvalRoleForStep(step, task) {
   if (/行政部門主任|行政部主任|清稿|資安|主管覆核/.test(step)) return "行政部主任";
   if (/總務|收文|用印|歸檔|jAgent|交換/.test(step)) return "總務";
   if (/申請人主管/.test(step)) return "主管";
-  if (/部門主管|主管承接/.test(step)) return "主任";
+  if (/部門主管|部門主任|主管承接/.test(step)) return "主任";
   if (/會計|財務/.test(step)) return "會計";
   if (/人資/.test(step)) return "人資";
   if (/申請人|業務助理|擬稿/.test(step)) return task?.requester || task?.owner || activeRole() || "申請人";
@@ -12068,7 +18861,42 @@ function approvalLogDocForTask(task) {
 
 function approvalLogRecords() {
   const visibleDocIds = new Set(scopedDispatchDocs().map((doc) => doc.id));
-  const documentRecords = workflowTasks
+  const officialDocumentRecords = officialWorkflowItems.map((item) => {
+    const rawSteps = item.approval_steps || item.application_package?.approval_history || [];
+    const steps = rawSteps.map((step, index) => ({
+      no: String(step.step_order || index + 1).padStart(2, "0"),
+      title: step.step_name || officialWorkflowStepLabels[step.step_key] || step.step_key,
+      owner: step.approver_name || step.approver_role || "尚未指派",
+      state: step.status === "approved" ? "done" : step.status === "rejected" ? "returned" : step.step_key === item.current_step ? "current" : "pending",
+      status: step.status === "approved" ? "已核准" : step.status === "rejected" ? "已退回" : step.step_key === item.current_step ? "待處理" : "待後續",
+      time: step.approved_at || "尚未到關",
+      comment: step.comment || "尚未填寫簽核意見。"
+    }));
+    const currentStep = steps.find((step) => ["current", "returned"].includes(step.state)) || steps.at(-1);
+    return {
+      officialDocument: item,
+      task: {
+        id: item.id,
+        title: item.title || item.subject,
+        type: "發文",
+        step: currentStep?.title || item.current_step_name || "草稿",
+        role: currentStep?.owner || "申請人",
+        status: officialStatusLabel(item.current_status),
+        requester: item.applicant_name,
+        submittedAt: item.requested_at || item.created_at,
+        lastSignedAt: currentStep?.time,
+        lastComment: currentStep?.comment
+      },
+      doc: { id: item.id, no: item.id, subject: item.subject || item.title, to: item.recipient, companyName: item.company_name },
+      currentStep,
+      doneCount: steps.filter((step) => step.state === "done").length,
+      totalSteps: steps.length,
+      steps,
+      submittedAt: item.requested_at || item.created_at || "尚未送出",
+      requester: item.applicant_name || "申請人"
+    };
+  });
+  const legacyDocumentRecords = workflowTasks
     .filter((task) => task.type === "發文" || /發文|函稿|公文/.test(`${task.title} ${task.step}`))
     .map((task) => {
       const doc = approvalLogDocForTask(task);
@@ -12127,35 +18955,68 @@ function approvalLogRecords() {
       requester: contract.owner
     };
   });
-  return [...documentRecords, ...contractRecordsForApproval];
+  const officialIds = new Set(officialDocumentRecords.map(({ task }) => task.id));
+  return [...officialDocumentRecords, ...legacyDocumentRecords.filter(({ task }) => !officialIds.has(task.id)), ...contractRecordsForApproval];
 }
 
 function filteredApprovalLogRecords() {
   const term = approvalLogSearchTerm.trim().toLowerCase();
-  return approvalLogRecords().filter(({ task, doc, currentStep }) => {
-    const statusText = `${task.status} ${currentStep?.status || ""}`;
-    const matchesFilter = approvalLogFilter === "all" || statusText.includes(approvalLogFilter);
+  return approvalLogRecords().filter((record) => {
+    const { task, doc } = record;
+    const matchesFilter = approvalProgressCategory(record) === approvalLogFilter;
     const haystack = `${task.id} ${task.title} ${task.step} ${task.role} ${task.status} ${doc?.no || ""} ${doc?.subject || ""} ${doc?.to || ""}`.toLowerCase();
     return matchesFilter && (!term || haystack.includes(term));
   });
+}
+
+function approvalProgressCategory({ task, currentStep, officialDocument } = {}) {
+  if (officialDocument) {
+    const status = officialDocument.current_status || "draft";
+    if (status === "draft") return "draft";
+    const pendingStep = (officialDocument.approval_steps || []).find((step) => step.step_key === officialDocument.current_step && step.status === "pending");
+    const dispatch = officialDocument.dispatch_record || {};
+    const isMyApproval = pendingStep?.approver_user_id === authState?.user?.id;
+    const isMyDispatch = dispatch.dispatch_status === "pending" && (
+      dispatch.dispatch_owner_user_id === authState?.user?.id
+      || (dispatch.dispatch_owner_type === "general_affairs" && authState?.user?.role === "總務")
+    );
+    const isReturnedToMe = status === "rejected" && officialDocument.applicant_id === authState?.user?.id;
+    if (isMyApproval || isMyDispatch || isReturnedToMe) return "unanswered";
+    if (["dispatched", "sent_by_applicant", "closed"].includes(status)) return "sent";
+    return "approving";
+  }
+  const status = `${task?.status || ""} ${currentStep?.status || ""}`;
+  if (/草稿/.test(status)) return "draft";
+  if (/已寄送|交換完成|已歸檔|已簽署|完成/.test(status)) return "sent";
+  if ((task?.role === activeRole() && /待|退回|審核/.test(status)) || /退回/.test(status)) return "unanswered";
+  return "approving";
 }
 
 function renderApprovalLog() {
   const list = document.querySelector("#approvalLogList");
   const detail = document.querySelector("#approvalLogDetail");
   if (!list || !detail) return;
+  const progressLabels = { unanswered: "未回覆", draft: "草稿", approving: "簽核中", sent: "已寄送" };
+  const allProgressRecords = approvalLogRecords();
+  document.querySelectorAll("[data-approval-log-filter]").forEach((button) => {
+    const key = button.dataset.approvalLogFilter;
+    const count = allProgressRecords.filter((record) => approvalProgressCategory(record) === key).length;
+    button.textContent = `${progressLabels[key] || key} ${count}`;
+    button.classList.toggle("active", key === approvalLogFilter);
+    button.setAttribute("aria-selected", String(key === approvalLogFilter));
+  });
   const records = filteredApprovalLogRecords();
   document.querySelector("#approvalLogCount").textContent = `${records.length} 件`;
   document.querySelector("#approvalLogScope").textContent = canSeeCompanyWideDocs() ? "全公司" : "依部門/角色";
   if (records.length && !records.some(({ task }) => task.id === selectedWorkflowTaskId)) selectedWorkflowTaskId = records[0].task.id;
   list.innerHTML = records.length ? records.map(({ task, doc, currentStep, doneCount, totalSteps, submittedAt }) => `
     <article class="address-card ${task.id === selectedWorkflowTaskId ? "selected-card" : ""}">
-      <strong>${doc?.no || task.id}</strong>
-      <span>${doc?.subject || task.title}</span>
-      <p>${currentStep?.title || task.step} · ${task.role} · ${task.status}</p>
-      <small>${doneCount}/${totalSteps} 關 · 送出時間 ${submittedAt}</small>
+      <strong>${escapeHtml(doc?.no || task.id)}</strong>
+      <span>${escapeHtml(doc?.subject || task.title)}</span>
+      <p>${escapeHtml(currentStep?.title || task.step)} · ${escapeHtml(task.role)} · ${escapeHtml(task.status)}</p>
+      <small>${Number(doneCount)}/${Number(totalSteps)} 關 · 送出時間 ${escapeHtml(submittedAt)}</small>
       <div class="row-actions">
-        <button class="segment" type="button" data-approval-log-select="${task.id}">檢視</button>
+        <button class="segment" type="button" data-approval-log-select="${escapeHtml(task.id)}">檢視</button>
       </div>
     </article>
   `).join("") : `<p class="empty-text">目前沒有符合條件的簽核紀錄。</p>`;
@@ -12164,47 +19025,95 @@ function renderApprovalLog() {
   if (!selected) {
     detail.innerHTML = `<p class="empty-text">請先送出一份公文，系統會自動建立簽核流程紀錄。</p>`;
   } else {
-    const { task, doc, currentStep, doneCount, totalSteps, steps, submittedAt, requester } = selected;
+    const { task, doc, currentStep, doneCount, totalSteps, steps, submittedAt, requester, officialDocument } = selected;
+    const pendingOfficialStep = (officialDocument?.approval_steps || []).find((step) => step.step_key === officialDocument.current_step && step.status === "pending");
+    const canActOfficial = Boolean(
+      officialDocument
+      && pendingOfficialStep?.approver_user_id
+      && authState?.user?.id
+      && pendingOfficialStep.approver_user_id === authState.user.id
+    );
+    const canCorrectOfficial = Boolean(
+      officialDocument
+      && officialDocumentIsApplicant(officialDocument)
+      && ["draft", "rejected"].includes(officialDocument.current_status)
+    );
     detail.innerHTML = `
       <article class="approval-log-summary">
         <div class="approval-log-summary-head">
-          <span>${task.id} · ${doc?.no || "尚未建立文號"}</span>
-          <strong>${doc?.subject || task.title}</strong>
+          <span>${escapeHtml(task.id)} · ${escapeHtml(doc?.no || "尚未建立文號")}</span>
+          <strong>${escapeHtml(doc?.subject || task.title)}</strong>
         </div>
-        <p>目前停在「${currentStep?.title || task.step}」，負責角色：${task.role}，狀態：${task.status}。</p>
+        <p>目前停在「${escapeHtml(currentStep?.title || task.step)}」，負責角色：${escapeHtml(task.role)}，狀態：${escapeHtml(task.status)}。</p>
         <dl class="approval-log-meta">
-          <div><dt>公司</dt><dd>${doc?.companyName || "歲悅長照股份有限公司"}</dd></div>
-          <div><dt>送出人</dt><dd>${requester}</dd></div>
-          <div><dt>送出時間</dt><dd>${submittedAt}</dd></div>
-          <div><dt>進度</dt><dd>${doneCount}/${totalSteps} 關</dd></div>
-          <div><dt>最近時間戳</dt><dd>${task.lastSignedAt || "尚未簽核"}</dd></div>
-          <div><dt>簽核意見</dt><dd>${task.lastComment || "尚未填寫"}</dd></div>
+          <div><dt>公司</dt><dd>${escapeHtml(doc?.companyName || "歲悅長照股份有限公司")}</dd></div>
+          <div><dt>送出人</dt><dd>${escapeHtml(requester)}</dd></div>
+          <div><dt>送出時間</dt><dd>${escapeHtml(submittedAt)}</dd></div>
+          <div><dt>進度</dt><dd>${Number(doneCount)}/${Number(totalSteps)} 關</dd></div>
+          <div><dt>最近時間戳</dt><dd>${escapeHtml(task.lastSignedAt || "尚未簽核")}</dd></div>
+          <div><dt>簽核意見</dt><dd>${escapeHtml(task.lastComment || "尚未填寫")}</dd></div>
         </dl>
+        ${officialDocument && officialDocumentHasEditorV2(officialDocument) ? `<div class="official-action-bar"><button class="secondary-button" type="button" data-open-editor-review="${escapeDraftHtml(officialDocument.id)}">查看 PDF 編輯版</button></div>` : ""}
+        ${canActOfficial ? `<div class="official-action-bar"><button class="primary-button" type="button" data-progress-official-action="approve" data-progress-official-id="${escapeHtml(officialDocument.id)}">核准</button><button class="secondary-button" type="button" data-progress-official-action="reject" data-progress-official-id="${escapeHtml(officialDocument.id)}">駁回</button></div>` : ""}
+        ${canCorrectOfficial ? `<div class="official-action-bar"><button class="primary-button" type="button" data-correct-official-id="${escapeHtml(officialDocument.id)}">${officialDocument.current_status === "rejected" ? "補正並重新送簽" : "繼續編輯草稿"}</button></div>` : ""}
+        ${officialDocument ? renderOfficialFinalStampedDownload(officialDocument) : ""}
       </article>
       <ol class="approval-log-trail">
         ${steps.map((step) => `
-          <li class="approval-log-step ${step.state}">
-            <time>${step.no}</time>
+          <li class="approval-log-step ${safeHtmlClassToken(step.state, "pending")}">
+            <time>${escapeHtml(step.no)}</time>
             <div class="approval-log-step-body">
               <div class="approval-log-step-title">
-                <strong>${step.title}</strong>
-                <span>${step.status}</span>
+                <strong>${escapeHtml(step.title)}</strong>
+                <span>${escapeHtml(step.status)}</span>
               </div>
-              <p>${step.owner}</p>
-              <small>${step.time}</small>
-              <em>${step.comment}</em>
+              <p>${escapeHtml(step.owner)}</p>
+              <small>${escapeHtml(step.time)}</small>
+              <em>${escapeHtml(step.comment)}</em>
             </div>
           </li>
         `).join("")}
       </ol>
+      ${officialDocument ? `<h4>申請單附件</h4>${renderOfficialFiles(officialApplicationFiles(officialDocument), officialDocument.id)}` : ""}
     `;
   }
   document.querySelectorAll("[data-approval-log-select]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       selectedWorkflowTaskId = button.dataset.approvalLogSelect;
+      if (String(selectedWorkflowTaskId).startsWith("OD-")) {
+        try {
+          const detailItem = await backendRequest(`/official-documents/${encodeURIComponent(selectedWorkflowTaskId)}`);
+          const index = officialWorkflowItems.findIndex((item) => item.id === detailItem.id);
+          if (index >= 0) officialWorkflowItems[index] = detailItem;
+          else officialWorkflowItems.unshift(detailItem);
+        } catch (error) {
+          showToast(`申請單載入失敗：${error.message}`);
+        }
+      }
       renderApprovalLog();
     });
   });
+  detail.querySelectorAll("[data-official-download]").forEach((button) => {
+    button.addEventListener("click", () => downloadOfficialWorkflowFile(button.dataset.documentId, button.dataset.officialDownload));
+  });
+  detail.querySelectorAll("[data-progress-official-action]").forEach((button) => {
+    button.addEventListener("click", () => actOnOfficialDocumentFromProgress(button.dataset.progressOfficialId, button.dataset.progressOfficialAction));
+  });
+  detail.querySelectorAll("[data-open-editor-review]").forEach((button) => {
+    button.addEventListener("click", () => void openOfficialDocumentEditorReview(button.dataset.openEditorReview));
+  });
+  detail.querySelectorAll("[data-correct-official-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = officialWorkflowItems.find((entry) => entry.id === button.dataset.correctOfficialId);
+      if (item) void beginOfficialCorrection(item);
+    });
+  });
+}
+
+async function actOnOfficialDocumentFromProgress(documentId, action) {
+  const item = officialWorkflowItems.find((entry) => entry.id === documentId);
+  if (!item) return showToast("找不到這筆簽核案件，請重新整理。");
+  openOfficialDecisionDialog(item, action, "approvalLog");
 }
 
 function renderApprovalProgress() {
@@ -12224,24 +19133,24 @@ function renderApprovalProgress() {
   status.textContent = `${doneCount}/${steps.length} 關`;
   summary.innerHTML = `
     <article class="approval-progress-card">
-      <span>${task.id} · ${task.type}</span>
-      <strong>${task.title}</strong>
-      <p>目前停在「${currentStep.title}」，負責角色：${currentStep.owner}，狀態：${task.status}。</p>
+      <span>${escapeHtml(task.id)} · ${escapeHtml(task.type)}</span>
+      <strong>${escapeHtml(task.title)}</strong>
+      <p>目前停在「${escapeHtml(currentStep.title)}」，負責角色：${escapeHtml(currentStep.owner)}，狀態：${escapeHtml(task.status)}。</p>
       <dl>
-        <div><dt>目前節點</dt><dd>${task.step}</dd></div>
-        <div><dt>簽核角色</dt><dd>${task.role}</dd></div>
-        <div><dt>最近時間戳</dt><dd>${task.lastSignedAt || "尚未簽核"}</dd></div>
-        <div><dt>簽核意見</dt><dd>${task.lastComment || "尚未填寫"}</dd></div>
+        <div><dt>目前節點</dt><dd>${escapeHtml(task.step)}</dd></div>
+        <div><dt>簽核角色</dt><dd>${escapeHtml(task.role)}</dd></div>
+        <div><dt>最近時間戳</dt><dd>${escapeHtml(task.lastSignedAt || "尚未簽核")}</dd></div>
+        <div><dt>簽核意見</dt><dd>${escapeHtml(task.lastComment || "尚未填寫")}</dd></div>
       </dl>
     </article>
   `;
   stepList.innerHTML = steps.map((step) => `
-    <article class="approval-step ${step.state}">
-      <time>${step.no}</time>
+    <article class="approval-step ${safeHtmlClassToken(step.state, "pending")}">
+      <time>${escapeHtml(step.no)}</time>
       <div>
-        <strong>${step.title}</strong>
-        <span>${step.owner} · ${step.status}</span>
-        <p>${step.time}｜${step.comment}</p>
+        <strong>${escapeHtml(step.title)}</strong>
+        <span>${escapeHtml(step.owner)} · ${escapeHtml(step.status)}</span>
+        <p>${escapeHtml(step.time)}｜${escapeHtml(step.comment)}</p>
       </div>
     </article>
   `).join("");
@@ -12254,8 +19163,8 @@ function renderWorkflowTemplateSteps() {
     <article class="timeline-item">
       <time>${String(index + 1).padStart(2, "0")}</time>
       <div>
-        <strong>${step}</strong>
-        <p>${approvalRoleForStep(step)} · ${template.name} 節點，完成後寫入簽核時間戳與不可否認紀錄。</p>
+        <strong>${escapeHtml(step)}</strong>
+        <p>${escapeHtml(approvalRoleForStep(step))} · ${escapeHtml(template.name)} 節點，完成後寫入簽核時間戳與不可否認紀錄。</p>
       </div>
     </article>
   `).join("");
@@ -12274,46 +19183,182 @@ function renderWorkflowConditions() {
     ["簽核路由", route.name],
     ["密件", security !== "普通" ? "需行政部主任資安檢核" : "一般權限即可"],
     ["速件", /速/.test(priority) ? "插隊行政部主任即時審核" : "依一般時限"],
-    ["會計節點", route.requiresAccounting ? "需會計複核" : "不需會計複核"],
+    ["統一簽核鏈", "主管、部門主任、行政部門主任、總務專員、申請人收件"],
     ["執行長節點", route.requiresCeo ? "需執行長核定" : "不需執行長核定"],
     ["金額", amount >= 100000 ? "列為高金額提醒，但不覆蓋小類別路由" : "依小類別路由"],
     ["機關別", /政府|衛生|社會/.test(agency) ? "政府機關公文需總務覆核" : "一般受文者流程"]
   ];
   document.querySelector("#workflowConditionGrid").innerHTML = rules.map(([label, value]) => `
     <article class="archive-card">
-      <span>${label}</span>
-      <strong>${value}</strong>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
     </article>
   `).join("");
 }
 
+function workflowProxyCandidateById(userId) {
+  return workflowProxyCandidates.find((candidate) => candidate.id === userId) || null;
+}
+
+function workflowProxyPersonLabel(userId) {
+  const candidate = workflowProxyCandidateById(userId);
+  if (!candidate) return userId || "未知人員";
+  const detail = [candidate.unit, candidate.title || candidate.role].filter(Boolean).join("／");
+  return detail ? `${candidate.name}（${detail}）` : candidate.name;
+}
+
+function workflowProxyDateLabel(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "時間未設定";
+  return date.toLocaleString("zh-TW", { hour12: false });
+}
+
+function workflowProxyEffectiveStatus(proxy) {
+  if (proxy.status === "revoked") return "已撤銷";
+  const nowValue = Date.now();
+  const startsAt = new Date(proxy.starts_at).getTime();
+  const endsAt = new Date(proxy.ends_at).getTime();
+  if (Number.isFinite(endsAt) && endsAt <= nowValue) return "已到期";
+  if (Number.isFinite(startsAt) && startsAt > nowValue) return "尚未生效";
+  return "生效中";
+}
+
+function canRevokeWorkflowProxy(proxy) {
+  return Boolean(
+    proxy?.status === "active"
+    && (workflowProxyCanManage || proxy.principal_user_id === workflowProxyCurrentUserId)
+  );
+}
+
 function renderWorkflowProxies() {
-  document.querySelector("#workflowProxyList").innerHTML = workflowProxies.map((proxy) => `
-    <article class="address-card">
-      <strong>${proxy.from} → ${proxy.to}</strong>
-      <span>${proxy.reason}</span>
-      <p>${proxy.status} · ${proxy.id}</p>
-      <div class="row-actions">
-        <button class="segment" type="button" data-proxy-toggle="${proxy.id}">${proxy.status === "啟用" ? "停用" : "啟用"}</button>
-        <button class="segment" type="button" data-proxy-apply="${proxy.id}">套用</button>
-      </div>
-    </article>
-  `).join("");
-  document.querySelectorAll("[data-proxy-toggle]").forEach((button) => {
-    button.addEventListener("click", () => toggleWorkflowProxy(button.dataset.proxyToggle));
+  const list = document.querySelector("#workflowProxyList");
+  const status = document.querySelector("#workflowProxyStatus");
+  if (!list || !status) return;
+  const stateMessages = {
+    idle: "登入後載入代理授權。",
+    loading: "正在讀取同公司人員與代理授權…",
+    ready: `已載入 ${workflowProxies.length} 筆代理授權。`,
+    error: "代理授權載入失敗，畫面不會改用本機資料。"
+  };
+  status.textContent = stateMessages[workflowProxyLoadState] || stateMessages.idle;
+  if (workflowProxyLoadState === "loading") {
+    list.innerHTML = `<p class="empty-text">正在載入正式代理資料…</p>`;
+    return;
+  }
+  if (workflowProxyLoadState === "error") {
+    list.innerHTML = `<p class="empty-text">無法取得正式代理資料，請重新整理或確認登入權限。</p>`;
+    return;
+  }
+  if (!workflowProxies.length) {
+    list.innerHTML = `<p class="empty-text">目前沒有你可查看的代理授權。</p>`;
+    return;
+  }
+  list.innerHTML = workflowProxies.map((proxy) => {
+    const effectiveStatus = workflowProxyEffectiveStatus(proxy);
+    const canRevoke = canRevokeWorkflowProxy(proxy);
+    return `
+      <article class="address-card">
+        <strong>${escapeHtml(workflowProxyPersonLabel(proxy.principal_user_id))} → ${escapeHtml(workflowProxyPersonLabel(proxy.delegate_user_id))}</strong>
+        <span>${escapeHtml(proxy.reason || "未填代理原因")}</span>
+        <p>${escapeHtml(effectiveStatus)} · ${escapeHtml(workflowProxyDateLabel(proxy.starts_at))} 至 ${escapeHtml(workflowProxyDateLabel(proxy.ends_at))}</p>
+        <small>授權編號：${escapeHtml(proxy.id || "-")}</small>
+        ${canRevoke ? `<div class="row-actions"><button class="segment" type="button" data-proxy-revoke="${escapeHtml(proxy.id)}">撤銷代理</button></div>` : ""}
+      </article>
+    `;
+  }).join("");
+  list.querySelectorAll("[data-proxy-revoke]").forEach((button) => {
+    button.addEventListener("click", () => void revokeWorkflowProxy(button.dataset.proxyRevoke));
   });
-  document.querySelectorAll("[data-proxy-apply]").forEach((button) => {
-    button.addEventListener("click", () => applyWorkflowProxy(button.dataset.proxyApply));
-  });
+}
+
+function toWorkflowProxyInputValue(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function setDefaultWorkflowProxyPeriod() {
+  const startsInput = document.querySelector("#workflowProxyStartsAt");
+  const endsInput = document.querySelector("#workflowProxyEndsAt");
+  if (!startsInput || !endsInput) return;
+  const start = new Date(Date.now() + 5 * 60 * 1000);
+  start.setSeconds(0, 0);
+  const end = new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const minimum = toWorkflowProxyInputValue(new Date());
+  startsInput.min = minimum;
+  endsInput.min = minimum;
+  if (!startsInput.value) startsInput.value = toWorkflowProxyInputValue(start);
+  if (!endsInput.value) endsInput.value = toWorkflowProxyInputValue(end);
+}
+
+function syncWorkflowProxyCandidateOptions() {
+  const principalSelect = document.querySelector("#workflowProxyPrincipal");
+  const delegateSelect = document.querySelector("#workflowProxyDelegate");
+  const submitButton = document.querySelector("#workflowProxySubmitBtn");
+  if (!principalSelect || !delegateSelect || !submitButton) return;
+  const previousPrincipal = principalSelect.value;
+  const principalId = workflowProxyCanManage && workflowProxyCandidateById(previousPrincipal)
+    ? previousPrincipal
+    : workflowProxyCurrentUserId;
+  const principalCandidates = workflowProxyCanManage
+    ? workflowProxyCandidates
+    : workflowProxyCandidates.filter((candidate) => candidate.id === workflowProxyCurrentUserId);
+  principalSelect.innerHTML = principalCandidates.length
+    ? principalCandidates.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(workflowProxyPersonLabel(candidate.id))}</option>`).join("")
+    : `<option value="">找不到目前登入人員</option>`;
+  principalSelect.value = principalCandidates.some((candidate) => candidate.id === principalId)
+    ? principalId
+    : principalCandidates[0]?.id || "";
+  principalSelect.disabled = !workflowProxyCanManage;
+
+  const previousDelegate = delegateSelect.value;
+  const delegateCandidates = workflowProxyCandidates.filter((candidate) => candidate.id !== principalSelect.value);
+  delegateSelect.innerHTML = delegateCandidates.length
+    ? `<option value="">請選擇代理人</option>${delegateCandidates.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(workflowProxyPersonLabel(candidate.id))}</option>`).join("")}`
+    : `<option value="">同公司沒有其他可代理人員</option>`;
+  if (delegateCandidates.some((candidate) => candidate.id === previousDelegate)) delegateSelect.value = previousDelegate;
+  submitButton.disabled = !principalSelect.value || !delegateCandidates.length || workflowProxyLoadState !== "ready";
+  setDefaultWorkflowProxyPeriod();
+}
+
+async function loadWorkflowDelegations(silent = false) {
+  if (!hasAuthenticatedBackendSession()) return;
+  workflowProxyLoadState = "loading";
+  renderWorkflowProxies();
+  try {
+    const [delegations, directory] = await Promise.all([
+      backendRequest("/workflow-delegations"),
+      backendRequest("/workflow-delegations/candidates")
+    ]);
+    if (!Array.isArray(delegations) || !Array.isArray(directory?.users)) {
+      throw new Error("代理資料格式不正確");
+    }
+    workflowProxies.splice(0, workflowProxies.length, ...delegations);
+    workflowProxyCandidates = directory.users.filter((candidate) => candidate?.id && candidate?.name);
+    workflowProxyCanManage = Boolean(directory.can_manage);
+    workflowProxyCurrentUserId = String(directory.current_user_id || authState?.user?.id || "");
+    workflowProxyLoadState = "ready";
+    syncWorkflowProxyCandidateOptions();
+    renderWorkflowProxies();
+    if (!silent) showToast("代理授權已更新。");
+  } catch (error) {
+    workflowProxies.splice(0, workflowProxies.length);
+    workflowProxyCandidates = [];
+    workflowProxyCanManage = false;
+    workflowProxyCurrentUserId = String(authState?.user?.id || "");
+    workflowProxyLoadState = "error";
+    syncWorkflowProxyCandidateOptions();
+    renderWorkflowProxies();
+    if (!silent) showToast(`代理授權載入失敗：${error.message}`);
+  }
 }
 
 function renderWorkflowProofLog() {
   document.querySelector("#workflowProofLog").innerHTML = workflowProofLog.map(([time, title, body]) => `
     <article class="timeline-item">
-      <time>${time}</time>
+      <time>${escapeHtml(time)}</time>
       <div>
-        <strong>${title}</strong>
-        <p>${body}</p>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(body)}</p>
       </div>
     </article>
   `).join("");
@@ -12322,10 +19367,10 @@ function renderWorkflowProofLog() {
 function renderWorkflowAuditLog() {
   document.querySelector("#workflowAuditLog").innerHTML = workflowAuditLog.map(([time, title, body]) => `
     <article class="timeline-item">
-      <time>${time}</time>
+      <time>${escapeHtml(time)}</time>
       <div>
-        <strong>${title}</strong>
-        <p>${body}</p>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(body)}</p>
       </div>
     </article>
   `).join("");
@@ -12507,43 +19552,85 @@ function evaluateWorkflowConditions() {
   showToast("條件式簽核已評估。");
 }
 
-function addWorkflowProxy() {
-  const proxy = {
-    id: `PX-${Date.now().toString().slice(-5)}`,
-    from: document.querySelector("#workflowProxyFrom").value,
-    to: document.querySelector("#workflowProxyTo").value,
-    reason: document.querySelector("#workflowProxyReason").value.trim(),
-    status: "啟用"
-  };
-  workflowProxies.unshift(proxy);
-  renderWorkflowProxies();
-  addWorkflowAudit("新增代理人", `${proxy.from} 由 ${proxy.to} 代理，原因：${proxy.reason}。`);
-  addWorkflowProof("代理人啟用", `${proxy.from} → ${proxy.to} 已啟用代理。`);
-  showToast("代理人已新增。");
+function workflowProxyApiDate(inputValue) {
+  const value = String(inputValue || "").trim();
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "";
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absolute = Math.abs(offsetMinutes);
+  const hours = String(Math.floor(absolute / 60)).padStart(2, "0");
+  const minutes = String(absolute % 60).padStart(2, "0");
+  return `${value.length === 16 ? `${value}:00` : value}${sign}${hours}:${minutes}`;
 }
 
-function toggleWorkflowProxy(id) {
+async function addWorkflowProxy() {
+  if (workflowProxyLoadState !== "ready") return showToast("請先重新載入正式代理資料。");
+  const principalSelect = document.querySelector("#workflowProxyPrincipal");
+  const delegateSelect = document.querySelector("#workflowProxyDelegate");
+  const startsInput = document.querySelector("#workflowProxyStartsAt");
+  const endsInput = document.querySelector("#workflowProxyEndsAt");
+  const reasonInput = document.querySelector("#workflowProxyReason");
+  const principalId = workflowProxyCanManage ? principalSelect.value : workflowProxyCurrentUserId;
+  const delegateId = delegateSelect.value;
+  const startsAt = new Date(startsInput.value);
+  const endsAt = new Date(endsInput.value);
+  const reason = reasonInput.value.trim();
+  if (!workflowProxyCandidateById(principalId)) return showToast("原簽核人不在目前公司的啟用名單內。");
+  if (!workflowProxyCandidateById(delegateId)) return showToast("請選擇同公司的啟用代理人。");
+  if (principalId === delegateId) return showToast("原簽核人與代理人不可為同一人。");
+  if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime()) || endsAt <= startsAt) {
+    return showToast("代理結束時間必須晚於開始時間。");
+  }
+  if (endsAt <= new Date()) return showToast("代理結束時間必須在現在之後。");
+  if (endsAt - startsAt > 180 * 24 * 60 * 60 * 1000) return showToast("單次代理期間不可超過 180 天。");
+  if (reason.length < 2) return showToast("請填寫至少 2 個字的代理原因。");
+  const principalLabel = workflowProxyPersonLabel(principalId);
+  const delegateLabel = workflowProxyPersonLabel(delegateId);
+  if (!confirmOperation("確認建立代理授權", `${principalLabel} 將於指定期間由 ${delegateLabel} 代理簽核。`)) return;
+  const submitButton = document.querySelector("#workflowProxySubmitBtn");
+  submitButton.disabled = true;
+  try {
+    await backendRequest("/workflow-delegations", {
+      method: "POST",
+      body: JSON.stringify({
+        principal_user_id: principalId,
+        delegate_user_id: delegateId,
+        starts_at: workflowProxyApiDate(startsInput.value),
+        ends_at: workflowProxyApiDate(endsInput.value),
+        reason
+      })
+    });
+    reasonInput.value = "";
+    addWorkflowAudit("建立代理授權", `${principalLabel} → ${delegateLabel}；授權已保存至正式流程資料庫。`);
+    addWorkflowProof("代理授權建立", `${principalLabel} → ${delegateLabel} 已建立可稽核的限時代理。`);
+    await loadWorkflowDelegations(true);
+    showToast("代理授權已建立並保存。");
+  } catch (error) {
+    showToast(`代理授權建立失敗：${error.message}`);
+  } finally {
+    syncWorkflowProxyCandidateOptions();
+  }
+}
+
+async function revokeWorkflowProxy(id) {
   const proxy = workflowProxies.find((item) => item.id === id);
-  if (!proxy) return;
-  proxy.status = proxy.status === "啟用" ? "停用" : "啟用";
-  renderWorkflowProxies();
-  addWorkflowAudit("更新代理狀態", `${proxy.from} → ${proxy.to} 已${proxy.status}。`);
-  showToast("代理狀態已更新。");
-}
-
-function applyWorkflowProxy(id) {
-  const proxy = workflowProxies.find((item) => item.id === id && item.status === "啟用");
-  if (!proxy) return showToast("此代理未啟用。");
-  workflowTasks.filter((task) => task.role === proxy.from && /待|審核/.test(task.status)).forEach((task) => {
-    task.role = proxy.to;
-    task.lastComment = `代理原因：${proxy.reason}`;
-  });
-  renderWorkflowTasks();
-  renderApprovalProgress();
-  renderDashboardApprovalProgress();
-  addWorkflowAudit("套用代理人", `已將待辦由 ${proxy.from} 改派給代理 ${proxy.to}。`);
-  addWorkflowProof("代理改派", `${proxy.from} 待辦已由 ${proxy.to} 代理處理。`);
-  showToast("代理人已套用。");
+  if (!proxy || !canRevokeWorkflowProxy(proxy)) return showToast("你沒有權限撤銷這筆代理授權。");
+  const principalLabel = workflowProxyPersonLabel(proxy.principal_user_id);
+  const delegateLabel = workflowProxyPersonLabel(proxy.delegate_user_id);
+  if (!confirmOperation("確認撤銷代理授權", `撤銷 ${principalLabel} → ${delegateLabel} 後，代理人將無法再代表原簽核人操作。`)) return;
+  try {
+    await backendRequest(`/workflow-delegations/${encodeURIComponent(id)}/revoke`, {
+      method: "POST",
+      body: "{}"
+    });
+    addWorkflowAudit("撤銷代理授權", `${principalLabel} → ${delegateLabel} 已在正式流程資料庫撤銷。`);
+    addWorkflowProof("代理授權撤銷", `${principalLabel} → ${delegateLabel} 已停止代理。`);
+    await loadWorkflowDelegations(true);
+    showToast("代理授權已撤銷。");
+  } catch (error) {
+    showToast(`代理授權撤銷失敗：${error.message}`);
+  }
 }
 
 function runWorkflowAdvancedAction() {
@@ -12599,8 +19686,31 @@ function companySealFallbackCompanies() {
     id: item.id,
     name: item.name,
     tax_id: item.tax_id || item.taxId || "待設定",
+    address: item.address || "",
+    finance_entity_id: item.financeEntityId || item.finance_entity_id || "",
     status: item.status === "啟用" ? "active" : item.status
   }));
+}
+
+function availableCompanySealCompanies() {
+  if (companySealCompanies.length) return companySealCompanies;
+  return isProductionEdocHost() ? [] : companySealFallbackCompanies();
+}
+
+function syncCompanyRegistryFromFinance(companies = []) {
+  if (!Array.isArray(companies) || !companies.length) return;
+  companyRegistry = companies
+    .filter((item) => ["active", "啟用"].includes(item.status || "active"))
+    .map((item) => ({
+      id: item.id,
+      financeEntityId: item.finance_entity_id || item.financeEntityId || "",
+      name: item.name,
+      taxId: item.tax_id || item.taxId || "",
+      address: item.address || "",
+      status: "啟用"
+    }));
+  renderComposeCompanyOptions();
+  applyComposeContactDefaults(false);
 }
 
 function companySealRefOptions(type) {
@@ -12610,6 +19720,7 @@ function companySealRefOptions(type) {
       { code: "establishment_seal", name: "公司設立印鑑" },
       { code: "bank_seal", name: "銀行印鑑章" },
       { code: "general_seal", name: "便章" },
+      { code: "official_seal", name: "關防印" },
       { code: "other", name: "其他章" }
     ],
     size: [
@@ -12647,7 +19758,7 @@ function companySealOptionTags(items, selectedValue, valueKey = "id", labelKey =
   return items.map((item) => {
     const value = item[valueKey];
     const label = item[labelKey] || value;
-    return `<option value="${value}"${value === selectedValue ? " selected" : ""}>${label}</option>`;
+    return `<option value="${escapeDraftHtml(value)}"${value === selectedValue ? " selected" : ""}>${escapeDraftHtml(label)}</option>`;
   }).join("");
 }
 
@@ -12712,7 +19823,7 @@ function companySealDocumentPayload(documentId) {
 }
 
 function currentCompanySealCompany() {
-  const companies = companySealCompanies.length ? companySealCompanies : companySealFallbackCompanies();
+  const companies = availableCompanySealCompanies();
   return companies.find((item) => item.id === selectedCompanySealCompanyId) || companies[0] || null;
 }
 
@@ -12720,10 +19831,522 @@ function currentCompanySeal() {
   return companySealLibrary.find((item) => item.id === selectedCompanySealId) || companySealLibrary[0] || null;
 }
 
+function companySealCalibrationSizeField(scope = "simple") {
+  return scope === "company"
+    ? "#companySealRenderSizeMmInput"
+    : "#simpleSealRenderSizeMmInput";
+}
+
+function syncCompanySealCalibrationInputs(scope, sealOrSizeType) {
+  const geometry = companySealFixedGeometry(sealOrSizeType || "large_seal");
+  const limits = COMPANY_SEAL_CALIBRATION_LIMITS_MM[geometry.sealSizeType];
+  const minimumPixels = companySealMinimumShortEdgePixels(geometry);
+  const defaultMinimumPixels = COMPANY_SEAL_MIN_SHORT_EDGE_PX[geometry.sealSizeType];
+  const canCalibrate = isCompanySealCustodian();
+  const input = document.querySelector(companySealCalibrationSizeField(scope));
+  if (input) {
+    input.min = String(limits.min);
+    input.max = String(limits.max);
+    input.step = "0.01";
+    input.value = formatCompanySealMeasurement(geometry.widthMm);
+    input.readOnly = !canCalibrate;
+    input.setAttribute("aria-readonly", String(!canCalibrate));
+    input.classList.toggle("seal-dimension-locked", !canCalibrate);
+  }
+  const hint = document.querySelector(scope === "company" ? "#companySealCalibrationHint" : "#simpleSealCalibrationHint");
+  if (hint) {
+    hint.textContent = canCalibrate
+      ? `${geometry.label}可直接輸入 ${limits.min}–${limits.max} mm；系統會自動以相同寬、高鎖定，不會變形。本次圖檔短邊至少 ${minimumPixels} px（預設 ${defaultMinimumPixels} px），PDF 編輯器仍不可縮放。`
+      : "僅執行長／行政部門主任可變更；PDF 編輯器只能移動或旋轉印章。";
+  }
+  return geometry;
+}
+
+function readCompanySealCalibrationInputs(scope, sealOrSizeType) {
+  const sealSizeType = companySealSizeType(sealOrSizeType);
+  const sizeMm = document.querySelector(companySealCalibrationSizeField(scope))?.value;
+  return validateCompanySealCalibration(sealSizeType, sizeMm, sizeMm);
+}
+
+function refreshCompanySealCalibrationHint(scope, sealOrSizeType) {
+  const hint = document.querySelector(scope === "company" ? "#companySealCalibrationHint" : "#simpleSealCalibrationHint");
+  if (!hint) return;
+  if (!isCompanySealCustodian()) {
+    hint.textContent = "僅執行長／行政部門主任可變更；PDF 編輯器只能移動或旋轉印章。";
+    return;
+  }
+  const validation = readCompanySealCalibrationInputs(scope, sealOrSizeType);
+  if (!validation.ok) {
+    hint.textContent = validation.message;
+    return;
+  }
+  const geometry = companySealFixedGeometry({
+    seal_size_type: validation.sealSizeType,
+    render_width_mm: validation.widthMm,
+    render_height_mm: validation.heightMm
+  });
+  const limits = COMPANY_SEAL_CALIBRATION_LIMITS_MM[validation.sealSizeType];
+  hint.textContent = `${geometry.label}實際尺寸 ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm；寬、高已自動同步。圖檔短邊至少 ${companySealMinimumShortEdgePixels(geometry)} px，PDF 編輯器仍不可縮放。`;
+}
+
+function applyCompanySealCustodianUi() {
+  const canCalibrate = isCompanySealCustodian();
+  document.querySelectorAll("[data-seal-custodian-notice]").forEach((notice) => {
+    notice.hidden = canCalibrate;
+    notice.textContent = "僅執行長／行政部門主任可變更。其他角色只能查看印章版本及提出用印申請。";
+  });
+  const mutationSelectors = [
+    "#simpleSealFileInput",
+    "#simpleSealUploadBtn",
+    "#companySealNameInput",
+    "#companySealCategorySelect",
+    "#companySealSizeSelect",
+    "#companySealPurposeInput",
+    "#companySealCreateBtn",
+    "#companySealFileInput",
+    "#companySealUploadBtn",
+    "#sealTypeNameInput",
+    "#sealTypeScopeInput",
+    "#addSealTypeBtn",
+    "#sealNameInput",
+    "#sealCompanyInput",
+    "#sealDepartmentInput",
+    "#sealTypeInput",
+    "#sealOwnerInput",
+    "#sealDocTypeInput",
+    "#sealImageInput",
+    "#sealAddBtn"
+  ];
+  mutationSelectors.forEach((selector) => {
+    const control = document.querySelector(selector);
+    if (control) control.disabled = !canCalibrate;
+  });
+  document.querySelectorAll("[data-simple-seal-category], [data-company-seal-preset]").forEach((button) => {
+    button.disabled = !canCalibrate;
+  });
+  ["#sealWidthMmInput", "#sealHeightMmInput"].forEach((selector) => {
+    const input = document.querySelector(selector);
+    if (!input) return;
+    input.readOnly = true;
+    input.setAttribute("aria-readonly", "true");
+    input.classList.add("seal-dimension-locked");
+  });
+  syncCompanySealCalibrationInputs(
+    "simple",
+    companySealLibrary.find((seal) => seal.id === selectedSimpleSealRecordId)
+      || document.querySelector("#simpleSealSizeSelect")?.value
+      || "large_seal"
+  );
+  syncCompanySealCalibrationInputs("company", currentCompanySeal() || "large_seal");
+  return canCalibrate;
+}
+
+function companySealHasCurrentVersion(seal) {
+  return Boolean(seal?.current_file || seal?.current_file_id || seal?.currentFile);
+}
+
+function launchDataReadinessChecks() {
+  const internalReadiness = goLiveAuditState?.internalReadiness || {};
+  return (goLiveAuditState?.dataReadiness || internalReadiness.dataReadiness || {}).checks || {};
+}
+
+function launchCompanyScopeState() {
+  return launchDataReadinessChecks().launchCompanyScope
+    || companySealVaultReadinessReport?.launchCompanyScope
+    || productionCutoverReadinessPackage?.launchCompanyScope
+    || null;
+}
+
+function launchScopedCompanyOptions(companies = []) {
+  const scope = launchCompanyScopeState();
+  if (!scope?.configured) return companies;
+  const allowed = new Set(scope.includedCompanyIds || []);
+  return companies.filter((company) => allowed.has(company.id || company.company_id));
+}
+
+function launchCompanyScopeSummaryText() {
+  const scope = launchCompanyScopeState();
+  if (!scope?.configured) return "";
+  const included = scope.includedCompanyIds?.length || 0;
+  const excluded = scope.excludedCompanyIds?.length || 0;
+  return `有限公司上線：開放 ${included} 間，暫停 ${excluded} 間。`;
+}
+
+function companySealGlobalReadinessTasks() {
+  const vaultGroups = companySealVaultReadinessReport?.companyGroups || [];
+  if (vaultGroups.length) {
+    return vaultGroups.map((company) => {
+      const missing = (company.missing || []).map((seal) => ({
+        ...seal,
+        category: seal.seal_category || seal.category,
+        label: seal.seal_label || seal.label,
+        active: seal.missing_type !== "missing_active_seal",
+        currentFile: false,
+        sealId: seal.seal_id || "",
+        requiredAction: seal.required_action || "上傳 Seal Vault current 版本"
+      }));
+      return {
+        companyId: company.company_id,
+        companyName: company.company_name || company.company_id || "未命名公司",
+        missing,
+        firstCategory: company.nextCategory || missing[0]?.category || "",
+        firstSealId: company.nextSealId || missing[0]?.sealId || "",
+        nextAction: company.nextAction || missing[0]?.requiredAction || "已具備 current 版本",
+        ready: missing.length === 0
+      };
+    });
+  }
+  const companyChecks = launchDataReadinessChecks().companySeals || [];
+  return companyChecks.map((company) => {
+    const missing = (company.requiredSeals || []).filter((seal) => !seal.active || !seal.currentFile);
+    return {
+      companyId: company.company_id,
+      companyName: company.company_name || company.company_id || "未命名公司",
+      missing,
+      firstCategory: missing[0]?.category || "",
+      ready: missing.length === 0
+    };
+  });
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text;
+}
+
+function companySealMissingManifestRows() {
+  if (companySealVaultReadinessReport?.missingManifest?.length) {
+    return companySealVaultReadinessReport.missingManifest.map((row) => ({
+      companyId: row.company_id,
+      companyName: row.company_name,
+      sealCategory: row.seal_category,
+      sealLabel: row.seal_label,
+      sealId: row.seal_id || "",
+      missingType: row.missing_type,
+      requiredAction: row.required_action,
+      owner: row.owner || "總務 / seal_admin",
+      storagePolicy: row.storage_policy || "原始印章檔只可上傳 private Seal Vault，不可放 public 或 GitHub",
+      api: row.seal_id ? `POST /api/seals/${row.seal_id}/files` : "POST /api/companies/{companyId}/seals → POST /api/seals/{sealId}/files",
+      doneWhen: `${row.company_name} 的${row.seal_label}顯示 current 版本，Go / No-Go 不再列為缺章。`
+    }));
+  }
+  return companySealGlobalReadinessTasks().flatMap((company) =>
+    company.missing.map((seal) => {
+      const label = seal.label || companySealRefName("category", seal.category);
+      return {
+        companyId: company.companyId,
+        companyName: company.companyName,
+        sealCategory: seal.category,
+        sealLabel: label,
+        sealId: seal.firstSealId || seal.sealId || "",
+        missingType: seal.active ? "missing_current_version" : "missing_active_seal",
+        requiredAction: seal.active ? "上傳 Seal Vault current 版本" : "建立啟用印章並上傳 current 版本",
+        owner: "總務 / seal_admin",
+        storagePolicy: "原始印章檔只可上傳 private Seal Vault，不可放 public 或 GitHub",
+        api: seal.firstSealId || seal.sealId ? `POST /api/seals/${seal.firstSealId || seal.sealId}/files` : "POST /api/companies/{companyId}/seals → POST /api/seals/{sealId}/files",
+        doneWhen: `${company.companyName} 的${label}顯示 current 版本，Go / No-Go 不再列為缺章。`
+      };
+    })
+  );
+}
+
+function companySealCustodyIntakeRows() {
+  if (companySealVaultReadinessReport?.custodyIntakeTemplate?.rows?.length) {
+    return companySealVaultReadinessReport.custodyIntakeTemplate.rows;
+  }
+  return companySealMissingManifestRows().map((row, index) => ({
+    order: index + 1,
+    company_id: row.companyId,
+    company_name: row.companyName,
+    seal_category: row.sealCategory,
+    seal_label: row.sealLabel,
+    seal_id: row.sealId,
+    missing_type: row.missingType,
+    custodian_name: "",
+    custodian_unit: "總務",
+    physical_seal_location: "",
+    file_name_to_upload: "",
+    file_mime_type: "",
+    file_size: "",
+    file_hash_sha256: "",
+    received_at: "",
+    uploaded_by: "",
+    approved_by: "",
+    vault_bucket: "edoc-seal-vault",
+    upload_api: row.api,
+    verification: `${row.companyName} 的${row.sealLabel}顯示 current 版本，且 audit log 有 upload_seal 與 set_current。`,
+    notes: "只記錄 Seal Vault 收檔 metadata；不可填公開連結、GitHub 路徑、密碼、PIN 或內嵌章圖內容。"
+  }));
+}
+
+async function exportCompanySealMissingManifest() {
+  await ensureCompanySealLaunchAudit();
+  const rows = companySealMissingManifestRows();
+  if (!rows.length) {
+    showToast("目前沒有 Go / No-Go 回報的缺章項目。");
+    return;
+  }
+  const headers = ["company_id", "company_name", "seal_category", "seal_label", "seal_id", "missing_type", "required_action", "owner", "api", "done_when", "storage_policy"];
+  const csv = [
+    headers.join(","),
+    ...rows.map((row) => [
+      row.companyId,
+      row.companyName,
+      row.sealCategory,
+      row.sealLabel,
+      row.sealId,
+      row.missingType,
+      row.requiredAction,
+      row.owner,
+      row.api,
+      row.doneWhen,
+      row.storagePolicy
+    ].map(csvCell).join(","))
+  ].join("\n");
+  const fileName = `edoc-seal-vault-missing-${launchSmokeDateValue()}.csv`;
+  downloadTextFile(fileName, csv, "text/csv;charset=utf-8");
+  addSealAudit("匯出全公司缺章清單", `${fileName} 已匯出，共 ${rows.length} 項缺件。`);
+  showToast(`已匯出 ${rows.length} 項缺章補件清單。`);
+}
+
+async function exportCompanySealCustodyIntakeTemplate() {
+  await ensureCompanySealLaunchAudit();
+  const template = companySealVaultReadinessReport?.custodyIntakeTemplate || {};
+  const headers = template.headers || [
+    "order",
+    "company_id",
+    "company_name",
+    "seal_category",
+    "seal_label",
+    "seal_id",
+    "missing_type",
+    "custodian_name",
+    "custodian_unit",
+    "physical_seal_location",
+    "file_name_to_upload",
+    "file_mime_type",
+    "file_size",
+    "file_hash_sha256",
+    "received_at",
+    "uploaded_by",
+    "approved_by",
+    "vault_bucket",
+    "upload_api",
+    "verification",
+    "notes"
+  ];
+  const rows = companySealCustodyIntakeRows();
+  if (!rows.length) {
+    showToast("目前沒有缺章需要建立收檔範本。");
+    return;
+  }
+  const csv = [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => csvCell(row[header] ?? "")).join(","))
+  ].join("\n");
+  const fileName = template.fileName || `edoc-seal-vault-custody-intake-${launchSmokeDateValue()}.csv`;
+  downloadTextFile(fileName, csv, "text/csv;charset=utf-8");
+  addSealAudit("匯出 Seal Vault 收檔範本", `${fileName} 已匯出，共 ${rows.length} 項；範本只填 metadata，不含原始章圖或 URL。`);
+  showToast(`已匯出 ${rows.length} 項 Seal Vault 收檔範本。`);
+}
+
+async function ensureCompanySealLaunchAudit() {
+  if ((launchDataReadinessChecks().companySeals || []).length && companySealVaultReadinessReport) return goLiveAuditState;
+  try {
+    const [result, vaultResult] = await Promise.all([
+      fetchOpsJson("/production/go-live-audit"),
+      fetchOpsJson("/production/seal-vault-readiness").catch((error) => ({ ok: false, data: null, error }))
+    ]);
+    if (result.ok && result.data) {
+      goLiveAuditState = result.data;
+      renderGoLiveAuditViews();
+    }
+    if (vaultResult.ok && vaultResult.data?.reportType === "seal_vault_launch_readiness") {
+      companySealVaultReadinessReport = vaultResult.data;
+    }
+    return goLiveAuditState;
+  } catch (error) {
+    addSealAudit("讀取全公司印章缺件失敗", error.message || "go-live audit api failed");
+  }
+  return null;
+}
+
+function renderCompanySealGlobalReadiness() {
+  const list = document.querySelector("#companySealGlobalReadinessList");
+  if (!list) return;
+  const canManageSealVault = isCompanySealCustodian();
+  const hasAuditData = Boolean((launchDataReadinessChecks().companySeals || []).length);
+  if (!hasAuditData) {
+    list.innerHTML = `
+      <article class="company-seal-global-card wait">
+        <div>
+          <span>全公司補件</span>
+          <strong>尚未載入 Go / No-Go 資料</strong>
+          <p>重新讀取後會列出每間公司缺少的便章、公司設立章、關防印與銀行章 current 版本。</p>
+        </div>
+        <button class="secondary-button" type="button" data-company-seal-global-refresh="true">讀取缺件</button>
+      </article>
+    `;
+  } else {
+    const companyTasks = companySealGlobalReadinessTasks();
+    const missingCompanies = companyTasks.filter((item) => !item.ready);
+    const vaultSummary = companySealVaultReadinessReport?.summary || {};
+    const scopeSummary = launchCompanyScopeSummaryText();
+    const vaultBlockers = companySealVaultReadinessReport?.blockers || [];
+    const vaultBlocked = companySealVaultReadinessReport?.decision === "BLOCKED" || Number(vaultSummary.blockerCount || 0) > 0;
+    const summaryText = companySealVaultReadinessReport
+      ? `後端補件包：${vaultSummary.readyCompanyCount || 0}/${vaultSummary.companyCount || 0} 公司就緒，缺章 ${vaultSummary.missingCount || 0} 項，blocker ${vaultSummary.blockerCount || 0} 項。${scopeSummary ? ` ${scopeSummary}` : ""}`
+      : "";
+    if (vaultBlocked) {
+      list.innerHTML = `
+        <article class="company-seal-global-card issue">
+          <div>
+            <span>Seal Vault 補件包</span>
+            <strong>Seal Vault readiness 有 blocker</strong>
+            <p>${escapeDraftHtml(vaultBlockers[0] || summaryText || "缺少 Supabase production、啟用公司或必要印章檢核資料，不能把空資料視為印章已齊。")}</p>
+          </div>
+          <button class="secondary-button" type="button" data-company-seal-global-refresh="true">重新讀取</button>
+        </article>
+      `;
+    } else if (!missingCompanies.length) {
+      list.innerHTML = `
+        <article class="company-seal-global-card pass">
+          <div>
+            <span>全公司補件</span>
+            <strong>必要印章 current 版本已齊</strong>
+            <p>${escapeDraftHtml(summaryText || "Go / No-Go 未列出 Seal Vault 缺件；仍需維持原章不暴露前端與 audit log。")}</p>
+          </div>
+        </article>
+      `;
+    } else {
+      list.innerHTML = `
+        <article class="company-seal-global-card wait">
+          <div>
+            <span>Seal Vault 補件包</span>
+            <strong>${escapeDraftHtml(summaryText || `全公司仍有 ${missingCompanies.length} 間公司缺章`)}</strong>
+            <p>請逐家公司補 current 版本；原章只可上傳 private Seal Vault，不可放 public 或 GitHub。</p>
+          </div>
+          <button class="secondary-button" type="button" data-company-seal-global-refresh="true">重新讀取</button>
+        </article>
+        ${missingCompanies.map((company) => {
+        const missingText = company.missing.map((seal) => {
+          const label = seal.label || companySealRefName("category", seal.category);
+          return seal.active ? `${label}缺 current` : `缺${label}`;
+        }).join("、");
+        return `
+          <article class="company-seal-global-card issue">
+            <div>
+              <span>缺件 ${company.missing.length} 類</span>
+              <strong>${escapeDraftHtml(company.companyName)}</strong>
+              <p>${escapeDraftHtml(company.nextAction ? `${missingText}；下一步：${company.nextAction}` : missingText)}</p>
+            </div>
+            <button class="primary-button" type="button" data-company-seal-global-company="${escapeDraftHtml(company.companyId)}" data-company-seal-global-category="${escapeDraftHtml(company.firstCategory)}" data-company-seal-global-seal="${escapeDraftHtml(company.firstSealId || "")}" ${canManageSealVault ? "" : "disabled title=\"僅執行長／行政部門主任可變更\""}>處理第一項</button>
+          </article>
+        `;
+      }).join("")}
+      `;
+    }
+  }
+  list.querySelectorAll("[data-company-seal-global-refresh]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await ensureCompanySealLaunchAudit();
+      renderCompanySealModule();
+    });
+  });
+  list.querySelectorAll("[data-company-seal-global-company]").forEach((button) => {
+    button.addEventListener("click", () => handleCompanySealGlobalTask(button.dataset.companySealGlobalCompany, button.dataset.companySealGlobalCategory, button.dataset.companySealGlobalSeal));
+  });
+}
+
+function companySealReadinessTasks() {
+  return companySealLaunchRequiredCategories.map((required) => {
+    const seals = companySealLibrary.filter((seal) => seal.seal_category === required.code && (seal.is_active || seal.is_active === 1));
+    const currentSeal = seals.find(companySealHasCurrentVersion);
+    const firstSeal = seals[0] || null;
+    if (currentSeal) {
+      return {
+        ...required,
+        ready: true,
+        tone: "pass",
+        status: "目前版本已就緒",
+        detail: `${currentSeal.seal_name} 已有 Seal Vault current 版本。`,
+        sealId: currentSeal.id,
+        action: "檢視"
+      };
+    }
+    if (firstSeal) {
+      return {
+        ...required,
+        ready: false,
+        tone: "issue",
+        status: "缺 current 版本",
+        detail: `${firstSeal.seal_name} 已建立，但尚未上傳或指定目前版本。`,
+        sealId: firstSeal.id,
+        action: "上傳版本"
+      };
+    }
+    return {
+      ...required,
+      ready: false,
+      tone: "issue",
+      status: "缺啟用印章",
+      detail: `尚未建立啟用的${required.name}。`,
+      sealId: "",
+      action: "建立印章"
+    };
+  });
+}
+
+function prefillCompanySealCreateForm(category) {
+  if (!requireCompanySealCustodian("建立或校準印章")) return;
+  const required = companySealLaunchRequiredCategories.find((item) => item.code === category);
+  if (!required) return;
+  const categorySelect = document.querySelector("#companySealCategorySelect");
+  const sizeSelect = document.querySelector("#companySealSizeSelect");
+  const nameInput = document.querySelector("#companySealNameInput");
+  const purposeInput = document.querySelector("#companySealPurposeInput");
+  if (categorySelect) categorySelect.value = category;
+  if (sizeSelect) sizeSelect.value = "large_seal";
+  if (nameInput) nameInput.value = `${required.name}－大章`;
+  if (purposeInput) purposeInput.value = required.purpose;
+  document.querySelector("#companySealCreateForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function handleCompanySealReadinessAction(category, sealId, ready = false) {
+  if (!ready && !requireCompanySealCustodian("建立或上傳印章版本")) return;
+  if (sealId) {
+    await selectCompanySeal(sealId);
+    if (ready) {
+      document.querySelector("#companySealSafePreview")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      showToast("已選取具備 current 版本的印章。");
+      return;
+    }
+    document.querySelector("#companySealUploadForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    document.querySelector("#companySealFileInput")?.focus();
+    showToast("已選取缺版本的印章，請上傳新版到 Seal Vault。");
+    return;
+  }
+  prefillCompanySealCreateForm(category);
+  showToast("已帶入必要印章資料，請建立印章後上傳 current 版本。");
+}
+
+async function handleCompanySealGlobalTask(companyId, category, sealId = "") {
+  if (!requireCompanySealCustodian("處理 Seal Vault 缺件")) return;
+  if (!companyId) return;
+  selectedCompanySealCompanyId = companyId;
+  const companySelect = document.querySelector("#companySealCompanySelect");
+  if (companySelect) companySelect.value = companyId;
+  await loadCompanySealCompanyData(true);
+  const seal = companySealLibrary.find((item) => item.id === sealId)
+    || companySealLibrary.find((item) => item.seal_category === category && (item.is_active || item.is_active === 1));
+  await handleCompanySealReadinessAction(category, seal?.id || "", seal ? companySealHasCurrentVersion(seal) : false);
+  document.querySelector("#companySealReadinessPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 async function loadCompanySealModule(silent = false) {
   try {
     const [companiesResult, referencesResult] = await Promise.all([
-      backendRequest("/companies").catch(() => []),
+      backendRequest("/companies"),
       backendRequest("/seal-reference-options").catch(() => ({ grouped: {} }))
     ]);
     companySealCompanies = (Array.isArray(companiesResult) ? companiesResult : []).map((item) => ({
@@ -12731,15 +20354,32 @@ async function loadCompanySealModule(silent = false) {
       tax_id: item.tax_id || item.taxId || "待設定"
     }));
     companySealReferences = referencesResult || { grouped: {} };
-    if (!companySealCompanies.length) companySealCompanies = companySealFallbackCompanies();
+    if (!companySealCompanies.length) {
+      if (isProductionEdocHost()) throw new Error("finance_company_sync_required");
+      companySealCompanies = companySealFallbackCompanies();
+    }
+    syncCompanyRegistryFromFinance(companySealCompanies);
     if (!selectedCompanySealCompanyId) selectedCompanySealCompanyId = companySealCompanies[0]?.id || "";
     companySealModuleLoaded = true;
+    await ensureCompanySealLaunchAudit();
     await loadCompanySealCompanyData(silent);
   } catch (error) {
-    companySealCompanies = companySealFallbackCompanies();
+    companySealCompanies = isProductionEdocHost() ? [] : companySealFallbackCompanies();
+    companySealLibrary = [];
+    companySealRequests = [];
+    companySealFiles = [];
+    companySealLogs = [];
+    selectedCompanySealCompanyId = companySealCompanies[0]?.id || "";
+    selectedCompanySealId = "";
+    selectedSimpleSealRecordId = "";
     companySealModuleLoaded = false;
     renderCompanySealModule();
-    if (!silent) showToast(`公司印章模組載入失敗：${error.message}`);
+    if (!silent) {
+      const message = isProductionEdocHost()
+        ? "會計系統公司清單同步失敗，已停用印章建立與上傳；請重新整理或聯絡管理員。"
+        : `公司印章模組載入失敗：${error.message}`;
+      showToast(message);
+    }
   }
 }
 
@@ -12772,78 +20412,109 @@ async function loadCompanySealCompanyData(silent = false) {
 
 function renderCompanySealModule() {
   if (!document.querySelector("#companySealModule")) return;
-  const companies = companySealCompanies.length ? companySealCompanies : companySealFallbackCompanies();
+  const companies = availableCompanySealCompanies();
   if (!selectedCompanySealCompanyId) selectedCompanySealCompanyId = companies[0]?.id || "";
   const selectedSeal = currentCompanySeal();
+  const canManageSealVault = isCompanySealCustodian();
+  renderSimpleSealUpload();
   document.querySelector("#companySealCompanySelect").innerHTML = companySealOptionTags(companies, selectedCompanySealCompanyId);
   document.querySelector("#sealUsageCompanySelect").innerHTML = companySealOptionTags(companies, selectedCompanySealCompanyId);
   document.querySelector("#companySealCategorySelect").innerHTML = companySealOptionTags(companySealRefOptions("category"), "general_seal", "code", "name");
   document.querySelector("#companySealSizeSelect").innerHTML = companySealOptionTags(companySealRefOptions("size"), "large_seal", "code", "name");
   document.querySelector("#sealUsageTypeSelect").innerHTML = companySealOptionTags(companySealRefOptions("usage_type"), "official_document", "code", "name");
   document.querySelector("#companySealLibraryStatus").textContent = `${companySealLibrary.length} 枚`;
+  const readinessTasks = companySealReadinessTasks();
+  const missingTasks = readinessTasks.filter((task) => !task.ready);
+  const globalTasks = companySealGlobalReadinessTasks();
+  const globalMissingCount = globalTasks.reduce((total, company) => total + (company.missing?.length || 0), 0);
+  document.querySelector("#companySealReadinessStatus").textContent = missingTasks.length ? `${missingTasks.length} 項缺件` : "可上線";
+  document.querySelector("#companySealReadinessSummary").textContent = missingTasks.length
+    ? `${currentCompanySealCompany()?.name || "此公司"} 尚有 ${missingTasks.length} 類必要印章未具備 current 版本；全公司目前 ${globalMissingCount || "仍有"} 類缺件需補。`
+    : `${currentCompanySealCompany()?.name || "此公司"} 的必要印章皆已有 Seal Vault current 版本；全公司缺件 ${globalMissingCount} 類。`;
+  renderCompanySealGlobalReadiness();
+  document.querySelector("#companySealReadinessList").innerHTML = readinessTasks.map((task) => `
+    <article class="company-seal-readiness-item ${escapeDraftHtml(task.tone)}">
+      <span>${escapeDraftHtml(task.status)}</span>
+      <strong>${escapeDraftHtml(task.name)}</strong>
+      <p>${escapeDraftHtml(task.detail)}</p>
+      <button class="${task.ready ? "secondary-button" : "primary-button"}" type="button" data-company-seal-readiness-category="${escapeDraftHtml(task.code)}" data-company-seal-readiness-seal="${escapeDraftHtml(task.sealId || "")}" data-company-seal-readiness-ready="${task.ready ? "true" : "false"}" ${!task.ready && !canManageSealVault ? "disabled title=\"僅執行長／行政部門主任可變更\"" : ""}>${escapeDraftHtml(task.action)}</button>
+    </article>
+  `).join("");
 
   const activeSeals = companySealLibrary.filter((seal) => seal.is_active || seal.is_active === 1);
   const selectedUsageSealId = document.querySelector("#sealUsageSealSelect")?.value || selectedCompanySealId;
   document.querySelector("#sealUsageSealSelect").innerHTML = activeSeals.map((seal) => `
-    <option value="${seal.id}"${seal.id === selectedUsageSealId ? " selected" : ""}>${seal.seal_name}｜${companySealRefName("category", seal.seal_category)}｜${companySealRefName("size", seal.seal_size_type)}</option>
+    <option value="${escapeDraftHtml(seal.id)}"${seal.id === selectedUsageSealId ? " selected" : ""}>${escapeDraftHtml(seal.seal_name)}｜${escapeDraftHtml(companySealRefName("category", seal.seal_category))}｜${escapeDraftHtml(companySealRefName("size", seal.seal_size_type))}</option>
   `).join("");
+  syncCompanySealUsageSizeInputs();
   const docs = companySealDocuments();
   const currentDoc = document.querySelector("#sealUsageDocumentSelect")?.value || docs[0]?.id || "";
   document.querySelector("#sealUsageDocumentSelect").innerHTML = companySealOptionTags(docs, currentDoc, "id", "label");
   document.querySelector("#sealStampRequestSelect").innerHTML = companySealRequests
     .filter((request) => request.status === "approved")
-    .map((request) => `<option value="${request.id}">${request.id}｜${request.seal_name || request.seal_id}｜${request.request_reason || "待套印"}</option>`)
+    .map((request) => `<option value="${escapeDraftHtml(request.id)}">${escapeDraftHtml(request.id)}｜${escapeDraftHtml(request.seal_name || request.seal_id)}｜${escapeDraftHtml(request.request_reason || "待套印")}</option>`)
     .join("");
 
   document.querySelector("#companySealLibraryRows").innerHTML = companySealLibrary.map((seal) => {
     const currentFile = seal.current_file;
+    const designatedFile = seal.current_file_status;
+    const geometry = companySealFixedGeometry(seal);
+    const versionStatus = currentFile
+      ? `v${currentFile.version}`
+      : designatedFile
+        ? `v${designatedFile.version}（${designatedFile.scan_status || "待防毒"}，不可用）`
+        : "未上傳";
     return `
       <tr class="${seal.id === selectedCompanySealId ? "selected-row" : ""}">
-        <td><button class="text-button row-select" type="button" data-company-seal-select="${seal.id}">${seal.seal_name}</button><small>${seal.company_name || currentCompanySealCompany()?.name || ""}</small></td>
-        <td>${companySealRefName("category", seal.seal_category)}</td>
-        <td>${companySealRefName("size", seal.seal_size_type)}</td>
+        <td><button class="text-button row-select" type="button" data-company-seal-select="${escapeDraftHtml(seal.id)}">${escapeDraftHtml(seal.seal_name)}</button><small>${escapeDraftHtml(seal.company_name || currentCompanySealCompany()?.name || "")}</small></td>
+        <td>${escapeDraftHtml(companySealRefName("category", seal.seal_category))}</td>
+        <td>${escapeDraftHtml(companySealRefName("size", seal.seal_size_type))}<small>${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm</small></td>
         <td><span class="badge ${seal.is_active || seal.is_active === 1 ? "ok" : "issue"}">${seal.is_active || seal.is_active === 1 ? "啟用" : "停用"}</span></td>
-        <td>${currentFile ? `v${currentFile.version}` : "未上傳"}<small>${currentFile?.uploaded_at || seal.updated_at || ""}</small></td>
-        <td><div class="row-actions"><button class="segment" type="button" data-company-seal-select="${seal.id}">檢視</button><button class="segment" type="button" data-company-seal-disable="${seal.id}">停用</button></div></td>
+        <td>${escapeDraftHtml(versionStatus)}<small>${escapeDraftHtml(currentFile?.uploaded_at || designatedFile?.uploaded_at || seal.updated_at || "")}</small></td>
+        <td><div class="row-actions"><button class="segment" type="button" data-company-seal-select="${escapeDraftHtml(seal.id)}">檢視</button><button class="segment" type="button" data-company-seal-disable="${escapeDraftHtml(seal.id)}" ${canManageSealVault ? "" : "disabled title=\"僅執行長／行政部門主任可變更\""}>停用</button></div></td>
       </tr>
     `;
   }).join("") || `<tr><td colspan="6">尚無印章資料。</td></tr>`;
 
   document.querySelector("#companySealSafePreview").innerHTML = selectedSeal ? `
-    <strong>${selectedSeal.seal_name}</strong>
-    <small>${companySealRefName("category", selectedSeal.seal_category)} / ${companySealRefName("size", selectedSeal.seal_size_type)} / ${selectedSeal.purpose_description || "未填用途"}</small>
-    <small>原始圖檔不提供前端 URL；目前僅顯示 metadata 與浮水印安全預覽。</small>
+    <strong>${escapeDraftHtml(selectedSeal.seal_name)}</strong>
+    <small>${escapeDraftHtml(companySealRefName("category", selectedSeal.seal_category))} / ${escapeDraftHtml(companySealRefName("size", selectedSeal.seal_size_type))} / ${escapeDraftHtml(selectedSeal.purpose_description || "未填用途")}</small>
+    <small>校準尺寸：${formatCompanySealMeasurement(companySealFixedGeometry(selectedSeal).widthMm)} × ${formatCompanySealMeasurement(companySealFixedGeometry(selectedSeal).heightMm)} mm；原章檔案不提供前端連結。</small>
     <div class="watermark-preview">安全預覽<br />非原章檔</div>
   ` : `<strong>未選取印章</strong><small>請先選取公司印章。</small>`;
 
   document.querySelector("#companySealFilesList").innerHTML = companySealFiles.map((file) => `
     <article class="address-card">
-      <strong>${file.file_name} ${file.is_current || file.is_current === 1 ? "（目前）" : ""}</strong>
-      <p>v${file.version} · ${file.file_mime_type} · ${Math.round(Number(file.file_size || 0) / 1024)} KB</p>
-      <p>hash ${String(file.file_hash || "").slice(0, 18)}… · ${file.uploaded_at || ""}</p>
-      <div class="row-actions"><button class="segment" type="button" data-company-seal-current-file="${file.id}">設為目前版本</button></div>
+      <strong>${escapeDraftHtml(file.file_name)} ${file.usable ? "（目前可用）" : file.is_current || file.is_current === 1 ? "（指定版本，待防毒）" : ""}</strong>
+      <p>v${Number(file.version || 0)} · ${escapeDraftHtml(file.file_mime_type)} · ${Math.round(Number(file.file_size || 0) / 1024)} KB</p>
+      <p>防毒：${escapeDraftHtml(file.scan_status || "待掃描")} · 校準 ${formatCompanySealMeasurement(file.render_width_mm || companySealFixedGeometry(selectedSeal).widthMm)} × ${formatCompanySealMeasurement(file.render_height_mm || companySealFixedGeometry(selectedSeal).heightMm)} mm · hash ${escapeDraftHtml(String(file.file_hash || "").slice(0, 18))}… · ${escapeDraftHtml(file.uploaded_at || "")}</p>
+      <div class="row-actions"><button class="segment" type="button" data-company-seal-current-file="${escapeDraftHtml(file.id)}" ${file.av_clean && canManageSealVault ? "" : `disabled title="${canManageSealVault ? "必須先通過防毒掃描" : "僅執行長／行政部門主任可變更"}"`}>設為目前版本</button></div>
     </article>
   `).join("") || `<p class="empty-text">尚未上傳印章版本；不會顯示原始章圖 URL。</p>`;
 
+  companySealStampPositions = companySealStampPositions.map((position) => fixedCompanySealStampPosition(
+    position,
+    companySealLibrary.find((seal) => seal.id === position.seal_id) || selectedCompanySealUsageSeal() || position.seal_size_type
+  ));
   document.querySelector("#sealUsagePositionsGrid").innerHTML = companySealStampPositions.map((position, index) => `
     <article class="archive-card">
       <span>章位 ${index + 1}</span>
-      <strong>第 ${position.page} 頁 / ${position.w}×${position.h}</strong>
-      <p>x ${position.x} · y ${position.y} · ${position.label}</p>
+      <strong>第 ${Number(position.page || 0)} 頁 / ${Number(position.w || 0)}×${Number(position.h || 0)}</strong>
+      <p>x ${Number(position.x || 0)} · y ${Number(position.y || 0)} · ${escapeDraftHtml(position.label)}</p>
     </article>
   `).join("");
 
   document.querySelector("#sealUsageApprovalStatus").textContent = `${companySealRequests.length} 件`;
   document.querySelector("#sealUsageApprovalList").innerHTML = companySealRequests.map((request) => `
     <article class="timeline-item">
-      <time>${companySealStatusName(request.status)}</time>
+      <time>${escapeDraftHtml(companySealStatusName(request.status))}</time>
       <div>
-        <strong>${request.seal_name || request.seal_id}</strong>
-        <p>${request.company_name || ""} · ${request.requested_by || "申請人"} · ${request.request_reason || "未填原因"}</p>
-        <p>${request.document_id} · ${companySealRefName("usage_type", request.usage_type)}</p>
+        <strong>${escapeDraftHtml(request.seal_name || request.seal_id)}</strong>
+        <p>${escapeDraftHtml(request.company_name || "")} · ${escapeDraftHtml(request.requested_by || "申請人")} · ${escapeDraftHtml(request.request_reason || "未填原因")}</p>
+        <p>${escapeDraftHtml(request.document_id)} · ${escapeDraftHtml(companySealRefName("usage_type", request.usage_type))}</p>
         <div class="row-actions">
-          <button class="segment" type="button" data-company-seal-approve-request="${request.id}" ${!["pending", "draft"].includes(request.status) ? "disabled" : ""}>核准並套印</button>
-          <button class="segment" type="button" data-company-seal-reject-request="${request.id}" ${["stamped", "cancelled", "rejected"].includes(request.status) ? "disabled" : ""}>駁回</button>
+          <button class="segment" type="button" data-company-seal-approve-request="${escapeDraftHtml(request.id)}" ${!["pending", "draft"].includes(request.status) ? "disabled" : ""}>核准並套印</button>
+          <button class="segment" type="button" data-company-seal-reject-request="${escapeDraftHtml(request.id)}" ${["stamped", "cancelled", "rejected"].includes(request.status) ? "disabled" : ""}>駁回</button>
         </div>
       </div>
     </article>
@@ -12851,11 +20522,11 @@ function renderCompanySealModule() {
 
   document.querySelector("#sealUsageLogList").innerHTML = companySealLogs.slice(0, 30).map((log) => `
     <article class="timeline-item">
-      <time>${log.created_at || ""}</time>
+      <time>${escapeDraftHtml(log.created_at || "")}</time>
       <div>
-        <strong>${log.action}</strong>
-        <p>${log.actor_id || "API"} · ${log.detail || ""}</p>
-        <p>${log.usage_request_id || ""} ${log.document_id || ""}</p>
+        <strong>${escapeDraftHtml(log.action)}</strong>
+        <p>${escapeDraftHtml(log.actor_id || "API")} · ${escapeDraftHtml(log.detail || "")}</p>
+        <p>${escapeDraftHtml(log.usage_request_id || "")} ${escapeDraftHtml(log.document_id || "")}</p>
       </div>
     </article>
   `).join("") || `<p class="empty-text">尚無用印紀錄。</p>`;
@@ -12869,12 +20540,412 @@ function renderCompanySealModule() {
   document.querySelectorAll("[data-company-seal-current-file]").forEach((button) => {
     button.addEventListener("click", () => setCompanySealCurrentFile(button.dataset.companySealCurrentFile));
   });
+  document.querySelectorAll("[data-company-seal-readiness-category]").forEach((button) => {
+    button.addEventListener("click", () => handleCompanySealReadinessAction(button.dataset.companySealReadinessCategory, button.dataset.companySealReadinessSeal, button.dataset.companySealReadinessReady === "true"));
+  });
   document.querySelectorAll("[data-company-seal-approve-request]").forEach((button) => {
     button.addEventListener("click", () => approveCompanySealUsageRequest(button.dataset.companySealApproveRequest));
   });
   document.querySelectorAll("[data-company-seal-reject-request]").forEach((button) => {
     button.addEventListener("click", () => rejectCompanySealUsageRequest(button.dataset.companySealRejectRequest));
   });
+  applyCompanySealCustodianUi();
+}
+
+function simpleSealDefaults(category = simpleSealCategory) {
+  return {
+    establishment_seal: { name: "公司章", purpose: "公司正式文件用印" },
+    general_seal: { name: "便章", purpose: "一般公文與行政文件用印" },
+    official_seal: { name: "關防印", purpose: "正式公文與機關往來文件用印" },
+    bank_seal: { name: "銀行印鑑章", purpose: "銀行往來文件用印" }
+  }[category] || { name: "其他章", purpose: "其他文件用印" };
+}
+
+function financeLinkedSealCompanies() {
+  if (isProductionEdocHost() && !companySealModuleLoaded) return [];
+  const source = availableCompanySealCompanies();
+  const active = source.filter((company) => !company.status || ["active", "啟用"].includes(company.status));
+  const linked = active.filter((company) => company.finance_entity_id || company.financeEntityId || company.source_system === "finance");
+  return linked.length || isProductionEdocHost() ? linked : active;
+}
+
+function simpleSealFileValidation(file) {
+  if (!file) return { ok: false, message: "尚未選擇檔案。" };
+  const extension = String(file.name || "").split(".").pop().toLowerCase();
+  const expectedMime = simpleSealMimeByExtension[extension] || "";
+  if (!expectedMime) return { ok: false, message: "只接受 .png、.jpg、.jpeg 或 .webp 圖檔。" };
+  if (file.type && file.type.toLowerCase() !== expectedMime) return { ok: false, message: "檔案副檔名與 MIME 類型不一致。" };
+  if (!file.size) return { ok: false, message: "檔案內容為空，請重新選擇。" };
+  if (file.size > simpleSealMaxUploadBytes) return { ok: false, message: "檔案超過 3 MB，請縮小後再上傳。" };
+  return { ok: true, mimeType: expectedMime, extension, message: "格式與大小初步檢查通過；上傳後仍須通過後端內容驗證與掃毒。" };
+}
+
+async function decodeCompanySealImageDimensions(file) {
+  if (typeof window.createImageBitmap === "function") {
+    try {
+      const bitmap = await window.createImageBitmap(file);
+      try {
+        return { width: Number(bitmap.width || 0), height: Number(bitmap.height || 0), decoder: "createImageBitmap" };
+      } finally {
+        bitmap.close?.();
+      }
+    } catch (_bitmapError) {
+      // Safari and some color profiles reject createImageBitmap even though
+      // the same raster is valid. Continue with the Image decoder below.
+    }
+  }
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.decoding = "async";
+    const decoder = typeof image.decode === "function" ? "image.decode" : "image.onload";
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback) => (value) => {
+        if (settled) return;
+        settled = true;
+        callback(value);
+      };
+      image.onload = finish(resolve);
+      image.onerror = finish(() => reject(new Error("seal_image_decode_failed")));
+      image.src = objectUrl;
+      if (typeof image.decode === "function") {
+        image.decode().then(finish(resolve)).catch(() => {
+          // Keep waiting for onload/onerror; browsers occasionally reject
+          // decode() for images they can still render successfully.
+        });
+      }
+    });
+    return { width: Number(image.naturalWidth || 0), height: Number(image.naturalHeight || 0), decoder };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function validateCompanySealImageGeometry(file, sealOrSizeType) {
+  const geometry = companySealFixedGeometry(sealOrSizeType || "large_seal");
+  let dimensions;
+  try {
+    dimensions = await decodeCompanySealImageDimensions(file);
+  } catch (_error) {
+    const code = "seal_file_content_invalid";
+    return { ok: false, code, message: friendlyBackendErrorMessage(code), geometry };
+  }
+  const width = Number(dimensions.width || 0);
+  const height = Number(dimensions.height || 0);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    const code = "seal_file_content_invalid";
+    return { ok: false, code, message: friendlyBackendErrorMessage(code), geometry, ...dimensions };
+  }
+  const minimumShortEdge = companySealMinimumShortEdgePixels(geometry);
+  if (Math.min(width, height) < minimumShortEdge) {
+    const code = "seal_image_resolution_too_low";
+    return {
+      ok: false,
+      code,
+      message: `${friendlyBackendErrorMessage(code)} 目前圖檔為 ${width} × ${height} px。`,
+      geometry,
+      minimumShortEdge,
+      ...dimensions
+    };
+  }
+  const actualAspectRatio = width / height;
+  const aspectRatioError = Math.abs(actualAspectRatio - geometry.aspectRatio) / geometry.aspectRatio;
+  if (aspectRatioError > COMPANY_SEAL_ASPECT_RATIO_TOLERANCE) {
+    const code = "seal_image_aspect_ratio_invalid";
+    return {
+      ok: false,
+      code,
+      message: `${friendlyBackendErrorMessage(code)} 目前圖檔為 ${width} × ${height} px。`,
+      geometry,
+      actualAspectRatio,
+      aspectRatioError,
+      ...dimensions
+    };
+  }
+  return {
+    ok: true,
+    code: "",
+    message: `${geometry.label}圖檔尺寸檢查通過：${width} × ${height} px；實體輸出鎖定為 ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm。`,
+    geometry,
+    actualAspectRatio,
+    aspectRatioError,
+    minimumShortEdge,
+    ...dimensions
+  };
+}
+
+function simpleSealFileSize(bytes = 0) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function renderSimpleSealFileSummary() {
+  const summary = document.querySelector("#simpleSealFileSummary");
+  const file = document.querySelector("#simpleSealFileInput")?.files?.[0];
+  if (!summary) return;
+  const validationSequence = ++simpleSealGeometryValidationSequence;
+  const validation = simpleSealFileValidation(file);
+  summary.classList.toggle("valid", false);
+  summary.classList.toggle("issue", Boolean(file) && !validation.ok);
+  summary.innerHTML = file ? `
+    <strong>${escapeDraftHtml(file.name)} · ${escapeDraftHtml(simpleSealFileSize(file.size))}</strong>
+    <span>${escapeDraftHtml(validation.message)}</span>
+  ` : `
+    <strong>尚未選擇檔案</strong>
+    <span>選檔後會先檢查副檔名、MIME 與大小，後端仍會重新驗證檔案內容及掃毒。</span>
+  `;
+  if (!file || !validation.ok) return;
+  const selectedRecord = companySealLibrary.find((seal) => seal.id === selectedSimpleSealRecordId);
+  const sizeType = selectedRecord?.seal_size_type || document.querySelector("#simpleSealSizeSelect")?.value || "large_seal";
+  const calibration = readCompanySealCalibrationInputs("simple", sizeType);
+  if (!calibration.ok) {
+    summary.classList.toggle("issue", true);
+    summary.innerHTML = `
+      <strong>${escapeDraftHtml(file.name)} · ${escapeDraftHtml(simpleSealFileSize(file.size))}</strong>
+      <span>${escapeDraftHtml(calibration.message)}</span>
+    `;
+    return;
+  }
+  summary.innerHTML = `
+    <strong>${escapeDraftHtml(file.name)} · ${escapeDraftHtml(simpleSealFileSize(file.size))}</strong>
+    <span>正在檢查圖檔解析度與 1:1 比例…</span>
+  `;
+  const imageGeometryValidation = await validateCompanySealImageGeometry(file, {
+    seal_size_type: calibration.sealSizeType,
+    render_width_mm: calibration.widthMm,
+    render_height_mm: calibration.heightMm
+  });
+  const currentFile = document.querySelector("#simpleSealFileInput")?.files?.[0];
+  if (validationSequence !== simpleSealGeometryValidationSequence || currentFile !== file) return;
+  summary.classList.toggle("valid", imageGeometryValidation.ok);
+  summary.classList.toggle("issue", !imageGeometryValidation.ok);
+  summary.innerHTML = `
+    <strong>${escapeDraftHtml(file.name)} · ${escapeDraftHtml(simpleSealFileSize(file.size))}</strong>
+    <span>${escapeDraftHtml(imageGeometryValidation.message)}</span>
+  `;
+}
+
+function simpleSealCurrentStatus(seal) {
+  const current = seal?.current_file_status || seal?.current_file || null;
+  if (!current) return { label: "未上傳", tone: "wait", effective: "尚未生效" };
+  if (current.usable && (current.is_current || current.is_current === 1)) return { label: "掃描通過 · current", tone: "ok", effective: current.uploaded_at || "已生效" };
+  return { label: `${current.scan_status || "待掃描"} · 尚不可用`, tone: "issue", effective: "掃描通過後才可生效" };
+}
+
+function fillSimpleSealRecord(recordId = "") {
+  selectedSimpleSealRecordId = recordId;
+  const seal = companySealLibrary.find((item) => item.id === recordId);
+  if (!seal) {
+    selectedSimpleSealRecordId = "";
+    setFieldValue("#simpleSealCategorySelect", simpleSealCategory);
+    setFieldValue("#simpleSealSizeSelect", "large_seal");
+    setFieldValue("#simpleSealNameInput", simpleSealDefaults().name);
+    setFieldValue("#simpleSealPurposeInput", simpleSealDefaults().purpose);
+    renderSimpleSealUpload();
+    return;
+  }
+  simpleSealCategory = seal.seal_category || "other";
+  selectedCompanySealId = seal.id;
+  setFieldValue("#simpleSealCategorySelect", simpleSealCategory);
+  setFieldValue("#simpleSealSizeSelect", seal.seal_size_type || "large_seal");
+  setFieldValue("#simpleSealNameInput", seal.seal_name || "");
+  setFieldValue("#simpleSealPurposeInput", seal.purpose_description || "");
+  renderSimpleSealUpload();
+}
+
+function renderSimpleSealUpload() {
+  const companySelect = document.querySelector("#simpleSealCompanySelect");
+  const list = document.querySelector("#simpleSealUploadedList");
+  if (!companySelect || !list) return;
+  const companies = financeLinkedSealCompanies();
+  const canManageSealVault = isCompanySealCustodian();
+  if (!selectedCompanySealCompanyId) selectedCompanySealCompanyId = companies[0]?.id || "";
+  companySelect.innerHTML = companySealOptionTags(companies, selectedCompanySealCompanyId);
+  companySelect.disabled = !companies.length;
+  const uploadButton = document.querySelector("#simpleSealUploadBtn");
+  if (uploadButton) uploadButton.disabled = !companies.length || !canManageSealVault;
+  const recordSelect = document.querySelector("#simpleSealRecordSelect");
+  if (recordSelect) {
+    recordSelect.innerHTML = `<option value="">建立新印章</option>${companySealLibrary.map((seal) => `
+      <option value="${escapeDraftHtml(seal.id)}"${seal.id === selectedSimpleSealRecordId ? " selected" : ""}${seal.is_active || seal.is_active === 1 ? "" : " disabled"}>${escapeDraftHtml(seal.seal_name)}｜${escapeDraftHtml(companySealRefName("category", seal.seal_category))}｜${escapeDraftHtml(companySealRefName("size", seal.seal_size_type))}${seal.is_active || seal.is_active === 1 ? "" : "｜已停用"}</option>
+    `).join("")}`;
+  }
+  const categorySelect = document.querySelector("#simpleSealCategorySelect");
+  if (categorySelect) categorySelect.innerHTML = companySealOptionTags(companySealRefOptions("category"), simpleSealCategory, "code", "name");
+  const sizeValue = document.querySelector("#simpleSealSizeSelect")?.value || "large_seal";
+  const sizeSelect = document.querySelector("#simpleSealSizeSelect");
+  if (sizeSelect) sizeSelect.innerHTML = companySealOptionTags(companySealRefOptions("size"), sizeValue, "code", "name");
+  const isExistingRecord = companySealLibrary.some((seal) => seal.id === selectedSimpleSealRecordId);
+  [categorySelect, sizeSelect, document.querySelector("#simpleSealNameInput"), document.querySelector("#simpleSealPurposeInput")].forEach((field) => {
+    if (field) field.disabled = !canManageSealVault || isExistingRecord;
+  });
+  const simpleFileInput = document.querySelector("#simpleSealFileInput");
+  if (simpleFileInput) simpleFileInput.disabled = !canManageSealVault;
+  syncCompanySealCalibrationInputs(
+    "simple",
+    companySealLibrary.find((seal) => seal.id === selectedSimpleSealRecordId) || sizeValue
+  );
+  document.querySelectorAll("[data-simple-seal-category]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.simpleSealCategory === simpleSealCategory);
+  });
+  const status = document.querySelector("#simpleSealUploadStatus");
+  const currentCount = companySealLibrary.filter((seal) => seal.current_file?.usable).length;
+  if (status) status.textContent = !companies.length ? "無 Finance 公司資料" : companySealLibrary.length ? `${currentCount}/${companySealLibrary.length} 個 current` : "尚未建立印章";
+  list.innerHTML = companySealLibrary.map((seal) => {
+    const file = seal.current_file_status || seal.current_file;
+    const geometry = companySealFixedGeometry(seal);
+    const versionStatus = simpleSealCurrentStatus(seal);
+    const hash = String(file?.file_hash || "");
+    return `
+      <article class="simple-seal-uploaded-item ${escapeDraftHtml(versionStatus.tone)}">
+        <div class="simple-seal-uploaded-heading">
+          <div>
+            <strong>${escapeDraftHtml(seal.seal_name)}</strong>
+            <span>${escapeDraftHtml(companySealRefName("category", seal.seal_category))} · ${escapeDraftHtml(companySealRefName("size", seal.seal_size_type))}</span>
+          </div>
+          <span class="status-pill">${escapeDraftHtml(versionStatus.label)}</span>
+        </div>
+        <dl class="simple-seal-metadata">
+          <div><dt>後端紀錄</dt><dd><code>${escapeDraftHtml(seal.id)}</code></dd></div>
+          <div><dt>目前版本</dt><dd>${file ? `v${Number(file.version || 0)} · ${file.is_current || file.is_current === 1 ? "current" : "非 current"}` : "尚無版本"}</dd></div>
+          <div><dt>生效狀態</dt><dd>${escapeDraftHtml(versionStatus.effective)}</dd></div>
+          <div><dt>掃描</dt><dd>${escapeDraftHtml(file?.scan_status || "尚未掃描")} ${file?.scan_engine ? `· ${escapeDraftHtml(file.scan_engine)}` : ""}</dd></div>
+          <div><dt>檔案</dt><dd>${file ? `${escapeDraftHtml(file.file_name || "-")} · ${escapeDraftHtml(simpleSealFileSize(file.file_size))}` : "-"}</dd></div>
+          <div><dt>校準尺寸</dt><dd>${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm</dd></div>
+          <div><dt>SHA-256</dt><dd><code title="${escapeDraftHtml(hash)}">${escapeDraftHtml(hash ? `${hash.slice(0, 24)}…` : "尚無雜湊")}</code></dd></div>
+          <div><dt>上傳時間</dt><dd>${escapeDraftHtml(file?.uploaded_at || "-")}</dd></div>
+          <div><dt>最後掃描</dt><dd>${escapeDraftHtml(file?.last_scan_at || "-")}</dd></div>
+        </dl>
+        <div class="simple-seal-item-actions">
+          <button class="secondary-button" type="button" data-simple-seal-record-edit="${escapeDraftHtml(seal.id)}" ${canManageSealVault ? "" : "disabled title=\"僅執行長／行政部門主任可變更\""}>選取並上傳新版</button>
+        </div>
+      </article>
+    `;
+  }).join("") || `<p class="empty-text">${companies.length ? "這間公司尚未建立印章，請填寫上方資料後上傳。" : "目前沒有可用的會計系統公司資料，請先完成 Finance 公司同步。"}</p>`;
+  list.querySelectorAll("[data-simple-seal-record-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      fillSimpleSealRecord(button.dataset.simpleSealRecordEdit);
+      document.querySelector("#simpleSealUploadForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+  applyCompanySealCustodianUi();
+  renderSimpleSealFileSummary();
+}
+
+function selectSimpleSealCategory(category) {
+  simpleSealCategory = category;
+  selectedSimpleSealRecordId = "";
+  setFieldValue("#simpleSealCategorySelect", category);
+  setFieldValue("#simpleSealNameInput", simpleSealDefaults(category).name);
+  setFieldValue("#simpleSealPurposeInput", simpleSealDefaults(category).purpose);
+  renderSimpleSealUpload();
+}
+
+async function refreshSimpleSealBackendRecord() {
+  const status = document.querySelector("#simpleSealUploadStatus");
+  if (status) status.textContent = "讀取後端中";
+  try {
+    await loadCompanySealCompanyData(true);
+    if (selectedSimpleSealRecordId && !companySealLibrary.some((seal) => seal.id === selectedSimpleSealRecordId)) selectedSimpleSealRecordId = "";
+    renderSimpleSealUpload();
+    showToast("已重新讀取同一筆後端印章與版本狀態。");
+  } catch (error) {
+    if (status) status.textContent = "讀取失敗";
+    showToast(`印章狀態讀取失敗：${error.message}`);
+  }
+}
+
+async function uploadSimpleCompanySeal(event) {
+  event?.preventDefault();
+  if (!requireCompanySealCustodian("建立、校準或上傳印章")) return;
+  const companyId = document.querySelector("#simpleSealCompanySelect")?.value || selectedCompanySealCompanyId;
+  const fileInput = document.querySelector("#simpleSealFileInput");
+  const file = fileInput?.files?.[0];
+  const category = document.querySelector("#simpleSealCategorySelect")?.value || simpleSealCategory;
+  const sizeType = document.querySelector("#simpleSealSizeSelect")?.value || "large_seal";
+  const defaults = simpleSealDefaults(category);
+  const sealName = document.querySelector("#simpleSealNameInput")?.value.trim() || defaults.name;
+  const purpose = document.querySelector("#simpleSealPurposeInput")?.value.trim() || defaults.purpose;
+  const validation = simpleSealFileValidation(file);
+  const calibration = readCompanySealCalibrationInputs("simple", sizeType);
+  if (!companyId) return showToast("請先選擇會計系統公司。");
+  if (!validation.ok) return showToast(validation.message);
+  if (!calibration.ok) return showToast(calibration.message);
+  document.querySelector("#simpleSealUploadStatus").textContent = "檢查解析度與比例中";
+  const imageGeometryValidation = await validateCompanySealImageGeometry(file, {
+    seal_size_type: calibration.sealSizeType,
+    render_width_mm: calibration.widthMm,
+    render_height_mm: calibration.heightMm
+  });
+  if (!imageGeometryValidation.ok) {
+    document.querySelector("#simpleSealUploadStatus").textContent = "尺寸檢查未通過";
+    renderSimpleSealFileSummary();
+    return showToast(imageGeometryValidation.message);
+  }
+  const selectedRecord = companySealLibrary.find((item) => item.id === selectedSimpleSealRecordId);
+  if (selectedRecord && selectedRecord.company_id !== companyId) return showToast("印章紀錄與公司不一致，請重新選擇。");
+  if (selectedRecord && !(selectedRecord.is_active || selectedRecord.is_active === 1)) return showToast("這筆印章已停用，不可上傳新版。");
+  const button = document.querySelector("#simpleSealUploadBtn");
+  const form = document.querySelector("#simpleSealUploadForm");
+  if (button) button.disabled = true;
+  form?.setAttribute("aria-busy", "true");
+  document.querySelector("#simpleSealUploadStatus").textContent = "上傳並掃描中";
+  try {
+    let seal = selectedRecord;
+    if (!seal) {
+      seal = companySealLibrary.find((item) =>
+        (item.is_active || item.is_active === 1)
+        && item.seal_category === category
+        && item.seal_size_type === sizeType
+        && item.seal_name === sealName
+      );
+    }
+    if (!seal) {
+      seal = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals`, {
+        method: "POST",
+        body: JSON.stringify({
+          seal_name: sealName,
+          seal_category: category,
+          seal_size_type: sizeType,
+          purpose_description: purpose,
+          actor: authState?.user?.name || activeRole()
+        })
+      });
+    }
+    const contentBase64 = await fileToBase64(file);
+    const result = await backendRequest(`/seals/${encodeURIComponent(seal.id)}/files`, {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: file.name,
+        file_mime_type: validation.mimeType,
+        content_base64: contentBase64,
+        render_size_mm: calibration.widthMm,
+        render_width_mm: calibration.widthMm,
+        render_height_mm: calibration.heightMm,
+        actor: authState?.user?.name || activeRole()
+      })
+    });
+    selectedCompanySealId = result.seal?.id || seal.id;
+    selectedSimpleSealRecordId = selectedCompanySealId;
+    simpleSealCategory = result.seal?.seal_category || category;
+    fileInput.value = "";
+    await loadCompanySealCompanyData(true);
+    const refreshed = companySealLibrary.find((item) => item.id === selectedCompanySealId);
+    const current = refreshed?.current_file_status || result.file;
+    document.querySelector("#simpleSealUploadStatus").textContent = current?.usable ? `v${current.version} 掃描通過 · current` : `v${current?.version || "-"} ${current?.scan_status || "待掃描"}`;
+    addSealAudit("上傳私有印章", `${sealName} / ${seal.id} / v${current?.version || "-"} 已存入 Seal Vault。`);
+    showToast(`${sealName}已上傳並重新讀取後端版本。`);
+  } catch (error) {
+    document.querySelector("#simpleSealUploadStatus").textContent = "上傳失敗";
+    showToast(`印章上傳失敗：${error.message}`);
+  } finally {
+    form?.removeAttribute("aria-busy");
+    if (button) button.disabled = !isCompanySealCustodian();
+    renderSimpleSealUpload();
+  }
 }
 
 async function selectCompanySeal(id) {
@@ -12887,6 +20958,7 @@ async function selectCompanySeal(id) {
 }
 
 async function createCompanySealFromForm() {
+  if (!requireCompanySealCustodian("建立印章")) return;
   const companyId = selectedCompanySealCompanyId || document.querySelector("#companySealCompanySelect")?.value;
   if (!companyId) return showToast("請先選擇公司。");
   try {
@@ -12909,7 +20981,24 @@ async function createCompanySealFromForm() {
   }
 }
 
+function applyCompanySealPreset(category) {
+  if (!requireCompanySealCustodian("變更印章資料")) return;
+  const presets = {
+    establishment_seal: { name: "公司章－大章", purpose: "公司設立、變更、正式登記與重大文件用印" },
+    general_seal: { name: "便章－大章", purpose: "一般公文、函稿與日常行政文件用印" },
+    bank_seal: { name: "銀行印鑑章－大章", purpose: "銀行往來、帳戶及付款授權文件用印" }
+  };
+  const preset = presets[category];
+  if (!preset) return;
+  setFieldValue("#companySealCategorySelect", category);
+  setFieldValue("#companySealSizeSelect", "large_seal");
+  setFieldValue("#companySealNameInput", preset.name);
+  setFieldValue("#companySealPurposeInput", preset.purpose);
+  showToast(`已帶入${preset.name}，建立印章後即可上傳私有章檔。`);
+}
+
 async function deactivateCompanySeal(id) {
+  if (!requireCompanySealCustodian("停用印章")) return;
   const seal = companySealLibrary.find((item) => item.id === id);
   if (!seal) return;
   if (!confirmOperation("確認停用印章", `停用 ${seal.seal_name} 後不可再建立新用印申請，但歷史紀錄會保留。`)) return;
@@ -12924,18 +21013,33 @@ async function deactivateCompanySeal(id) {
 }
 
 async function uploadCompanySealVersion() {
+  if (!requireCompanySealCustodian("校準或上傳印章版本")) return;
   const file = document.querySelector("#companySealFileInput")?.files?.[0];
   const seal = currentCompanySeal();
   if (!seal) return showToast("請先選取印章。");
   if (!file) return showToast("請選擇新版印章檔。");
+  const validation = simpleSealFileValidation(file);
+  if (!validation.ok) return showToast(validation.message);
+  const calibration = readCompanySealCalibrationInputs("company", seal);
+  if (!calibration.ok) return showToast(calibration.message);
   try {
+    const imageGeometryValidation = await validateCompanySealImageGeometry(file, {
+      ...seal,
+      render_width_mm: calibration.widthMm,
+      render_height_mm: calibration.heightMm,
+      current_file: null
+    });
+    if (!imageGeometryValidation.ok) return showToast(imageGeometryValidation.message);
     const contentBase64 = await fileToBase64(file);
     const result = await backendRequest(`/seals/${encodeURIComponent(seal.id)}/files`, {
       method: "POST",
       body: JSON.stringify({
         file_name: file.name,
-        file_mime_type: file.type || "image/png",
+        file_mime_type: validation.mimeType,
         content_base64: contentBase64,
+        render_size_mm: calibration.widthMm,
+        render_width_mm: calibration.widthMm,
+        render_height_mm: calibration.heightMm,
         actor: authState?.user?.name || activeRole()
       })
     });
@@ -12951,6 +21055,7 @@ async function uploadCompanySealVersion() {
 }
 
 async function setCompanySealCurrentFile(fileId) {
+  if (!requireCompanySealCustodian("切換印章目前版本")) return;
   try {
     await backendRequest(`/seal-files/${encodeURIComponent(fileId)}/set-current`, { method: "PATCH" });
     await selectCompanySeal(selectedCompanySealId);
@@ -12961,18 +21066,35 @@ async function setCompanySealCurrentFile(fileId) {
   }
 }
 
+function selectedCompanySealUsageSeal() {
+  const sealId = document.querySelector("#sealUsageSealSelect")?.value || selectedCompanySealId;
+  return companySealLibrary.find((seal) => seal.id === sealId) || currentCompanySeal();
+}
+
+function syncCompanySealUsageSizeInputs() {
+  const seal = selectedCompanySealUsageSeal();
+  const geometry = companySealFixedGeometry(seal || "large_seal");
+  const widthInput = document.querySelector("#sealUsageWInput");
+  const heightInput = document.querySelector("#sealUsageHInput");
+  if (widthInput) widthInput.value = formatCompanySealMeasurement(geometry.widthPt);
+  if (heightInput) heightInput.value = formatCompanySealMeasurement(geometry.heightPt);
+  const hint = document.querySelector("#sealUsageSizeLock");
+  if (hint) hint.textContent = `尺寸已鎖定：${geometry.label} ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（${formatCompanySealMeasurement(geometry.widthPt)} × ${formatCompanySealMeasurement(geometry.heightPt)} pt）。`;
+  return geometry;
+}
+
 function addCompanySealStampPosition() {
-  const seal = currentCompanySeal();
-  companySealStampPositions.push({
+  const seal = selectedCompanySealUsageSeal();
+  if (!seal) return showToast("請先選擇印章。");
+  const geometry = syncCompanySealUsageSizeInputs();
+  companySealStampPositions.push(fixedCompanySealStampPosition({
     page: Number(document.querySelector("#sealUsagePageInput")?.value || 1),
     x: Number(document.querySelector("#sealUsageXInput")?.value || 420),
     y: Number(document.querySelector("#sealUsageYInput")?.value || 130),
-    w: Number(document.querySelector("#sealUsageWInput")?.value || 85),
-    h: Number(document.querySelector("#sealUsageHInput")?.value || 85),
     label: seal?.seal_name || "用印",
     type: seal?.seal_category || "general_seal",
     seal_id: seal?.id || selectedCompanySealId
-  });
+  }, geometry.sealSizeType));
   renderCompanySealModule();
 }
 
@@ -12983,9 +21105,12 @@ async function submitCompanySealUsageRequest() {
   if (!documentId) return showToast("請選擇文件。");
   if (!sealId) return showToast("請選擇印章。");
   if (!hasMinimumText(reason, 4)) return showToast("請填寫用印原因。");
+  const seal = companySealLibrary.find((item) => item.id === sealId);
+  const geometry = companySealFixedGeometry(seal || "large_seal");
   const positions = companySealStampPositions.length ? companySealStampPositions : [{
-    page: 1, x: 420, y: 130, w: 85, h: 85, label: "用印", type: "general_seal", seal_id: sealId
+    page: 1, x: 420, y: 130, label: "用印", type: "general_seal", seal_id: sealId
   }];
+  companySealStampPositions = positions.map((position) => fixedCompanySealStampPosition({ ...position, seal_id: sealId }, geometry.sealSizeType));
   try {
     const result = await backendRequest(`/documents/${encodeURIComponent(documentId)}/seal-requests`, {
       method: "POST",
@@ -12993,7 +21118,7 @@ async function submitCompanySealUsageRequest() {
         seal_id: sealId,
         request_reason: reason,
         usage_type: document.querySelector("#sealUsageTypeSelect")?.value || "official_document",
-        stamp_positions: positions.map((position) => ({ ...position, seal_id: sealId })),
+        stamp_positions: companySealStampPositions.map((position) => ({ ...position, seal_id: sealId })),
         actor: authState?.user?.name || activeRole(),
         document: companySealDocumentPayload(documentId),
         metadata: { source: "company_seal_module", approval_template: "finance_style" }
@@ -13100,7 +21225,8 @@ function addDepartmentRegistryItem() {
 }
 
 function addSealTypeRegistryItem() {
-  if (activeRole() !== "執行長") return showToast("只有執行長可以新增印章類別。");
+  if (!requireCompanySealCustodian("新增印章類別")) return;
+  if (authState?.user?.role !== "執行長") return showToast("只有 Finance 執行長可以新增印章類別。");
   const name = document.querySelector("#sealTypeNameInput").value.trim();
   const scope = document.querySelector("#sealTypeScopeInput").value.trim() || "未設定使用範圍";
   if (!hasMinimumText(name, 2)) return showToast("請輸入印章類別。");
@@ -13186,6 +21312,7 @@ function renderExecutiveSealAdmin() {
 }
 
 function renderSealRegistry() {
+  const canManageSealVault = isCompanySealCustodian();
   document.querySelector("#sealCount").textContent = `${sealRegistry.length} 枚`;
   document.querySelector("#sealRegistry").innerHTML = sealRegistry.map((seal) => `
     <article class="address-card ${seal.id === selectedSealId ? "selected-card" : ""}">
@@ -13196,7 +21323,7 @@ function renderSealRegistry() {
       <p>${seal.imageName || "未上傳圖檔"} · ${seal.hash}</p>
       <div class="row-actions">
         <button class="segment" type="button" data-seal-select="${seal.id}">檢視</button>
-        <button class="segment" type="button" data-seal-toggle="${seal.id}">${seal.status === "啟用" ? "停用" : "啟用"}</button>
+        <button class="segment" type="button" data-seal-toggle="${seal.id}" ${canManageSealVault ? "" : "disabled title=\"僅執行長／行政部門主任可變更\""}>${seal.status === "啟用" ? "停用" : "啟用"}</button>
       </div>
     </article>
   `).join("");
@@ -13235,7 +21362,7 @@ function renderSealDetail() {
         <div><dt>保管角色</dt><dd>${seal.owner}</dd></div>
         <div><dt>適用文別</dt><dd>${seal.docType}</dd></div>
         <div><dt>實體尺寸</dt><dd>${seal.widthMm || "-"} × ${seal.heightMm || "-"} mm</dd></div>
-        <div><dt>PDF 尺寸</dt><dd>${sealWidthPt(seal)} × ${sealHeightPt(seal)} pt</dd></div>
+        <div><dt>PDF 尺寸</dt><dd>${formatCompanySealMeasurement(sealWidthPt(seal))} × ${formatCompanySealMeasurement(sealHeightPt(seal))} pt</dd></div>
         <div><dt>章圖檔案</dt><dd>${seal.imageName || "未上傳"}</dd></div>
         <div><dt>校準狀態</dt><dd>${seal.calibrationStatus || "待校準"}</dd></div>
         <div><dt>狀態</dt><dd>${seal.status}</dd></div>
@@ -13319,29 +21446,242 @@ function stageRectToUploadedStamp(left, top, width, height, stamp) {
   };
 }
 
-function addUploadedStamp(kind = "company") {
+function uploadedSealCompanies() {
+  const source = availableCompanySealCompanies();
+  const accountCompanyId = authState?.user?.company_id || "";
+  const accountCompanyName = authState?.user?.company_name || "";
+  return launchScopedCompanyOptions(source).filter(
+    (item) => item.id === accountCompanyId || item.name === accountCompanyName
+  );
+}
+
+function uploadedEditorV2FeatureEnabled(companyId = document.querySelector("#uploadedSealCompany")?.value || authState?.user?.company_id || "") {
+  const company = uploadedSealCompanies().find((item) => (item.id || item.company_id) === companyId) || {};
+  const rawValue = company.feature_flags?.pdf_editor_v2
+    ?? company.featureFlags?.pdf_editor_v2
+    ?? company.pdf_editor_v2
+    ?? authState?.user?.feature_flags?.pdf_editor_v2
+    ?? window.__EDOC_FEATURE_FLAGS__?.pdf_editor_v2;
+  return [true, 1, "1", "true", "on", "enabled"].includes(rawValue);
+}
+
+function renderUploadedSealCompanyOptions() {
+  const select = document.querySelector("#uploadedSealCompany");
+  if (!select) return;
+  const companies = uploadedSealCompanies();
+  const previous = select.value;
+  const accountCompanyId = authState?.user?.company_id || "";
+  const accountCompanyName = authState?.user?.company_name || "";
+  const accountCompany = companies.find((item) => item.id === accountCompanyId || item.name === accountCompanyName);
+  select.innerHTML = companies.length
+    ? companies.map((item) => `<option value="${escapeDraftHtml(item.id)}">${escapeDraftHtml(item.name)}</option>`).join("")
+    : `<option value="">尚未開放可送簽公司</option>`;
+  select.disabled = !companies.length || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+  if (companies.some((item) => item.id === previous)) select.value = previous;
+  else if (accountCompany) select.value = accountCompany.id;
+  else if (companies[0]) select.value = companies[0].id;
+}
+
+function renderUploadedSealOptions() {
+  const select = document.querySelector("#uploadedSealSealSelect");
+  if (!select) return;
+  const previous = select.value;
+  const ready = uploadedSealOptions.filter(officialSealHasCurrentFile);
+  select.innerHTML = [
+    ready.length ? "" : `<option value="">尚無可用的 current 印章版本</option>`,
+    ...uploadedSealOptions.map((seal) => {
+      const usable = officialSealHasCurrentFile(seal);
+      const size = seal.seal_size_type === "large_seal" ? "大章" : seal.seal_size_type === "small_seal" ? "小章" : "";
+      return `<option value="${escapeDraftHtml(seal.id)}"${usable ? "" : " disabled"}>${escapeDraftHtml(seal.seal_name || seal.id)}${size ? ` · ${size}` : ""}${usable ? "" : "（未上傳版本）"}</option>`;
+    })
+  ].join("");
+  select.disabled = !ready.length;
+  if (ready.some((seal) => seal.id === previous)) select.value = previous;
+  else select.value = ready[0]?.id || "";
+}
+
+async function loadUploadedSealOptions(companyId = document.querySelector("#uploadedSealCompany")?.value || "") {
+  if (!companyId || !hasAuthenticatedBackendSession()) {
+    uploadedSealOptions = [];
+    renderUploadedSealOptions();
+    return;
+  }
+  try {
+    const result = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals`);
+    uploadedSealOptions = Array.isArray(result)
+      ? result.filter((seal) => seal.is_active !== 0 && seal.is_active !== false)
+      : [];
+  } catch (error) {
+    uploadedSealOptions = [];
+    showToast(`印章清單載入失敗：${error.message}`);
+  }
+  renderUploadedSealOptions();
+  if (normalizeUploadedEditorSealGeometry(uploadedSealEditorState)) {
+    syncLegacyUploadedEditorCollections();
+    if (uploadedSealEditorRuntime.documentId && !uploadedSealEditorRuntime.locked) markUploadedEditorDirty();
+    renderUploadedSealWorkbench();
+  }
+}
+
+function selectedUploadedSeal() {
+  const sealId = document.querySelector("#uploadedSealSealSelect")?.value || "";
+  return uploadedSealOptions.find((seal) => seal.id === sealId) || null;
+}
+
+function configureUploadedSealMode(target = activeRouteTarget) {
+  uploadedSealMode = target === "contractSeal" ? "contract" : "official_document";
+  const contractMode = uploadedSealMode === "contract";
+  const setText = (selector, value) => {
+    const node = document.querySelector(selector);
+    if (node) node.textContent = value;
+  };
+  setText("#uploadedSealHeaderEyebrow", contractMode ? "合約四步完成" : "四步完成");
+  setText("#uploadedSealHeaderTitle", contractMode ? "合約用印" : "電子用印");
+  setText("#uploadedSealHeaderDescription", contractMode
+    ? "上傳 A4 合約 PDF，標示印章與文字位置後送簽；用印完成後交申請人確認與下載，不進入公文寄送待辦。"
+    : "填寫申請資料、上傳 A4 PDF 並標示用印位置；用印完成後交申請人確認與下載，不進入公文寄送待辦。");
+  setText("#uploadedSealApplicationTitle", contractMode ? "申請人與合約資料" : "申請人與用印資料");
+  setText("#uploadedSealWorkspaceTitle", contractMode ? "合約標記與用印位置" : "選擇印章與用印位置");
+  const type = document.querySelector("#uploadedSealType");
+  if (type) type.value = contractMode ? "contract" : "official_document";
+  document.querySelector("#uploadedSealTypeField")?.toggleAttribute("hidden", contractMode);
+  document.querySelector("#uploadedSealCounterpartyField")?.toggleAttribute("hidden", !contractMode);
+  const approvalRouteSection = document.querySelector("#uploadedSealApprovalRouteSection");
+  const approvalCategorySelect = document.querySelector("#uploadedSealApprovalCategorySelect");
+  approvalRouteSection?.removeAttribute("hidden");
+  if (approvalCategorySelect) {
+    const classificationLocked = Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+    approvalCategorySelect.disabled = classificationLocked;
+    approvalCategorySelect.required = true;
+  }
+  renderUploadedSealApprovalRoute();
+  renderUploadedSealWorkbench();
+}
+
+async function initializeUploadedSealWorkspace() {
+  renderUploadedSealCompanyOptions();
+  await loadUploadedSealOptions();
+  renderUploadedSealWorkbench();
+}
+
+function addUploadedStamp(scope = "current_page", placement = null) {
   if (!uploadedSealPdf) return showToast("請先上傳 PDF。");
-  const seal = kind === "owner"
-    ? (sealRegistry.find((item) => item.status === "啟用" && /負責人|圖記/.test(`${item.name}${item.type}`)) || currentSeal())
-    : currentSeal();
-  const pageSeal = kind === "page";
+  const seal = selectedUploadedSeal();
+  if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇已有 current 版本的印章。");
+  const allPages = scope === "all_pages";
+  const geometry = companySealFixedGeometry(seal);
   uploadedSealStampPositions.push({
     id: `UPOS-${Date.now()}-${uploadedSealStampPositions.length + 1}`,
-    page: pageSeal ? "all" : 1,
-    x: pageSeal ? 560 : kind === "owner" ? 500 : 420,
-    y: pageSeal ? 385 : 130,
-    w: pageSeal ? 24 : sealWidthPt(seal),
-    h: pageSeal ? 96 : sealHeightPt(seal),
-    label: pageSeal ? "騎縫章" : kind === "owner" ? "負責人章" : "公司章",
-    type: pageSeal ? "多頁章" : seal?.type || "一般章",
-    seal_id: seal?.id || selectedSealId
+    page: allPages ? "all" : uploadedSealCurrentPage,
+    x: placement?.x ?? 420,
+    y: placement?.y ?? 130,
+    w: geometry.widthPt,
+    h: geometry.heightPt,
+    seal_size_type: geometry.sealSizeType,
+    size_locked: true,
+    label: seal.seal_name || "公司印章",
+    type: seal.seal_category || "company_seal",
+    seal_id: seal.id
   });
+  renderUploadedSealWorkbench();
+}
+
+function detectUploadedPdfPageCount(file) {
+  return file.arrayBuffer().then((buffer) => {
+    const source = new TextDecoder("latin1").decode(buffer);
+    const pageObjects = source.match(/\/Type\s*\/Page\b/g)?.length || 0;
+    const declaredCounts = [...source.matchAll(/\/Count\s+(\d+)/g)].map((match) => Number(match[1]) || 0);
+    return Math.max(1, pageObjects, ...declaredCounts);
+  }).catch(() => 1);
+}
+
+function setUploadedSealPage(page) {
+  if (!uploadedSealPdf) return;
+  uploadedSealCurrentPage = Math.max(1, Math.min(uploadedSealPageCount || 1, Number(page) || 1));
+  renderUploadedSealWorkbench();
+}
+
+function loadUploadedPdfFramePage(frame, pageKey) {
+  if (!uploadedSealPdf?.file) return;
+  // Chromium's PDF viewer may ignore a #page-only change on the same blob URL.
+  // Give each page navigation a fresh URL so the embedded viewer fully reloads.
+  const previousPreviewUrl = uploadedSealPreviewObjectUrl;
+  uploadedSealPreviewObjectUrl = URL.createObjectURL(uploadedSealPdf.file);
+  frame.src = `${uploadedSealPreviewObjectUrl}#page=${uploadedSealCurrentPage}&view=Fit&toolbar=0&navpanes=0`;
+  frame.dataset.pageKey = pageKey;
+  if (previousPreviewUrl) URL.revokeObjectURL(previousPreviewUrl);
+}
+
+function addUploadedStampAtPoint(clientX, clientY) {
+  if (!uploadedSealPdf) return showToast("請先上傳 PDF。");
+  const seal = selectedUploadedSeal();
+  if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇已有 current 版本的印章。");
+  const scope = document.querySelector("#uploadedSealStampType")?.value || "current_page";
+  const geometry = companySealFixedGeometry(seal);
+  const widthPt = geometry.widthPt;
+  const heightPt = geometry.heightPt;
+  const stage = document.querySelector("#uploadedPdfStage");
+  const rect = stage?.getBoundingClientRect();
+  if (!stage || !rect) return;
+  const widthPx = (widthPt / 595) * rect.width;
+  const heightPx = (heightPt / 842) * rect.height;
+  const left = Math.max(0, Math.min(rect.width - widthPx, clientX - rect.left - widthPx / 2));
+  const top = Math.max(0, Math.min(rect.height - heightPx, clientY - rect.top - heightPx / 2));
+  const placement = stageRectToUploadedStamp(left, top, widthPx, heightPx, {});
+  addUploadedStamp(scope, { x: placement.x, y: placement.y });
+}
+
+function uploadedTextToStageRect(overlay) {
+  const stage = document.querySelector("#uploadedPdfStage");
+  const width = stage?.clientWidth || 1;
+  const height = stage?.clientHeight || 1;
+  const fontSize = Number(overlay.font_size || 14);
+  const textWidth = Math.max(fontSize * 2, Math.min(520, String(overlay.text_content || "").length * fontSize));
+  return {
+    left: (Number(overlay.x || 0) / 595) * width,
+    top: height - ((Number(overlay.y || 0) + fontSize) / 842) * height,
+    width: Math.min(width, (textWidth / 595) * width),
+    height: Math.max(24, ((fontSize * 1.5) / 842) * height)
+  };
+}
+
+function stagePositionToUploadedText(left, top, overlay) {
+  const stage = document.querySelector("#uploadedPdfStage");
+  const width = stage?.clientWidth || 1;
+  const height = stage?.clientHeight || 1;
+  const fontSize = Number(overlay.font_size || 14);
+  return {
+    ...overlay,
+    x: Math.max(0, Math.round((left / width) * 595 * 100) / 100),
+    y: Math.max(12, Math.round((((height - top) / height) * 842 - fontSize) * 100) / 100)
+  };
+}
+
+function addUploadedTextAtPoint(clientX = null, clientY = null) {
+  if (!uploadedSealPdf) return showToast("請先上傳 PDF。");
+  const input = document.querySelector("#uploadedSealTextInput");
+  const textContent = input?.value.trim() || "";
+  if (!textContent) return showToast("請先輸入要加入合約的文字。");
+  const fontSize = Math.max(8, Math.min(72, Number(document.querySelector("#uploadedSealFontSize")?.value || 14)));
+  const stage = document.querySelector("#uploadedPdfStage");
+  const rect = stage?.getBoundingClientRect();
+  if (!stage || !rect) return;
+  const left = clientX == null ? rect.width * 0.34 : Math.max(0, Math.min(rect.width - 24, clientX - rect.left));
+  const top = clientY == null ? rect.height * 0.46 : Math.max(0, Math.min(rect.height - 24, clientY - rect.top));
+  uploadedSealTextOverlays.push(stagePositionToUploadedText(left, top, {
+    id: `UTEXT-${Date.now()}-${uploadedSealTextOverlays.length + 1}`,
+    page: uploadedSealCurrentPage,
+    text_content: textContent,
+    font_size: fontSize,
+    font_family: PDF_EDITOR_DEFAULT_FONT_FAMILY
+  }));
   renderUploadedSealWorkbench();
 }
 
 function bindUploadedStampDrag(marker, stamp) {
   marker.addEventListener("pointerdown", (event) => {
     event.preventDefault();
+    event.stopPropagation();
     marker.setPointerCapture(event.pointerId);
     const startX = event.clientX;
     const startY = event.clientY;
@@ -13370,44 +21710,141 @@ function bindUploadedStampDrag(marker, stamp) {
   });
 }
 
+function bindUploadedTextDrag(marker, overlay) {
+  marker.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    marker.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLeft = marker.offsetLeft;
+    const startTop = marker.offsetTop;
+    const stage = document.querySelector("#uploadedPdfStage");
+    const move = (moveEvent) => {
+      const maxLeft = (stage?.clientWidth || 0) - marker.offsetWidth;
+      const maxTop = (stage?.clientHeight || 0) - marker.offsetHeight;
+      marker.style.left = `${Math.max(0, Math.min(maxLeft, startLeft + moveEvent.clientX - startX))}px`;
+      marker.style.top = `${Math.max(0, Math.min(maxTop, startTop + moveEvent.clientY - startY))}px`;
+    };
+    const up = () => {
+      marker.removeEventListener("pointermove", move);
+      marker.removeEventListener("pointerup", up);
+      const index = uploadedSealTextOverlays.findIndex((item) => item.id === overlay.id);
+      if (index >= 0) {
+        uploadedSealTextOverlays[index] = stagePositionToUploadedText(marker.offsetLeft, marker.offsetTop, uploadedSealTextOverlays[index]);
+        renderUploadedSealWorkbench();
+      }
+    };
+    marker.addEventListener("pointermove", move);
+    marker.addEventListener("pointerup", up);
+  });
+}
+
 function renderUploadedSealWorkbench() {
+  const applicantInput = document.querySelector("#uploadedSealApplicant");
+  const departmentInput = document.querySelector("#uploadedSealDepartment");
+  const emailInput = document.querySelector("#uploadedSealEmail");
+  if (applicantInput && !applicantInput.value) applicantInput.value = authState?.user?.name || "";
+  if (departmentInput && !departmentInput.value) departmentInput.value = activeUnit() || "";
+  if (emailInput && !emailInput.value) emailInput.value = authState?.user?.email || "";
   const companySelect = document.querySelector("#uploadedSealCompany");
-  if (companySelect) {
-    const current = companySelect.value || companyRegistry[0]?.name || "歲悅股份有限公司";
-    companySelect.innerHTML = optionTags(companyRegistry.map((item) => item.name), current);
-  }
+  if (companySelect && !companySelect.options.length) renderUploadedSealCompanyOptions();
+  document.querySelectorAll("[data-uploaded-placement-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.uploadedPlacementMode === uploadedSealPlacementMode);
+  });
+  document.querySelector("#uploadedSealTextTools")?.toggleAttribute("hidden", uploadedSealPlacementMode !== "text");
+  document.querySelector("#uploadedSealSealSelect")?.closest("label")?.toggleAttribute("hidden", uploadedSealPlacementMode !== "seal");
+  document.querySelector("#uploadedSealStampType")?.closest("label")?.toggleAttribute("hidden", uploadedSealPlacementMode !== "seal");
+  document.querySelector("#addSelectedStampBtn")?.toggleAttribute("hidden", uploadedSealPlacementMode !== "seal");
   const status = document.querySelector("#uploadedSealPdfStatus");
-  if (status) status.textContent = uploadedSealPdf ? `${uploadedSealPdf.name} · ${uploadedSealStampPositions.length} 個章位` : "尚未上傳";
+  if (status) status.textContent = uploadedSealPdf
+    ? `${uploadedSealPageCount} 頁 · ${uploadedSealStampPositions.length} 個章位 · ${uploadedSealTextOverlays.length} 個文字`
+    : "尚未上傳 PDF";
   const frame = document.querySelector("#uploadedPdfFrame");
   const empty = document.querySelector("#uploadedPdfEmpty");
   if (frame) {
     frame.hidden = !uploadedSealPdf;
-    frame.src = uploadedSealObjectUrl || "about:blank";
+    const pageKey = `${uploadedSealObjectUrl}:${uploadedSealCurrentPage}`;
+    if (uploadedSealPdf && frame.dataset.pageKey !== pageKey) {
+      loadUploadedPdfFramePage(frame, pageKey);
+    }
   }
   if (empty) empty.hidden = Boolean(uploadedSealPdf);
   const layer = document.querySelector("#uploadedStampLayer");
   if (layer) {
-    layer.innerHTML = uploadedSealStampPositions.map((stamp) => {
+    const visibleStamps = uploadedSealStampPositions.filter((stamp) => stamp.page === "all" || Number(stamp.page) === uploadedSealCurrentPage);
+    const visibleTexts = uploadedSealTextOverlays.filter((overlay) => Number(overlay.page) === uploadedSealCurrentPage);
+    const stampMarkup = visibleStamps.map((stamp) => {
       const rect = uploadedStampToStageRect(stamp);
       return `
-        <button class="uploaded-stamp-marker" type="button" data-uploaded-stamp="${stamp.id}" style="left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px">
-          ${stamp.label}<small>${stamp.page === "all" ? "全部頁" : `第 ${stamp.page} 頁`}</small>
+        <button class="uploaded-stamp-marker ${stamp.page === "all" ? "all-pages" : ""}" type="button" data-uploaded-stamp="${escapeDraftHtml(stamp.id)}" style="left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px">
+          ${escapeDraftHtml(stamp.label)}<small>${stamp.page === "all" ? "全部頁" : `第 ${stamp.page} 頁`}</small>
         </button>
       `;
     }).join("");
+    const textMarkup = visibleTexts.map((overlay) => {
+      const rect = uploadedTextToStageRect(overlay);
+      return `<button class="uploaded-text-marker" type="button" data-uploaded-text="${escapeDraftHtml(overlay.id)}" style="left:${rect.left}px;top:${rect.top}px;min-width:${rect.width}px;height:${rect.height}px;font-size:${Math.max(10, rect.height * 0.68)}px">${escapeDraftHtml(overlay.text_content)}</button>`;
+    }).join("");
+    layer.innerHTML = `${stampMarkup}${textMarkup}`;
     layer.querySelectorAll("[data-uploaded-stamp]").forEach((marker) => {
       const stamp = uploadedSealStampPositions.find((item) => item.id === marker.dataset.uploadedStamp);
       if (stamp) bindUploadedStampDrag(marker, stamp);
     });
+    layer.querySelectorAll("[data-uploaded-text]").forEach((marker) => {
+      const overlay = uploadedSealTextOverlays.find((item) => item.id === marker.dataset.uploadedText);
+      if (overlay) bindUploadedTextDrag(marker, overlay);
+    });
   }
+  const strip = document.querySelector("#uploadedPdfPageStrip");
+  if (strip) {
+    strip.innerHTML = uploadedSealPdf
+      ? Array.from({ length: uploadedSealPageCount }, (_, index) => `<button class="uploaded-page-chip ${index + 1 === uploadedSealCurrentPage ? "active" : ""}" type="button" data-uploaded-page="${index + 1}" aria-label="前往第 ${index + 1} 頁">${index + 1}</button>`).join("")
+      : `<span>頁面將顯示於此</span>`;
+    strip.querySelectorAll("[data-uploaded-page]").forEach((button) => button.addEventListener("click", () => setUploadedSealPage(button.dataset.uploadedPage)));
+    strip.querySelector(".active")?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  }
+  const prev = document.querySelector("#uploadedPdfPrevBtn");
+  const next = document.querySelector("#uploadedPdfNextBtn");
+  if (prev) prev.disabled = !uploadedSealPdf || uploadedSealCurrentPage <= 1;
+  if (next) next.disabled = !uploadedSealPdf || uploadedSealCurrentPage >= uploadedSealPageCount;
+  const pageLabel = document.querySelector("#uploadedPdfPageLabel");
+  if (pageLabel) pageLabel.textContent = uploadedSealPdf ? `第 ${uploadedSealCurrentPage} / ${uploadedSealPageCount} 頁` : "尚未載入頁面";
+  const markerCount = uploadedSealStampPositions.length + uploadedSealTextOverlays.length;
+  const phase = !uploadedSealPdf ? 1 : markerCount ? 4 : 3;
+  document.querySelectorAll("#electronicSeal .electronic-seal-stepper span").forEach((step, index) => {
+    step.classList.toggle("active", index + 1 === phase);
+    step.classList.toggle("completed", index + 1 < phase);
+  });
   const summary = document.querySelector("#uploadedStampSummary");
   if (summary) {
-    summary.innerHTML = [
-      ["PDF", uploadedSealPdf ? `${uploadedSealPdf.name} · ${uploadedSealPdf.size} bytes` : "待上傳"],
-      ["章位", `${uploadedSealStampPositions.length} 個`],
-      ["流程", document.querySelector("#uploadedSealRoute")?.value || "A"],
-      ["類型", document.querySelector("#uploadedSealType")?.value === "contract" ? "電子合約" : "電子公文"]
-    ].map(([label, value]) => `<article class="archive-card"><span>${label}</span><strong>${value}</strong></article>`).join("");
+    const stampItems = uploadedSealStampPositions.map((stamp, index) => `<article class="uploaded-stamp-summary-item">
+          <button type="button" data-stamp-page="${stamp.page === "all" ? uploadedSealCurrentPage : stamp.page}">
+            <span class="uploaded-stamp-number">${index + 1}</span>
+            <span><strong>${escapeDraftHtml(stamp.label)}</strong><small>${stamp.page === "all" ? "套用全部頁" : `第 ${stamp.page} 頁`} · X ${Math.round(stamp.x)} / Y ${Math.round(stamp.y)}</small></span>
+          </button>
+          <button class="icon-button" type="button" data-remove-uploaded-stamp="${escapeDraftHtml(stamp.id)}" aria-label="刪除 ${escapeDraftHtml(stamp.label)}">×</button>
+        </article>`).join("");
+    const textItems = uploadedSealTextOverlays.map((overlay, index) => `<article class="uploaded-stamp-summary-item uploaded-text-summary-item">
+          <button type="button" data-text-page="${overlay.page}">
+            <span class="uploaded-stamp-number">T${index + 1}</span>
+            <span><strong>${escapeDraftHtml(overlay.text_content)}</strong><small>第 ${overlay.page} 頁 · ${overlay.font_size} pt · X ${Math.round(overlay.x)} / Y ${Math.round(overlay.y)}</small></span>
+          </button>
+          <button class="icon-button" type="button" data-remove-uploaded-text="${escapeDraftHtml(overlay.id)}" aria-label="刪除文字">×</button>
+        </article>`).join("");
+    summary.innerHTML = markerCount
+      ? `${stampItems}${textItems}`
+      : `<p class="empty-text">尚未標示位置；選擇印章或文字工具後，點一下右側 PDF 即可加入。</p>`;
+    summary.querySelectorAll("[data-stamp-page]").forEach((button) => button.addEventListener("click", () => setUploadedSealPage(button.dataset.stampPage)));
+    summary.querySelectorAll("[data-text-page]").forEach((button) => button.addEventListener("click", () => setUploadedSealPage(button.dataset.textPage)));
+    summary.querySelectorAll("[data-remove-uploaded-stamp]").forEach((button) => button.addEventListener("click", () => {
+      uploadedSealStampPositions = uploadedSealStampPositions.filter((stamp) => stamp.id !== button.dataset.removeUploadedStamp);
+      renderUploadedSealWorkbench();
+    }));
+    summary.querySelectorAll("[data-remove-uploaded-text]").forEach((button) => button.addEventListener("click", () => {
+      uploadedSealTextOverlays = uploadedSealTextOverlays.filter((overlay) => overlay.id !== button.dataset.removeUploadedText);
+      renderUploadedSealWorkbench();
+    }));
   }
 }
 
@@ -13420,6 +21857,8 @@ async function handleUploadedSealPdfChange() {
     return showToast("請上傳 PDF 檔。");
   }
   if (uploadedSealObjectUrl) URL.revokeObjectURL(uploadedSealObjectUrl);
+  if (uploadedSealPreviewObjectUrl) URL.revokeObjectURL(uploadedSealPreviewObjectUrl);
+  uploadedSealPreviewObjectUrl = "";
   uploadedSealObjectUrl = URL.createObjectURL(file);
   uploadedSealPdf = {
     file,
@@ -13428,12 +21867,14 @@ async function handleUploadedSealPdfChange() {
     contentBase64: await fileToBase64(file),
     hash: await hashBlob(file)
   };
-  if (!uploadedSealStampPositions.length) {
-    addUploadedStamp("company");
-    addUploadedStamp("owner");
-  }
+  uploadedSealPageCount = await detectUploadedPdfPageCount(file);
+  uploadedSealCurrentPage = 1;
+  uploadedSealStampPositions = [];
+  uploadedSealTextOverlays = [];
+  const title = document.querySelector("#uploadedSealTitle");
+  if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
   renderUploadedSealWorkbench();
-  addSealAudit("上傳 PDF 用印來源", `${file.name} 已上傳至前端工作台，hash ${uploadedSealPdf.hash}。`);
+  addSealAudit("上傳 PDF 用印來源", `PDF 已載入前端工作台，頁數 ${uploadedSealPageCount}，hash ${uploadedSealPdf.hash}。`);
 }
 
 function localSealRequestFromBackend(result) {
@@ -13455,62 +21896,2179 @@ function localSealRequestFromBackend(result) {
 }
 
 async function submitUploadedSealApplication() {
+  const form = document.querySelector("#uploadedSealForm");
+  if (form && !form.reportValidity()) return;
+  const contractMode = uploadedSealMode === "contract";
+  const approvalSelection = approvalSelectionForSelect("#uploadedSealApprovalCategorySelect");
+  if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) {
+    setOfficialFieldValidity("#uploadedSealApprovalCategorySelect", "#uploadedSealApprovalCategoryHint", false, "請選擇公文用印文件類型的文件細項。");
+    focusOfficialWorkflowField("#uploadedSealApprovalCategorySelect");
+    return showToast("請先選擇公文用印文件類型。");
+  }
   if (!uploadedSealPdf) return showToast("請先上傳 PDF。");
   if (!uploadedSealStampPositions.length) return showToast("請先加入至少一個用印處。");
-  const sourceType = document.querySelector("#uploadedSealType")?.value || "official_document";
-  const doc = currentDispatchDoc();
-  const documentId = uploadedSealDocumentId();
+  const seal = selectedUploadedSeal();
+  if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇已有 current 版本的印章。");
+  const title = document.querySelector("#uploadedSealTitle")?.value.trim() || uploadedSealPdf.name;
+  const reason = document.querySelector("#uploadedSealReason")?.value.trim() || "PDF 用印申請";
+  const expandedStampPositions = uploadedSealStampPositions.flatMap((stamp) => {
+    const pages = stamp.page === "all"
+      ? Array.from({ length: uploadedSealPageCount }, (_, index) => index + 1)
+      : [Number(stamp.page) || 1];
+    return pages.map((page) => ({
+      seal_id: seal.id,
+      page,
+      x: stamp.x,
+      y: stamp.y,
+      width: stamp.w,
+      height: stamp.h
+    }));
+  });
   const payload = {
-    id: `USEAL-${Date.now()}`,
-    document_id: documentId,
-    application_type: sourceType,
-    company_name: document.querySelector("#uploadedSealCompany")?.value || companyRegistry[0]?.name || "歲悅股份有限公司",
-    department: activeUnit() || "行政部",
-    title: document.querySelector("#uploadedSealTitle")?.value || uploadedSealPdf.name,
-    seal_id: selectedSealId,
-    source_pdf_name: uploadedSealPdf.name,
-    source_pdf_content_base64: uploadedSealPdf.contentBase64,
-    approval_route_code: document.querySelector("#uploadedSealRoute")?.value || "A",
-    reason: sourceType === "contract" ? "電子合約上傳 PDF 用印" : "電子公文上傳 PDF 用印",
-    stamp_positions: uploadedSealStampPositions,
-    document: {
-      document_id: documentId,
-      id: documentId,
-      no: doc?.no || documentId,
-      companyName: document.querySelector("#uploadedSealCompany")?.value || companyRegistry[0]?.name || "歲悅股份有限公司",
-      direction: "發文",
-      type: sourceType === "contract" ? "合約用印" : "函",
-      subject: document.querySelector("#uploadedSealTitle")?.value || uploadedSealPdf.name,
-      body: "上傳 PDF 用印申請。",
-      owner: activeRole(),
-      department: activeUnit() || "行政部"
-    }
+    source_type: "uploaded_pdf",
+    document_type: contractMode ? "contract_pdf_for_stamp" : "uploaded_pdf_for_stamp",
+    document_category: approvalSelection.documentCategory,
+    document_category_group: approvalSelection.documentCategoryGroup,
+    approval_route_code: approvalSelection.approvalRouteCode,
+    approval_route_name: approvalSelection.approvalRouteName,
+    approval_flow_nodes: [...approvalSelection.approvalFlowNodes],
+    workflow_template_key: approvalSelection.workflowTemplateKey,
+    company_id: document.querySelector("#uploadedSealCompany")?.value || "",
+    seal_id: seal.id,
+    dispatch_method: "no_dispatch_required",
+    requires_stamp: true,
+    title,
+    subject: title,
+    description: reason,
+    recipient: contractMode ? document.querySelector("#uploadedSealCounterparty")?.value.trim() || "" : "",
+    dispatch_unit: document.querySelector("#uploadedSealDepartment")?.value.trim() || activeUnit(),
+    handler_name: document.querySelector("#uploadedSealApplicant")?.value.trim() || authState?.user?.name || activeRole(),
+    request_reason: reason,
+    file_name: uploadedSealPdf.name,
+    content_base64: uploadedSealPdf.contentBase64,
+    stamp_positions: expandedStampPositions,
+    text_overlays: uploadedSealTextOverlays.map((overlay, index) => ({
+      page: Number(overlay.page) || 1,
+      x: overlay.x,
+      y: overlay.y,
+      text_content: overlay.text_content,
+      font_size: overlay.font_size,
+      font_family: PDF_EDITOR_DEFAULT_FONT_FAMILY,
+      order_index: index + 1
+    })),
+    metadata: {
+      application_kind: contractMode ? "contract_seal" : "uploaded_pdf_seal",
+      counterparty: document.querySelector("#uploadedSealCounterparty")?.value.trim() || "",
+      applicant_email: document.querySelector("#uploadedSealEmail")?.value.trim() || authState?.user?.email || "",
+      applicant_phone: document.querySelector("#uploadedSealPhone")?.value.trim() || "",
+      font_family: PDF_EDITOR_DEFAULT_FONT_FAMILY,
+      document_category: approvalSelection.documentCategory,
+      document_category_group: approvalSelection.documentCategoryGroup,
+      approval_route_code: approvalSelection.approvalRouteCode,
+      approval_route_name: approvalSelection.approvalRouteName,
+      workflow_template_key: approvalSelection.workflowTemplateKey,
+      approval_flow_nodes: [...approvalSelection.approvalFlowNodes]
+    },
+    submit: false
   };
+  const submitButton = document.querySelector("#submitUploadedSealBtn");
   try {
-    const result = await backendRequest("/seal-applications/submit", {
+    if (submitButton) submitButton.disabled = true;
+    let result = await backendRequest("/official-documents", {
       method: "POST",
       body: JSON.stringify(payload)
     });
-    const request = localSealRequestFromBackend(result);
-    sealRequests.unshift(request);
-    selectedSealRequestId = request.id;
-    pdfVersionStore[request.docId] = pdfVersionStore[request.docId] || {};
-    pdfVersionStore[request.docId].before = {
-      id: result.pdf_before?.id,
-      fileObjectId: result.pdf_before?.file_object_id,
-      url: result.pdf_before?.download_url,
-      hash: result.pdf_before?.sha256,
-      size: result.pdf_before?.file?.size_bytes || uploadedSealPdf.size,
-      createdAt: result.created_at,
-      label: "上傳 PDF 鎖版",
-      pageCount: result.pdf_before?.page_count || 1
-    };
-    addSealAudit("送出上傳 PDF 用印", `${payload.title} 已送主管簽核，PDF hash ${result.locked_pdf_sha256}，章位 hash ${result.locked_positions_sha256}。`);
-    renderSeals();
-    showToast("PDF 用印申請已送出。");
+    result = await backendRequest(`/official-documents/${encodeURIComponent(result.id)}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ comment: contractMode ? "合約 PDF 標記完成後送出簽核" : "PDF 章位確認後送出簽核" })
+    });
+    selectedOfficialDocumentId = result.id;
+    officialWorkflowScope = "mine";
+    await loadOfficialWorkflow("mine");
+    addSealAudit("送出 PDF 用印", `${title} 已送出，章位 ${expandedStampPositions.length} 處、文字 ${uploadedSealTextOverlays.length} 處。`);
+    showToast(contractMode ? "合約用印申請已送出簽核。" : "PDF 用印申請已送出簽核。");
   } catch (error) {
     addSealAudit("上傳 PDF 用印送簽失敗", error.message);
     showToast(`送簽失敗：${error.message}`);
+  } finally {
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+// PDF Editor V2 -------------------------------------------------------------
+// The source PDF is immutable. Browser state only describes page references
+// and non-destructive operations; the server is the authority that creates a
+// prepared PDF and later resolves each locked Seal Vault version.
+
+function cloneUploadedEditorValue(value) {
+  return typeof structuredClone === "function"
+    ? structuredClone(value)
+    : JSON.parse(JSON.stringify(value));
+}
+
+function normalizeEditorDegrees(value) {
+  const normalized = Number(value || 0) % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function roundEditorPoint(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function canonicalEditorJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalEditorJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalEditorJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function calculateUploadedEditorManifest(state = uploadedSealEditorState) {
+  const manifest = cloneUploadedEditorValue(state);
+  delete manifest.manifestSha256;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalEditorJson(manifest)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function refreshUploadedEditorManifest() {
+  uploadedSealEditorState.manifestSha256 = await calculateUploadedEditorManifest(uploadedSealEditorState);
+  return uploadedSealEditorState.manifestSha256;
+}
+
+function setUploadedEditorSaveStatus(kind, message) {
+  const status = document.querySelector("#uploadedEditorSaveStatus");
+  if (!status) return;
+  status.className = `pdf-editor-save-status ${kind}`;
+  status.textContent = message;
+}
+
+function currentUploadedEditorPage() {
+  return uploadedSealEditorState.pages.find((page) => page.pageId === uploadedSealEditorRuntime.currentPageId)
+    || uploadedSealEditorState.pages[0]
+    || null;
+}
+
+function currentUploadedEditorPageIndex() {
+  const page = currentUploadedEditorPage();
+  return page ? uploadedSealEditorState.pages.findIndex((item) => item.pageId === page.pageId) : -1;
+}
+
+function uploadedEditorPageRuntime(pageId) {
+  return uploadedSealEditorRuntime.pageProxies.get(pageId) || null;
+}
+
+function syncLegacyUploadedEditorCollections() {
+  uploadedSealPageCount = uploadedSealEditorState.pages.length;
+  const currentIndex = currentUploadedEditorPageIndex();
+  uploadedSealCurrentPage = currentIndex < 0 ? 1 : currentIndex + 1;
+  uploadedSealStampPositions = uploadedSealEditorState.elements.filter((element) => element.kind === "seal").map((element) => ({
+    id: element.id,
+    page: Math.max(1, uploadedSealEditorState.pages.findIndex((page) => page.pageId === element.pageId) + 1),
+    page_ref: element.pageId,
+    x: element.x,
+    y: element.y,
+    w: element.width,
+    h: element.height,
+    rotation: element.rotation,
+    opacity: element.opacity,
+    z_index: element.zIndex,
+    seal_id: element.properties?.sealId || "",
+    label: element.properties?.sealName || "公司印章"
+  }));
+  uploadedSealTextOverlays = uploadedSealEditorState.elements.filter((element) => ["text", "replacement"].includes(element.kind)).map((element) => ({
+    id: element.id,
+    page: Math.max(1, uploadedSealEditorState.pages.findIndex((page) => page.pageId === element.pageId) + 1),
+    page_ref: element.pageId,
+    x: element.x,
+    y: element.y,
+    width: element.width,
+    height: element.height,
+    rotation: element.rotation,
+    opacity: element.opacity,
+    text_content: element.properties?.text || "",
+    font_size: element.properties?.fontSize || 14,
+    font_family: element.properties?.fontFamily || PDF_EDITOR_DEFAULT_FONT_FAMILY
+  }));
+}
+
+function pushUploadedEditorHistory(previousState) {
+  uploadedSealEditorRuntime.undoStack.push(cloneUploadedEditorValue(previousState));
+  if (uploadedSealEditorRuntime.undoStack.length > 60) uploadedSealEditorRuntime.undoStack.shift();
+  uploadedSealEditorRuntime.redoStack = [];
+}
+
+function markUploadedEditorDirty() {
+  uploadedSealEditorRuntime.dirtyGeneration += 1;
+  uploadedSealEditorRuntime.preparedFileId = "";
+  uploadedSealEditorRuntime.preparedSha256 = "";
+  const preflight = document.querySelector("#uploadedEditorPreflightStatus");
+  if (preflight) preflight.textContent = "內容已變更，送簽前需重新產生確認版";
+  if (uploadedSealEditorRuntime.conflict) {
+    setUploadedEditorSaveStatus("conflict", "版本衝突：請先保留本機版本或重新載入");
+    document.querySelector("#uploadedEditorConflictCopyBtn")?.toggleAttribute("hidden", false);
+    document.querySelector("#uploadedEditorResolveConflictBtn")?.toggleAttribute("hidden", false);
+    return;
+  }
+  if (!navigator.onLine) {
+    uploadedSealEditorRuntime.offlineDirty = true;
+    setUploadedEditorSaveStatus("offline", "離線中，變更保留於此裝置");
+    return;
+  }
+  setUploadedEditorSaveStatus("dirty", "尚未儲存");
+  window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
+  uploadedSealEditorRuntime.saveTimer = window.setTimeout(() => {
+    void saveUploadedEditorState();
+  }, PDF_EDITOR_AUTOSAVE_DELAY_MS);
+}
+
+function commitUploadedEditorMutation(mutator, { render = true } = {}) {
+  if (uploadedSealEditorRuntime.locked) return showToast("送簽版本已鎖定，不能再修改。");
+  const previous = cloneUploadedEditorValue(uploadedSealEditorState);
+  mutator(uploadedSealEditorState);
+  uploadedSealEditorState.elements = uploadedSealEditorState.elements
+    .filter((element) => PDF_EDITOR_ALLOWED_KINDS.has(element.kind) && uploadedSealEditorState.pages.some((page) => page.pageId === element.pageId))
+    .slice(0, PDF_EDITOR_MAX_ELEMENTS);
+  normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
+  normalizeUploadedEditorElementLayers(uploadedSealEditorState);
+  // Selection clicks, clamped drags and property updates can resolve to the
+  // exact same state. They must not consume a revision or invalidate a valid
+  // prepared PDF merely because an event handler ran.
+  if (canonicalEditorJson(previous) === canonicalEditorJson(uploadedSealEditorState)) {
+    if (render) renderUploadedSealWorkbench();
+    return false;
+  }
+  pushUploadedEditorHistory(previous);
+  syncLegacyUploadedEditorCollections();
+  markUploadedEditorDirty();
+  if (render) renderUploadedSealWorkbench();
+  return true;
+}
+
+function undoUploadedEditor() {
+  const previous = uploadedSealEditorRuntime.undoStack.pop();
+  if (!previous || uploadedSealEditorRuntime.locked) return;
+  uploadedSealEditorRuntime.redoStack.push(cloneUploadedEditorValue(uploadedSealEditorState));
+  const revisionNo = uploadedSealEditorState.revisionNo;
+  const manifestSha256 = uploadedSealEditorState.manifestSha256;
+  uploadedSealEditorState = previous;
+  // History changes editable content only. Keep the optimistic-lock cursor
+  // current if an autosave completed after this snapshot was captured.
+  uploadedSealEditorState.revisionNo = revisionNo;
+  uploadedSealEditorState.manifestSha256 = manifestSha256;
+  normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
+  normalizeUploadedEditorElementLayers(uploadedSealEditorState);
+  uploadedSealEditorRuntime.selectedIds.clear();
+  syncLegacyUploadedEditorCollections();
+  markUploadedEditorDirty();
+  renderUploadedSealWorkbench();
+}
+
+function redoUploadedEditor() {
+  const next = uploadedSealEditorRuntime.redoStack.pop();
+  if (!next || uploadedSealEditorRuntime.locked) return;
+  uploadedSealEditorRuntime.undoStack.push(cloneUploadedEditorValue(uploadedSealEditorState));
+  const revisionNo = uploadedSealEditorState.revisionNo;
+  const manifestSha256 = uploadedSealEditorState.manifestSha256;
+  uploadedSealEditorState = next;
+  uploadedSealEditorState.revisionNo = revisionNo;
+  uploadedSealEditorState.manifestSha256 = manifestSha256;
+  normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
+  normalizeUploadedEditorElementLayers(uploadedSealEditorState);
+  uploadedSealEditorRuntime.selectedIds.clear();
+  syncLegacyUploadedEditorCollections();
+  markUploadedEditorDirty();
+  renderUploadedSealWorkbench();
+}
+
+function editorDraftPayload() {
+  const contractMode = uploadedSealMode === "contract";
+  const approvalSelection = approvalSelectionForSelect("#uploadedSealApprovalCategorySelect");
+  const handlerName = document.querySelector("#uploadedSealApplicant")?.value.trim() || authState?.user?.name || "";
+  const departmentName = document.querySelector("#uploadedSealDepartment")?.value.trim() || activeUnit() || "";
+  const contactEmail = document.querySelector("#uploadedSealEmail")?.value.trim() || authState?.user?.email || "";
+  const contactPhone = document.querySelector("#uploadedSealPhone")?.value.trim() || "02-66045432 #";
+  return {
+    company_id: document.querySelector("#uploadedSealCompany")?.value || authState?.user?.company_id || "",
+    document_type: contractMode ? "contract_pdf_for_stamp" : "uploaded_pdf_for_stamp",
+    application_kind: contractMode ? "contract_seal" : "uploaded_pdf_seal",
+    title: document.querySelector("#uploadedSealTitle")?.value.trim() || "PDF 電子用印草稿",
+    description: document.querySelector("#uploadedSealReason")?.value.trim() || "",
+    request_reason: document.querySelector("#uploadedSealReason")?.value.trim() || "",
+    recipient: contractMode ? document.querySelector("#uploadedSealCounterparty")?.value.trim() || "" : "",
+    handler_name: handlerName,
+    applicant_department_name: departmentName,
+    dispatch_unit: departmentName,
+    dispatch_method: "no_dispatch_required",
+    contact_email: contactEmail,
+    contact_phone: contactPhone,
+    metadata: {
+      contact_email: contactEmail,
+      contact_phone: contactPhone,
+      document_category: approvalSelection.documentCategory,
+      document_category_group: approvalSelection.documentCategoryGroup,
+      approval_route_code: approvalSelection.approvalRouteCode,
+      approval_route_name: approvalSelection.approvalRouteName
+    },
+    document_category: approvalSelection.documentCategory,
+    approval_route_code: approvalSelection.approvalRouteCode,
+    workflow_template_key: approvalSelection.workflowTemplateKey,
+    editor_schema_version: PDF_EDITOR_SCHEMA_VERSION,
+    renderer_version: PDF_EDITOR_RENDERER_VERSION
+  };
+}
+
+async function ensureUploadedEditorDraft() {
+  if (uploadedSealEditorRuntime.documentId) return uploadedSealEditorRuntime.documentId;
+  if (!uploadedEditorV2FeatureEnabled()) throw new Error("此公司尚未開啟 PDF Editor V2，無法建立新草稿。");
+  const approvalSelection = approvalSelectionForSelect("#uploadedSealApprovalCategorySelect");
+  if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) {
+    setOfficialFieldValidity("#uploadedSealApprovalCategorySelect", "#uploadedSealApprovalCategoryHint", false, "請先選擇用印文件類型；系統會依 A／B／C／D 級鎖定簽核關係人。");
+    focusOfficialWorkflowField("#uploadedSealApprovalCategorySelect");
+    throw new Error("請先選擇用印文件類型，再上傳 PDF。");
+  }
+  if (uploadedSealEditorRuntime.draftCreatePromise) return uploadedSealEditorRuntime.draftCreatePromise;
+  uploadedSealEditorRuntime.draftCreatePromise = backendRequest("/official-documents/editor-drafts", {
+    method: "POST",
+    body: JSON.stringify(editorDraftPayload())
+  }).then((result) => {
+    uploadedSealEditorRuntime.documentId = result.document_id || result.id || "";
+    uploadedSealEditorRuntime.revisionId = result.editor_revision?.id || result.editor_revision?.revision_id || result.revision_id || "";
+    uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || result.editor_state?.manifestSha256 || result.editor_revision?.manifestSha256 || result.editor_revision?.manifest_sha256 || "";
+    const serverRevisionNo = Number(result.editor_revision?.revision_no ?? result.editor_revision?.revisionNo ?? result.editor_state?.revisionNo);
+    if (Number.isFinite(serverRevisionNo)) uploadedSealEditorState.revisionNo = serverRevisionNo;
+    rememberUploadedEditorSavedSealBindings(result.editor_state || result.editor_revision?.state || null);
+    setUploadedEditorSaveStatus("saved", "私密草稿已建立");
+    return uploadedSealEditorRuntime.documentId;
+  }).finally(() => {
+    uploadedSealEditorRuntime.draftCreatePromise = null;
+  });
+  return uploadedSealEditorRuntime.draftCreatePromise;
+}
+
+async function requestEditorUpload(file, assetKind = "source_pdf") {
+  const documentId = await ensureUploadedEditorDraft();
+  const sha256 = await hashBlob(file);
+  const intent = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/editor-uploads`, {
+    method: "POST",
+    body: JSON.stringify({
+      asset_kind: assetKind,
+      file_name: file.name,
+      mime_type: file.type || (assetKind === "image" ? "application/octet-stream" : "application/pdf"),
+      size_bytes: file.size,
+      sha256
+    })
+  });
+  return { ...intent, sha256, documentId, assetKind };
+}
+
+function tusMetadataValue(value) {
+  const bytes = new TextEncoder().encode(String(value || ""));
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary);
+}
+
+async function performTusUpload(file, intent, onProgress = () => {}) {
+  if (!intent?.upload_url || !["tus", "local_direct"].includes(intent.protocol)) throw new Error("後端未提供有效的 TUS 直傳資格。");
+  const baseHeaders = { ...(intent.headers || {}) };
+  if (intent.x_signature && !Object.keys(baseHeaders).some((key) => key.toLowerCase() === "x-signature")) baseHeaders["x-signature"] = intent.x_signature;
+  const uploadIsSameOrigin = new URL(intent.upload_url, window.location.href).origin === window.location.origin;
+  if (uploadIsSameOrigin && !Object.keys(baseHeaders).some((key) => key.toLowerCase() === "authorization") && isHeaderSafeToken(authState?.token)) {
+    baseHeaders.Authorization = `Bearer ${authState.token}`;
+  }
+  if (intent.protocol === "local_direct") {
+    const response = await fetch(intent.upload_url, {
+      method: intent.method || "PUT",
+      headers: { ...baseHeaders, "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error(`本機直傳驗收失敗（${response.status}）。`);
+    onProgress(1);
+    return { uploadUrl: intent.upload_url, offset: file.size };
+  }
+  const bucketName = intent.bucketName || intent.bucket_name || intent.metadata?.bucketName || intent.metadata?.bucket_name || "";
+  const objectName = intent.objectName || intent.object_name || intent.metadata?.objectName || intent.metadata?.object_name || intent.storage_path || "";
+  const contentType = intent.contentType || intent.content_type || intent.metadata?.contentType || intent.metadata?.content_type || file.type || "application/octet-stream";
+  const metadata = [
+    `filename ${tusMetadataValue(file.name)}`,
+    `filetype ${tusMetadataValue(contentType)}`,
+    bucketName ? `bucketName ${tusMetadataValue(bucketName)}` : "",
+    objectName ? `objectName ${tusMetadataValue(objectName)}` : "",
+    `contentType ${tusMetadataValue(contentType)}`
+  ].filter(Boolean).join(",");
+  const createHeaders = {
+    ...baseHeaders,
+    "Tus-Resumable": "1.0.0",
+    "Upload-Length": String(file.size),
+    "Upload-Metadata": metadata
+  };
+  let uploadUrl = intent.upload_url;
+  let offset = 0;
+  const createResponse = await fetch(intent.upload_url, { method: "POST", headers: createHeaders, cache: "no-store" });
+  if (createResponse.ok) {
+    const location = createResponse.headers.get("Location");
+    if (location) uploadUrl = new URL(location, intent.upload_url).toString();
+    offset = Number(createResponse.headers.get("Upload-Offset") || 0);
+  } else if (![405, 409].includes(createResponse.status)) {
+    throw new Error(`TUS 建立上傳失敗（${createResponse.status}）。`);
+  }
+  const chunkSize = 6 * 1024 * 1024;
+  let attempts = 0;
+  while (offset < file.size) {
+    const end = Math.min(file.size, offset + chunkSize);
+    const chunk = file.slice(offset, end);
+    const response = await fetch(uploadUrl, {
+      method: "PATCH",
+      headers: {
+        ...baseHeaders,
+        "Tus-Resumable": "1.0.0",
+        "Upload-Offset": String(offset),
+        "Content-Type": "application/offset+octet-stream"
+      },
+      body: chunk,
+      cache: "no-store"
+    });
+    if (response.ok) {
+      offset = Number(response.headers.get("Upload-Offset") || end);
+      attempts = 0;
+      onProgress(Math.min(1, offset / Math.max(1, file.size)));
+      continue;
+    }
+    if (attempts >= 2) throw new Error(`TUS 續傳失敗（${response.status}）。`);
+    attempts += 1;
+    const head = await fetch(uploadUrl, { method: "HEAD", headers: { ...baseHeaders, "Tus-Resumable": "1.0.0" }, cache: "no-store" });
+    if (!head.ok) throw new Error(`TUS 無法查詢續傳位置（${head.status}）。`);
+    offset = Number(head.headers.get("Upload-Offset") || 0);
+  }
+  return { uploadUrl, offset };
+}
+
+async function finalizeEditorUpload(intent, file) {
+  return backendRequest(`/official-documents/${encodeURIComponent(intent.documentId)}/editor-uploads/${encodeURIComponent(intent.upload_id)}/finalize`, {
+    method: "POST",
+    body: JSON.stringify({ sha256: intent.sha256, size_bytes: file.size })
+  });
+}
+
+async function validateUploadedPdfDocument(pdfDocument) {
+  if (pdfDocument.numPages > PDF_EDITOR_MAX_PAGES) throw new Error(`PDF 最多 ${PDF_EDITOR_MAX_PAGES} 頁。`);
+  if (pdfDocument.isPureXfa) throw new Error("第一版不接受 XFA PDF，請先轉為一般 PDF。");
+  const a4Report = requirePdfPagesA4(await readPdfA4Pages(pdfDocument));
+  const javaScript = typeof pdfDocument.getJavaScript === "function" ? await pdfDocument.getJavaScript() : [];
+  if (Array.isArray(javaScript) && javaScript.some(Boolean)) throw new Error("PDF 含 JavaScript，已依安全規則阻擋。");
+  const attachments = typeof pdfDocument.getAttachments === "function" ? await pdfDocument.getAttachments() : null;
+  if (attachments && Object.keys(attachments).length) throw new Error("PDF 含內嵌附件，已依安全規則阻擋。");
+  for (let start = 1; start <= pdfDocument.numPages; start += 8) {
+    const pageNumbers = Array.from({ length: Math.min(8, pdfDocument.numPages - start + 1) }, (_, index) => start + index);
+    const annotationGroups = await Promise.all(pageNumbers.map(async (pageNumber) => {
+      const page = await pdfDocument.getPage(pageNumber);
+      return page.getAnnotations({ intent: "display" });
+    }));
+    const annotations = annotationGroups.flat();
+    if (annotations.some((annotation) => annotation.fieldType === "Sig" || annotation.subtype === "FileAttachment")) {
+      throw new Error("PDF 含既有數位簽章或內嵌附件，已依安全規則阻擋。");
+    }
+  }
+  return { a4Report };
+}
+
+async function loadPdfJsAsset(file, assetId, serverPages = []) {
+  const pdfjsLib = await ensurePdfJsLibrary();
+  if (!pdfjsLib?.getDocument) throw new Error("PDF.js 尚未載入，請重新整理頁面。");
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(await file.arrayBuffer()),
+    enableXfa: false,
+    isEvalSupported: false,
+    useSystemFonts: true
+  });
+  let passwordProtected = false;
+  loadingTask.onPassword = () => {
+    passwordProtected = true;
+    void loadingTask.destroy();
+  };
+  let pdfDocument;
+  try {
+    pdfDocument = await loadingTask.promise;
+  } catch (error) {
+    if (passwordProtected || error?.name === "PasswordException") throw new Error("密碼加密 PDF 不接受編輯，請提供未加密版本。");
+    throw new Error("PDF 無法解析或已損毀，請重新輸出後再上傳。");
+  }
+  await validateUploadedPdfDocument(pdfDocument);
+  uploadedSealEditorRuntime.pdfDocuments.set(assetId, pdfDocument);
+  uploadedSealEditorRuntime.assetFiles.set(assetId, file);
+  const fileUrl = URL.createObjectURL(file);
+  const oldUrl = uploadedSealEditorRuntime.assetUrls.get(assetId);
+  if (oldUrl) URL.revokeObjectURL(oldUrl);
+  uploadedSealEditorRuntime.assetUrls.set(assetId, fileUrl);
+  const pages = [];
+  for (let index = 0; index < pdfDocument.numPages; index += 1) {
+    const proxy = await pdfDocument.getPage(index + 1);
+    const unit = Number(proxy.userUnit || 1);
+    const view = proxy.view.map((value) => roundEditorPoint(Number(value) * unit));
+    const serverPage = serverPages[index] || {};
+    const pageId = serverPage.pageId || serverPage.page_id || `page-${assetId}-${index + 1}`;
+    pages.push({
+      pageId,
+      sourceAssetId: assetId,
+      sourcePageIndex: index,
+      widthPt: roundEditorPoint(view[2] - view[0]),
+      heightPt: roundEditorPoint(view[3] - view[1]),
+      cropBox: view,
+      rotation: normalizeEditorDegrees(serverPage.rotation ?? proxy.rotate),
+      order: 0
+    });
+    uploadedSealEditorRuntime.pageProxies.set(pageId, { proxy, userUnit: unit, assetId });
+  }
+  return pages;
+}
+
+function applyEditorRevisionFromResponse(result) {
+  const revision = result?.editor_revision || result?.revision || result || {};
+  const revisionNo = Number(revision.revision_no ?? revision.revisionNo ?? result?.revisionNo);
+  const revisionId = revision.id || revision.revision_id || result?.revision_id;
+  if (Number.isFinite(revisionNo)) uploadedSealEditorState.revisionNo = revisionNo;
+  if (revisionId) uploadedSealEditorRuntime.revisionId = revisionId;
+  const serverManifest = result?.manifestSha256 || result?.manifest_sha256 || result?.state?.manifestSha256 || revision.manifest_sha256 || revision.manifestSha256;
+  if (serverManifest) uploadedSealEditorRuntime.baseManifestSha256 = serverManifest;
+  rememberUploadedEditorSavedSealBindings(result?.state || result?.editor_state || revision?.state || revision?.editor_state || null);
+}
+
+function applyUploadedEditorCanonicalSaveResponse(result, savingGeneration) {
+  // A save may take long enough for another pointer or keyboard edit to land.
+  // Never replace those newer local edits with the older request response.
+  if (uploadedSealEditorRuntime.dirtyGeneration !== savingGeneration) return false;
+  const revision = result?.editor_revision || result?.revision || result || {};
+  const state = result?.state || result?.editor_state || revision?.state || revision?.editor_state;
+  if (!state || Number(state.schemaVersion || state.schema_version) !== PDF_EDITOR_SCHEMA_VERSION) return false;
+  const selectedIds = new Set(uploadedSealEditorRuntime.selectedIds || []);
+  const previousPageId = uploadedSealEditorRuntime.currentPageId;
+  uploadedSealEditorState = {
+    ...emptyUploadedSealEditorState(),
+    ...cloneUploadedEditorValue(state),
+    revisionNo: Number(result?.revisionNo ?? revision?.revisionNo ?? revision?.revision_no ?? state.revisionNo ?? 0),
+    manifestSha256: result?.manifestSha256 || result?.manifest_sha256 || revision?.manifestSha256 || revision?.manifest_sha256 || state.manifestSha256 || ""
+  };
+  uploadedSealEditorRuntime.currentPageId = uploadedSealEditorState.pages.some((page) => page.pageId === previousPageId)
+    ? previousPageId
+    : uploadedSealEditorState.pages[0]?.pageId || "";
+  uploadedSealEditorRuntime.selectedIds = new Set(
+    uploadedSealEditorState.elements
+      .filter((element) => selectedIds.has(element.id))
+      .map((element) => element.id)
+  );
+  rememberUploadedEditorSavedSealBindings(uploadedSealEditorState);
+  syncLegacyUploadedEditorCollections();
+  return true;
+}
+
+async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = false } = {}) {
+  const previousState = append ? cloneUploadedEditorValue(uploadedSealEditorState) : null;
+  const asset = finalized?.asset || {};
+  const assetId = asset.id || asset.asset_id || intent.asset_id || `asset-${crypto.randomUUID?.() || Date.now()}`;
+  if (!append) {
+    uploadedSealEditorRuntime.pdfDocuments.forEach((document) => { void document.destroy?.(); });
+    uploadedSealEditorRuntime.pdfDocuments.clear();
+    uploadedSealEditorRuntime.pageProxies.clear();
+    uploadedSealEditorRuntime.assetFiles.clear();
+    uploadedSealEditorRuntime.assetUrls.forEach((url) => { if (String(url).startsWith("blob:")) URL.revokeObjectURL(url); });
+    uploadedSealEditorRuntime.assetUrls.clear();
+    uploadedSealEditorRuntime.imageUrls.forEach((url) => { if (String(url).startsWith("blob:")) URL.revokeObjectURL(url); });
+    uploadedSealEditorRuntime.imageUrls.clear();
+  }
+  const incomingPages = await loadPdfJsAsset(file, assetId, finalized?.pages || []);
+  const combinedCount = (append ? uploadedSealEditorState.pages.length : 0) + incomingPages.length;
+  if (combinedCount > PDF_EDITOR_MAX_PAGES) throw new Error(`合併後超過 ${PDF_EDITOR_MAX_PAGES} 頁上限。`);
+  applyEditorRevisionFromResponse(finalized);
+  const sourceEntry = {
+    assetId,
+    kind: intent.assetKind,
+    fileName: file.name,
+    mimeType: file.type || "application/pdf",
+    sizeBytes: file.size,
+    sha256: intent.sha256
+  };
+  if (!append) {
+    uploadedSealEditorState = {
+      ...emptyUploadedSealEditorState(),
+      revisionNo: uploadedSealEditorState.revisionNo,
+      sourceFiles: [sourceEntry],
+      pages: incomingPages,
+      elements: []
+    };
+    uploadedSealEditorRuntime.undoStack = [];
+    uploadedSealEditorRuntime.redoStack = [];
+    uploadedSealEditorRuntime.selectedIds.clear();
+  } else {
+    uploadedSealEditorState.sourceFiles.push(sourceEntry);
+    uploadedSealEditorState.pages.push(...incomingPages);
+    pushUploadedEditorHistory(previousState);
+  }
+  uploadedSealEditorState.pages.forEach((page, index) => { page.order = index + 1; });
+  if (!uploadedSealEditorRuntime.currentPageId || !uploadedSealEditorState.pages.some((page) => page.pageId === uploadedSealEditorRuntime.currentPageId)) {
+    uploadedSealEditorRuntime.currentPageId = incomingPages[0]?.pageId || uploadedSealEditorState.pages[0]?.pageId || "";
+  }
+  uploadedSealPageCount = uploadedSealEditorState.pages.length;
+  syncLegacyUploadedEditorCollections();
+  await refreshUploadedEditorManifest();
+  markUploadedEditorDirty();
+  renderUploadedSealWorkbench();
+  return { assetId, pages: incomingPages };
+}
+
+function editorElementById(elementId) {
+  return uploadedSealEditorState.elements.find((element) => element.id === elementId) || null;
+}
+
+function uploadedEditorViewportRect(element) {
+  const page = uploadedSealEditorState.pages.find((item) => item.pageId === element.pageId);
+  const runtime = uploadedEditorPageRuntime(element.pageId);
+  const viewport = uploadedSealEditorRuntime.currentViewport;
+  if (!page || !runtime || !viewport) return { left: 0, top: 0, width: 1, height: 1 };
+  const unit = runtime.userUnit || 1;
+  const x1 = (page.cropBox[0] + Number(element.x || 0)) / unit;
+  const y1 = (page.cropBox[1] + Number(element.y || 0)) / unit;
+  const x2 = (page.cropBox[0] + Number(element.x || 0) + Number(element.width || 0)) / unit;
+  const y2 = (page.cropBox[1] + Number(element.y || 0) + Number(element.height || 0)) / unit;
+  const converted = viewport.convertToViewportRectangle([x1, y1, x2, y2]);
+  return {
+    left: Math.min(converted[0], converted[2]),
+    top: Math.min(converted[1], converted[3]),
+    width: Math.max(1, Math.abs(converted[2] - converted[0])),
+    height: Math.max(1, Math.abs(converted[3] - converted[1]))
+  };
+}
+
+function uploadedEditorClientPoint(clientX, clientY) {
+  const stage = document.querySelector("#uploadedPdfStage");
+  const page = currentUploadedEditorPage();
+  const runtime = page ? uploadedEditorPageRuntime(page.pageId) : null;
+  const viewport = uploadedSealEditorRuntime.currentViewport;
+  if (!stage || !page || !runtime || !viewport) return null;
+  const rect = stage.getBoundingClientRect();
+  const viewportX = ((clientX - rect.left) / Math.max(1, rect.width)) * viewport.width;
+  const viewportY = ((clientY - rect.top) / Math.max(1, rect.height)) * viewport.height;
+  const raw = viewport.convertToPdfPoint(viewportX, viewportY);
+  return {
+    x: roundEditorPoint(raw[0] * runtime.userUnit - page.cropBox[0]),
+    y: roundEditorPoint(raw[1] * runtime.userUnit - page.cropBox[1])
+  };
+}
+
+function editorDefaultElement(kind, page, point, properties = {}) {
+  const seal = selectedUploadedSeal();
+  const sealGeometry = companySealFixedGeometry(seal || properties.sealSizeType || "large_seal");
+  const sealVersionSnapshot = companySealCurrentVersionSnapshot(seal);
+  const defaults = {
+    seal: { width: sealGeometry.widthPt, height: sealGeometry.heightPt },
+    text: { width: 180, height: 24 },
+    replacement: { width: 200, height: 34 },
+    image: { width: 144, height: 96 },
+    shape: { width: 120, height: 60 },
+    checkmark: { width: 24, height: 24 },
+    highlight: { width: 180, height: 22 },
+    redaction: { width: 180, height: 32 }
+  }[kind] || { width: 72, height: 36 };
+  const width = Math.min(defaults.width, page.widthPt);
+  const height = Math.min(defaults.height, page.heightPt);
+  const zIndex = Math.max(0, ...uploadedSealEditorState.elements.filter((element) => element.pageId === page.pageId).map((element) => Number(element.zIndex || 0))) + 1;
+  return {
+    id: `editor-${kind}-${crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`,
+    pageId: page.pageId,
+    kind,
+    x: roundEditorPoint(Math.max(0, Math.min(page.widthPt - width, Number(point?.x ?? (page.widthPt - width) / 2) - width / 2))),
+    y: roundEditorPoint(Math.max(0, Math.min(page.heightPt - height, Number(point?.y ?? (page.heightPt - height) / 2) - height / 2))),
+    width: kind === "seal" ? width : roundEditorPoint(width),
+    height: kind === "seal" ? height : roundEditorPoint(height),
+    rotation: 0,
+    opacity: kind === "highlight" ? 0.42 : 1,
+    zIndex,
+    properties: {
+      text: ["text", "replacement"].includes(kind)
+        ? (document.querySelector("#uploadedSealTextInput")?.value.trim() || (kind === "replacement" ? "取代文字" : "新增文字"))
+        : "",
+      fontSize: Number(document.querySelector("#uploadedSealFontSize")?.value || 14),
+      fontFamily: PDF_EDITOR_DEFAULT_FONT_FAMILY,
+      color: kind === "highlight" ? "#fde047" : kind === "redaction" ? "#000000" : "#111827",
+      fill: kind === "redaction" ? "#000000" : kind === "replacement" ? "#ffffff" : "transparent",
+      stroke: "#ea580c",
+      strokeWidth: 2,
+      align: "left",
+      shapeType: "rectangle",
+      secure: ["replacement", "redaction"].includes(kind),
+      ...properties,
+      ...(kind === "seal" ? {
+        sealId: seal?.id || "",
+        sealName: seal?.seal_name || "公司印章",
+        sealSizeType: sealGeometry.sealSizeType,
+        sealFileId: sealVersionSnapshot.sealFileId,
+        sealFileSha256: sealVersionSnapshot.sealFileSha256,
+        physicalWidthMm: sealGeometry.widthMm,
+        physicalHeightMm: sealGeometry.heightMm,
+        aspectRatio: sealGeometry.aspectRatio,
+        sizeLocked: true
+      } : {})
+    }
+  };
+}
+
+function addUploadedEditorElement(kind, point = null, properties = {}, pageIds = null) {
+  if (!PDF_EDITOR_ALLOWED_KINDS.has(kind)) return;
+  if (uploadedSealEditorState.elements.length >= PDF_EDITOR_MAX_ELEMENTS) return showToast(`每份草稿最多 ${PDF_EDITOR_MAX_ELEMENTS} 個物件。`);
+  if (kind === "seal") {
+    const seal = selectedUploadedSeal();
+    if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇已有 current 版本的印章。");
+    const versionSnapshot = companySealCurrentVersionSnapshot(seal);
+    if (!versionSnapshot.sealFileId || !versionSnapshot.sealFileSha256) {
+      return showToast("目前印章版本缺少不可變檔案 ID 或 SHA-256，請重新整理 Seal Vault 後再放置。");
+    }
+  }
+  if (["text", "replacement"].includes(kind) && !(properties.text || document.querySelector("#uploadedSealTextInput")?.value.trim())) {
+    return showToast(kind === "replacement" ? "請先輸入取代後文字，再點選要取代的位置。" : "請先輸入要加入的文字。");
+  }
+  const targetPages = (pageIds || [currentUploadedEditorPage()?.pageId]).map((pageId) => uploadedSealEditorState.pages.find((page) => page.pageId === pageId)).filter(Boolean);
+  if (!targetPages.length) return showToast("請先上傳 PDF。");
+  let created = [];
+  commitUploadedEditorMutation((state) => {
+    created = targetPages.map((page) => editorDefaultElement(kind, page, point, properties));
+    state.elements.push(...created);
+  });
+  uploadedSealEditorRuntime.selectedIds = new Set(created.map((element) => element.id));
+  renderUploadedSealWorkbench();
+}
+
+function addUploadedStamp(scope = "current_page", placement = null) {
+  const page = currentUploadedEditorPage();
+  if (!page) return showToast("請先上傳 PDF。");
+  const point = placement ? { x: placement.x, y: placement.y } : null;
+  const pageIds = scope === "all_pages" ? uploadedSealEditorState.pages.map((item) => item.pageId) : [page.pageId];
+  addUploadedEditorElement("seal", point, {}, pageIds);
+}
+
+function addUploadedStampAtPoint(clientX, clientY) {
+  const point = uploadedEditorClientPoint(clientX, clientY);
+  const scope = document.querySelector("#uploadedSealStampType")?.value || "current_page";
+  if (point) addUploadedStamp(scope, point);
+}
+
+function addUploadedTextAtPoint(clientX = null, clientY = null) {
+  const point = clientX == null ? null : uploadedEditorClientPoint(clientX, clientY);
+  const text = document.querySelector("#uploadedSealTextInput")?.value.trim() || "";
+  if (!text) return showToast("請先輸入要加入的文字。");
+  addUploadedEditorElement(uploadedSealPlacementMode === "replacement" ? "replacement" : "text", point, { text });
+}
+
+function uploadedEditorSealPreviewBinding(properties = {}) {
+  const sealId = String(properties.sealId || properties.seal_id || "");
+  const sealFileId = String(properties.sealFileId || properties.seal_file_id || "");
+  const sealFileSha256 = String(properties.sealFileSha256 || properties.seal_file_sha256 || "");
+  return {
+    sealId,
+    sealFileId,
+    sealFileSha256,
+    cacheKey: `${sealId}:${sealFileId}:${sealFileSha256}`
+  };
+}
+
+function rememberUploadedEditorSavedSealBindings(state) {
+  if (!state || !Array.isArray(state.elements)) return;
+  uploadedSealEditorRuntime.savedSealPreviewBindings = new Set(
+    state.elements
+      .filter((element) => element?.kind === "seal")
+      .map((element) => uploadedEditorSealPreviewBinding(element.properties || {}))
+      .filter((binding) => binding.sealId && binding.sealFileId && binding.sealFileSha256)
+      .map((binding) => binding.cacheKey)
+  );
+}
+
+function revokeUploadedEditorSealPreview(cacheKey, entry = uploadedSealEditorRuntime.sealPreviewUrls.get(cacheKey)) {
+  if (!entry) return;
+  window.clearTimeout(entry.revokeTimer || 0);
+  if (String(entry.url || "").startsWith("blob:")) URL.revokeObjectURL(entry.url);
+  if (uploadedSealEditorRuntime.sealPreviewUrls.get(cacheKey) === entry) {
+    uploadedSealEditorRuntime.sealPreviewUrls.delete(cacheKey);
+  }
+}
+
+function activeUploadedEditorSealPreviewUrl(bindingOrProperties = {}) {
+  const binding = bindingOrProperties.cacheKey
+    ? bindingOrProperties
+    : uploadedEditorSealPreviewBinding(bindingOrProperties);
+  const entry = uploadedSealEditorRuntime.sealPreviewUrls.get(binding.cacheKey);
+  if (!entry?.url) return "";
+  if (!Number.isFinite(Number(entry.expiresAt)) || Number(entry.expiresAt) <= Date.now()) {
+    revokeUploadedEditorSealPreview(binding.cacheKey, entry);
+    return "";
+  }
+  return entry.url;
+}
+
+function cacheUploadedEditorSealPreview(binding, url, expiresAt) {
+  const previous = uploadedSealEditorRuntime.sealPreviewUrls.get(binding.cacheKey);
+  if (previous) revokeUploadedEditorSealPreview(binding.cacheKey, previous);
+  const cappedExpiresAt = Math.min(Number(expiresAt || 0), Date.now() + 5 * 60 * 1000);
+  const entry = { url, expiresAt: cappedExpiresAt, revokeTimer: 0 };
+  uploadedSealEditorRuntime.sealPreviewUrls.set(binding.cacheKey, entry);
+  entry.revokeTimer = window.setTimeout(() => {
+    revokeUploadedEditorSealPreview(binding.cacheKey, entry);
+    renderUploadedEditorSvgLayer();
+  }, Math.max(0, cappedExpiresAt - Date.now()));
+  return entry;
+}
+
+async function loadSealPreviewUrl(sealId, sealFileId = "", sealFileSha256 = "") {
+  if (!sealId) return "";
+  const binding = uploadedEditorSealPreviewBinding({ sealId, sealFileId, sealFileSha256 });
+  const hasAnyFileBinding = Boolean(binding.sealFileId || binding.sealFileSha256);
+  if (hasAnyFileBinding && !(binding.sealFileId && binding.sealFileSha256)) return "";
+  const activeUrl = activeUploadedEditorSealPreviewUrl(binding);
+  if (activeUrl) return activeUrl;
+  const cached = uploadedSealEditorRuntime.sealPreviewUrls.get(binding.cacheKey);
+  if (cached?.promise) return cached.promise;
+  let pendingObjectUrl = "";
+  const promise = (async () => {
+    const headers = { "Cache-Control": "no-store" };
+    if (isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
+    const query = new URLSearchParams();
+    if (binding.sealFileId) {
+      query.set("fileId", binding.sealFileId);
+      query.set("fileSha256", binding.sealFileSha256);
+      const documentId = String(uploadedSealEditorRuntime.documentId || "");
+      const revisionId = String(uploadedSealEditorRuntime.revisionId || "");
+      // Historical versions are disclosed only when the saved revision proves
+      // that it references this exact seal file. A newly placed current version
+      // can still be verified by ID + hash before its autosave completes.
+      if (documentId && revisionId && uploadedSealEditorRuntime.savedSealPreviewBindings.has(binding.cacheKey)) {
+        query.set("documentId", documentId);
+        query.set("revisionId", revisionId);
+      }
+    }
+    const queryString = query.toString();
+    const suffix = queryString ? `?${queryString}` : "";
+    const response = await fetch(`${backendApiBase}/company-seals/${encodeURIComponent(binding.sealId)}/editor-preview${suffix}`, { headers, cache: "no-store" });
+    if (!response.ok) throw new Error("seal_preview_unavailable");
+    const contentType = response.headers.get("Content-Type") || "";
+    let url = "";
+    const previewReceivedAt = Date.now();
+    const maximumPreviewExpiry = previewReceivedAt + 5 * 60 * 1000;
+    let expiresAt = maximumPreviewExpiry;
+    if (contentType.includes("application/json")) {
+      const result = await response.json();
+      url = result.url || result.preview_url || "";
+      const parsedExpiry = Date.parse(result.expires_at || result.expiresAt || "");
+      if (Number.isFinite(parsedExpiry) && parsedExpiry > previewReceivedAt) expiresAt = Math.min(parsedExpiry, maximumPreviewExpiry);
+    } else {
+      url = URL.createObjectURL(await response.blob());
+      pendingObjectUrl = url;
+      const ttlSeconds = Number(response.headers.get("X-EDOC-Preview-Expires-In"));
+      if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+        expiresAt = previewReceivedAt + Math.min(300, ttlSeconds) * 1000;
+      } else {
+        const parsedExpiry = Date.parse(response.headers.get("Expires") || "");
+        if (Number.isFinite(parsedExpiry) && parsedExpiry > previewReceivedAt) expiresAt = Math.min(parsedExpiry, maximumPreviewExpiry);
+      }
+    }
+    cacheUploadedEditorSealPreview(binding, url, expiresAt);
+    pendingObjectUrl = "";
+    renderUploadedEditorSvgLayer();
+    return url;
+  })().catch(() => {
+    if (String(pendingObjectUrl).startsWith("blob:")) URL.revokeObjectURL(pendingObjectUrl);
+    uploadedSealEditorRuntime.sealPreviewUrls.set(binding.cacheKey, { url: "", expiresAt: Date.now() + 30000 });
+    return "";
+  });
+  uploadedSealEditorRuntime.sealPreviewUrls.set(binding.cacheKey, { promise, expiresAt: 0, url: "" });
+  return promise;
+}
+
+function svgEditorNode(name, attributes = {}) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
+  return node;
+}
+
+function appendEditorElementVisual(group, element, rect) {
+  const selected = uploadedSealEditorRuntime.selectedIds.has(element.id);
+  const properties = element.properties || {};
+  if (element.kind === "seal") {
+    const previewBinding = uploadedEditorSealPreviewBinding(properties);
+    const preview = activeUploadedEditorSealPreviewUrl(previewBinding);
+    if (preview) group.append(svgEditorNode("image", { href: preview, x: rect.left, y: rect.top, width: rect.width, height: rect.height, preserveAspectRatio: "xMidYMid meet" }));
+    else {
+      group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, rx: 5, class: "editor-seal-placeholder" }));
+      const label = svgEditorNode("text", { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, "text-anchor": "middle", "dominant-baseline": "middle", class: "editor-seal-label" });
+      label.textContent = properties.sealName || "印章預覽";
+      group.append(label);
+      void loadSealPreviewUrl(previewBinding.sealId, previewBinding.sealFileId, previewBinding.sealFileSha256);
+    }
+  } else if (["text", "replacement"].includes(element.kind)) {
+    if (element.kind === "replacement") group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, fill: properties.fill || "#ffffff", class: "editor-replacement-base" }));
+    const fontSize = Math.max(8, Number(properties.fontSize || 14) * uploadedSealEditorRuntime.zoom);
+    const text = svgEditorNode("text", { x: rect.left + 3, y: rect.top + Math.min(rect.height - 2, fontSize), fill: properties.color || "#111827", "font-size": fontSize, class: "editor-text-content" });
+    text.textContent = properties.text || "文字";
+    group.append(text);
+  } else if (element.kind === "image") {
+    const url = uploadedSealEditorRuntime.imageUrls.get(properties.assetId) || "";
+    if (url) group.append(svgEditorNode("image", { href: url, x: rect.left, y: rect.top, width: rect.width, height: rect.height, preserveAspectRatio: "none" }));
+    else group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, class: "editor-image-placeholder" }));
+  } else if (element.kind === "shape") {
+    if (properties.shapeType === "line") group.append(svgEditorNode("line", { x1: rect.left, y1: rect.top + rect.height / 2, x2: rect.left + rect.width, y2: rect.top + rect.height / 2, stroke: properties.stroke || "#ea580c", "stroke-width": properties.strokeWidth || 2 }));
+    else group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, fill: properties.fill || "transparent", stroke: properties.stroke || "#ea580c", "stroke-width": properties.strokeWidth || 2 }));
+  } else if (element.kind === "checkmark") {
+    group.append(svgEditorNode("path", { d: `M ${rect.left + rect.width * 0.12} ${rect.top + rect.height * 0.52} L ${rect.left + rect.width * 0.42} ${rect.top + rect.height * 0.82} L ${rect.left + rect.width * 0.9} ${rect.top + rect.height * 0.12}`, fill: "none", stroke: properties.color || "#166534", "stroke-width": Math.max(3, rect.width * 0.1), "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  } else {
+    group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, rx: element.kind === "highlight" ? 2 : 0, fill: element.kind === "redaction" ? properties.fill || "#000" : properties.color || "#fde047", class: `editor-${element.kind}` }));
+  }
+  if (selected) {
+    group.append(svgEditorNode("rect", { x: rect.left - 2, y: rect.top - 2, width: rect.width + 4, height: rect.height + 4, class: "editor-selection-outline" }));
+    if (uploadedSealEditorRuntime.selectedIds.size === 1) {
+      if (element.kind !== "seal") {
+        group.append(svgEditorNode("circle", { cx: rect.left + rect.width, cy: rect.top + rect.height, r: 22, class: "editor-handle-hit", "data-editor-handle": "resize", "data-editor-element-id": element.id }));
+        group.append(svgEditorNode("circle", { cx: rect.left + rect.width, cy: rect.top + rect.height, r: 7, class: "editor-resize-handle", "data-editor-handle": "resize", "data-editor-element-id": element.id }));
+      }
+      group.append(svgEditorNode("line", { x1: rect.left + rect.width / 2, y1: rect.top, x2: rect.left + rect.width / 2, y2: rect.top - 18, class: "editor-rotate-stem" }));
+      group.append(svgEditorNode("circle", { cx: rect.left + rect.width / 2, cy: rect.top - 22, r: 22, class: "editor-handle-hit", "data-editor-handle": "rotate", "data-editor-element-id": element.id }));
+      group.append(svgEditorNode("circle", { cx: rect.left + rect.width / 2, cy: rect.top - 22, r: 7, class: "editor-rotate-handle", "data-editor-handle": "rotate", "data-editor-element-id": element.id }));
+    }
+  }
+}
+
+function renderUploadedEditorSvgLayer() {
+  const svg = document.querySelector("#uploadedEditorSvgLayer");
+  const viewport = uploadedSealEditorRuntime.currentViewport;
+  const page = currentUploadedEditorPage();
+  if (!svg || !viewport || !page) {
+    if (svg) svg.replaceChildren();
+    return;
+  }
+  svg.setAttribute("viewBox", `0 0 ${viewport.width} ${viewport.height}`);
+  svg.setAttribute("width", String(viewport.width));
+  svg.setAttribute("height", String(viewport.height));
+  svg.replaceChildren();
+  uploadedSealEditorRuntime.guides.forEach((guide) => {
+    if (guide.axis === "x") {
+      const guideElement = { pageId: page.pageId, x: guide.value, y: 0, width: 0, height: page.heightPt };
+      const rect = uploadedEditorViewportRect(guideElement);
+      svg.append(svgEditorNode("line", { x1: rect.left, y1: 0, x2: rect.left, y2: viewport.height, class: "editor-alignment-guide" }));
+    } else {
+      const guideElement = { pageId: page.pageId, x: 0, y: guide.value, width: page.widthPt, height: 0 };
+      const rect = uploadedEditorViewportRect(guideElement);
+      svg.append(svgEditorNode("line", { x1: 0, y1: rect.top, x2: viewport.width, y2: rect.top, class: "editor-alignment-guide" }));
+    }
+  });
+  uploadedSealEditorState.elements
+    .filter((element) => element.pageId === page.pageId)
+    .sort(compareEditorElementsForLayer)
+    .forEach((element) => {
+      const rect = uploadedEditorViewportRect(element);
+      const group = svgEditorNode("g", {
+        "data-editor-element-id": element.id,
+        class: `editor-svg-element kind-${element.kind}${uploadedSealEditorRuntime.selectedIds.has(element.id) ? " selected" : ""}`,
+        opacity: Math.max(0.05, Math.min(1, Number(element.opacity ?? 1))),
+        transform: Number(element.rotation || 0) ? `rotate(${-Number(element.rotation || 0)} ${rect.left + rect.width / 2} ${rect.top + rect.height / 2})` : ""
+      });
+      appendEditorElementVisual(group, element, rect);
+      svg.append(group);
+    });
+}
+
+function calculateUploadedEditorFitScale(pageRuntime, rotation) {
+  const scroll = document.querySelector("#uploadedEditorScroll");
+  if (!scroll || !pageRuntime) return 1;
+  const baseViewport = pageRuntime.proxy.getViewport({ scale: 1, rotation });
+  const availableWidth = Math.max(280, scroll.clientWidth - 34);
+  const availableHeight = Math.max(360, Math.min(window.innerHeight * 0.72, 920));
+  return Math.max(0.25, Math.min(2, availableWidth / baseViewport.width, availableHeight / baseViewport.height));
+}
+
+async function renderUploadedPdfPage() {
+  const canvas = document.querySelector("#uploadedPdfCanvas");
+  const stage = document.querySelector("#uploadedPdfStage");
+  const empty = document.querySelector("#uploadedPdfEmpty");
+  const page = currentUploadedEditorPage();
+  const runtime = page ? uploadedEditorPageRuntime(page.pageId) : null;
+  if (!canvas || !stage) return;
+  if (uploadedSealEditorRuntime.reviewMode === "changes") {
+    canvas.hidden = true;
+    stage.hidden = true;
+    renderUploadedEditorSvgLayer();
+    renderUploadedEditorChangeSummary();
+    return;
+  }
+  stage.hidden = false;
+  document.querySelector("#uploadedEditorChangeSummaryPanel")?.toggleAttribute("hidden", true);
+  if (uploadedSealEditorRuntime.reviewMode === "prepared") {
+    const preparedDocument = await ensureUploadedPreparedPdfDocument();
+    if (preparedDocument) {
+      const preparedPage = await preparedDocument.getPage(Math.max(1, Math.min(preparedDocument.numPages, currentUploadedEditorPageIndex() + 1)));
+      return renderUploadedReadOnlyPdfProxy(preparedPage, preparedPage.rotate, "送簽確認版");
+    }
+  }
+  if (uploadedSealEditorRuntime.reviewMode === "original" && runtime) {
+    return renderUploadedReadOnlyPdfProxy(runtime.proxy, runtime.proxy.rotate, "不可變原稿");
+  }
+  if (!page || !runtime) {
+    canvas.hidden = true;
+    empty?.toggleAttribute("hidden", false);
+    stage.style.removeProperty("width");
+    stage.style.removeProperty("height");
+    uploadedSealEditorRuntime.currentViewport = null;
+    renderUploadedEditorSvgLayer();
+    return;
+  }
+  canvas.hidden = false;
+  empty?.toggleAttribute("hidden", true);
+  if (uploadedSealEditorRuntime.fitPage) uploadedSealEditorRuntime.zoom = calculateUploadedEditorFitScale(runtime, page.rotation);
+  const viewport = runtime.proxy.getViewport({ scale: uploadedSealEditorRuntime.zoom, rotation: page.rotation });
+  uploadedSealEditorRuntime.currentViewport = viewport;
+  uploadedSealEditorRuntime.currentPageProxy = runtime.proxy;
+  const outputScale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  canvas.width = Math.floor(viewport.width * outputScale);
+  canvas.height = Math.floor(viewport.height * outputScale);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  stage.style.width = `${viewport.width}px`;
+  stage.style.height = `${viewport.height}px`;
+  const context = canvas.getContext("2d", { alpha: false });
+  uploadedSealEditorRuntime.renderTask?.cancel?.();
+  const nonce = ++uploadedSealEditorRuntime.renderNonce;
+  const renderTask = runtime.proxy.render({ canvasContext: context, viewport, transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0], annotationMode: window.pdfjsLib.AnnotationMode?.DISABLE ?? 0 });
+  uploadedSealEditorRuntime.renderTask = renderTask;
+  try {
+    await renderTask.promise;
+  } catch (error) {
+    if (error?.name !== "RenderingCancelledException") showToast("PDF 頁面顯示失敗，請重新整理後再試。");
+  }
+  if (nonce !== uploadedSealEditorRuntime.renderNonce) return;
+  renderUploadedEditorSvgLayer();
+  const zoomInput = document.querySelector("#uploadedEditorZoom");
+  const zoomOutput = document.querySelector("#uploadedEditorZoomValue");
+  if (zoomInput) zoomInput.value = String(Math.round(uploadedSealEditorRuntime.zoom * 100));
+  if (zoomOutput) zoomOutput.textContent = `${Math.round(uploadedSealEditorRuntime.zoom * 100)}%`;
+}
+
+async function renderUploadedReadOnlyPdfProxy(proxy, rotation, label) {
+  const canvas = document.querySelector("#uploadedPdfCanvas");
+  const stage = document.querySelector("#uploadedPdfStage");
+  const empty = document.querySelector("#uploadedPdfEmpty");
+  if (!canvas || !stage || !proxy) return;
+  empty?.toggleAttribute("hidden", true);
+  canvas.hidden = false;
+  const runtime = { proxy };
+  const scale = uploadedSealEditorRuntime.fitPage ? calculateUploadedEditorFitScale(runtime, rotation) : uploadedSealEditorRuntime.zoom;
+  const viewport = proxy.getViewport({ scale, rotation });
+  const ratio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  canvas.width = Math.floor(viewport.width * ratio);
+  canvas.height = Math.floor(viewport.height * ratio);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  stage.style.width = `${viewport.width}px`;
+  stage.style.height = `${viewport.height}px`;
+  uploadedSealEditorRuntime.currentViewport = viewport;
+  uploadedSealEditorRuntime.renderTask?.cancel?.();
+  const task = proxy.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0], annotationMode: window.pdfjsLib.AnnotationMode?.DISABLE ?? 0 });
+  uploadedSealEditorRuntime.renderTask = task;
+  try { await task.promise; } catch (error) { if (error?.name !== "RenderingCancelledException") throw error; }
+  const svg = document.querySelector("#uploadedEditorSvgLayer");
+  svg?.replaceChildren();
+  const geometry = document.querySelector("#uploadedPdfGeometryLabel");
+  if (geometry) geometry.textContent = `${label} · 唯讀`;
+}
+
+async function loadUploadedEditorChangeSummary() {
+  if (!uploadedSealEditorRuntime.documentId) return null;
+  const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/editor-change-summary`);
+  uploadedSealEditorRuntime.changeSummary = result;
+  uploadedSealEditorRuntime.preparedUrl = uploadedSealEditorRuntime.preparedUrl || editorPreparedAuthorizedUrl(result);
+  renderUploadedEditorChangeSummary();
+  return result;
+}
+
+async function ensureUploadedPreparedPdfDocument() {
+  if (uploadedSealEditorRuntime.preparedPdfDocument) return uploadedSealEditorRuntime.preparedPdfDocument;
+  if (!uploadedSealEditorRuntime.preparedUrl) await loadUploadedEditorChangeSummary();
+  if (!uploadedSealEditorRuntime.preparedUrl) {
+    showToast("尚未產生可檢視的送簽確認版。");
+    uploadedSealEditorRuntime.reviewMode = "edited";
+    return null;
+  }
+  const blob = await fetchEditorAuthorizedBlob(uploadedSealEditorRuntime.preparedUrl);
+  const pdfjsLib = await ensurePdfJsLibrary();
+  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), enableXfa: false, isEvalSupported: false, useSystemFonts: true });
+  uploadedSealEditorRuntime.preparedPdfDocument = await loadingTask.promise;
+  return uploadedSealEditorRuntime.preparedPdfDocument;
+}
+
+const editorChangeKindLabels = Object.freeze({
+  seal: "印章",
+  text: "新增文字",
+  replacement: "文字取代",
+  image: "圖片",
+  shape: "形狀",
+  checkmark: "勾選",
+  highlight: "螢光標記",
+  redaction: "安全遮蔽"
+});
+
+const editorPageOperationLabels = Object.freeze({
+  imported: "匯入頁面",
+  deleted: "刪除頁面",
+  reordered: "重排頁面",
+  rotated: "旋轉頁面"
+});
+
+function positiveEditorSummaryNumber(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function normalizeEditorPageOperations(changePayload) {
+  const source = changePayload?.pageOperations || changePayload?.page_operations || {};
+  if (Array.isArray(source)) {
+    return source.map((item) => {
+      const operation = String(item?.operation || item?.type || item?.kind || "").toLowerCase();
+      return editorPageOperationLabels[operation] ? { ...item, operation } : null;
+    }).filter(Boolean);
+  }
+  if (!source || typeof source !== "object") return [];
+  return Object.keys(editorPageOperationLabels).flatMap((operation) => {
+    const entries = source[operation];
+    if (!Array.isArray(entries)) return [];
+    return entries.map((item) => ({ ...(item && typeof item === "object" ? item : {}), operation }));
+  });
+}
+
+function editorSummaryPageNumber(change, pageId, changePayload, pageOperations) {
+  const direct = positiveEditorSummaryNumber(change?.page ?? change?.pageNumber ?? change?.page_no ?? change?.order);
+  if (direct) return direct;
+  const operation = pageOperations.find((item) => pageId && String(item.pageId || item.page_id || "") === pageId);
+  const operationOrder = positiveEditorSummaryNumber(operation?.toOrder ?? operation?.to_order ?? operation?.fromOrder ?? operation?.from_order);
+  if (operationOrder) return operationOrder;
+  const pageOrder = Array.isArray(changePayload?.pageOrder) ? changePayload.pageOrder : Array.isArray(changePayload?.page_order) ? changePayload.page_order : [];
+  const responseIndex = pageOrder.findIndex((item) => String(item || "") === pageId);
+  if (responseIndex >= 0) return responseIndex + 1;
+  const stateIndex = uploadedSealEditorState.pages.findIndex((item) => String(item.pageId || "") === pageId);
+  return stateIndex >= 0 ? stateIndex + 1 : null;
+}
+
+function normalizeEditorPageChanges(summary) {
+  const changePayload = summary?.changes;
+  const structuredPayload = changePayload && !Array.isArray(changePayload) && typeof changePayload === "object" ? changePayload : {};
+  const pageOperations = normalizeEditorPageOperations(structuredPayload);
+  const rawByPage = structuredPayload.byPage ?? structuredPayload.by_page;
+  let entries = [];
+  if (Array.isArray(rawByPage)) {
+    entries = rawByPage;
+  } else if (rawByPage && typeof rawByPage === "object") {
+    entries = Object.entries(rawByPage).map(([pageId, value]) => ({
+      pageId,
+      ...(value && typeof value === "object" ? value : {})
+    }));
+  } else if (Array.isArray(changePayload)) {
+    entries = changePayload;
+  }
+  if (!entries.length) {
+    entries = uploadedSealEditorState.pages.map((page, index) => {
+      const elements = uploadedSealEditorState.elements.filter((element) => element.pageId === page.pageId);
+      const changes = {};
+      elements.forEach((element) => { changes[element.kind] = (changes[element.kind] || 0) + 1; });
+      return { pageId: page.pageId, page: index + 1, changes };
+    });
+  }
+  const normalized = entries.map((entry) => {
+    const change = entry && typeof entry === "object" ? entry : {};
+    const pageId = String(change.pageId || change.page_id || "");
+    const rawCounts = change.changes && typeof change.changes === "object" && !Array.isArray(change.changes)
+      ? change.changes
+      : change.counts && typeof change.counts === "object" && !Array.isArray(change.counts)
+        ? change.counts
+        : change;
+    const counts = {};
+    Object.keys(editorChangeKindLabels).forEach((kind) => {
+      const count = Number(rawCounts?.[kind]);
+      if (Number.isFinite(count) && count > 0) counts[kind] = Math.floor(count);
+    });
+    const legacyKinds = Array.isArray(change.kinds || change.types || change.elementKinds)
+      ? (change.kinds || change.types || change.elementKinds).filter((kind) => editorChangeKindLabels[kind])
+      : [];
+    const operationNames = Array.isArray(change.operations)
+      ? [...new Set(change.operations.map((item) => String(item || "").toLowerCase()).filter((item) => editorPageOperationLabels[item]))]
+      : pageOperations.filter((item) => pageId && String(item.pageId || item.page_id || "") === pageId).map((item) => item.operation);
+    const countedTotal = Object.values(counts).reduce((total, count) => total + count, 0);
+    const legacyTotal = Number(change.objectCount ?? change.object_count ?? change.count);
+    return {
+      page: editorSummaryPageNumber(change, pageId, structuredPayload, pageOperations),
+      counts,
+      kinds: Object.keys(counts).length ? Object.keys(counts) : legacyKinds,
+      objectCount: countedTotal || (Number.isFinite(legacyTotal) && legacyTotal > 0 ? Math.floor(legacyTotal) : 0),
+      operations: operationNames
+    };
+  }).filter((item) => item.objectCount > 0 || item.operations.length > 0);
+  return { changes: normalized, pageOperations };
+}
+
+function editorPageOperationSummary(operation) {
+  const label = editorPageOperationLabels[operation.operation];
+  if (!label) return "";
+  const fromOrder = positiveEditorSummaryNumber(operation.fromOrder ?? operation.from_order);
+  const toOrder = positiveEditorSummaryNumber(operation.toOrder ?? operation.to_order);
+  if (operation.operation === "imported") return `${label}${toOrder ? ` · 新增為第 ${toOrder} 頁` : ""}`;
+  if (operation.operation === "deleted") return `${label}${fromOrder ? ` · 原第 ${fromOrder} 頁` : ""}`;
+  if (operation.operation === "reordered") {
+    return `${label}${fromOrder && toOrder ? ` · 第 ${fromOrder} 頁移至第 ${toOrder} 頁` : ""}`;
+  }
+  const currentOrder = toOrder || fromOrder;
+  const fromRotation = Number(operation.fromRotation ?? operation.from_rotation);
+  const toRotation = Number(operation.toRotation ?? operation.to_rotation);
+  const rotationDetail = Number.isFinite(fromRotation) && Number.isFinite(toRotation)
+    ? ` · ${normalizeEditorDegrees(fromRotation)}° → ${normalizeEditorDegrees(toRotation)}°`
+    : "";
+  return `${label}${currentOrder ? ` · 第 ${currentOrder} 頁` : ""}${rotationDetail}`;
+}
+
+function renderUploadedEditorChangeSummary() {
+  const panel = document.querySelector("#uploadedEditorChangeSummaryPanel");
+  if (!panel || uploadedSealEditorRuntime.reviewMode !== "changes") return;
+  panel.hidden = false;
+  const summary = uploadedSealEditorRuntime.changeSummary || {};
+  const normalized = normalizeEditorPageChanges(summary);
+  const pageChangeHtml = normalized.changes.length ? `<ol>${normalized.changes.map((change) => {
+    const pageLabel = change.page ? `第 ${change.page} 頁` : "已異動頁面";
+    const kinds = change.kinds.map((kind) => editorChangeKindLabels[kind]).filter(Boolean);
+    const operations = change.operations.map((operation) => editorPageOperationLabels[operation]).filter(Boolean);
+    const details = [];
+    if (change.objectCount) details.push(`${change.objectCount} 個編輯物件${kinds.length ? `（${kinds.join("、")}）` : ""}`);
+    if (operations.length) details.push(operations.join("、"));
+    return `<li><strong>${pageLabel}</strong> · ${escapeDraftHtml(details.join(" · "))}</li>`;
+  }).join("")}</ol>` : `<p class="empty-text">目前沒有編輯變更。</p>`;
+  const operationItems = normalized.pageOperations.map(editorPageOperationSummary).filter(Boolean);
+  const pageOperationHtml = operationItems.length
+    ? `<h5>頁面整理</h5><ul>${operationItems.map((item) => `<li>${escapeDraftHtml(item)}</li>`).join("")}</ul>`
+    : "";
+  panel.innerHTML = `<h4>按頁變更清單</h4><p>此處只顯示頁碼、類型與物件數，不顯示公文文字、檔名或個資。</p>${pageChangeHtml}${pageOperationHtml}`;
+}
+
+async function showUploadedEditorReview(mode) {
+  if (!["original", "edited", "prepared", "changes"].includes(mode)) return;
+  uploadedSealEditorRuntime.reviewMode = mode;
+  document.querySelectorAll("[data-editor-review]").forEach((button) => button.classList.toggle("active", button.dataset.editorReview === mode));
+  if (mode === "changes" && !uploadedSealEditorRuntime.changeSummary) {
+    try { await loadUploadedEditorChangeSummary(); } catch (error) { showToast(`變更清單載入失敗：${error.message}`); }
+  }
+  await renderUploadedPdfPage();
+}
+
+async function renderUploadedEditorThumbnail(pageId, canvas) {
+  const runtime = uploadedEditorPageRuntime(pageId);
+  const page = uploadedSealEditorState.pages.find((item) => item.pageId === pageId);
+  if (!runtime || !page || canvas.dataset.rendered === `${page.rotation}`) return;
+  const base = runtime.proxy.getViewport({ scale: 1, rotation: page.rotation });
+  const viewport = runtime.proxy.getViewport({ scale: Math.min(0.24, 116 / Math.max(1, base.width)), rotation: page.rotation });
+  const ratio = Math.min(1.5, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(viewport.width * ratio);
+  canvas.height = Math.floor(viewport.height * ratio);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  try {
+    await runtime.proxy.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0], annotationMode: window.pdfjsLib.AnnotationMode?.DISABLE ?? 0 }).promise;
+    canvas.dataset.rendered = String(page.rotation);
+  } catch (error) {
+    canvas.dataset.rendered = "error";
+  }
+}
+
+function renderUploadedEditorThumbnails() {
+  const list = document.querySelector("#uploadedPdfThumbnailList");
+  if (!list) return;
+  list.innerHTML = uploadedSealEditorState.pages.length
+    ? uploadedSealEditorState.pages.map((page, index) => `<button class="pdf-editor-thumbnail ${page.pageId === uploadedSealEditorRuntime.currentPageId ? "active" : ""}" type="button" draggable="true" data-page-id="${escapeDraftHtml(page.pageId)}"><canvas aria-hidden="true"></canvas><span>${index + 1}</span><small>${Math.round(page.widthPt)} × ${Math.round(page.heightPt)} pt${page.rotation ? ` · ${page.rotation}°` : ""}</small></button>`).join("")
+    : `<p class="empty-text">尚未載入頁面</p>`;
+  list.querySelectorAll("[data-page-id]").forEach((button) => {
+    button.addEventListener("click", () => setUploadedSealPage(button.dataset.pageId));
+    button.addEventListener("dragstart", (event) => event.dataTransfer?.setData("text/page-id", button.dataset.pageId));
+    button.addEventListener("dragover", (event) => event.preventDefault());
+    button.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const sourceId = event.dataTransfer?.getData("text/page-id");
+      reorderUploadedEditorPage(sourceId, button.dataset.pageId);
+    });
+  });
+  uploadedSealEditorRuntime.thumbnailObserver?.disconnect?.();
+  uploadedSealEditorRuntime.thumbnailObserver = new IntersectionObserver((entries) => {
+    entries.filter((entry) => entry.isIntersecting).forEach((entry) => {
+      const button = entry.target.closest("[data-page-id]");
+      if (button) void renderUploadedEditorThumbnail(button.dataset.pageId, entry.target);
+      uploadedSealEditorRuntime.thumbnailObserver?.unobserve(entry.target);
+    });
+  }, { root: list, rootMargin: "180px" });
+  list.querySelectorAll("canvas").forEach((canvas) => uploadedSealEditorRuntime.thumbnailObserver.observe(canvas));
+}
+
+function setUploadedSealPage(page) {
+  if (!uploadedSealEditorState.pages.length) return;
+  let pageId = "";
+  if (typeof page === "string" && uploadedSealEditorState.pages.some((item) => item.pageId === page)) pageId = page;
+  else {
+    const index = Math.max(0, Math.min(uploadedSealEditorState.pages.length - 1, Number(page || 1) - 1));
+    pageId = uploadedSealEditorState.pages[index].pageId;
+  }
+  uploadedSealEditorRuntime.currentPageId = pageId;
+  uploadedSealEditorRuntime.selectedIds = new Set([...uploadedSealEditorRuntime.selectedIds].filter((id) => editorElementById(id)?.pageId === pageId));
+  syncLegacyUploadedEditorCollections();
+  renderUploadedSealWorkbench();
+}
+
+function setUploadedEditorMode(mode) {
+  if (!['general', 'advanced'].includes(mode)) return;
+  uploadedSealEditorRuntime.mode = mode;
+  const editor = document.querySelector("#uploadedPdfEditor");
+  if (editor) editor.dataset.editorMode = mode;
+  document.querySelectorAll("[data-editor-mode]").forEach((button) => {
+    if (!button.matches("button")) return;
+    const active = button.dataset.editorMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  if (mode === "general" && !["select", "seal", "text"].includes(uploadedSealEditorRuntime.tool)) setUploadedEditorTool("select");
+  renderUploadedSealWorkbench();
+}
+
+function setUploadedEditorTool(tool) {
+  if (!["select", ...PDF_EDITOR_ALLOWED_KINDS].includes(tool)) return;
+  if (uploadedSealEditorRuntime.mode === "general" && !["select", "seal", "text"].includes(tool)) return;
+  uploadedSealEditorRuntime.tool = tool;
+  uploadedSealPlacementMode = tool;
+  document.querySelectorAll("[data-editor-tool]").forEach((button) => button.classList.toggle("active", button.dataset.editorTool === tool));
+  if (tool === "image") document.querySelector("#uploadedEditorImageInput")?.click();
+  renderUploadedSealWorkbench();
+}
+
+function setUploadedEditorZoom(value, { fit = false } = {}) {
+  uploadedSealEditorRuntime.fitPage = fit;
+  if (!fit) uploadedSealEditorRuntime.zoom = Math.max(0.25, Math.min(3, Number(value || 1)));
+  void renderUploadedPdfPage();
+}
+
+function snapUploadedEditorPosition(element, x, y) {
+  const page = uploadedSealEditorState.pages.find((item) => item.pageId === element.pageId);
+  if (!page) return { x, y, guides: [] };
+  const candidatesX = [0, page.widthPt / 2 - element.width / 2, page.widthPt - element.width];
+  const candidatesY = [0, page.heightPt / 2 - element.height / 2, page.heightPt - element.height];
+  uploadedSealEditorState.elements.filter((item) => item.pageId === element.pageId && item.id !== element.id).forEach((item) => {
+    candidatesX.push(item.x, item.x + item.width, item.x + item.width / 2 - element.width / 2);
+    candidatesY.push(item.y, item.y + item.height, item.y + item.height / 2 - element.height / 2);
+  });
+  let snappedX = x;
+  let snappedY = y;
+  const guides = [];
+  const nearestX = candidatesX.sort((a, b) => Math.abs(a - x) - Math.abs(b - x))[0];
+  const nearestY = candidatesY.sort((a, b) => Math.abs(a - y) - Math.abs(b - y))[0];
+  if (Math.abs(nearestX - x) <= 3) { snappedX = nearestX; guides.push({ axis: "x", value: nearestX + element.width / 2 }); }
+  if (Math.abs(nearestY - y) <= 3) { snappedY = nearestY; guides.push({ axis: "y", value: nearestY + element.height / 2 }); }
+  return { x: snappedX, y: snappedY, guides };
+}
+
+function selectUploadedEditorElement(elementId, additive = false) {
+  if (!additive) uploadedSealEditorRuntime.selectedIds.clear();
+  if (elementId) {
+    if (additive && uploadedSealEditorRuntime.selectedIds.has(elementId)) uploadedSealEditorRuntime.selectedIds.delete(elementId);
+    else uploadedSealEditorRuntime.selectedIds.add(elementId);
+  }
+  renderUploadedEditorSvgLayer();
+  renderUploadedEditorProperties();
+}
+
+function beginUploadedEditorPointer(event) {
+  if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.reviewMode !== "edited") return;
+  if (event.pointerType === "touch") {
+    uploadedSealEditorRuntime.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (uploadedSealEditorRuntime.touchPointers.size === 2) {
+      const points = [...uploadedSealEditorRuntime.touchPointers.values()];
+      uploadedSealEditorRuntime.pinchStartDistance = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
+      uploadedSealEditorRuntime.pinchStartZoom = uploadedSealEditorRuntime.zoom;
+      uploadedSealEditorRuntime.pointerAction = null;
+      return;
+    }
+  }
+  const handle = event.target.closest("[data-editor-handle]");
+  const group = event.target.closest("[data-editor-element-id]");
+  const elementId = handle?.dataset.editorElementId || group?.dataset.editorElementId || "";
+  if (elementId) {
+    event.preventDefault();
+    if (!uploadedSealEditorRuntime.selectedIds.has(elementId) || event.shiftKey || event.metaKey || event.ctrlKey) selectUploadedEditorElement(elementId, event.shiftKey || event.metaKey || event.ctrlKey);
+    const element = editorElementById(elementId);
+    const startPoint = uploadedEditorClientPoint(event.clientX, event.clientY);
+    if (!element || !startPoint) return;
+    const requestedAction = handle?.dataset.editorHandle || "move";
+    if (element.kind === "seal" && requestedAction === "resize") return;
+    const selectedStartElements = [...uploadedSealEditorRuntime.selectedIds]
+      .map(editorElementById)
+      .filter((item) => item?.pageId === element.pageId)
+      .reduce((items, item) => ({ ...items, [item.id]: cloneUploadedEditorValue(item) }), {});
+    uploadedSealEditorRuntime.pointerAction = {
+      type: requestedAction,
+      elementId,
+      startPoint,
+      startClient: { x: event.clientX, y: event.clientY },
+      startElement: cloneUploadedEditorValue(element),
+      startElements: selectedStartElements,
+      previousState: cloneUploadedEditorValue(uploadedSealEditorState)
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    return;
+  }
+  if (uploadedSealEditorRuntime.tool === "select") {
+    selectUploadedEditorElement("", false);
+    uploadedSealEditorRuntime.pointerAction = { type: "swipe", startClient: { x: event.clientX, y: event.clientY } };
+    return;
+  }
+  if (uploadedSealEditorRuntime.tool === "image") return document.querySelector("#uploadedEditorImageInput")?.click();
+  const point = uploadedEditorClientPoint(event.clientX, event.clientY);
+  if (point) addUploadedEditorElement(uploadedSealEditorRuntime.tool, point);
+}
+
+function moveUploadedEditorPointer(event) {
+  if (event.pointerType === "touch" && uploadedSealEditorRuntime.touchPointers.has(event.pointerId)) {
+    uploadedSealEditorRuntime.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (uploadedSealEditorRuntime.touchPointers.size === 2 && uploadedSealEditorRuntime.pinchStartDistance) {
+      const points = [...uploadedSealEditorRuntime.touchPointers.values()];
+      const distance = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
+      setUploadedEditorZoom(uploadedSealEditorRuntime.pinchStartZoom * distance / uploadedSealEditorRuntime.pinchStartDistance);
+      return;
+    }
+  }
+  const action = uploadedSealEditorRuntime.pointerAction;
+  if (!action || action.type === "swipe") return;
+  const element = editorElementById(action.elementId);
+  const point = uploadedEditorClientPoint(event.clientX, event.clientY);
+  const page = element ? uploadedSealEditorState.pages.find((item) => item.pageId === element.pageId) : null;
+  if (!element || !point || !page) return;
+  event.preventDefault();
+  if (action.type === "move") {
+    const proposedX = action.startElement.x + point.x - action.startPoint.x;
+    const proposedY = action.startElement.y + point.y - action.startPoint.y;
+    const snapped = snapUploadedEditorPosition(element, proposedX, proposedY);
+    const deltaX = snapped.x - action.startElement.x;
+    const deltaY = snapped.y - action.startElement.y;
+    Object.values(action.startElements || { [element.id]: action.startElement }).forEach((startElement) => {
+      const selectedElement = editorElementById(startElement.id);
+      const selectedPage = uploadedSealEditorState.pages.find((item) => item.pageId === startElement.pageId);
+      if (!selectedElement || !selectedPage) return;
+      selectedElement.x = roundEditorPoint(Math.max(0, Math.min(selectedPage.widthPt - selectedElement.width, startElement.x + deltaX)));
+      selectedElement.y = roundEditorPoint(Math.max(0, Math.min(selectedPage.heightPt - selectedElement.height, startElement.y + deltaY)));
+    });
+    uploadedSealEditorRuntime.guides = snapped.guides;
+  } else if (action.type === "resize") {
+    if (element.kind !== "seal") {
+      element.width = roundEditorPoint(Math.max(4, Math.min(page.widthPt - element.x, action.startElement.width + point.x - action.startPoint.x)));
+      element.height = roundEditorPoint(Math.max(4, Math.min(page.heightPt - element.y, action.startElement.height + point.y - action.startPoint.y)));
+    }
+  } else if (action.type === "rotate") {
+    const rect = document.querySelector("#uploadedPdfStage")?.getBoundingClientRect();
+    const visual = uploadedEditorViewportRect(action.startElement);
+    const centerX = (rect?.left || 0) + visual.left + visual.width / 2;
+    const centerY = (rect?.top || 0) + visual.top + visual.height / 2;
+    element.rotation = roundEditorPoint(Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180 / Math.PI + 90);
+  }
+  renderUploadedEditorSvgLayer();
+  renderUploadedEditorProperties();
+}
+
+function endUploadedEditorPointer(event) {
+  if (event.pointerType === "touch") uploadedSealEditorRuntime.touchPointers.delete(event.pointerId);
+  const action = uploadedSealEditorRuntime.pointerAction;
+  uploadedSealEditorRuntime.pointerAction = null;
+  uploadedSealEditorRuntime.guides = [];
+  if (!action) return renderUploadedEditorSvgLayer();
+  if (action.type === "swipe") {
+    const dx = event.clientX - action.startClient.x;
+    const dy = event.clientY - action.startClient.y;
+    if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) setUploadedSealPage(uploadedSealCurrentPage + (dx < 0 ? 1 : -1));
+    return;
+  }
+  if (canonicalEditorJson(action.previousState) === canonicalEditorJson(uploadedSealEditorState)) {
+    return renderUploadedEditorSvgLayer();
+  }
+  pushUploadedEditorHistory(action.previousState);
+  syncLegacyUploadedEditorCollections();
+  markUploadedEditorDirty();
+  renderUploadedSealWorkbench();
+}
+
+function renderUploadedEditorProperties() {
+  const selected = [...uploadedSealEditorRuntime.selectedIds].map(editorElementById).filter(Boolean);
+  const form = document.querySelector("#uploadedEditorPropertyForm");
+  const empty = document.querySelector("#uploadedEditorPropertyEmpty");
+  const count = document.querySelector("#uploadedEditorSelectionCount");
+  if (count) count.textContent = selected.length ? `已選 ${selected.length} 個` : "未選取";
+  if (form) form.hidden = !selected.length;
+  if (empty) empty.hidden = Boolean(selected.length);
+  if (!selected.length) return;
+  const element = selected[0];
+  const setValue = (selector, value) => {
+    const input = document.querySelector(selector);
+    if (input) input.value = selected.length === 1 ? String(value ?? "") : "";
+  };
+  setValue("#uploadedEditorPropertyText", element.properties?.text || "");
+  setValue("#uploadedEditorPropertyX", element.x);
+  setValue("#uploadedEditorPropertyY", element.y);
+  setValue("#uploadedEditorPropertyWidth", element.width);
+  setValue("#uploadedEditorPropertyHeight", element.height);
+  setValue("#uploadedEditorPropertyRotation", element.rotation);
+  setValue("#uploadedEditorPropertyOpacity", element.opacity);
+  setValue("#uploadedEditorPropertyFontSize", element.properties?.fontSize || 14);
+  setValue("#uploadedEditorPropertyColor", element.properties?.color || "#111827");
+  setValue("#uploadedEditorPropertyShapeType", element.properties?.shapeType || "rectangle");
+  const sealSizeLocked = selected.length === 1 && element.kind === "seal";
+  ["#uploadedEditorPropertyWidth", "#uploadedEditorPropertyHeight"].forEach((selector) => {
+    const input = document.querySelector(selector);
+    if (!input) return;
+    if (sealSizeLocked) {
+      input.value = formatCompanySealMeasurement(selector.endsWith("Width") ? element.width : element.height);
+    }
+    input.readOnly = sealSizeLocked;
+    input.setAttribute("aria-readonly", String(sealSizeLocked));
+    input.classList.toggle("seal-dimension-locked", sealSizeLocked);
+  });
+  const sizeLock = document.querySelector("#uploadedEditorSealSizeLock");
+  if (sizeLock) {
+    sizeLock.hidden = !sealSizeLocked;
+    if (sealSizeLocked) {
+      const geometry = uploadedEditorImmutableSealGeometry(element)
+        || companySealFixedGeometry(uploadedEditorSealRecord(element) || element, element.width);
+      sizeLock.textContent = `尺寸已鎖定：${geometry.label} ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（${formatCompanySealMeasurement(geometry.widthPt)} × ${formatCompanySealMeasurement(geometry.heightPt)} pt）。印章只能移動或旋轉。`;
+    }
+  }
+  document.querySelector(".editor-property-text")?.toggleAttribute("hidden", !["text", "replacement"].includes(element.kind));
+  document.querySelector(".editor-property-shape")?.toggleAttribute("hidden", element.kind !== "shape");
+}
+
+function updateUploadedEditorProperty() {
+  const ids = [...uploadedSealEditorRuntime.selectedIds];
+  if (!ids.length) return;
+  const read = (selector) => document.querySelector(selector)?.value;
+  commitUploadedEditorMutation((state) => {
+    state.elements.filter((element) => ids.includes(element.id)).forEach((element) => {
+      if (ids.length === 1) {
+        const page = state.pages.find((item) => item.pageId === element.pageId);
+        element.x = Math.max(0, Math.min(page.widthPt - element.width, Number(read("#uploadedEditorPropertyX") || element.x)));
+        element.y = Math.max(0, Math.min(page.heightPt - element.height, Number(read("#uploadedEditorPropertyY") || element.y)));
+        if (element.kind !== "seal") {
+          element.width = Math.max(1, Math.min(page.widthPt - element.x, Number(read("#uploadedEditorPropertyWidth") || element.width)));
+          element.height = Math.max(1, Math.min(page.heightPt - element.y, Number(read("#uploadedEditorPropertyHeight") || element.height)));
+        }
+        element.rotation = Number(read("#uploadedEditorPropertyRotation") || 0);
+        element.opacity = Math.max(0.05, Math.min(1, Number(read("#uploadedEditorPropertyOpacity") || 1)));
+        element.properties = {
+          ...(element.properties || {}),
+          text: read("#uploadedEditorPropertyText") ?? element.properties?.text,
+          fontSize: Math.max(6, Math.min(144, Number(read("#uploadedEditorPropertyFontSize") || element.properties?.fontSize || 14))),
+          color: read("#uploadedEditorPropertyColor") || element.properties?.color || "#111827",
+          shapeType: element.kind === "shape" ? (read("#uploadedEditorPropertyShapeType") || element.properties?.shapeType || "rectangle") : element.properties?.shapeType
+        };
+      }
+    });
+  });
+}
+
+function deleteUploadedEditorSelection() {
+  const ids = new Set(uploadedSealEditorRuntime.selectedIds);
+  if (!ids.size) return;
+  commitUploadedEditorMutation((state) => { state.elements = state.elements.filter((element) => !ids.has(element.id)); });
+  uploadedSealEditorRuntime.selectedIds.clear();
+  renderUploadedSealWorkbench();
+}
+
+function copyUploadedEditorSelection() {
+  uploadedSealEditorRuntime.clipboard = [...uploadedSealEditorRuntime.selectedIds].map(editorElementById).filter(Boolean).map(cloneUploadedEditorValue);
+  showToast(`已複製 ${uploadedSealEditorRuntime.clipboard.length} 個物件。`);
+}
+
+function pasteUploadedEditorSelection(pageId = currentUploadedEditorPage()?.pageId) {
+  if (!uploadedSealEditorRuntime.clipboard.length || !pageId) return;
+  let copies = [];
+  commitUploadedEditorMutation((state) => {
+    copies = uploadedSealEditorRuntime.clipboard.map((element) => ({ ...cloneUploadedEditorValue(element), id: `editor-${element.kind}-${crypto.randomUUID?.() || Date.now()}`, pageId, x: element.x + 8, y: element.y + 8, zIndex: state.elements.length + 1 }));
+    state.elements.push(...copies);
+  });
+  uploadedSealEditorRuntime.selectedIds = new Set(copies.map((element) => element.id));
+  renderUploadedSealWorkbench();
+}
+
+function parseUploadedEditorPageRange(value) {
+  const pages = new Set();
+  String(value || "").split(",").map((part) => part.trim()).filter(Boolean).forEach((part) => {
+    const match = part.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    if (!match) return;
+    const start = Number(match[1]);
+    const end = Number(match[2] || start);
+    for (let page = Math.min(start, end); page <= Math.max(start, end); page += 1) if (page >= 1 && page <= uploadedSealEditorState.pages.length) pages.add(page);
+  });
+  return [...pages].sort((a, b) => a - b);
+}
+
+function copyUploadedEditorSelectionToPages() {
+  const selected = [...uploadedSealEditorRuntime.selectedIds].map(editorElementById).filter(Boolean);
+  const pages = parseUploadedEditorPageRange(document.querySelector("#uploadedEditorCopyPages")?.value);
+  if (!selected.length || !pages.length) return showToast("請先選取物件並輸入有效頁面範圍。");
+  commitUploadedEditorMutation((state) => {
+    pages.forEach((pageNumber) => {
+      const pageId = state.pages[pageNumber - 1].pageId;
+      selected.forEach((element) => state.elements.push({ ...cloneUploadedEditorValue(element), id: `editor-${element.kind}-${crypto.randomUUID?.() || Date.now()}-${pageNumber}`, pageId, zIndex: state.elements.length + 1 }));
+    });
+  });
+}
+
+function moveUploadedEditorLayer(direction) {
+  const ids = new Set(uploadedSealEditorRuntime.selectedIds);
+  if (!ids.size) return;
+  commitUploadedEditorMutation((state) => {
+    const values = state.elements.filter((element) => ids.has(element.id));
+    values.forEach((element) => { element.zIndex = direction === "front" ? state.elements.length + 100 : -100; });
+    normalizeUploadedEditorElementLayers(state);
+  });
+}
+
+function reorderUploadedEditorPage(sourceId, targetId) {
+  if (!sourceId || !targetId || sourceId === targetId) return;
+  commitUploadedEditorMutation((state) => {
+    const from = state.pages.findIndex((page) => page.pageId === sourceId);
+    const to = state.pages.findIndex((page) => page.pageId === targetId);
+    if (from < 0 || to < 0) return;
+    const [page] = state.pages.splice(from, 1);
+    state.pages.splice(to, 0, page);
+    state.pages.forEach((item, index) => { item.order = index + 1; });
+  });
+}
+
+function runUploadedEditorPageAction(action) {
+  const index = currentUploadedEditorPageIndex();
+  const page = currentUploadedEditorPage();
+  if (!page || index < 0) return;
+  if (action === "delete" && uploadedSealEditorState.pages.length === 1) return showToast("文件至少需要保留一頁。");
+  commitUploadedEditorMutation((state) => {
+    const currentIndex = state.pages.findIndex((item) => item.pageId === page.pageId);
+    if (action === "move-up" && currentIndex > 0) [state.pages[currentIndex - 1], state.pages[currentIndex]] = [state.pages[currentIndex], state.pages[currentIndex - 1]];
+    if (action === "move-down" && currentIndex < state.pages.length - 1) [state.pages[currentIndex + 1], state.pages[currentIndex]] = [state.pages[currentIndex], state.pages[currentIndex + 1]];
+    if (action === "rotate-left") page.rotation = normalizeEditorDegrees(page.rotation - 90);
+    if (action === "rotate-right") page.rotation = normalizeEditorDegrees(page.rotation + 90);
+    if (action === "delete") {
+      state.pages.splice(currentIndex, 1);
+      state.elements = state.elements.filter((element) => element.pageId !== page.pageId);
+      uploadedSealEditorRuntime.currentPageId = state.pages[Math.min(currentIndex, state.pages.length - 1)]?.pageId || "";
+    }
+    state.pages.forEach((item, pageIndex) => { item.order = pageIndex + 1; });
+  });
+}
+
+async function handleUploadedEditorImportPdf(files) {
+  for (const file of files) {
+    if (!file || (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf"))) return showToast("匯入只接受 PDF。");
+    if (file.size > PDF_EDITOR_MAX_FILE_BYTES) return showToast("單一 PDF 不得超過 50 MB。");
+    setUploadedPdfA4Status("checking", `正在檢查 ${file.name} 的每一頁是否為 A4…`);
+    setUploadedEditorSaveStatus("uploading", "合併 PDF 直傳中 0%");
+    const intent = await requestEditorUpload(file, "import_pdf");
+    await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `合併 PDF 直傳中 ${Math.round(progress * 100)}%`));
+    setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
+    const finalized = await finalizeEditorUpload(intent, file);
+    await loadUploadedPdfIntoEditor(file, intent, finalized, { append: true });
+  }
+  ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
+}
+
+async function handleUploadedEditorImage(file) {
+  if (!file) return;
+  if (!["image/png", "image/jpeg"].includes(file.type)) return showToast("圖片只接受 PNG 或 JPEG。");
+  if (file.size > PDF_EDITOR_MAX_IMAGE_BYTES) return showToast("單張圖片不得超過 10 MB。");
+  try {
+    setUploadedEditorSaveStatus("uploading", "圖片直傳中 0%");
+    const intent = await requestEditorUpload(file, "image");
+    await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `圖片直傳中 ${Math.round(progress * 100)}%`));
+    setUploadedEditorSaveStatus("checking", "圖片掃毒中");
+    const finalized = await finalizeEditorUpload(intent, file);
+    applyEditorRevisionFromResponse(finalized);
+    const asset = finalized.asset || {};
+    const assetId = asset.id || asset.asset_id || intent.asset_id;
+    const url = URL.createObjectURL(file);
+    const previous = uploadedSealEditorRuntime.imageUrls.get(assetId);
+    if (previous) URL.revokeObjectURL(previous);
+    uploadedSealEditorRuntime.imageUrls.set(assetId, url);
+    const page = currentUploadedEditorPage();
+    if (!page) throw new Error("請先載入 PDF，再插入圖片。");
+    let element = null;
+    commitUploadedEditorMutation((state) => {
+      if (!state.sourceFiles.some((source) => source.assetId === assetId)) {
+        state.sourceFiles.push({ assetId, kind: "image", fileName: file.name, mimeType: file.type, sizeBytes: file.size, sha256: intent.sha256 });
+      }
+      element = editorDefaultElement("image", page, null, { assetId, sha256: intent.sha256, mimeType: file.type });
+      state.elements.push(element);
+    });
+    uploadedSealEditorRuntime.selectedIds = new Set(element ? [element.id] : []);
+    renderUploadedSealWorkbench();
+  } catch (error) {
+    setUploadedEditorSaveStatus("error", "圖片上傳失敗");
+    showToast(`圖片上傳失敗：${error.message}`);
+  } finally {
+    const input = document.querySelector("#uploadedEditorImageInput");
+    if (input) input.value = "";
+  }
+}
+
+async function saveUploadedEditorState({ immediate = false } = {}) {
+  window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
+  if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return null;
+  if (!navigator.onLine) {
+    uploadedSealEditorRuntime.offlineDirty = true;
+    setUploadedEditorSaveStatus("offline", "離線中，尚未同步");
+    return null;
+  }
+  if (uploadedSealEditorRuntime.saving) {
+    uploadedSealEditorRuntime.saveQueued = true;
+    const activeResult = await uploadedSealEditorRuntime.savePromise;
+    if (immediate && uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration && !uploadedSealEditorRuntime.conflict) {
+      return saveUploadedEditorState({ immediate: true });
+    }
+    return activeResult;
+  }
+  if (normalizeUploadedEditorSealGeometry(uploadedSealEditorState)) {
+    syncLegacyUploadedEditorCollections();
+    renderUploadedEditorSvgLayer();
+    renderUploadedEditorProperties();
+  }
+  uploadedSealEditorRuntime.saving = true;
+  uploadedSealEditorRuntime.saveQueued = false;
+  const savingGeneration = uploadedSealEditorRuntime.dirtyGeneration;
+  const stateSnapshot = cloneUploadedEditorValue(uploadedSealEditorState);
+  const revisionNo = Number(stateSnapshot.revisionNo || 0);
+  const baseManifestSha256 = uploadedSealEditorRuntime.baseManifestSha256 || "";
+  let saveCompleted = false;
+  setUploadedEditorSaveStatus("saving", immediate ? "送簽前同步中" : "儲存中");
+  const operation = (async () => {
+    try {
+      const manifestSha256 = await calculateUploadedEditorManifest(stateSnapshot);
+      stateSnapshot.manifestSha256 = manifestSha256;
+      const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/editor-state`, {
+        method: "PUT",
+        headers: { "If-Match": `\"${baseManifestSha256 || revisionNo}\"` },
+        body: JSON.stringify({ revisionNo, baseManifestSha256, manifestSha256, state: stateSnapshot })
+      });
+      applyEditorRevisionFromResponse(result);
+      saveCompleted = true;
+      uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || result.state?.manifestSha256 || manifestSha256;
+      uploadedSealEditorRuntime.offlineDirty = false;
+      uploadedSealEditorRuntime.savedGeneration = Math.max(uploadedSealEditorRuntime.savedGeneration, savingGeneration);
+      document.querySelector("#uploadedEditorConflictCopyBtn")?.toggleAttribute("hidden", true);
+      document.querySelector("#uploadedEditorResolveConflictBtn")?.toggleAttribute("hidden", true);
+      if (uploadedSealEditorRuntime.dirtyGeneration === savingGeneration) {
+        const canonicalStateApplied = applyUploadedEditorCanonicalSaveResponse(result, savingGeneration);
+        uploadedSealEditorState.manifestSha256 = uploadedSealEditorRuntime.baseManifestSha256;
+        setUploadedEditorSaveStatus("saved", `已保存 · revision ${uploadedSealEditorState.revisionNo}`);
+        if (canonicalStateApplied) renderUploadedSealWorkbench();
+      } else {
+        uploadedSealEditorRuntime.saveQueued = true;
+        setUploadedEditorSaveStatus("dirty", "偵測到新變更，繼續儲存中");
+      }
+      return result;
+    } catch (error) {
+      if (error.status === 409 || error.detail === "editor_revision_conflict" || error.rawMessage === "editor_revision_conflict") {
+        handleUploadedEditorConflict(error);
+        return null;
+      }
+      setUploadedEditorSaveStatus("error", "儲存失敗，將自動重試");
+      if (!immediate) uploadedSealEditorRuntime.saveTimer = window.setTimeout(() => void saveUploadedEditorState(), 5000);
+      throw error;
+    } finally {
+      uploadedSealEditorRuntime.saving = false;
+      uploadedSealEditorRuntime.savePromise = null;
+      if (saveCompleted && (uploadedSealEditorRuntime.saveQueued || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration) && !uploadedSealEditorRuntime.conflict) {
+        uploadedSealEditorRuntime.saveQueued = false;
+        uploadedSealEditorRuntime.saveTimer = window.setTimeout(() => void saveUploadedEditorState(), 0);
+      }
+    }
+  })();
+  uploadedSealEditorRuntime.savePromise = operation;
+  const result = await operation;
+  if (immediate && uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration && !uploadedSealEditorRuntime.conflict) {
+    return saveUploadedEditorState({ immediate: true });
+  }
+  return result;
+}
+
+function handleUploadedEditorConflict(error) {
+  uploadedSealEditorRuntime.conflict = { at: Date.now(), revisionNo: uploadedSealEditorState.revisionNo, detail: error?.detail || "editor_revision_conflict", localState: cloneUploadedEditorValue(uploadedSealEditorState) };
+  setUploadedEditorSaveStatus("conflict", "版本衝突：另一裝置已有新版本");
+  document.querySelector("#uploadedEditorConflictCopyBtn")?.toggleAttribute("hidden", false);
+  document.querySelector("#uploadedEditorResolveConflictBtn")?.toggleAttribute("hidden", false);
+  showToast("偵測到另一裝置已更新草稿；系統未覆蓋任何內容，請重新載入確認。");
+}
+
+async function copyUploadedEditorConflictVersion() {
+  const state = uploadedSealEditorRuntime.conflict?.localState || uploadedSealEditorState;
+  const recovery = canonicalEditorJson({
+    schemaVersion: PDF_EDITOR_SCHEMA_VERSION,
+    documentId: uploadedSealEditorRuntime.documentId,
+    capturedAt: new Date().toISOString(),
+    state
+  });
+  try {
+    await navigator.clipboard.writeText(recovery);
+    showToast("本機衝突版本已複製；重新載入後可交由管理員協助還原。");
+  } catch (error) {
+    const blob = new Blob([recovery], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `pdf-editor-recovery-${uploadedSealEditorRuntime.documentId || "draft"}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    showToast("已下載本機衝突版本備份。");
+  }
+}
+
+async function reloadUploadedEditorServerState() {
+  if (!uploadedSealEditorRuntime.documentId) return;
+  const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/editor-state`);
+  const state = result.state || result.editor_state;
+  if (!state || Number(state.schemaVersion || state.schema_version) !== PDF_EDITOR_SCHEMA_VERSION) throw new Error("伺服器草稿版本不相容。");
+  uploadedSealEditorState = { ...emptyUploadedSealEditorState(), ...cloneUploadedEditorValue(state), revisionNo: Number(result.revisionNo ?? state.revisionNo ?? 0), manifestSha256: result.manifestSha256 || state.manifestSha256 || "" };
+  const sealGeometryNormalized = normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
+  uploadedSealEditorRuntime.revisionId = result.revision_id || result.revisionId || "";
+  uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || state.manifestSha256 || "";
+  uploadedSealEditorRuntime.preparedFileId = result.preparedFileId || "";
+  uploadedSealEditorRuntime.preparedSha256 = result.preparedSha256 || "";
+  uploadedSealEditorRuntime.preparedUrl = editorPreparedAuthorizedUrl(result);
+  uploadedSealEditorRuntime.currentPageId = uploadedSealEditorState.pages[0]?.pageId || "";
+  uploadedSealEditorRuntime.selectedIds.clear();
+  uploadedSealEditorRuntime.undoStack = [];
+  uploadedSealEditorRuntime.redoStack = [];
+  uploadedSealEditorRuntime.dirtyGeneration = 0;
+  uploadedSealEditorRuntime.savedGeneration = 0;
+  uploadedSealEditorRuntime.saveQueued = false;
+  uploadedSealEditorRuntime.conflict = null;
+  rememberUploadedEditorSavedSealBindings(uploadedSealEditorState);
+  document.querySelector("#uploadedEditorConflictCopyBtn")?.toggleAttribute("hidden", true);
+  document.querySelector("#uploadedEditorResolveConflictBtn")?.toggleAttribute("hidden", true);
+  syncLegacyUploadedEditorCollections();
+  await hydrateUploadedEditorAuthorizedAssets(result);
+  if (sealGeometryNormalized && !uploadedSealEditorRuntime.locked) markUploadedEditorDirty();
+  else setUploadedEditorSaveStatus("saved", `已載入 revision ${uploadedSealEditorState.revisionNo}`);
+  renderUploadedSealWorkbench();
+}
+
+function editorAuthorizedAssetUrl(source, result = {}) {
+  const assetId = source.assetId || source.asset_id || source.id || "";
+  const fromResult = (result.assets || result.authorized_assets || result.authorizedAssets || []).find((asset) => (asset.assetId || asset.asset_id || asset.id) === assetId) || {};
+  return source.authorizedUrl || source.authorized_url || source.downloadUrl || source.download_url || source.url
+    || fromResult.authorizedUrl || fromResult.authorized_url || fromResult.downloadUrl || fromResult.download_url || fromResult.url || "";
+}
+
+function editorPreparedAuthorizedUrl(result = {}) {
+  const preparedFileId = result.preparedFileId || result.prepared_file_id || uploadedSealEditorRuntime.preparedFileId || "";
+  const preparedAsset = (result.assets || result.authorized_assets || result.authorizedAssets || []).find((asset) => {
+    const assetId = asset.assetId || asset.asset_id || asset.id || asset.fileId || asset.file_id;
+    return (preparedFileId && assetId === preparedFileId) || asset.kind === "prepared_pdf" || asset.file_type === "prepared_pdf";
+  }) || {};
+  const provided = result.preparedUrl || result.prepared_url || result.prepared?.authorizedUrl || result.prepared?.authorized_url
+    || result.prepared?.downloadUrl || result.prepared?.download_url || result.prepared?.url
+    || preparedAsset.authorizedUrl || preparedAsset.authorized_url || preparedAsset.downloadUrl || preparedAsset.download_url || preparedAsset.url || "";
+  if (provided) return provided;
+  if (preparedFileId && uploadedSealEditorRuntime.documentId) {
+    return `${backendApiBase}/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/files/${encodeURIComponent(preparedFileId)}/download`;
+  }
+  return "";
+}
+
+async function fetchEditorAuthorizedBlob(url) {
+  if (!url) throw new Error("伺服器未提供短效檔案授權。");
+  const apiBase = new URL(`${String(backendApiBase || "/api").replace(/\/$/, "")}/`, window.location.origin);
+  const resolved = new URL(url, apiBase).toString();
+  const headers = { "Cache-Control": "no-store" };
+  if (new URL(resolved).origin === window.location.origin && isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
+  const response = await fetch(resolved, { headers, cache: "no-store" });
+  if (!response.ok) throw new Error(`短效檔案授權已失效（${response.status}）。`);
+  return response.blob();
+}
+
+async function hydrateUploadedEditorAuthorizedAssets(result = {}) {
+  for (const source of uploadedSealEditorState.sourceFiles) {
+    const assetId = source.assetId || source.asset_id || source.id || "";
+    if (!assetId || uploadedSealEditorRuntime.assetFiles.has(assetId) || uploadedSealEditorRuntime.imageUrls.has(assetId)) continue;
+    const authorizedUrl = editorAuthorizedAssetUrl(source, result);
+    if (!authorizedUrl) continue;
+    const blob = await fetchEditorAuthorizedBlob(authorizedUrl);
+    const file = new File([blob], source.fileName || source.file_name || `asset-${assetId}`, { type: source.mimeType || source.mime_type || blob.type || "application/octet-stream" });
+    if (String(source.kind || "").includes("image") || file.type.startsWith("image/")) {
+      uploadedSealEditorRuntime.imageUrls.set(assetId, URL.createObjectURL(file));
+      continue;
+    }
+    const serverPages = uploadedSealEditorState.pages.filter((page) => page.sourceAssetId === assetId).sort((a, b) => a.sourcePageIndex - b.sourcePageIndex);
+    await loadPdfJsAsset(file, assetId, serverPages);
+  }
+}
+
+async function loadUploadedEditorState(documentId) {
+  uploadedSealEditorRuntime.documentId = documentId;
+  const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/editor-state`);
+  const state = result.state || result.editor_state;
+  if (!state || Number(state.schemaVersion || state.schema_version) !== PDF_EDITOR_SCHEMA_VERSION) throw new Error("找不到相容的 PDF Editor V2 草稿。");
+  uploadedSealEditorState = { ...emptyUploadedSealEditorState(), ...cloneUploadedEditorValue(state), revisionNo: Number(result.revisionNo ?? state.revisionNo ?? 0), manifestSha256: result.manifestSha256 || state.manifestSha256 || "" };
+  uploadedSealEditorRuntime.revisionId = result.revision_id || result.revisionId || "";
+  uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || state.manifestSha256 || "";
+  uploadedSealEditorRuntime.preparedFileId = result.preparedFileId || "";
+  uploadedSealEditorRuntime.preparedSha256 = result.preparedSha256 || "";
+  uploadedSealEditorRuntime.preparedUrl = editorPreparedAuthorizedUrl(result);
+  uploadedSealEditorRuntime.locked = ["locked", "submitted", "approved"].includes(result.status);
+  rememberUploadedEditorSavedSealBindings(uploadedSealEditorState);
+  const sealGeometryNormalized = normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
+  uploadedSealEditorRuntime.dirtyGeneration = 0;
+  uploadedSealEditorRuntime.savedGeneration = 0;
+  uploadedSealEditorRuntime.saveQueued = false;
+  uploadedSealEditorRuntime.currentPageId = uploadedSealEditorState.pages[0]?.pageId || "";
+  await hydrateUploadedEditorAuthorizedAssets(result);
+  syncLegacyUploadedEditorCollections();
+  if (uploadedSealEditorState.pages.length) {
+    try {
+      ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
+    } catch (_error) {
+      setUploadedEditorSaveStatus("error", "PDF 含有非 A4 頁面，不能送簽");
+    }
+  }
+  if (sealGeometryNormalized && !uploadedSealEditorRuntime.locked) markUploadedEditorDirty();
+  renderUploadedSealWorkbench();
+  return result;
+}
+
+function officialDocumentHasEditorV2(item = {}) {
+  return Boolean(
+    Number(item.editor_schema_version || item.editor_revision?.schema_version || item.stamp_request?.editor_schema_version) === PDF_EDITOR_SCHEMA_VERSION
+    || item.editor_revision_id
+    || item.editor_revision?.id
+    || item.stamp_request?.editor_revision_id
+    || officialApplicationFiles(item).some((file) => file.file_type === "prepared_pdf")
+  );
+}
+
+async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
+  if (!documentId) return;
+  try {
+    setView("electronicSeal");
+    await loadUploadedEditorState(documentId);
+    await showUploadedEditorReview(mode);
+    document.querySelector("#uploadedPdfEditor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    showToast(`PDF 編輯版本載入失敗：${error.message}`);
+  }
+}
+
+async function preflightUploadedEditor() {
+  if (!uploadedSealEditorRuntime.documentId) throw new Error("尚未建立 PDF 編輯草稿。");
+  ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
+  await saveUploadedEditorState({ immediate: true });
+  if (uploadedSealEditorRuntime.conflict) throw new Error("版本衝突尚未處理，不能送簽。");
+  const status = document.querySelector("#uploadedEditorPreflightStatus");
+  if (status) status.textContent = "後端正在產生精準確認版…";
+  const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/editor-preflight`, {
+    method: "POST",
+    body: JSON.stringify({ editorRevisionId: uploadedSealEditorRuntime.revisionId, manifestSha256: uploadedSealEditorState.manifestSha256 })
+  });
+  if (result.status !== "prepared") throw new Error("確認版尚未完成，請稍後再試。");
+  uploadedSealEditorRuntime.preparedFileId = result.preparedFileId || result.prepared_file_id || "";
+  uploadedSealEditorRuntime.preparedSha256 = result.preparedSha256 || result.prepared_sha256 || "";
+  uploadedSealEditorRuntime.preparedUrl = editorPreparedAuthorizedUrl(result) || result.authorizedUrl || result.authorized_url || "";
+  applyEditorRevisionFromResponse(result);
+  if (!uploadedSealEditorRuntime.preparedFileId || !uploadedSealEditorRuntime.preparedSha256) throw new Error("後端未回傳完整確認版雜湊。");
+  if (status) status.textContent = `確認版已完成 · ${uploadedSealEditorRuntime.preparedSha256.slice(0, 12)}…`;
+  return result;
+}
+
+async function handleUploadedSealPdfChange() {
+  const input = document.querySelector("#uploadedSealPdfInput");
+  const file = input?.files?.[0];
+  if (!file) return;
+  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+    input.value = "";
+    return showToast("請上傳 PDF 檔。");
+  }
+  if (file.size > PDF_EDITOR_MAX_FILE_BYTES) {
+    input.value = "";
+    return showToast("PDF 不得超過 50 MB。");
+  }
+  try {
+    setUploadedPdfA4Status("checking", "正在檢查每一頁是否為 A4…");
+    setUploadedEditorSaveStatus("uploading", "TUS 私密直傳中 0%");
+    const intent = await requestEditorUpload(file, "source_pdf");
+    await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `TUS 私密直傳中 ${Math.round(progress * 100)}%`));
+    setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
+    const finalized = await finalizeEditorUpload(intent, file);
+    await loadUploadedPdfIntoEditor(file, intent, finalized, { append: false });
+    uploadedSealPdf = { file, name: file.name, size: file.size, hash: intent.sha256, assetId: finalized.asset?.id || finalized.asset?.asset_id || intent.asset_id };
+    uploadedSealObjectUrl = uploadedSealEditorRuntime.assetUrls.get(uploadedSealPdf.assetId) || "";
+    const title = document.querySelector("#uploadedSealTitle");
+    if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
+    ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
+    addSealAudit("PDF 編輯來源已通過預檢", `asset ${uploadedSealPdf.assetId || "-"} · ${uploadedSealPageCount} 頁 · hash ${intent.sha256.slice(0, 16)}…`);
+    showToast(`PDF 已安全載入，共 ${uploadedSealPageCount} 頁。`);
+  } catch (error) {
+    input.value = "";
+    setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
+    setUploadedEditorSaveStatus("error", "PDF 未通過上傳或預檢");
+    showToast(`PDF 無法開啟：${pdfA4UiErrorMessage(error)}`);
+  }
+}
+
+function renderUploadedSealWorkbench() {
+  const applicantInput = document.querySelector("#uploadedSealApplicant");
+  const departmentInput = document.querySelector("#uploadedSealDepartment");
+  const emailInput = document.querySelector("#uploadedSealEmail");
+  const phoneInput = document.querySelector("#uploadedSealPhone");
+  if (applicantInput && !applicantInput.value) applicantInput.value = authState?.user?.name || "";
+  if (departmentInput && !departmentInput.value) departmentInput.value = activeUnit() || "";
+  if (emailInput && !emailInput.value) emailInput.value = authState?.user?.email || "";
+  if (phoneInput && !phoneInput.value) phoneInput.value = "02-66045432 #";
+  const companySelect = document.querySelector("#uploadedSealCompany");
+  if (companySelect && !companySelect.options.length) renderUploadedSealCompanyOptions();
+  if (companySelect) companySelect.disabled = !companySelect.options.length || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+  const approvalCategorySelect = document.querySelector("#uploadedSealApprovalCategorySelect");
+  if (approvalCategorySelect) {
+    approvalCategorySelect.required = true;
+    approvalCategorySelect.disabled = Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+  }
+  const editor = document.querySelector("#uploadedPdfEditor");
+  const featureEnabled = Boolean(uploadedSealEditorRuntime.documentId || uploadedEditorV2FeatureEnabled());
+  if (editor) {
+    editor.dataset.editorMode = uploadedSealEditorRuntime.mode;
+    editor.dataset.editorLocked = String(uploadedSealEditorRuntime.locked);
+    editor.dataset.featureEnabled = String(featureEnabled);
+  }
+  const sourceInput = document.querySelector("#uploadedSealPdfInput");
+  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked;
+  const saveStatus = document.querySelector("#uploadedEditorSaveStatus");
+  if (!featureEnabled && !uploadedSealEditorRuntime.documentId) {
+    setUploadedEditorSaveStatus("offline", "此公司尚未開啟 PDF Editor V2");
+  } else if (
+    featureEnabled
+    && !uploadedSealEditorRuntime.documentId
+    && saveStatus?.textContent === "此公司尚未開啟 PDF Editor V2"
+  ) {
+    setUploadedEditorSaveStatus("saved", "PDF Editor V2 已開啟，可上傳文件");
+  }
+  document.querySelectorAll("[data-editor-review]").forEach((button) => button.classList.toggle("active", button.dataset.editorReview === uploadedSealEditorRuntime.reviewMode));
+  document.querySelectorAll("[data-editor-tool]").forEach((button) => button.classList.toggle("active", button.dataset.editorTool === uploadedSealEditorRuntime.tool));
+  document.querySelectorAll("[data-uploaded-placement-mode]").forEach((button) => button.classList.toggle("active", button.dataset.uploadedPlacementMode === uploadedSealPlacementMode));
+  const generalOptions = document.querySelector("#uploadedEditorGeneralOptions");
+  if (generalOptions) generalOptions.hidden = !["seal", "text", "replacement"].includes(uploadedSealEditorRuntime.tool);
+  document.querySelector("#uploadedSealTextTools")?.toggleAttribute("hidden", !["text", "replacement"].includes(uploadedSealEditorRuntime.tool));
+  const textInputLabel = document.querySelector("#uploadedEditorTextInputLabel");
+  const textInput = document.querySelector("#uploadedSealTextInput");
+  if (textInputLabel) textInputLabel.textContent = uploadedSealEditorRuntime.tool === "replacement" ? "取代後文字（舊內容會安全移除）" : "文字";
+  if (textInput) textInput.placeholder = uploadedSealEditorRuntime.tool === "replacement" ? "輸入安全取代後的新文字，再點選文件位置" : "輸入要加入的文字";
+  document.querySelector("#uploadedSealSealSelect")?.closest("label")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
+  document.querySelector("#uploadedSealStampType")?.closest("label")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
+  document.querySelector("#addSelectedStampBtn")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
+  const status = document.querySelector("#uploadedSealPdfStatus");
+  if (status) status.textContent = uploadedSealEditorState.pages.length
+    ? `${uploadedSealEditorState.pages.length} 頁 · ${uploadedSealEditorState.elements.length} 個編輯物件 · revision ${uploadedSealEditorState.revisionNo}`
+    : "尚未上傳 PDF";
+  const pageCount = document.querySelector("#uploadedEditorPageCount");
+  if (pageCount) pageCount.textContent = `${uploadedSealEditorState.pages.length} 頁`;
+  const currentIndex = currentUploadedEditorPageIndex();
+  const page = currentUploadedEditorPage();
+  const pageLabel = document.querySelector("#uploadedPdfPageLabel");
+  if (pageLabel) pageLabel.textContent = page ? `第 ${currentIndex + 1} / ${uploadedSealEditorState.pages.length} 頁` : "尚未載入頁面";
+  const geometry = document.querySelector("#uploadedPdfGeometryLabel");
+  if (geometry) geometry.textContent = page ? `${Math.round(page.widthPt)} × ${Math.round(page.heightPt)} pt · CropBox · ${page.rotation}°` : "等待 PDF 幾何資訊";
+  const strip = document.querySelector("#uploadedPdfPageStrip");
+  if (strip) {
+    strip.innerHTML = uploadedSealEditorState.pages.length
+      ? uploadedSealEditorState.pages.map((item, index) => `<button class="uploaded-page-chip ${item.pageId === uploadedSealEditorRuntime.currentPageId ? "active" : ""}" type="button" data-uploaded-page="${escapeDraftHtml(item.pageId)}" aria-label="前往第 ${index + 1} 頁">${index + 1}</button>`).join("")
+      : `<span>頁面將顯示於此</span>`;
+    strip.querySelectorAll("[data-uploaded-page]").forEach((button) => button.addEventListener("click", () => setUploadedSealPage(button.dataset.uploadedPage)));
+    strip.querySelector(".active")?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  }
+  const prev = document.querySelector("#uploadedPdfPrevBtn");
+  const next = document.querySelector("#uploadedPdfNextBtn");
+  if (prev) prev.disabled = currentIndex <= 0;
+  if (next) next.disabled = currentIndex < 0 || currentIndex >= uploadedSealEditorState.pages.length - 1;
+  const empty = document.querySelector("#uploadedPdfEmpty");
+  if (empty) empty.hidden = Boolean(page);
+  document.querySelector("#uploadedEditorUndoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.undoStack.length || uploadedSealEditorRuntime.locked);
+  document.querySelector("#uploadedEditorRedoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.redoStack.length || uploadedSealEditorRuntime.locked);
+  renderUploadedEditorThumbnails();
+  renderUploadedEditorProperties();
+  const markerCount = uploadedSealEditorState.elements.length;
+  const phase = !uploadedSealEditorState.pages.length ? 1 : markerCount ? 4 : 3;
+  document.querySelectorAll("#electronicSeal .electronic-seal-stepper span").forEach((step, index) => {
+    step.classList.toggle("active", index + 1 === phase);
+    step.classList.toggle("completed", index + 1 < phase);
+  });
+  const summary = document.querySelector("#uploadedStampSummary");
+  if (summary) {
+    summary.innerHTML = markerCount
+      ? uploadedSealEditorState.elements.map((element, index) => {
+          const pageNumber = uploadedSealEditorState.pages.findIndex((pageItem) => pageItem.pageId === element.pageId) + 1;
+          const label = element.kind === "seal" ? element.properties?.sealName || "印章" : element.kind === "replacement" ? `取代：${element.properties?.text || ""}` : element.kind === "text" ? element.properties?.text || "文字" : ({ image: "圖片", shape: "形狀", checkmark: "勾選", highlight: "螢光", redaction: "安全遮蔽" }[element.kind] || element.kind);
+          return `<article class="uploaded-stamp-summary-item"><button type="button" data-editor-summary-id="${escapeDraftHtml(element.id)}"><span class="uploaded-stamp-number">${index + 1}</span><span><strong>${escapeDraftHtml(label)}</strong><small>第 ${pageNumber} 頁 · X ${Math.round(element.x)} / Y ${Math.round(element.y)} · ${Math.round(element.width)} × ${Math.round(element.height)} pt</small></span></button><button class="icon-button" type="button" data-editor-summary-delete="${escapeDraftHtml(element.id)}" aria-label="刪除物件">×</button></article>`;
+        }).join("")
+      : `<p class="empty-text">尚未加入編輯物件；請從工具列選擇印章、文字或進階工具。</p>`;
+    summary.querySelectorAll("[data-editor-summary-id]").forEach((button) => button.addEventListener("click", () => {
+      const element = editorElementById(button.dataset.editorSummaryId);
+      if (!element) return;
+      setUploadedSealPage(element.pageId);
+      selectUploadedEditorElement(element.id);
+    }));
+    summary.querySelectorAll("[data-editor-summary-delete]").forEach((button) => button.addEventListener("click", () => {
+      uploadedSealEditorRuntime.selectedIds = new Set([button.dataset.editorSummaryDelete]);
+      deleteUploadedEditorSelection();
+    }));
+  }
+  void renderUploadedPdfPage();
+}
+
+async function initializeUploadedSealWorkspace() {
+  renderUploadedSealCompanyOptions();
+  await loadUploadedSealOptions();
+  renderUploadedSealWorkbench();
+}
+
+async function submitUploadedSealApplication() {
+  const form = document.querySelector("#uploadedSealForm");
+  if (form && !form.reportValidity()) return;
+  const contractMode = uploadedSealMode === "contract";
+  const approvalSelection = approvalSelectionForSelect("#uploadedSealApprovalCategorySelect");
+  if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) return showToast("請先選擇用印文件類型。");
+  if (!uploadedSealEditorState.pages.length || !uploadedSealEditorRuntime.documentId) return showToast("請先完成 PDF 上傳、掃毒與預檢。");
+  const seals = uploadedSealEditorState.elements.filter((element) => element.kind === "seal");
+  if (!seals.length) return showToast("請先加入至少一個用印處。");
+  const submitButton = document.querySelector("#submitUploadedSealBtn");
+  try {
+    if (submitButton) submitButton.disabled = true;
+    const prepared = await preflightUploadedEditor();
+    const confirmed = window.confirm(`後端已產生送簽確認版。\n\n頁數：${uploadedSealEditorState.pages.length}\n編輯物件：${uploadedSealEditorState.elements.length}\n印章：${seals.length}\nprepared hash：${uploadedSealEditorRuntime.preparedSha256.slice(0, 16)}…\n\n確認內容正確並鎖定送簽？`);
+    if (!confirmed) return;
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/submit`, {
+      method: "POST",
+      body: JSON.stringify({
+        comment: contractMode ? "合約 PDF V2 編輯確認後送出簽核" : "電子用印 PDF V2 編輯確認後送出簽核",
+        editorRevisionId: uploadedSealEditorRuntime.revisionId || prepared.revision?.id || prepared.revision?.revision_id,
+        manifestSha256: uploadedSealEditorState.manifestSha256,
+        preparedFileId: uploadedSealEditorRuntime.preparedFileId,
+        preparedSha256: uploadedSealEditorRuntime.preparedSha256
+      })
+    });
+    uploadedSealEditorRuntime.locked = true;
+    document.querySelector("#uploadedPdfEditor")?.setAttribute("data-editor-locked", "true");
+    setUploadedEditorSaveStatus("locked", "已送簽並鎖定");
+    selectedOfficialDocumentId = result.id || uploadedSealEditorRuntime.documentId;
+    officialWorkflowScope = "mine";
+    await loadOfficialWorkflow("mine");
+    addSealAudit("鎖定 PDF V2 送簽版本", `document ${uploadedSealEditorRuntime.documentId} · revision ${uploadedSealEditorState.revisionNo} · manifest ${uploadedSealEditorState.manifestSha256.slice(0, 16)}… · prepared ${uploadedSealEditorRuntime.preparedSha256.slice(0, 16)}…`);
+    showToast(contractMode ? "合約用印確認版已鎖定並送出簽核。" : "電子用印確認版已鎖定並送出簽核。");
+    renderUploadedSealWorkbench();
+  } catch (error) {
+    addSealAudit("PDF V2 送簽失敗", error.message);
+    showToast(`送簽失敗：${error.message}`);
+  } finally {
+    if (submitButton && !uploadedSealEditorRuntime.locked) submitButton.disabled = false;
   }
 }
 
@@ -13523,9 +24081,12 @@ function pdfText(text, x, y, size = 11) {
 }
 
 function stampCommands(stamp, pageIndex, pageCount) {
+  const fallbackGeometry = companySealFixedGeometry(stamp?.seal_size_type || "small_seal");
+  const width = Number(stamp.w ?? stamp.width) || fallbackGeometry.widthPt;
+  const height = Number(stamp.h ?? stamp.height) || fallbackGeometry.heightPt;
   return [
     "1 0 0 RG 1 0 0 rg",
-    `${stamp.x} ${stamp.y} ${stamp.w || 56} ${stamp.h || 56} re S`,
+    `${stamp.x} ${stamp.y} ${width} ${height} re S`,
     pdfText(stamp.label || "SEAL", stamp.x + 8, stamp.y + 32, 10),
     pdfText(stamp.stampNo || "STAMP", stamp.x + 5, stamp.y + 18, 6),
     pageCount > 1 ? pdfText(`Page ${pageIndex}/${pageCount}`, stamp.x + 7, stamp.y + 7, 6) : "",
@@ -13544,6 +24105,9 @@ function buildOfficialPdf(doc, stamps = [], options = {}) {
     let stream = "";
     stream += "0.97 0.97 0.95 rg 36 36 523 770 re f 0 0 0 rg\n";
     stream += "0.85 0.42 0.04 RG 36 770 523 1 re S\n";
+    stamps.filter((stamp) => stamp.page === page || stamp.page === "all").forEach((stamp) => {
+      stream += stampCommands(stamp, page, pageCount);
+    });
     stream += pdfText("Suiyuecare Official eDoc", 72, 740, 18);
     stream += pdfText(`Template: ${options.template || "Official Letter"}`, 72, 715, 9);
     stream += pdfText(`Doc No: ${doc.no}`, 72, 682, 12);
@@ -13554,9 +24118,6 @@ function buildOfficialPdf(doc, stamps = [], options = {}) {
     stream += pdfText(`Attachments: ${doc.attachments.join(", ")}`, 72, 548, 10);
     stream += pdfText(`Generated: ${new Date().toLocaleString("zh-TW", { hour12: false })}`, 72, 92, 8);
     stream += pdfText(`Page ${page} of ${pageCount}`, 480, 56, 8);
-    stamps.filter((stamp) => stamp.page === page || stamp.page === "all").forEach((stamp) => {
-      stream += stampCommands(stamp, page, pageCount);
-    });
     const pageObjectNumber = 3 + (page - 1) * 2;
     const contentObjectNumber = pageObjectNumber + 1;
     objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${3 + pageCount * 2} 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`);
@@ -13585,16 +24146,18 @@ async function hashBlob(blob) {
 
 function pdfOptions() {
   const selectedSeal = currentSeal();
+  const companyGeometry = companySealFixedGeometry(selectedSeal || "large_seal");
+  const ownerGeometry = companySealFixedGeometry("small_seal");
   return {
     template: document.querySelector("#pdfTemplateSelect")?.value || "歲悅正式函",
     companyX: Number(document.querySelector("#companySealX")?.value || 420),
     companyY: Number(document.querySelector("#companySealY")?.value || 130),
     ownerX: Number(document.querySelector("#ownerSealX")?.value || 470),
     ownerY: Number(document.querySelector("#ownerSealY")?.value || 130),
-    companyWidthMm: Number(selectedSeal?.widthMm || document.querySelector("#sealWidthMmInput")?.value || 30),
-    companyHeightMm: Number(selectedSeal?.heightMm || document.querySelector("#sealHeightMmInput")?.value || 30),
-    ownerWidthMm: 18,
-    ownerHeightMm: 18,
+    companyWidthMm: companyGeometry.widthMm,
+    companyHeightMm: companyGeometry.heightMm,
+    ownerWidthMm: ownerGeometry.widthMm,
+    ownerHeightMm: ownerGeometry.heightMm,
     multiPage: Boolean(document.querySelector("#enablePageSeal")?.checked)
   };
 }
@@ -13609,20 +24172,23 @@ function backendPdfPayload(doc, request = null) {
   };
   const largeSeal = sealForComposeType(baseSealPlan.large?.type, companyName);
   const smallSeal = sealForComposeType(baseSealPlan.small?.type, companyName);
+  const largeGeometry = companySealFixedGeometry("large_seal");
+  const smallGeometry = companySealFixedGeometry("small_seal");
   const sealPlan = {
+    mode: "seal_or_manual_dispatch",
     large: {
       type: baseSealPlan.large?.type || "無",
       placement: baseSealPlan.large?.placement || { ...composeSealPlacements.large },
       sealId: largeSeal?.id || "",
-      widthMm: Number(largeSeal?.widthMm || 30),
-      heightMm: Number(largeSeal?.heightMm || largeSeal?.widthMm || 30)
+      widthMm: largeGeometry.widthMm,
+      heightMm: largeGeometry.heightMm
     },
     small: {
       type: baseSealPlan.small?.type || "無",
       placement: baseSealPlan.small?.placement || { ...composeSealPlacements.small },
       sealId: smallSeal?.id || "",
-      widthMm: Number(smallSeal?.widthMm || 18),
-      heightMm: Number(smallSeal?.heightMm || smallSeal?.widthMm || 18)
+      widthMm: smallGeometry.widthMm,
+      heightMm: smallGeometry.heightMm
     }
   };
   return {
@@ -13666,7 +24232,7 @@ function backendPdfPayload(doc, request = null) {
       dueDate: doc.dueDate,
       contactAddress: doc.contactAddress || document.querySelector("#contactAddress")?.value || "220205 新北市板橋區英士路192之1號",
       contactOwner: doc.contactOwner || document.querySelector("#contactOwner")?.value || doc.owner || activeRole(),
-      contactPhone: doc.contactPhone || document.querySelector("#contactPhone")?.value || "(02)2257-7155 分機3762",
+      contactPhone: doc.contactPhone || document.querySelector("#contactPhone")?.value || composeDefaultContactPhone,
       contactFax: doc.contactFax || document.querySelector("#contactFax")?.value || "(02)2254-4029",
       contactEmail: doc.contactEmail || document.querySelector("#contactEmail")?.value || "edoc@suiyuecare.com",
       sealPlan
@@ -13941,10 +24507,11 @@ async function generatePdfTemplate(doc = currentDispatchDoc()) {
 function stampListForRequest(request, doc) {
   const options = pdfOptions();
   const seal = sealById(request.sealId);
+  const ownerGeometry = companySealFixedGeometry("small_seal");
   const stampNo = request.stampNo || `STAMP-${doc.no.replace(/\D/g, "").slice(-10)}-${request.sealId}`;
   const stamps = [
     { page: 1, x: options.companyX, y: options.companyY, w: sealWidthPt(seal), h: sealHeightPt(seal), label: seal?.type || "Company", stampNo },
-    { page: 1, x: options.ownerX, y: options.ownerY, w: Math.round(options.ownerWidthMm * pdfPointsPerMm * 100) / 100, h: Math.round(options.ownerHeightMm * pdfPointsPerMm * 100) / 100, label: "Owner", stampNo }
+    { page: 1, x: options.ownerX, y: options.ownerY, w: ownerGeometry.widthPt, h: ownerGeometry.heightPt, seal_size_type: ownerGeometry.sealSizeType, size_locked: true, label: "Owner", stampNo }
   ];
   if (options.multiPage) stamps.push({ page: "all", x: 535, y: 392, w: 34, h: 72, label: "PAGE", stampNo });
   return stamps;
@@ -14107,10 +24674,10 @@ async function verifyCurrentPdfHash() {
 function renderSealAuditLog() {
   document.querySelector("#sealAuditLog").innerHTML = sealAuditLog.map(([time, title, body]) => `
     <article class="timeline-item">
-      <time>${time}</time>
+      <time>${escapeDraftHtml(time)}</time>
       <div>
-        <strong>${title}</strong>
-        <p>${body}</p>
+        <strong>${escapeDraftHtml(title)}</strong>
+        <p>${escapeDraftHtml(body)}</p>
       </div>
     </article>
   `).join("");
@@ -14130,9 +24697,11 @@ function renderSeals() {
   renderSignatureProofGrid();
   renderUploadedSealWorkbench();
   renderUnifiedFlows();
+  applyCompanySealCustodianUi();
 }
 
 function toggleSeal(id) {
+  if (!requireCompanySealCustodian("變更舊版印鑑狀態")) return;
   const seal = sealById(id);
   if (!seal) return;
   seal.status = seal.status === "啟用" ? "停用" : "啟用";
@@ -14299,9 +24868,11 @@ async function rejectSealRequests(ids = selectedSealRequestIds()) {
 }
 
 function addSealFromForm() {
+  if (!requireCompanySealCustodian("使用舊版新增印鑑")) return;
   const widthMm = Number(document.querySelector("#sealWidthMmInput").value || 0);
   const heightMm = Number(document.querySelector("#sealHeightMmInput").value || 0);
-  if (!widthMm || !heightMm || widthMm <= 0 || heightMm <= 0) return showToast("請輸入印鑑實體長寬，單位為 mm。");
+  const calibration = validateCompanySealCalibration("large_seal", widthMm, heightMm);
+  if (!calibration.ok) return showToast(calibration.message);
   const seal = {
     id: `SEAL-${Date.now().toString().slice(-5)}`,
     company: document.querySelector("#sealCompanyInput").value,
@@ -14327,13 +24898,15 @@ function addSealFromForm() {
 }
 
 async function handleSealImageUpload() {
+  if (!requireCompanySealCustodian("選擇印章圖檔")) return;
   const input = document.querySelector("#sealImageInput");
   const preview = document.querySelector("#sealImagePreview");
   const file = input?.files?.[0];
   if (!file || !preview) return;
-  if (!file.type.startsWith("image/")) {
+  const validation = simpleSealFileValidation(file);
+  if (!validation.ok) {
     input.value = "";
-    return showToast("印鑑圖檔請上傳 PNG、JPG 或其他圖片格式。");
+    return showToast(validation.message);
   }
   input.value = "";
   preview.dataset.image = "";
@@ -14547,24 +25120,20 @@ document.querySelector("#globalSearchForm")?.addEventListener("submit", (event) 
   runUnifiedSearch();
 });
 
-document.querySelector("#searchRunBtn").addEventListener("click", runUnifiedSearch);
 document.querySelector("#searchForm").addEventListener("submit", (event) => {
   event.preventDefault();
   runUnifiedSearch();
 });
-["#searchQuery", "#searchStatus"].forEach((selector) => {
-  document.querySelector(selector).addEventListener("keydown", (event) => {
-    if (event.key === "Enter") runUnifiedSearch();
-  });
-});
-document.querySelector("#searchCategory").addEventListener("change", runUnifiedSearch);
-document.querySelector("#searchLimit").addEventListener("change", runUnifiedSearch);
 document.querySelector("#searchClearBtn").addEventListener("click", () => {
   document.querySelector("#searchQuery").value = "";
   document.querySelector("#searchStatus").value = "";
   document.querySelector("#searchCategory").value = "all";
   searchResults = [];
+  searchTotal = 0;
+  searchHasMore = false;
+  searchError = "";
   selectedSearchId = "";
+  searchHasRun = false;
   renderSearch();
 });
 
@@ -14576,6 +25145,15 @@ document.querySelectorAll("[data-inbound-filter]").forEach((button) => {
     renderInboundRows();
   });
 });
+document.querySelectorAll("[data-inbound-section]").forEach((button) => {
+  button.addEventListener("click", () => setInboundSection(button.dataset.inboundSection));
+});
+document.querySelector("#openInboundArchiveBtn")?.addEventListener("click", () => setInboundSection("archive"));
+document.querySelector("#inboundArchiveForm")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void createInboundArchiveFromForm();
+});
+document.querySelector("#inboundArchiveSourceType")?.addEventListener("change", prepareInboundArchiveForm);
 
 document.querySelectorAll(".segment[data-dispatch-filter]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -14587,6 +25165,11 @@ document.querySelectorAll(".segment[data-dispatch-filter]").forEach((button) => 
 });
 
 document.querySelector("#roleSelect").addEventListener("change", (event) => {
+  if (roleSwitchDisabledByPolicy()) {
+    event.target.value = workflowRole;
+    showToast("正式登入後不可在畫面切換身分，請改用正確帳號登入。");
+    return;
+  }
   document.querySelector("#roleNote").textContent = roleNotes[event.target.value];
   workflowRole = event.target.value;
   applyRoleNavigation();
@@ -14595,6 +25178,8 @@ document.querySelector("#roleSelect").addEventListener("change", (event) => {
   renderIdentityWorkbench();
   renderInboundRows();
   renderInboundDetail();
+  prepareInboundArchiveForm();
+  renderInternalDispatchModule();
   renderDispatchBoard();
   renderDispatchDetail();
   void loadOfficialWorkflow(officialWorkflowScope === "new" ? "all" : officialWorkflowScope);
@@ -14607,42 +25192,18 @@ document.querySelector("#roleSelect").addEventListener("change", (event) => {
 
 document.querySelector("#composeForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!validateComposeStep("fill")) return;
+  if (!draftConfirmed) {
+    setComposeStep("confirm", { force: true });
+    showToast("送出前請先確認函稿預覽。");
+    return;
+  }
   const doc = await createDispatchFromForm("待清稿");
   if (!doc) return;
   activeComposeStep = "fill";
   renderComposeStepper();
   showToast("已建立函稿並加入發文佇列。");
   setView(isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
-});
-
-document.querySelector("#loginForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try {
-    await loginWithBackend(
-      document.querySelector("#loginEmail").value,
-      document.querySelector("#loginPassword").value,
-      document.querySelector("#loginEnvironment").value
-    );
-  } catch (error) {
-    showToast(error.message || "後端登入失敗。");
-    addAccountAudit("後端登入失敗", error.message || "Auth API 未回應。");
-  }
-});
-
-document.querySelector("#demoLoginBtn").addEventListener("click", async () => {
-  document.querySelector("#loginEmail").value = "edoc@suiyuecare.com";
-  document.querySelector("#loginPassword").value = "demo1234";
-  try {
-    await loginWithBackend("edoc@suiyuecare.com", "demo1234", "Google Workspace");
-  } catch (error) {
-    showToast(error.message || "測試帳號登入失敗。");
-  }
-});
-document.querySelector("#portalLoginBtn")?.addEventListener("click", () => {
-  redirectToLoggingPortal();
-});
-document.querySelectorAll("[data-quick-role]").forEach((button) => {
-  button.addEventListener("click", () => quickLoginAsRole(button.dataset.quickRole));
 });
 
 document.querySelector("#pullInboundBtn")?.addEventListener("click", pullJagentInbound);
@@ -14663,6 +25224,7 @@ document.querySelector("#exceptionForm").addEventListener("submit", (event) => {
   event.preventDefault();
   createInboundException(selectedInboundId ? [selectedInboundId] : null, document.querySelector("#exceptionType").value);
 });
+document.querySelector("#createInboundSmokeTestBtn")?.addEventListener("click", createBackendInboundLaunchSmokeTest);
 document.querySelector("#saveRegisterDraftBtn").addEventListener("click", () => showToast("收文登錄草稿已暫存。"));
 document.querySelector("#clearInboundLogBtn").addEventListener("click", () => {
   clearLogWithConfirm(inboundAuditLog, renderInboundAuditLog, "收文操作紀錄");
@@ -14688,8 +25250,10 @@ document.querySelectorAll("[data-official-scope]").forEach((button) => {
   button.addEventListener("click", () => {
     const scope = button.dataset.officialScope || "all";
     if (scope === "new") {
+      editingOfficialDocumentId = "";
       officialWorkflowScope = "new";
       selectedOfficialDocumentId = "";
+      resetOfficialStampPositions();
       renderOfficialWorkflow();
       void loadOfficialSealOptions();
       return;
@@ -14706,20 +25270,62 @@ document.querySelector("#officialWorkflowSearch")?.addEventListener("input", (ev
   renderOfficialWorkflow();
 });
 document.querySelector("#officialCompanySelect")?.addEventListener("change", (event) => {
+  event.currentTarget.dataset.userEdited = "true";
+  event.currentTarget.dataset.autoDefault = "false";
+  clearOfficialWorkflowValidation();
   void loadOfficialSealOptions(event.target.value);
 });
 document.querySelector("#officialSourceType")?.addEventListener("change", (event) => {
-  document.querySelector("#officialPdfInput")?.toggleAttribute("required", event.target.value === "uploaded_pdf");
+  syncOfficialSourceMode({ clearPdf: true });
+  clearOfficialWorkflowValidation();
 });
-["#officialStampPageInput", "#officialStampXInput", "#officialStampYInput", "#officialStampWidthInput", "#officialStampHeightInput"].forEach((selector) => {
+document.querySelector("#officialSmokePdfTemplateBtn")?.addEventListener("click", downloadUploadedPdfLaunchSmokeTemplate);
+["#officialApprovalCategorySelect", "#officialSealSelect", "#officialDispatchMethodSelect", "#officialRecipientInput", "#officialDispatchUnitInput", "#officialHandlerInput", "#officialSubjectInput", "#officialDescriptionInput", "#officialMethodInput", "#officialReasonInput", "#officialPdfInput"].forEach((selector) => {
+  const element = document.querySelector(selector);
+  element?.addEventListener("input", clearOfficialWorkflowValidation);
+  element?.addEventListener("change", clearOfficialWorkflowValidation);
+});
+document.querySelector("#officialPdfInput")?.addEventListener("change", (event) => {
+  void handleOfficialPdfA4Change(event);
+});
+document.querySelector("#officialApprovalCategorySelect")?.addEventListener("change", () => {
+  const selection = renderOfficialApplicationApprovalRoute();
+  setOfficialFieldValidity(
+    "#officialApprovalCategorySelect",
+    "#officialApprovalCategoryHint",
+    Boolean(selection.approvalRouteCode),
+    selection.approvalRouteCode ? `已自動判定 ${selection.approvalRouteName}。` : "請選擇文件細項。"
+  );
+});
+document.querySelector("#officialSealSelect")?.addEventListener("change", () => {
+  updateOfficialSealCurrentHint();
+  rebindOfficialStampPositionsToSelectedSeal();
+  lockOfficialStampPositionSizesToSelectedSeal();
+});
+["#officialStampPageInput", "#officialStampXInput", "#officialStampYInput"].forEach((selector) => {
   document.querySelector(selector)?.addEventListener("input", updateOfficialStampPreview);
 });
+document.querySelector("#officialAddStampPositionBtn")?.addEventListener("click", addOfficialStampPosition);
 document.querySelector("#officialWorkflowForm")?.addEventListener("submit", (event) => {
   event.preventDefault();
   void createOfficialWorkflow(true);
 });
 document.querySelector("#officialSaveDraftBtn")?.addEventListener("click", () => {
   void createOfficialWorkflow(false);
+});
+document.querySelector("#officialCancelCorrectionBtn")?.addEventListener("click", cancelOfficialCorrection);
+document.querySelector("#internalDispatchReloadBtn")?.addEventListener("click", () => loadInternalDispatches(false));
+document.querySelector("#internalDispatchForm")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void createInternalDispatchFromForm();
+});
+document.querySelector("#internalDispatchDocumentSelect")?.addEventListener("change", (event) => {
+  const inbound = inboundDocs.find((item) => item.id === event.target.value);
+  if (!inbound) return;
+  const title = document.querySelector("#internalDispatchTitleInput");
+  const body = document.querySelector("#internalDispatchBodyInput");
+  if (title && !title.value.trim()) title.value = inbound.subject || "內部公文派發";
+  if (body && !body.value.trim()) body.value = inbound.note || "請依派發要求辦理。";
 });
 document.querySelector("#approvalLogSearch").addEventListener("input", (event) => {
   approvalLogSearchTerm = event.target.value;
@@ -14789,10 +25395,17 @@ document.querySelector("#inboundModalCloseBtn").addEventListener("click", closeI
 document.querySelector("#inboundModal").addEventListener("click", (event) => {
   if (event.target.id === "inboundModal") closeInboundModal();
 });
+document.querySelector("#officialDecisionForm")?.addEventListener("submit", (event) => void submitOfficialDecision(event));
+document.querySelector("#officialDecisionModalCloseBtn")?.addEventListener("click", closeOfficialDecisionDialog);
+document.querySelector("#officialDecisionCancelBtn")?.addEventListener("click", closeOfficialDecisionDialog);
+document.querySelector("#officialDecisionModal")?.addEventListener("click", (event) => {
+  if (event.target.id === "officialDecisionModal") closeOfficialDecisionDialog();
+});
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!document.querySelector("#contractModal")?.classList.contains("hidden")) closeContractModal();
   if (!document.querySelector("#inboundModal")?.classList.contains("hidden")) closeInboundModal();
+  if (!document.querySelector("#officialDecisionModal")?.classList.contains("hidden")) closeOfficialDecisionDialog();
 });
 document.querySelector("#previewPackageBtn").addEventListener("click", () => {
   const doc = currentDispatchDoc();
@@ -14810,6 +25423,7 @@ document.querySelector("#generateDispatchNoBtn").addEventListener("click", () =>
   showToast(`已產生發文字號：${no}`);
 });
 document.querySelector("#aiGenerateDraftBtn")?.addEventListener("click", generateAiDraft);
+document.querySelector("#generateFromPurposeBtn")?.addEventListener("click", generateAiDraft);
 document.querySelector("#aiApplyDraftBtn")?.addEventListener("click", applyAiDraftToCompose);
 document.querySelector("#aiClearDraftBtn")?.addEventListener("click", clearAiDraft);
 document.querySelector("#previewDraftBtn")?.addEventListener("click", () => {
@@ -14819,7 +25433,14 @@ document.querySelector("#previewDraftBtn")?.addEventListener("click", () => {
 document.querySelector("#toggleDraftPreviewBtn")?.addEventListener("click", () => {
   setDraftPreviewExpanded(!draftPreviewExpanded, { scroll: !draftPreviewExpanded });
 });
+document.querySelectorAll("[data-print-official-draft]").forEach((button) => {
+  button.addEventListener("click", () => void printOfficialDraft(button.dataset.printOfficialDraft));
+});
 document.querySelector("#confirmDraftBtn").addEventListener("click", () => {
+  if (!validateComposeStep("fill")) {
+    setComposeStep("fill", { force: true });
+    return;
+  }
   setDraftConfirmed(true);
   showToast("函稿已確認，可以加入發文佇列。");
 });
@@ -14838,12 +25459,39 @@ document.querySelector("#composeNextAction").addEventListener("click", (event) =
   const nextButton = event.target.closest("#composeInlineNextBtn");
   if (nextButton && !nextButton.disabled) advanceComposeStep();
 });
-["#composeCompanySelect", "#docType", "#priority", "#recipient", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
+["#largeSealType", "#smallSealType"].forEach((selector) => {
+  document.querySelector(selector)?.addEventListener("change", (event) => {
+    syncComposeElectronicExchangeMode(event.currentTarget);
+    markDraftDirty();
+  });
+});
+syncComposeElectronicExchangeMode();
+["#composeCompanySelect", "#docType", "#priority", "#composeApprovalCategorySelect", "#recipient", "#documentPurpose", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);
   if (!["INPUT", "TEXTAREA"].includes(element?.tagName) || element?.type === "file") {
     element?.addEventListener("change", markDraftDirty);
   }
+});
+["#contactAddress", "#contactOwner", "#contactPhone", "#contactEmail"].forEach((selector) => {
+  document.querySelector(selector)?.addEventListener("input", (event) => {
+    event.currentTarget.dataset.autoDefault = "false";
+  });
+});
+document.querySelector("#composeCompanySelect")?.addEventListener("change", (event) => {
+  event.currentTarget.dataset.userEdited = "true";
+  event.currentTarget.dataset.autoDefault = "false";
+  applyComposeContactDefaults(false);
+});
+document.querySelector("#composeApprovalCategorySelect")?.addEventListener("change", () => {
+  renderComposeApprovalRoute();
+  const selection = approvalSelectionForSelect("#composeApprovalCategorySelect");
+  setComposeFieldValidity(
+    "#composeApprovalCategorySelect",
+    "#composeApprovalCategoryHint",
+    Boolean(selection.approvalRouteCode),
+    selection.approvalRouteCode ? `已自動判定 ${selection.approvalRouteName}。` : "請選擇文件細項。"
+  );
 });
 document.querySelector("#sendQueueBtn")?.addEventListener("click", () => {
   const queued = dispatchDocs.filter((doc) => ["已封裝", "已清稿", "待清稿"].includes(doc.status)).map((doc) => doc.id);
@@ -14909,6 +25557,11 @@ document.querySelector("#formatClearLogBtn").addEventListener("click", () => {
   document.querySelector(selector).addEventListener("change", renderFormatChecks);
 });
 document.querySelector("#workflowRoleSelect").addEventListener("change", (event) => {
+  if (roleSwitchDisabledByPolicy()) {
+    event.target.value = workflowRole;
+    showToast("正式登入後不可切換流程角色，請改用正確帳號登入。");
+    return;
+  }
   workflowRole = event.target.value;
   applyRoleNavigation();
   renderScopeZone();
@@ -14924,6 +25577,10 @@ document.querySelector("#workflowRoleSelect").addEventListener("change", (event)
   addWorkflowAudit("切換流程角色", `目前流程控管角色切換為 ${workflowRole}。`);
 });
 document.querySelector("#workflowSyncRoleBtn").addEventListener("click", () => {
+  if (roleSwitchDisabledByPolicy()) {
+    showToast("正式登入後不可同步成其他側欄角色。");
+    return;
+  }
   document.querySelector("#roleSelect").value = workflowRole;
   document.querySelector("#roleNote").textContent = roleNotes[workflowRole];
   applyRoleNavigation();
@@ -14998,11 +25655,12 @@ document.querySelector("#workflowConditionForm").addEventListener("submit", (eve
   event.preventDefault();
   evaluateWorkflowConditions();
 });
-document.querySelector("#workflowProxyAddBtn").addEventListener("click", addWorkflowProxy);
+document.querySelector("#workflowProxyAddBtn").addEventListener("click", () => void loadWorkflowDelegations(false));
 document.querySelector("#workflowProxyForm").addEventListener("submit", (event) => {
   event.preventDefault();
-  addWorkflowProxy();
+  void addWorkflowProxy();
 });
+document.querySelector("#workflowProxyPrincipal")?.addEventListener("change", syncWorkflowProxyCandidateOptions);
 document.querySelector("#workflowActionForm").addEventListener("submit", (event) => {
   event.preventDefault();
   runWorkflowAdvancedAction();
@@ -15016,15 +25674,130 @@ document.querySelector("#sealApproveBtn").addEventListener("click", () => approv
 document.querySelector("#sealGeneratePdfBtn").addEventListener("click", () => generatePdfTemplate());
 document.querySelector("#sealStampPdfBtn").addEventListener("click", stampCurrentPdf);
 document.querySelector("#sealVerifyHashBtn").addEventListener("click", verifyCurrentPdfHash);
-document.querySelector("#uploadedSealPdfInput").addEventListener("change", handleUploadedSealPdfChange);
-document.querySelector("#addCompanyStampBtn").addEventListener("click", () => addUploadedStamp("company"));
-document.querySelector("#addOwnerStampBtn").addEventListener("click", () => addUploadedStamp("owner"));
-document.querySelector("#addPageStampBtn").addEventListener("click", () => addUploadedStamp("page"));
-document.querySelector("#clearUploadedStampsBtn").addEventListener("click", () => {
-  uploadedSealStampPositions = [];
+document.querySelector("#uploadedSealPdfInput")?.addEventListener("change", handleUploadedSealPdfChange);
+document.querySelector("#addSelectedStampBtn")?.addEventListener("click", () => addUploadedStamp(document.querySelector("#uploadedSealStampType")?.value || "current_page"));
+document.querySelector("#addUploadedTextBtn")?.addEventListener("click", () => addUploadedTextAtPoint());
+document.querySelector("#uploadedSealCompany")?.addEventListener("change", async (event) => {
+  await loadUploadedSealOptions(event.target.value);
   renderUploadedSealWorkbench();
 });
-document.querySelector("#submitUploadedSealBtn").addEventListener("click", submitUploadedSealApplication);
+document.querySelector("#uploadedSealApprovalCategorySelect")?.addEventListener("change", () => {
+  const selection = renderUploadedSealApprovalRoute();
+  setOfficialFieldValidity(
+    "#uploadedSealApprovalCategorySelect",
+    "#uploadedSealApprovalCategoryHint",
+    Boolean(selection.approvalRouteCode),
+    selection.approvalRouteCode ? `已自動判定 ${selection.approvalRouteName}。` : "請選擇文件細項。"
+  );
+});
+document.querySelectorAll("button[data-editor-mode]").forEach((button) => button.addEventListener("click", () => setUploadedEditorMode(button.dataset.editorMode)));
+document.querySelectorAll("[data-editor-tool]").forEach((button) => button.addEventListener("click", () => setUploadedEditorTool(button.dataset.editorTool)));
+document.querySelector("#uploadedPdfPrevBtn")?.addEventListener("click", () => setUploadedSealPage(uploadedSealCurrentPage - 1));
+document.querySelector("#uploadedPdfNextBtn")?.addEventListener("click", () => setUploadedSealPage(uploadedSealCurrentPage + 1));
+document.querySelector("#uploadedEditorUndoBtn")?.addEventListener("click", undoUploadedEditor);
+document.querySelector("#uploadedEditorRedoBtn")?.addEventListener("click", redoUploadedEditor);
+document.querySelector("#uploadedEditorZoom")?.addEventListener("input", (event) => setUploadedEditorZoom(Number(event.target.value) / 100));
+document.querySelector("#uploadedEditorZoomOutBtn")?.addEventListener("click", () => setUploadedEditorZoom(uploadedSealEditorRuntime.zoom - 0.1));
+document.querySelector("#uploadedEditorZoomInBtn")?.addEventListener("click", () => setUploadedEditorZoom(uploadedSealEditorRuntime.zoom + 0.1));
+document.querySelector("#uploadedEditorFitBtn")?.addEventListener("click", () => setUploadedEditorZoom(uploadedSealEditorRuntime.zoom, { fit: true }));
+document.querySelector("#uploadedEditorImportPdfBtn")?.addEventListener("click", () => document.querySelector("#uploadedEditorImportPdfInput")?.click());
+document.querySelector("#uploadedEditorThumbnailToggleBtn")?.addEventListener("click", (event) => {
+  const editor = document.querySelector("#uploadedPdfEditor");
+  const open = editor?.dataset.thumbnailsOpen !== "true";
+  if (editor) editor.dataset.thumbnailsOpen = String(open);
+  event.currentTarget.setAttribute("aria-expanded", String(open));
+});
+document.querySelector("#uploadedEditorPropertiesToggleBtn")?.addEventListener("click", (event) => {
+  const editor = document.querySelector("#uploadedPdfEditor");
+  const open = editor?.dataset.propertiesOpen !== "true";
+  if (editor) editor.dataset.propertiesOpen = String(open);
+  event.currentTarget.setAttribute("aria-expanded", String(open));
+});
+document.querySelector("#uploadedEditorImportPdfInput")?.addEventListener("change", async (event) => {
+  try {
+    await handleUploadedEditorImportPdf([...event.target.files]);
+  } catch (error) {
+    setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
+    setUploadedEditorSaveStatus("error", "合併 PDF 失敗");
+    showToast(`合併 PDF 失敗：${pdfA4UiErrorMessage(error)}`);
+  } finally {
+    event.target.value = "";
+  }
+});
+document.querySelector("#uploadedEditorImageInput")?.addEventListener("change", (event) => void handleUploadedEditorImage(event.target.files?.[0]));
+document.querySelectorAll("[data-editor-page-action]").forEach((button) => button.addEventListener("click", () => runUploadedEditorPageAction(button.dataset.editorPageAction)));
+document.querySelectorAll("[data-editor-review]").forEach((button) => button.addEventListener("click", () => void showUploadedEditorReview(button.dataset.editorReview)));
+document.querySelector("#clearUploadedStampsBtn")?.addEventListener("click", () => {
+  if (!uploadedSealEditorState.elements.length || uploadedSealEditorRuntime.locked) return;
+  if (!window.confirm("確定清除目前草稿的全部編輯物件？原始 PDF 不會被刪除。")) return;
+  commitUploadedEditorMutation((state) => { state.elements = []; });
+  uploadedSealEditorRuntime.selectedIds.clear();
+});
+document.querySelector("#submitUploadedSealBtn")?.addEventListener("click", submitUploadedSealApplication);
+document.querySelector("#uploadedSealType")?.addEventListener("change", renderUploadedSealWorkbench);
+const uploadedStampLayer = document.querySelector("#uploadedStampLayer");
+uploadedStampLayer?.addEventListener("pointerdown", beginUploadedEditorPointer);
+uploadedStampLayer?.addEventListener("pointermove", moveUploadedEditorPointer);
+uploadedStampLayer?.addEventListener("pointerup", endUploadedEditorPointer);
+uploadedStampLayer?.addEventListener("pointercancel", endUploadedEditorPointer);
+uploadedStampLayer?.addEventListener("wheel", (event) => {
+  if (!event.ctrlKey && !event.metaKey) return;
+  event.preventDefault();
+  setUploadedEditorZoom(uploadedSealEditorRuntime.zoom + (event.deltaY < 0 ? 0.1 : -0.1));
+}, { passive: false });
+[
+  "#uploadedEditorPropertyText",
+  "#uploadedEditorPropertyX",
+  "#uploadedEditorPropertyY",
+  "#uploadedEditorPropertyWidth",
+  "#uploadedEditorPropertyHeight",
+  "#uploadedEditorPropertyRotation",
+  "#uploadedEditorPropertyOpacity",
+  "#uploadedEditorPropertyFontSize",
+  "#uploadedEditorPropertyColor",
+  "#uploadedEditorPropertyShapeType"
+].forEach((selector) => document.querySelector(selector)?.addEventListener("change", updateUploadedEditorProperty));
+document.querySelectorAll("[data-editor-layer]").forEach((button) => button.addEventListener("click", () => moveUploadedEditorLayer(button.dataset.editorLayer)));
+document.querySelector("[data-editor-copy-selected]")?.addEventListener("click", copyUploadedEditorSelection);
+document.querySelector("[data-editor-delete-selected]")?.addEventListener("click", deleteUploadedEditorSelection);
+document.querySelector("#uploadedEditorCopyPagesBtn")?.addEventListener("click", copyUploadedEditorSelectionToPages);
+document.querySelector("#uploadedEditorConflictCopyBtn")?.addEventListener("click", () => void copyUploadedEditorConflictVersion());
+document.querySelector("#uploadedEditorResolveConflictBtn")?.addEventListener("click", () => void reloadUploadedEditorServerState().catch((error) => showToast(`重新載入失敗：${error.message}`)));
+window.addEventListener("online", () => {
+  if (uploadedSealEditorRuntime.offlineDirty) void saveUploadedEditorState();
+});
+window.addEventListener("offline", () => {
+  uploadedSealEditorRuntime.offlineDirty = true;
+  setUploadedEditorSaveStatus("offline", "離線中，變更保留於此裝置");
+});
+window.addEventListener("resize", () => {
+  if (uploadedSealEditorRuntime.fitPage && uploadedSealEditorState.pages.length) void renderUploadedPdfPage();
+});
+document.addEventListener("keydown", (event) => {
+  const editorVisible = document.querySelector("#electronicSeal")?.classList.contains("active") || document.querySelector("#contractSeal")?.classList.contains("active");
+  if (!editorVisible || uploadedSealEditorRuntime.locked || event.target.closest("input, textarea, select")) return;
+  const command = event.metaKey || event.ctrlKey;
+  if (command && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    if (event.shiftKey) redoUploadedEditor(); else undoUploadedEditor();
+    return;
+  }
+  if (command && event.key.toLowerCase() === "c") { event.preventDefault(); copyUploadedEditorSelection(); return; }
+  if (command && event.key.toLowerCase() === "v") { event.preventDefault(); pasteUploadedEditorSelection(); return; }
+  if (["Delete", "Backspace"].includes(event.key)) { event.preventDefault(); deleteUploadedEditorSelection(); return; }
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) || !uploadedSealEditorRuntime.selectedIds.size) return;
+  event.preventDefault();
+  const amount = event.shiftKey ? 10 : 1;
+  commitUploadedEditorMutation((state) => {
+    state.elements.filter((element) => uploadedSealEditorRuntime.selectedIds.has(element.id)).forEach((element) => {
+      const page = state.pages.find((item) => item.pageId === element.pageId);
+      if (event.key === "ArrowLeft") element.x = Math.max(0, element.x - amount);
+      if (event.key === "ArrowRight") element.x = Math.min(page.widthPt - element.width, element.x + amount);
+      if (event.key === "ArrowDown") element.y = Math.max(0, element.y - amount);
+      if (event.key === "ArrowUp") element.y = Math.min(page.heightPt - element.height, element.y + amount);
+    });
+  });
+});
 document.querySelector("#downloadBeforePdfBtn").addEventListener("click", () => downloadPdfVersion("before"));
 document.querySelector("#downloadAfterPdfBtn").addEventListener("click", () => downloadPdfVersion("after"));
 document.querySelector("#sealApplicationBtn").addEventListener("click", generateSealApplication);
@@ -15049,7 +25822,42 @@ document.querySelector("#sealUsageCompanySelect").addEventListener("change", (ev
   selectedCompanySealId = "";
   loadCompanySealCompanyData();
 });
+document.querySelector("#sealUsageSealSelect")?.addEventListener("change", () => {
+  syncCompanySealUsageSizeInputs();
+  companySealStampPositions = companySealStampPositions.map((position) => fixedCompanySealStampPosition(
+    position,
+    selectedCompanySealUsageSeal() || "large_seal"
+  ));
+  renderCompanySealModule();
+});
 document.querySelector("#companySealReloadBtn").addEventListener("click", () => loadCompanySealModule());
+document.querySelector("#simpleSealUploadForm")?.addEventListener("submit", uploadSimpleCompanySeal);
+document.querySelector("#simpleSealCompanySelect")?.addEventListener("change", async (event) => {
+  selectedCompanySealCompanyId = event.target.value;
+  selectedCompanySealId = "";
+  selectedSimpleSealRecordId = "";
+  await loadCompanySealCompanyData(true);
+});
+document.querySelector("#simpleSealRecordSelect")?.addEventListener("change", (event) => fillSimpleSealRecord(event.target.value));
+document.querySelector("#simpleSealCategorySelect")?.addEventListener("change", (event) => selectSimpleSealCategory(event.target.value));
+document.querySelector("#simpleSealFileInput")?.addEventListener("change", renderSimpleSealFileSummary);
+document.querySelector("#simpleSealSizeSelect")?.addEventListener("change", (event) => {
+  syncCompanySealCalibrationInputs("simple", event.target.value);
+  void renderSimpleSealFileSummary();
+});
+document.querySelector("#simpleSealRenderSizeMmInput")?.addEventListener("input", () => {
+  refreshCompanySealCalibrationHint("simple", document.querySelector("#simpleSealSizeSelect")?.value || "large_seal");
+  void renderSimpleSealFileSummary();
+});
+document.querySelector("#companySealRenderSizeMmInput")?.addEventListener("input", () => {
+  refreshCompanySealCalibrationHint("company", currentCompanySeal() || "large_seal");
+});
+document.querySelector("#simpleSealRefreshBtn")?.addEventListener("click", refreshSimpleSealBackendRecord);
+document.querySelectorAll("[data-simple-seal-category]").forEach((button) => {
+  button.addEventListener("click", () => selectSimpleSealCategory(button.dataset.simpleSealCategory));
+});
+document.querySelector("#companySealExportMissingBtn")?.addEventListener("click", exportCompanySealMissingManifest);
+document.querySelector("#companySealExportIntakeBtn")?.addEventListener("click", exportCompanySealCustodyIntakeTemplate);
 document.querySelector("#companySealCreateBtn").addEventListener("click", createCompanySealFromForm);
 document.querySelector("#companySealCreateForm").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -15150,7 +25958,12 @@ document.querySelectorAll(".segment[data-archive-filter]").forEach((button) => {
 });
 document.querySelector("#archiveSearch").addEventListener("input", (event) => {
   archiveSearchTerm = event.target.value;
-  renderArchiveRows();
+  if (!hasAuthenticatedBackendSession()) {
+    renderArchiveRows();
+    return;
+  }
+  window.clearTimeout(archiveSearchTimer);
+  archiveSearchTimer = window.setTimeout(() => void loadArchiveRecordsFromBackend(archiveSearchTerm), 300);
 });
 document.querySelector("#archiveSealBtn").addEventListener("click", () => runArchiveAction("seal"));
 document.querySelector("#archiveVerifyBtn").addEventListener("click", () => runArchiveAction("verify"));
@@ -15224,24 +26037,31 @@ document.querySelector("#accountSearch").addEventListener("input", (event) => {
   accountSearchTerm = event.target.value;
   renderAccounts();
 });
-document.querySelector("#accountRoleSelect").addEventListener("change", () => syncAccountJobLevelWithRole());
-document.querySelector("#accountInviteBtn").addEventListener("click", createAccountFromForm);
-document.querySelector("#accountForm").addEventListener("submit", (event) => {
+document.querySelector("#accountRoleSelect")?.addEventListener("change", () => syncAccountJobLevelWithRole());
+document.querySelector("#accountInviteBtn")?.addEventListener("click", createAccountFromForm);
+document.querySelector("#accountForm")?.addEventListener("submit", (event) => {
   event.preventDefault();
   createAccountFromForm();
 });
-document.querySelector("#accountSyncBtn").addEventListener("click", syncAccountsFromRoles);
+document.querySelector("#accountSyncBtn")?.addEventListener("click", syncAccountsFromRoles);
+document.querySelector("#accountRefreshBtn")?.addEventListener("click", refreshFinanceAccountProjection);
+document.querySelector("#accountRosterTemplateExportBtn")?.addEventListener("click", exportFormalAccountRosterTemplate);
+document.querySelector("#accountRosterImportBtn")?.addEventListener("click", () => document.querySelector("#accountRosterImportInput")?.click());
+document.querySelector("#accountRosterImportInput")?.addEventListener("change", (event) => {
+  handleFormalAccountRosterImportFile(event.target.files?.[0]);
+  event.target.value = "";
+});
 document.querySelector("#accountExportBtn").addEventListener("click", () => {
   addAccountAudit("匯出權限報表", `已匯出 ${userAccounts.length} 個帳號、${Object.keys(rolePermissions).length} 個角色與 ${accountLoginLogs.length} 筆登入紀錄。`);
   showToast("帳號權限報表已匯出。");
 });
-document.querySelector("#ssoConnectBtn").addEventListener("click", connectSso);
-document.querySelector("#ssoTestBtn").addEventListener("click", testSso);
-document.querySelector("#ssoForm").addEventListener("submit", (event) => {
+document.querySelector("#ssoConnectBtn")?.addEventListener("click", connectSso);
+document.querySelector("#ssoTestBtn")?.addEventListener("click", testSso);
+document.querySelector("#ssoForm")?.addEventListener("submit", (event) => {
   event.preventDefault();
   connectSso();
 });
-document.querySelector("#mfaEnforceBtn").addEventListener("click", enforceMfa);
+document.querySelector("#mfaEnforceBtn")?.addEventListener("click", enforceMfa);
 document.querySelector("#accountAddIpBtn").addEventListener("click", addAccountIpRule);
 document.querySelector("#accountIpForm").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -15431,6 +26251,9 @@ document.querySelector("#opsReadinessBtn").addEventListener("click", runOpsReadi
 document.querySelector("#opsGoLiveAuditBtn").addEventListener("click", runOpsGoLiveAudit);
 document.querySelector("#opsMonitoringBtn").addEventListener("click", runOpsMonitoringCheck);
 document.querySelector("#goLiveRefreshBtn").addEventListener("click", runOpsGoLiveAudit);
+document.querySelector("#launchReportExportBtn")?.addEventListener("click", exportLaunchSmokeReport);
+document.querySelector("#launchCutoverExportBtn")?.addEventListener("click", exportLaunchCutoverPackage);
+document.querySelector("#opsProductionChecklistExportBtn")?.addEventListener("click", exportOpsProductionChecklist);
 document.querySelector("#opsLookupErrorBtn").addEventListener("click", () => lookupOpsErrorCode());
 document.querySelector("#opsErrorForm").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -15465,6 +26288,7 @@ document.querySelector("#complianceClearLogBtn").addEventListener("click", () =>
   clearLogWithConfirm(complianceAuditLog, renderComplianceAuditLog, "法遵營運紀錄");
 });
 document.querySelector("#retryFailedBtn").addEventListener("click", () => {
+  if (!guardFormalExchangeUi("重送異常交換")) return;
   const failed = dispatchDocs.filter((doc) => doc.status === "交換失敗").map((doc) => doc.id);
   if (failed.length) runDispatchAction("resend", failed);
   addExchangeEvent("重送異常", failed.length ? `已重送 ${failed.length} 筆交換失敗發文。` : "目前沒有交換失敗案件。");
@@ -15501,6 +26325,16 @@ document.querySelector("#settingsWorkflowTemplateForm")?.addEventListener("submi
   event.preventDefault();
   upsertSettingsWorkflowTemplate();
 });
+document.querySelector("#officialWorkflowConfigSaveBtn")?.addEventListener("click", saveOfficialWorkflowConfig);
+document.querySelectorAll("[data-official-workflow-step]").forEach((input) => {
+  input.addEventListener("change", () => {
+    officialWorkflowConfig = { ...officialWorkflowConfig, enabled_steps: selectedOfficialWorkflowSteps(), steps: [] };
+    renderOfficialWorkflowConfig();
+  });
+});
+document.querySelectorAll("[data-company-seal-preset]").forEach((button) => {
+  button.addEventListener("click", () => applyCompanySealPreset(button.dataset.companySealPreset));
+});
 document.querySelector("#settingsGrantPermissionBtn")?.addEventListener("click", () => mutateSettingsPermission("grant"));
 document.querySelector("#settingsRevokePermissionBtn")?.addEventListener("click", () => mutateSettingsPermission("revoke"));
 document.querySelector("#settingsPermissionRoleSelect")?.addEventListener("change", renderSettingsPermissionMatrix);
@@ -15524,9 +26358,29 @@ document.querySelector("#headerNotificationBtn")?.addEventListener("click", () =
 });
 document.querySelector("#headerRefreshBtn")?.addEventListener("click", refreshCurrentWorkspace);
 document.querySelector("#returnPortalBtn")?.addEventListener("click", () => {
-  window.location.href = buildLoggingPortalUrl();
+  returnToLoggingPortalModulePicker();
 });
 document.querySelector("#logoutBtn")?.addEventListener("click", leaveApp);
+document.querySelector("#navMoreBtn")?.addEventListener("click", () => {
+  renderMoreNavigation();
+  const dialog = document.querySelector("#navMoreDialog");
+  if (dialog?.showModal) dialog.showModal();
+  else dialog?.setAttribute("open", "");
+});
+document.querySelector("#navMoreCloseBtn")?.addEventListener("click", () => {
+  document.querySelector("#navMoreDialog")?.close();
+});
+document.querySelector("#navMoreList")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-more-nav-target]");
+  if (!button) return;
+  const target = button.dataset.moreNavTarget;
+  document.querySelector("#navMoreDialog")?.close();
+  if (target) setView(target);
+});
+const compactNavigationMedia = window.matchMedia("(max-width: 720px)");
+if (typeof compactNavigationMedia.addEventListener === "function") {
+  compactNavigationMedia.addEventListener("change", renderMoreNavigation);
+}
 document.querySelector("#identityWorkbench").addEventListener("click", (event) => {
   const button = event.target.closest("[data-identity-target]");
   if (!button) return;
@@ -15536,80 +26390,166 @@ document.querySelector("#identityWorkbench").addEventListener("click", (event) =
   if (clickId) window.setTimeout(() => document.querySelector(`#${clickId}`)?.click(), 80);
 });
 
+function removeProductionDemonstrationData() {
+  if (!isProductionEdocHost()) return;
+  [
+    queueItems,
+    inboundDocs,
+    pulledInboundTemplates,
+    inboundAuditLog,
+    dispatchDocs,
+    dispatchAuditLog,
+    addressBook,
+    exchangeEvents,
+    auditEvents,
+    archiveItems,
+    archiveRecords,
+    archiveAuditLog,
+    securityDevices,
+    securityAuditLog,
+    fileAccessLog,
+    userAccounts,
+    accountLoginLogs,
+    accountDevices,
+    accountIpRules,
+    accountAuditLog,
+    reportTrend,
+    reportsAuditLog,
+    opsApiLogs,
+    opsConfigVersions,
+    opsAuditLog,
+    notificationItems,
+    notificationAuditLog,
+    notificationDeliveryLog,
+    systemInboxItems,
+    backgroundJobs,
+    jobAuditLog,
+    databaseAuditLog,
+    formatAuditLog,
+    documentAclRules,
+    documentAclEvents,
+    workflowTasks,
+    workflowSteps,
+    workflowAuditLog,
+    workflowProxies,
+    workflowProofLog,
+    sealRegistry,
+    sealRequests,
+    sealAuditLog,
+    electronicSignatureProofs,
+    contractRecords,
+    contractApprovals,
+    contractAuditLog,
+    contractSealAuditLog,
+    trackingCases,
+    trackingAuditLog
+  ].forEach((items) => items.splice(0, items.length));
+}
+
+removeProductionDemonstrationData();
 applyEdocRoleOptions();
 syncConfigurableSelectOptions();
-assignNextDispatchNo(true);
-applyComposeContactDefaults();
-renderDraftPreview();
-applyRoleNavigation();
-renderScopeZone();
-renderIdentityWorkbench();
-renderRoleDashboard();
-renderQueueRows();
-renderInboundRows();
-renderInboundDetail();
-renderInboundAuditLog();
-renderDispatchBoard();
-renderDispatchDetail();
-renderDispatchAuditLog();
-renderPrechecks();
-renderJagentStatus();
-renderAddressResults();
-renderFormatAttachments();
-renderFormatChecks();
-renderFormatAgencyResults();
-renderFormatAuditLog();
-renderWorkflowRole();
-renderWorkflowTasks();
-renderUnifiedFlows();
-renderWorkflowSteps();
-renderApprovalProgress();
-renderApprovalLog();
-renderWorkflowAuditLog();
-renderApprovalCategorySelect("#workflowDocumentCategorySelect", "服務委託合約");
-renderWorkflowTemplateSteps();
-renderWorkflowConditions();
-renderWorkflowProxies();
-renderWorkflowProofLog();
-renderContracts();
-renderContractSeal();
-fillContractForm();
-renderSeals();
-loadCompanySealModule(true);
-renderTrackingSummary();
-renderTrackingRows();
-renderTrackingDetail();
-renderTrackingAuditLog();
-renderTimeline("#exchangeTimeline", exchangeEvents);
-renderTimeline("#auditTimeline", auditEvents);
-renderArchiveSummary();
-renderArchiveRows();
-renderArchiveDetail();
-renderArchiveGrid();
-renderArchiveAuditLog();
-renderSecurityStatus();
-renderSecurityPermissionGrid();
-renderSecurityDeviceList();
-renderSecurityAuditLog();
-renderFileSecurity();
-loadFileStorageServiceHealth();
-renderAccounts();
-renderReports();
-renderReportsAuditLog();
-renderNotifications();
-renderNotificationAuditLog();
-syncNotificationsFromBackend(true);
-syncDatabaseFromBackend(true);
-renderJobs();
-syncJobsFromBackend(true);
-syncDatabaseTables(true);
-renderDatabase();
-renderOps();
-renderComplianceOps();
-renderFeatureGrid();
-renderSettings();
-renderSearch();
-setView(location.hash?.slice(1) && titles[location.hash.slice(1)] ? location.hash.slice(1) : "dashboard");
+renderApprovalCategorySelect("#composeApprovalCategorySelect", "", { requireSelection: true });
+renderApprovalCategorySelect("#officialApprovalCategorySelect", "", { requireSelection: true });
+renderApprovalCategorySelect("#uploadedSealApprovalCategorySelect", "", { requireSelection: true });
+let deferredWorkspaceInitialized = false;
+let deferredWorkspaceScheduled = false;
+
+function initializeDeferredWorkspace() {
+  if (deferredWorkspaceInitialized || !hasAuthenticatedBackendSession()) return;
+  deferredWorkspaceInitialized = true;
+  renderComposeApprovalRoute();
+  renderOfficialApplicationApprovalRoute();
+  renderUploadedSealApprovalRoute();
+  assignNextDispatchNo(true);
+  applyComposeContactDefaults();
+  renderDraftPreview();
+  renderQueueRows();
+  renderInboundRows();
+  renderInboundDetail();
+  renderInboundAuditLog();
+  setInboundSection("records");
+  renderDispatchBoard();
+  renderDispatchDetail();
+  renderDispatchAuditLog();
+  renderInternalDispatchModule();
+  renderPrechecks();
+  renderJagentStatus();
+  renderAddressResults();
+  renderFormatAttachments();
+  renderFormatChecks();
+  renderFormatAgencyResults();
+  renderFormatAuditLog();
+  renderWorkflowRole();
+  renderOfficialWorkflowConfig();
+  renderWorkflowTasks();
+  renderUnifiedFlows();
+  renderWorkflowSteps();
+  renderApprovalProgress();
+  renderApprovalLog();
+  renderWorkflowAuditLog();
+  renderApprovalCategorySelect("#workflowDocumentCategorySelect", "服務委託合約");
+  renderWorkflowTemplateSteps();
+  renderWorkflowConditions();
+  renderWorkflowProxies();
+  renderWorkflowProofLog();
+  renderContracts();
+  renderContractSeal();
+  fillContractForm();
+  renderSeals();
+  renderTrackingSummary();
+  renderTrackingRows();
+  renderTrackingDetail();
+  renderTrackingAuditLog();
+  renderTimeline("#exchangeTimeline", exchangeEvents);
+  renderTimeline("#auditTimeline", auditEvents);
+  renderArchiveSummary();
+  renderArchiveRows();
+  renderArchiveDetail();
+  renderArchiveGrid();
+  renderArchiveAuditLog();
+  renderSecurityStatus();
+  renderSecurityPermissionGrid();
+  renderSecurityDeviceList();
+  renderSecurityAuditLog();
+  renderFileSecurity();
+  renderAccounts();
+  renderReports();
+  renderReportsAuditLog();
+  renderNotifications();
+  renderNotificationAuditLog();
+  renderJobs();
+  renderDatabase();
+  renderOps();
+  renderComplianceOps();
+  renderFeatureGrid();
+  renderSettings();
+  renderSearch();
+  applyFormalExchangeUiState();
+  applyProductionLoginSafetyState();
+}
+
+function scheduleDeferredWorkspaceInitialization() {
+  if (deferredWorkspaceInitialized || deferredWorkspaceScheduled) return;
+  deferredWorkspaceScheduled = true;
+  const run = () => {
+    deferredWorkspaceScheduled = false;
+    initializeDeferredWorkspace();
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(run, { timeout: 900 });
+  } else {
+    window.setTimeout(run, 40);
+  }
+}
+
 updateHeaderStatus();
 window.setInterval(updateHeaderStatus, 1000);
-tryResumePlatformSession();
+setModuleEntryProgress(18, "正在啟動電子公文", "準備安全登入與您的個人工作台。");
+void tryResumePlatformSession().then((resumed) => {
+  if (resumed || isProductionEdocHost()) return;
+  document.querySelector("#moduleEntryProgress")?.classList.add("hidden");
+  const loginScreen = document.querySelector("#loginScreen");
+  loginScreen?.classList.remove("hidden");
+  loginScreen?.setAttribute("aria-hidden", "false");
+});
