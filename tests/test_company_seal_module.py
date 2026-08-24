@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import base64
+import io
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 import backend
+from PIL import Image
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SEAL_SLOT_MIGRATION = ROOT / "supabase" / "migrations" / "20260823191041_backfill_company_seal_upload_slots.sql"
 
 
 class CompanySealModuleTestCase(unittest.TestCase):
@@ -45,7 +51,9 @@ class CompanySealModuleTestCase(unittest.TestCase):
         return row["id"]
 
     def png_payload(self, name: str = "company-seal.png") -> dict:
-        data = b"\x89PNG\r\n\x1a\nseal-test"
+        buffer = io.BytesIO()
+        Image.new("RGBA", (320, 320), (180, 0, 0, 255)).save(buffer, format="PNG")
+        data = buffer.getvalue()
         return {
             "file_name": name,
             "file_mime_type": "image/png",
@@ -55,7 +63,7 @@ class CompanySealModuleTestCase(unittest.TestCase):
 
     def test_seed_creates_reference_options_and_default_company_seals(self) -> None:
         seal_count = self.conn.execute("SELECT COUNT(*) AS count FROM company_seals WHERE company_id = 'CO-001'").fetchone()["count"]
-        self.assertEqual(seal_count, 7)
+        self.assertEqual(seal_count, 8)
         categories = {
             row["code"]
             for row in self.conn.execute("SELECT code FROM seal_reference_options WHERE option_type = 'category'")
@@ -155,6 +163,30 @@ class CompanySealModuleTestCase(unittest.TestCase):
         self.assertEqual(doc["status"], "已用印")
         actions = {row["action"] for row in self.conn.execute("SELECT action FROM seal_usage_logs WHERE usage_request_id = ?", (request["id"],))}
         self.assertTrue({"request_use", "approve_use", "stamp_document"}.issubset(actions))
+
+
+class CompanySealUploadSlotMigrationTestCase(unittest.TestCase):
+    def test_migration_provisions_all_eight_metadata_slots_without_fake_files(self) -> None:
+        sql = SEAL_SLOT_MIGRATION.read_text(encoding="utf-8")
+        required_slots = {
+            ("establishment_seal", "large_seal"),
+            ("establishment_seal", "small_seal"),
+            ("bank_seal", "large_seal"),
+            ("bank_seal", "small_seal"),
+            ("general_seal", "large_seal"),
+            ("general_seal", "small_seal"),
+            ("official_seal", "large_seal"),
+            ("other", "large_seal"),
+        }
+
+        for category, size_type in required_slots:
+            self.assertIn(f"('{category}', '{size_type}'", sql)
+        self.assertIn("private.edoc_ensure_company_seal_slots_v1", sql)
+        self.assertIn("companies_edoc_seal_slots_v1", sql)
+        self.assertIn("from public, anon, authenticated", sql)
+        self.assertNotIn("insert into public.company_seal_files", sql.lower())
+        self.assertNotIn("file_storage_key", sql.lower())
+        self.assertNotIn("file_hash", sql.lower())
 
 
 if __name__ == "__main__":

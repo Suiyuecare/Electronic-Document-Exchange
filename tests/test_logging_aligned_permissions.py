@@ -141,7 +141,7 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
                 profile = backend.edoc_roster_permission_profile(row)
                 self.assertEqual((profile["role"], profile["data_scope"]), expected)
 
-    def test_logging_bridge_creates_edoc_session_and_account_link(self) -> None:
+    def test_finance_bridge_creates_edoc_session_and_account_link(self) -> None:
         payload = {
             "source": "logging",
             "user": {
@@ -157,7 +157,7 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertTrue(session["token"])
-        self.assertEqual(session["user"]["account_source"], "logging")
+        self.assertEqual(session["user"]["account_source"], "finance")
         self.assertEqual(session["user"]["role"], "執行長")
         self.assertEqual(session["bridge"]["loggingRoleKey"], "ceo")
         self.assertIn("official_documents.all_records", session["permissions"])
@@ -166,7 +166,7 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
             """
             SELECT *
             FROM module_account_links
-            WHERE source_system = 'logging'
+            WHERE source_system = 'finance'
               AND source_account_id = 'logging-ceo-001'
               AND target_module = 'edoc'
             """
@@ -202,7 +202,8 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
 
     def test_signed_portal_handoff_enters_as_general_affairs(self) -> None:
         original_secret = backend.PORTAL_HANDOFF_SECRET
-        backend.PORTAL_HANDOFF_SECRET = "unit-test-portal-handoff-secret"
+        portal_secret = "unit-test-portal-handoff-secret-32-bytes"
+        backend.PORTAL_HANDOFF_SECRET = portal_secret
         payload = {
             "source": "logging-portal",
             "moduleId": "edoc",
@@ -215,11 +216,12 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
             "title": "總務課長",
             "department": "行政部",
             "moduleActions": ["view", "submit", "approve", "assign"],
+            "jti": "portal-handoff-unit-test-0001",
             "iat": int(time.time()),
             "exp": int(time.time()) + 600,
         }
         encoded = backend.base64.urlsafe_b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("utf-8").rstrip("=")
-        signature = backend.base64url_hmac_sha256("unit-test-portal-handoff-secret", encoded)
+        signature = backend.base64url_hmac_sha256(portal_secret, encoded)
 
         try:
             session, status = backend.authenticate_logging_bridge(
@@ -229,10 +231,10 @@ class LoggingAlignedPermissionsTestCase(unittest.TestCase):
                 "unittest",
             )
 
-            self.assertEqual(status, 200)
+            self.assertEqual(status, 200, session)
             self.assertEqual(session["user"]["role"], "總務")
             self.assertEqual(session["user"]["logging_role_key"], "ga_chief")
-            self.assertEqual(session["bridge"]["sourceSystem"], "logging")
+            self.assertEqual(session["bridge"]["sourceSystem"], "finance")
             self.assertIn("official_documents.receive", session["permissions"])
         finally:
             backend.PORTAL_HANDOFF_SECRET = original_secret

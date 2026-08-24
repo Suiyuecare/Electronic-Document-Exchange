@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import unittest
@@ -39,6 +40,10 @@ class GoLiveAuditTestCase(unittest.TestCase):
                 "EDOC_OCSP_RESPONDER_URL",
                 "EDOC_CRL_DISTRIBUTION_URL",
                 "EDOC_EXCHANGE_PROVIDER",
+                "PORTAL_HANDOFF_SECRET",
+                "EDOC_FINANCE_BRIDGE_URL",
+                "EDOC_FINANCE_BRIDGE_SECRET",
+                "EDOC_FINANCE_BRIDGE_TIMEOUT_SECONDS",
             ]
         }
 
@@ -50,6 +55,12 @@ class GoLiveAuditTestCase(unittest.TestCase):
         values = {
             "EDOC_DEPLOYMENT_ENV": "production",
             "EDOC_PUBLIC_BASE_URL": "https://edoc.suiyuecare.com",
+            "EDOC_LAUNCH_COMPANY_MODE": "finance_active",
+            "EDOC_PDF_EDITOR_V2_COMPANY_MODE": "finance_active",
+            "EDOC_PORTAL_HANDOFF_SECRET": "portal-handoff-secret-at-least-32-bytes",
+            "EDOC_FINANCE_BRIDGE_URL": "https://finance.example.com/edoc-identity-snapshot",
+            "EDOC_FINANCE_BRIDGE_SECRET": "finance-bridge-secret-at-least-32-bytes",
+            "EDOC_FINANCE_BRIDGE_TIMEOUT_SECONDS": "3",
             "SUPABASE_URL": "https://project.supabase.co",
             "SUPABASE_SERVICE_ROLE_KEY": "service-role",
             "CRON_SECRET": "cron-secret",
@@ -114,6 +125,10 @@ class GoLiveAuditTestCase(unittest.TestCase):
         backend.EDOC_TSA_API_KEY = values["EDOC_TSA_API_KEY"]
         backend.EDOC_OCSP_RESPONDER_URL = values["EDOC_OCSP_RESPONDER_URL"]
         backend.EDOC_CRL_DISTRIBUTION_URL = values["EDOC_CRL_DISTRIBUTION_URL"]
+        backend.PORTAL_HANDOFF_SECRET = values["EDOC_PORTAL_HANDOFF_SECRET"]
+        backend.EDOC_FINANCE_BRIDGE_URL = values["EDOC_FINANCE_BRIDGE_URL"]
+        backend.EDOC_FINANCE_BRIDGE_SECRET = values["EDOC_FINANCE_BRIDGE_SECRET"]
+        backend.EDOC_FINANCE_BRIDGE_TIMEOUT_SECONDS = 3.0
         return patcher
 
     def test_production_missing_formal_services_is_no_go(self) -> None:
@@ -143,9 +158,9 @@ class GoLiveAuditTestCase(unittest.TestCase):
         self.assertTrue(audit["readiness"]["ready"])
         self.assertFalse(audit["formalGo"])
         self.assertTrue(audit["internalPilotAllowed"])
-        self.assertTrue(any(item["key"] == "exchange" and item["status"] == "fail" for item in audit["categories"]))
+        self.assertTrue(any(item["key"] == "exchange" and item["status"] != "pass" for item in audit["categories"]))
 
-    def test_demo_password_is_blocked_when_production_policy_is_enabled(self) -> None:
+    def test_edoc_password_login_is_blocked_in_production(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -166,7 +181,180 @@ class GoLiveAuditTestCase(unittest.TestCase):
             conn.close()
 
         self.assertEqual(status, 403)
-        self.assertEqual(session["error"], "demo_login_disabled")
+        self.assertEqual(session["error"], "finance_sso_required")
+
+    def test_launch_readiness_exercises_senior_applicants_and_skips_empty_entities(self) -> None:
+        self.assertIn("主管", backend.INTERNAL_LAUNCH_APPLICANT_ROLES)
+        self.assertIn("主任", backend.INTERNAL_LAUNCH_APPLICANT_ROLES)
+        self.assertIn("主任", backend.INTERNAL_LAUNCH_REQUIRED_ROLES)
+        companies = [{"id": "CO-EMPTY"}, {"id": "CO-READY"}]
+        applicant = {
+            "id": "applicant-1",
+            "role": "主管",
+            "logging_role_key": "section_chief",
+            "account_source": "finance",
+        }
+        actor = {"id": "actor-1", "account_source": "finance"}
+
+        with mock.patch.object(backend, "finance_workflow_step_failure_reason", return_value=""):
+            readiness = backend.build_internal_launch_workflow_readiness(
+                companies,
+                {"CO-READY": [applicant]},
+                lambda _step, _applicant, _company: actor,
+            )
+
+        self.assertTrue(readiness["ready"])
+        self.assertTrue(readiness["applicantReady"])
+        self.assertEqual(readiness["companyCount"], 2)
+        self.assertEqual(readiness["applicableCompanyCount"], 1)
+        self.assertEqual(len(readiness["routeChecks"]), 2)
+        empty = next(item for item in readiness["applicantCoverage"] if item["company_id"] == "CO-EMPTY")
+        self.assertFalse(empty["applicable"])
+        self.assertTrue(empty["ready"])
+        self.assertTrue(all("applicant_manager" not in item["steps"] for item in [
+            {"steps": [step["step_key"] for step in route["steps"]]}
+            for route in readiness["routeChecks"]
+        ]))
+
+    def test_supabase_readiness_reports_non_seal_completion_separately(self) -> None:
+        role_counts = {
+            role: 1
+            for role in dict.fromkeys([
+                *backend.INTERNAL_LAUNCH_APPLICANT_ROLES,
+                *backend.INTERNAL_LAUNCH_REQUIRED_ROLES,
+            ])
+        }
+        workflow = {
+            "ready": True,
+            "applicantReady": True,
+            "applicableCompanyCount": 1,
+            "applicantCoverage": [{"company_id": "CO-1", "applicable": True, "ready": True}],
+            "routeCodes": ["A", "C"],
+            "routeChecks": [{"ready": True}],
+            "workflowSteps": [{"ready": True}],
+            "blockers": [],
+        }
+        with (
+            mock.patch.object(backend, "supabase_internal_launch_user_counts", return_value=role_counts),
+            mock.patch.object(
+                backend,
+                "supabase_internal_launch_access_readiness",
+                return_value={"ready": True, "blockers": [], "warnings": [], "checks": {}},
+            ),
+            mock.patch.object(
+                backend,
+                "supabase_scoped_internal_launch_companies",
+                return_value=([{"id": "CO-1"}], {"mode": "finance_active"}, [{"id": "CO-1"}]),
+            ),
+            mock.patch.object(
+                backend,
+                "supabase_internal_launch_finance_applicants_by_company",
+                return_value={"CO-1": [{"id": "applicant-1"}]},
+            ),
+            mock.patch.object(backend, "build_internal_launch_workflow_readiness", return_value=workflow),
+            mock.patch.object(
+                backend,
+                "supabase_internal_launch_company_seal_checks",
+                return_value=([{"company_id": "CO-1"}], ["CO-1 尚未上傳印章"]),
+            ),
+            mock.patch.object(
+                backend,
+                "supabase_internal_launch_user_journeys",
+                return_value=[{"title": "非印章流程", "ready": True, "missing": []}],
+            ),
+        ):
+            readiness = backend.supabase_internal_launch_data_readiness()
+
+        self.assertFalse(readiness["ready"])
+        self.assertTrue(readiness["readyWithoutSealAssets"])
+        self.assertFalse(readiness["sealAssetsReady"])
+        self.assertEqual(readiness["nonSealBlockers"], [])
+        self.assertEqual(readiness["sealBlockers"], ["CO-1 尚未上傳印章"])
+
+    def test_public_login_decision_distinguishes_only_missing_seal_assets(self) -> None:
+        readiness = {
+            "launchScope": "internal_official",
+            "databaseMode": "supabase",
+            "ready": False,
+            "internalGo": False,
+            "missing": [],
+            "blockers": ["去識別化公司尚未上傳正式印章"],
+            "warnings": [],
+            "checks": {
+                "supabase": True,
+                "privateStorage": True,
+                "demoAccountsDisabled": True,
+                "formalExchangeDisabled": True,
+                "launchData": False,
+                "financeBridge": {"configured": True},
+                "portalHandoff": {"configured": True},
+                "antivirus": {"ready": True},
+                "pdfEditorV2CompanyScope": {"configured": True, "coversLaunchScope": True},
+            },
+            "dataReadiness": {
+                "ready": False,
+                "readyWithoutSealAssets": True,
+                "sealAssetsReady": False,
+                "nonSealBlockers": [],
+                "sealBlockers": ["去識別化公司尚未上傳正式印章"],
+            },
+        }
+        next_action = json.dumps({"primaryAction": {}}, ensure_ascii=False).encode("utf-8")
+        with mock.patch.object(
+            backend,
+            "production_next_action_artifact",
+            return_value={"content": next_action.decode("utf-8")},
+        ):
+            payload = json.loads(backend.production_login_release_decision_artifact(readiness)["content"])
+
+        self.assertTrue(payload["generalEmployeeLoginAllowed"])
+        self.assertTrue(payload["currentState"]["nonSealWorkflowReady"])
+        self.assertFalse(payload["currentState"]["sealAssetsReady"])
+        self.assertEqual(payload["currentState"]["nonSealBlockerCount"], 0)
+        self.assertEqual(payload["currentState"]["sealBlockerCount"], 1)
+        codes = {item["code"] for item in payload["operationRestrictions"]}
+        self.assertIn("SEAL_ASSETS_NOT_READY", codes)
+        self.assertNotIn("WORKFLOW_DATA_NOT_READY", codes)
+
+    def test_public_login_decision_keeps_skipped_data_audit_unknown(self) -> None:
+        readiness = {
+            "launchScope": "internal_official",
+            "databaseMode": "supabase",
+            "ready": False,
+            "internalGo": False,
+            "missing": [],
+            "blockers": [],
+            "warnings": [],
+            "checks": {
+                "supabase": True,
+                "privateStorage": True,
+                "demoAccountsDisabled": True,
+                "formalExchangeDisabled": True,
+                "launchData": False,
+                "financeBridge": {"configured": True},
+                "portalHandoff": {"configured": True},
+                "antivirus": {"ready": True},
+                "pdfEditorV2CompanyScope": {"configured": True, "coversLaunchScope": True},
+            },
+        }
+        next_action = json.dumps({"primaryAction": {}}, ensure_ascii=False).encode("utf-8")
+        with mock.patch.object(
+            backend,
+            "production_next_action_artifact",
+            return_value={"content": next_action.decode("utf-8")},
+        ):
+            payload = json.loads(backend.production_login_release_decision_artifact(readiness)["content"])
+
+        state = payload["currentState"]
+        self.assertFalse(state["dataReadinessEvaluated"])
+        self.assertIsNone(state["launchData"])
+        self.assertIsNone(state["nonSealWorkflowReady"])
+        self.assertIsNone(state["sealAssetsReady"])
+        self.assertIsNone(state["nonSealBlockerCount"])
+        self.assertIsNone(state["sealBlockerCount"])
+        codes = {item["code"] for item in payload["operationRestrictions"]}
+        self.assertNotIn("WORKFLOW_DATA_NOT_READY", codes)
+        self.assertNotIn("SEAL_ASSETS_NOT_READY", codes)
 
 
 if __name__ == "__main__":

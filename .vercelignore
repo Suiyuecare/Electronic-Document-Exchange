@@ -4,6 +4,14 @@
 !.env.production.example
 .git
 .github
+docs
+supabase/migrations/
+supabase/seed.sql
+supabase/.temp/
+supabase/.DS_Store
+tests
+services
+tmp
 data
 backups
 storage

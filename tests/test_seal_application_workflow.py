@@ -11,6 +11,7 @@ class SealApplicationWorkflowTestCase(unittest.TestCase):
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        backend.register_sqlite_functions(self.conn)
         self.conn.executescript(backend.SCHEMA)
         backend.seed(self.conn)
         backend.seed_auth(self.conn)
@@ -18,6 +19,9 @@ class SealApplicationWorkflowTestCase(unittest.TestCase):
         backend.seed_signing_certificates(self.conn)
         backend.seed_certificate_authorities(self.conn)
         backend.seed_seal_assets(self.conn)
+        self.conn.execute(
+            "UPDATE users SET company_id = 'CO-001', company_name = '歲悅股份有限公司'"
+        )
 
     def tearDown(self) -> None:
         self.conn.close()
@@ -31,6 +35,33 @@ class SealApplicationWorkflowTestCase(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         return session
+
+    def session_for_user_id(self, user_id: str) -> dict:
+        row = self.conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        self.assertIsNotNone(row)
+        return {
+            "token": "unit-test",
+            "expiresAt": "2099-12-31 23:59:59",
+            "user": backend.public_user(row),
+            "permissions": backend.role_permission_codes(self.conn, row["role"]),
+        }
+
+    def approve_until_applicant_receipt(self, application: dict) -> dict:
+        result = application
+        while not result.get("stamp_no"):
+            snapshot = backend.seal_application_step_snapshot(
+                self.conn,
+                result["id"],
+                int(result["current_step_no"]),
+            )
+            approver = self.session_for_user_id(snapshot["approver_user_id"])
+            result = backend.seal_application_approve(
+                self.conn,
+                result["id"],
+                {"comment": f"{snapshot['step_name']}測試核准"},
+                approver,
+            )
+        return result
 
     def source_pdf_file_id(self) -> str:
         pdf = backend.build_official_pdf(
@@ -76,7 +107,7 @@ class SealApplicationWorkflowTestCase(unittest.TestCase):
         employee = self.login_session("sales-assistant@suiyuecare.com")
         result = backend.seal_application_submit(self.conn, self.submit_payload(self.source_pdf_file_id()), employee)
 
-        self.assertEqual(result["status"], "待主管簽核")
+        self.assertEqual(result["status"], "待申請人主管簽核")
         self.assertEqual(result["application_type"], "official_document")
         self.assertEqual(len(result["stamp_positions"]), 3)
         self.assertTrue(result["locked_pdf_sha256"])
@@ -89,22 +120,28 @@ class SealApplicationWorkflowTestCase(unittest.TestCase):
         self.assertEqual(snapshots[0]["status"], "已完成")
         self.assertEqual(snapshots[1]["approver_role"], "主管")
 
-    def test_supervisor_approval_auto_stamps_pdf_and_notifies_applicant(self) -> None:
+    def test_full_approval_auto_stamps_pdf_and_notifies_applicant(self) -> None:
         employee = self.login_session("sales-assistant@suiyuecare.com")
-        supervisor = self.login_session("director@suiyuecare.com")
         submitted = backend.seal_application_submit(self.conn, self.submit_payload(self.source_pdf_file_id()), employee)
 
-        approved = backend.seal_application_approve(self.conn, submitted["id"], {"comment": "測試核准"}, supervisor)
+        approved = self.approve_until_applicant_receipt(submitted)
 
-        self.assertEqual(approved["status"], "已押章")
+        self.assertEqual(approved["status"], "待申請人收件")
         self.assertTrue(approved["stamp_no"].startswith("STAMP-"))
         self.assertTrue(approved["pdf_after_version_id"])
         self.assertEqual(approved["pdf_after"]["version_type"], "after_seal")
         self.assertTrue(approved["signature"]["id"].startswith("ESIG-"))
         notices = self.conn.execute("SELECT * FROM notifications WHERE source = ?", (submitted["id"],)).fetchall()
         self.assertGreaterEqual(len(notices), 2)
+        completed = backend.seal_application_approve(
+            self.conn,
+            submitted["id"],
+            {"comment": "申請人確認收到用印檔案"},
+            employee,
+        )
+        self.assertEqual(completed["status"], "完成")
         with self.assertRaises(ValueError):
-            backend.seal_application_approve(self.conn, submitted["id"], {}, supervisor)
+            backend.seal_application_approve(self.conn, submitted["id"], {}, employee)
 
     def test_changed_stamp_position_hash_is_rejected_before_approval(self) -> None:
         employee = self.login_session("sales-assistant@suiyuecare.com")

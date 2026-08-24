@@ -11,7 +11,7 @@
 - `index.html`：獨立系統入口。
 - `styles.css`：內部系統 UI 樣式。
 - `app.js`：登入/登出、後端 Auth session、RBAC 載入、模擬資料、頁籤切換、收發文列表、功能總表與互動提示。
-- `backend.py`：零依賴 Python 後端，提供靜態檔服務、REST API、SQLite schema migration、seed data、Auth session、RBAC、audit log 與資料備份。
+- `backend.py`：Python 後端，提供靜態檔服務、REST API、SQLite schema migration、PDF 衍生版本、Auth session、RBAC、audit log 與資料備份。
 - `data/edoc.sqlite3`：本機 SQLite 後端資料庫，啟動後自動建立。
 - `backups/`：後端資料庫備份輸出目錄。
 
@@ -54,17 +54,7 @@ python3 backend.py --host 127.0.0.1 --port 5174
 - `POST /api/pdf/verify`
 - `GET /api/files/:id/download`
 
-本機測試帳號：
-
-```text
-edoc@suiyuecare.com / demo1234
-records@suiyuecare.com / demo1234
-director@suiyuecare.com / demo1234
-ceo@suiyuecare.com / demo1234
-hr@suiyuecare.com / demo1234
-accounting@suiyuecare.com / demo1234
-sales-assistant@suiyuecare.com / demo1234
-```
+系統不提供內建 demo 帳號或 EDOC 專屬密碼登入；正式使用者一律由 Portal／Finance Google SSO 的短效簽章 handoff 進入，且必須先存在於 Finance 同步的人員主檔。
 
 ## GitHub / Vercel / Supabase 串接
 
@@ -79,15 +69,13 @@ Vercel 需要設定的環境變數：
 ```text
 EDOC_DEPLOYMENT_ENV=production
 EDOC_DB_MODE=supabase
+EDOC_LAUNCH_COMPANY_MODE=finance_active
+EDOC_PDF_EDITOR_V2_COMPANY_MODE=finance_active
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<server-only-service-role-key>
 CRON_SECRET=<random-secret>
-SMTP_HOST=<smtp-host>
-SMTP_PORT=587
-SMTP_USERNAME=<smtp-user>
-SMTP_PASSWORD=<smtp-password>
-SMTP_FROM=notify@suiyuecare.com
-SMTP_USE_TLS=true
+RESEND_API_KEY=<server-only-resend-key>
+MAIL_FROM=公文收發電子用印系統 <notifications@suiyuecare.com>
 LINE_WEBHOOK_URL=<line-webhook-url>
 EDOC_SIGNATURE_PROVIDER=<formal-provider-name>
 EDOC_SIGNATURE_API_URL=https://<signature-provider>/api
@@ -100,6 +88,12 @@ EDOC_TSA_API_KEY=<server-only-tsa-api-key>
 EDOC_OCSP_RESPONDER_URL=https://<ocsp-responder>
 EDOC_CRL_DISTRIBUTION_URL=https://<crl-url>
 ```
+
+公司與人員皆以 Finance 為唯一主檔。`EDOC_LAUNCH_COMPANY_MODE=finance_active` 會自動開放並同步 Finance 啟用公司；`EDOC_PDF_EDITOR_V2_COMPANY_MODE=finance_active` 讓同一批公司使用 V2，不必在新增公司後重改 Vercel。若發生資安事件或需要分批停用，可暫時切為 `manual_allowlist`，再以對應的 `*_COMPANY_IDS` 限制範圍。
+
+正式環境必須同時配置可用的 ClamAV 掃毒端點與明確的 Finance 公司來源模式才可開啟。推薦的私人 Cloud Run gateway 位於 [`services/clamav-scanner`](services/clamav-scanner/README.md)，eDoc 與 gateway 以 HTTPS HMAC v1 雙向驗證；大檔由 gateway 讀取 60 秒 Supabase signed URL，避免經過 Vercel／Cloud Run HTTP/1 body 上限。V2 preflight 目前採同步、失敗即阻擋送簽；在具備原子 claim／lease／重送上限的 durable worker 前，不得宣稱為非同步處理或把既有週期任務表當作工作佇列。
+
+編輯器使用自架、鎖版 PDF.js canvas＋SVG 編輯層。來源 PDF、匯入 PDF 與圖片走 private Storage 直傳、雜湊、掃毒及 preflight；送簽時鎖定 EditorState revision、manifest、prepared PDF 與每一枚印章版本。正式電子公文交換仍維持 Mock／停用，取得機關 jAgent／API／SDK／封包規格並完成測試與人工核准前不得切換正式 provider。
 
 正式部署手冊：[`docs/deployment-production.md`](docs/deployment-production.md)。
 正式環境檢查端點：
@@ -128,9 +122,9 @@ Supabase 專案建議建立獨立的 `Suiyuecare eDoc` project，不要混用 Fi
 - `notifications` 保存通知佇列，`notification_deliveries` 保存每次 Email / LINE / 站內通知派送結果。
 - `system_inbox` 保存站內通知，`notification_rules` 保存收文、待清稿、交換失敗、Token 到期與逾期查核規則。
 - `POST /api/notifications/sync` 會依公文、交換任務與 Token 狀態建立通知。
-- `POST /api/notifications/send` 會實際呼叫 SMTP、LINE webhook，並寫入站內通知。
+- `POST /api/notifications/send` 會實際呼叫 Resend、LINE webhook，並寫入站內通知。
 - `POST /api/notifications/test`、`/retry-failed`、`/push-inbox` 分別提供通道測試、失敗重送與站內推送。
-- Email 需設定 `SMTP_HOST`、`SMTP_PORT`、`SMTP_USERNAME`、`SMTP_PASSWORD`、`SMTP_FROM`；LINE 需設定 `LINE_WEBHOOK_URL`。未設定時不會假裝成功，會寫入「未設定」派送紀錄。
+- Email 沿用官網的 `RESEND_API_KEY` 與 `MAIL_FROM`；LINE 需設定 `LINE_WEBHOOK_URL`。未設定時不會假裝成功，會寫入「未設定」派送紀錄。
 
 法遵與營運文件：
 
