@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260824-uiux-r3" />
+    <link rel="stylesheet" href="styles.css?v=20260824-nav-merge-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
@@ -46,48 +46,11 @@
         </div>
 
         <nav class="nav-list" aria-label="公文收發電子用印系統功能">
-          <button class="nav-item active" data-target="dashboard" data-icon="總">總覽</button>
-          <button class="nav-item" data-target="search" data-icon="搜">公文查詢</button>
-          <button class="nav-item" data-target="approvalLog" data-icon="簽">簽核進度</button>
-          <button class="nav-item" data-target="contracts" data-icon="約">合約管理</button>
-          <button class="nav-item" data-target="contractSeal" data-icon="印">合約用印</button>
-          <button class="nav-item" data-target="electronicSeal" data-icon="章">電子用印</button>
-          <button class="nav-item" data-target="inbound" data-icon="錄">公文收錄</button>
-          <button class="nav-item" data-target="compose" data-icon="寫">建立公文</button>
-          <button class="nav-item" data-target="format" data-icon="格">文書格式</button>
-          <button class="nav-item" data-target="workflow" data-icon="流">流程控管</button>
-          <button class="nav-item" data-target="seals" data-icon="章">印鑑管理</button>
-          <button class="nav-item" data-target="tracking" data-icon="催">稽催追蹤</button>
-          <button class="nav-item" data-target="exchange" data-icon="介" id="exchangeNavItem">交換介接</button>
-          <button class="nav-item" data-target="archive" data-icon="檔">歸檔保存</button>
-          <button class="nav-item" data-target="security" data-icon="安">資安控管</button>
-          <button class="nav-item" data-target="fileSecurity" data-icon="鎖">檔案資安</button>
-          <button class="nav-item" data-target="accounts" data-icon="帳">帳號權限</button>
-          <button class="nav-item" data-target="reports" data-icon="報">報表統計</button>
-          <button class="nav-item" data-target="notifications" data-icon="通">通知中心</button>
-          <button class="nav-item" data-target="jobs" data-icon="任">背景任務</button>
-          <button class="nav-item" data-target="database" data-icon="庫">後端資料庫</button>
-          <button class="nav-item" data-target="ops" data-icon="維">維運中心</button>
-          <button class="nav-item" data-target="complianceOps" data-icon="法">法遵營運</button>
-          <button class="nav-item" data-target="features" data-icon="表">功能總表</button>
-          <button class="nav-item" data-target="settings" data-icon="設">系統設定</button>
-          <button class="nav-more-trigger" id="navMoreBtn" type="button" aria-haspopup="dialog" aria-controls="navMoreDialog" hidden>
-            <span aria-hidden="true">＋</span>
-            <strong>更多功能</strong>
-          </button>
+          <button class="nav-item workspace-nav-item active" data-workspace-group="work" data-icon="總">工作台</button>
+          <button class="nav-item workspace-nav-item" data-workspace-group="documents" data-icon="文">公文作業</button>
+          <button class="nav-item workspace-nav-item" data-workspace-group="seals" data-icon="章">用印作業</button>
+          <button class="nav-item workspace-nav-item" data-workspace-group="admin" data-icon="管">管理中心</button>
         </nav>
-
-        <dialog class="nav-more-dialog" id="navMoreDialog" aria-labelledby="navMoreTitle">
-          <div class="nav-more-head">
-            <div>
-              <p class="eyebrow">依目前權限顯示</p>
-              <h2 id="navMoreTitle">更多功能</h2>
-            </div>
-            <button class="nav-more-close" id="navMoreCloseBtn" type="button" aria-label="關閉更多功能">關閉</button>
-          </div>
-          <p class="nav-more-intro">日常工作留在主選單；設定、報表與低頻管理集中在這裡。</p>
-          <div class="nav-more-list" id="navMoreList"></div>
-        </dialog>
 
         <section class="profile-card">
           <p class="eyebrow">目前角色</p>
@@ -130,6 +93,8 @@
             <span class="top-info" id="topInfo">即時同步</span>
           </div>
         </header>
+
+        <nav class="workspace-subnav" id="workspaceSubnav" aria-label="目前工作區功能"></nav>
 
         <section class="view active" id="dashboard">
           <div class="dashboard-role-strip">
@@ -4181,6 +4146,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260824-uiux-r3"></script>
+    <script src="app.js?v=20260824-nav-merge-r1"></script>
   </body>
 </html>

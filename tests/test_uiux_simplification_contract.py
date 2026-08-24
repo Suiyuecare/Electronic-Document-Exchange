@@ -100,16 +100,18 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn(".contract-link { display: inline-flex; align-items: center;", normalized)
         self.assertIn(".view button.primary-button, .view button.secondary-button, .view button.icon-button { min-height: 44px;", normalized)
 
-    def test_mobile_navigation_keeps_four_frequent_routes_and_more_drawer(self) -> None:
-        self.assertIn('id="navMoreBtn"', self.html)
-        self.assertIn('id="navMoreDialog"', self.html)
-        self.assertIn('id="navMoreList"', self.html)
-        self.assertIn('item.dataset.mobileCompactHidden = routeIndex >= 4 ? "true" : "false";', self.js)
-        self.assertIn('.nav-item[data-mobile-compact-hidden="true"]', self.css)
-        self.assertIn('compactNavigationMedia.addEventListener("change", renderMoreNavigation);', self.js)
-        self.assertIn('dialog.showModal()', self.js)
-        self.assertIn('document.querySelector("#navMoreDialog")?.close();', self.js)
-        self.assertIn('route !== "contractSeal"', self.js)
+    def test_navigation_uses_four_workspaces_and_contextual_tabs(self) -> None:
+        self.assertEqual(self.html.count('class="nav-item workspace-nav-item'), 4)
+        for group in ("work", "documents", "seals", "admin"):
+            self.assertIn(f'data-workspace-group="{group}"', self.html)
+        self.assertIn('id="workspaceSubnav"', self.html)
+        self.assertNotIn('id="navMoreBtn"', self.html)
+        self.assertNotIn('id="navMoreDialog"', self.html)
+        self.assertIn("const workspaceNavigationGroups", self.js)
+        self.assertIn('aliases: ["contractSeal"]', self.js)
+        self.assertIn("function renderWorkspaceSubnavigation", self.js)
+        self.assertIn('event.target.closest("[data-workspace-route]")', self.js)
+        self.assertIn(".workspace-subnav-button", self.css)
 
     def test_entry_loading_brand_asset_is_packaged_for_vercel(self) -> None:
         vercel = (ROOT / "vercel.json").read_text(encoding="utf-8")

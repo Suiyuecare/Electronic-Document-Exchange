@@ -1307,6 +1307,54 @@ label textarea[data-validity="needs"] {
   backdrop-filter: blur(16px);
 }
 
+.workspace-subnav {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 10px 42px;
+  overflow-x: auto;
+  border-bottom: 1px solid rgba(234, 211, 179, 0.72);
+  background: rgba(255, 255, 255, 0.78);
+  scrollbar-width: thin;
+}
+
+.workspace-subnav[hidden] {
+  display: none;
+}
+
+.workspace-subnav-button {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 9px 16px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.workspace-subnav-button:hover {
+  border-color: rgba(240, 138, 36, 0.34);
+  background: #fff7ec;
+  color: var(--accent-strong);
+}
+
+.workspace-subnav-button.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.workspace-subnav-button:focus-visible {
+  outline: 3px solid rgba(240, 138, 36, 0.34);
+  outline-offset: 2px;
+}
+
 .topbar > div:first-child {
   min-width: 200px;
 }
@@ -9623,7 +9671,7 @@ textarea {
     max-width: 100%;
     overflow-x: auto;
     overflow-y: hidden;
-    padding-bottom: 2px;
+    padding: 8px 0 2px;
     scrollbar-width: thin;
   }
 
@@ -9829,6 +9877,18 @@ textarea {
   .topbar h2 {
     font-size: 22px;
     line-height: 1.12;
+  }
+
+  .workspace-subnav {
+    gap: 6px;
+    padding: 8px 0 12px;
+    border-bottom-color: var(--line);
+    background: #f7f3ec;
+  }
+
+  .workspace-subnav-button {
+    min-height: 44px;
+    padding: 9px 14px;
   }
 
   .topbar .quick-actions {

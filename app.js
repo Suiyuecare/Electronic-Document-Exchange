@@ -2608,19 +2608,15 @@ function setView(target) {
   document.body.dataset.activeRoute = target;
   const viewTarget = target === "contractSeal" ? "electronicSeal" : target;
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === viewTarget));
-  document.querySelectorAll(".nav-item").forEach((item) => {
-    const active = item.dataset.target === target;
+  const activeWorkspaceGroup = workspaceGroupForRoute(target);
+  document.querySelectorAll(".workspace-nav-item").forEach((item) => {
+    const active = item.dataset.workspaceGroup === activeWorkspaceGroup;
     item.classList.toggle("active", active);
     if (active) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   });
-  document.querySelectorAll("[data-more-nav-target]").forEach((item) => {
-    const active = item.dataset.moreNavTarget === target;
-    item.classList.toggle("active", active);
-    if (active) item.setAttribute("aria-current", "page");
-    else item.removeAttribute("aria-current");
-  });
-  const activeNavItem = document.querySelector(`.nav-item[data-target="${target}"]`);
+  renderWorkspaceSubnavigation(target);
+  const activeNavItem = document.querySelector(`.workspace-nav-item[data-workspace-group="${activeWorkspaceGroup}"]`);
   const navList = activeNavItem?.closest(".nav-list");
   if (activeNavItem && navList && window.matchMedia("(max-width: 720px)").matches) {
     window.requestAnimationFrame(() => {
@@ -3000,59 +2996,71 @@ function simpleRouteEyebrow(target, role = activeRole()) {
   return "全公司收發與交換處理";
 }
 
-function moreNavigationRoutesForRole(role = activeRole(), compactMobile = window.matchMedia("(max-width: 720px)").matches) {
-  const primary = primaryRoutesForRole(role);
-  const secondary = secondaryRoutesForRole(role).filter((route) => !primary.includes(route));
-  const mobileOverflow = compactMobile ? primary.slice(4) : [];
-  // contractSeal remains a compatible deep-link and contract-list action, but
-  // it opens the same uploaded-PDF editor as electronicSeal. Listing both in
-  // navigation makes first-time users think they are separate workflows.
-  return [...new Set([...mobileOverflow, ...secondary])]
-    .filter((route) => route !== "contractSeal" && isRouteAllowed(route));
+const workspaceNavigationGroups = Object.freeze({
+  work: { label: "工作台", routes: ["dashboard", "notifications", "approvalLog"], aliases: [] },
+  documents: { label: "公文作業", routes: ["compose", "inbound", "search"], aliases: [] },
+  seals: { label: "用印作業", routes: ["electronicSeal", "contracts", "seals"], aliases: ["contractSeal"] },
+  admin: { label: "管理中心", routes: ["workflow", "tracking", "reports", "accounts", "settings", "ops"], aliases: [] }
+});
+
+const workspaceRouteLabels = Object.freeze({
+  dashboard: "首頁",
+  notifications: "待辦中心",
+  approvalLog: "簽核進度",
+  compose: "撰寫公文",
+  inbound: "公文收錄",
+  search: "公文查詢",
+  electronicSeal: "電子用印",
+  contracts: "合約管理",
+  seals: "印章版本",
+  workflow: "流程設定",
+  tracking: "稽催追蹤",
+  reports: "報表統計",
+  accounts: "帳號權限",
+  settings: "系統設定",
+  ops: "維運中心"
+});
+
+function workspaceGroupForRoute(route = activeRouteTarget) {
+  const normalized = route === "contractSeal" ? "electronicSeal" : route;
+  return Object.entries(workspaceNavigationGroups).find(([, group]) => (
+    group.routes.includes(normalized) || group.aliases.includes(route)
+  ))?.[0] || "work";
 }
 
-function renderMoreNavigation() {
-  const button = document.querySelector("#navMoreBtn");
-  const list = document.querySelector("#navMoreList");
-  if (!button || !list) return;
-  const routes = moreNavigationRoutesForRole();
-  button.hidden = routes.length === 0;
-  list.innerHTML = routes.map((route) => {
-    const exchangeDisabled = route === "exchange";
-    const label = exchangeDisabled ? "政府電子交換（未啟用）" : simpleRouteTitle(route);
-    const description = exchangeDisabled
-      ? "目前僅保留設定與健康檢查；不會連正式交換環境。"
-      : simpleRouteEyebrow(route);
-    return `
-      <button class="nav-more-item" type="button" data-more-nav-target="${route}">
-        <strong>${label}</strong>
-        <span>${description}</span>
-      </button>
-    `;
-  }).join("") || `<p class="nav-more-empty">目前沒有其他可用功能。</p>`;
+function workspaceRoutesForGroup(groupKey) {
+  const group = workspaceNavigationGroups[groupKey];
+  if (!group) return [];
+  return group.routes.filter((route) => isRouteAllowed(route));
+}
+
+function workspaceDefaultRoute(groupKey) {
+  return workspaceRoutesForGroup(groupKey)[0] || "dashboard";
+}
+
+function renderWorkspaceSubnavigation(target = activeRouteTarget) {
+  const nav = document.querySelector("#workspaceSubnav");
+  if (!nav) return;
+  const groupKey = workspaceGroupForRoute(target);
+  const routes = workspaceRoutesForGroup(groupKey);
+  const selectedRoute = target === "contractSeal" ? "electronicSeal" : target;
+  nav.dataset.workspaceGroup = groupKey;
+  nav.setAttribute("aria-label", `${workspaceNavigationGroups[groupKey]?.label || "工作區"}功能`);
+  nav.innerHTML = routes.map((route) => `
+    <button class="workspace-subnav-button ${route === selectedRoute ? "active" : ""}" type="button" data-workspace-route="${route}" ${route === selectedRoute ? 'aria-current="page"' : ""}>
+      ${escapeHtml(workspaceRouteLabels[route] || simpleRouteTitle(route))}
+    </button>
+  `).join("");
+  nav.hidden = routes.length <= 1;
 }
 
 function applyRoleNavigation() {
-  const primary = primaryRoutesForRole();
   const allowed = allowedRoutesForRole();
-  const labels = simpleRouteLabels();
-  const nav = document.querySelector(".nav-list");
-  const items = [...document.querySelectorAll(".nav-item")];
   document.body.dataset.identityKind = identityKindForRole();
-  items.forEach((item) => {
-    const routeIndex = primary.indexOf(item.dataset.target);
-    item.hidden = routeIndex === -1;
-    item.dataset.mobileCompactHidden = routeIndex >= 4 ? "true" : "false";
-    item.style.order = String(routeIndex === -1 ? 999 : routeIndex);
-    if (labels[item.dataset.target]) item.textContent = labels[item.dataset.target];
+  document.querySelectorAll("[data-workspace-group]").forEach((item) => {
+    const groupKey = item.dataset.workspaceGroup;
+    item.hidden = workspaceRoutesForGroup(groupKey).length === 0;
   });
-  if (nav) {
-    primary
-      .map((route) => items.find((item) => item.dataset.target === route))
-      .filter(Boolean)
-      .forEach((item) => nav.appendChild(item));
-    items.filter((item) => !primary.includes(item.dataset.target)).forEach((item) => nav.appendChild(item));
-  }
   const companyWide = ["行政部主任", "總務", "執行長"].includes(activeRole());
   document.querySelector("#pullInboundBtn")?.toggleAttribute("hidden", !companyWide);
   document.querySelector("#sendQueueBtn")?.toggleAttribute("hidden", !companyWide);
@@ -3061,12 +3069,11 @@ function applyRoleNavigation() {
   document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(active);
   updateHeaderStatus();
   document.querySelectorAll("[data-target]").forEach((control) => {
-    if (control.classList.contains("nav-item")) return;
     const target = control.dataset.target;
     if (!target || !titles[target]) return;
     control.toggleAttribute("hidden", !allowed.includes(target));
   });
-  renderMoreNavigation();
+  renderWorkspaceSubnavigation(active);
   if (!allowed.includes(active)) setView("dashboard");
 }
 
@@ -26803,26 +26810,13 @@ document.querySelector("#returnPortalBtn")?.addEventListener("click", () => {
   returnToLoggingPortalModulePicker();
 });
 document.querySelector("#logoutBtn")?.addEventListener("click", leaveApp);
-document.querySelector("#navMoreBtn")?.addEventListener("click", () => {
-  renderMoreNavigation();
-  const dialog = document.querySelector("#navMoreDialog");
-  if (dialog?.showModal) dialog.showModal();
-  else dialog?.setAttribute("open", "");
+document.querySelectorAll("[data-workspace-group]").forEach((button) => {
+  button.addEventListener("click", () => setView(workspaceDefaultRoute(button.dataset.workspaceGroup)));
 });
-document.querySelector("#navMoreCloseBtn")?.addEventListener("click", () => {
-  document.querySelector("#navMoreDialog")?.close();
+document.querySelector("#workspaceSubnav")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-workspace-route]");
+  if (button?.dataset.workspaceRoute) setView(button.dataset.workspaceRoute);
 });
-document.querySelector("#navMoreList")?.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-more-nav-target]");
-  if (!button) return;
-  const target = button.dataset.moreNavTarget;
-  document.querySelector("#navMoreDialog")?.close();
-  if (target) setView(target);
-});
-const compactNavigationMedia = window.matchMedia("(max-width: 720px)");
-if (typeof compactNavigationMedia.addEventListener === "function") {
-  compactNavigationMedia.addEventListener("change", renderMoreNavigation);
-}
 document.querySelector("#identityWorkbench").addEventListener("click", (event) => {
   const button = event.target.closest("[data-identity-target]");
   if (!button) return;
