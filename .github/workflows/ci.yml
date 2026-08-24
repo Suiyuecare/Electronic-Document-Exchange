@@ -6,6 +6,12 @@ on:
     branches:
       - main
 
+# A quick follow-up commit supersedes the older validation on the same PR or
+# branch. Cancel it instead of letting stale failures finish and email again.
+concurrency:
+  group: edoc-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     name: Validate backend and frontend
