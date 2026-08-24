@@ -137,8 +137,22 @@
               <p class="eyebrow" id="dashboardRoleEyebrow">Role Home</p>
               <h3 id="dashboardRoleTitle">角色首頁</h3>
             </div>
-            <span class="status-pill" id="dashboardRoleScope">依登入身份載入</span>
+            <div class="dashboard-role-actions">
+              <span class="status-pill" id="dashboardRoleScope">依登入身份載入</span>
+              <button class="text-button" id="roleOnboardingShowBtn" type="button" hidden>使用提示</button>
+            </div>
           </div>
+
+          <section class="panel role-onboarding" id="roleOnboarding" hidden aria-labelledby="roleOnboardingTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">第一次使用</p>
+                <h3 id="roleOnboardingTitle">三步開始今天的工作</h3>
+              </div>
+              <button class="text-button" id="roleOnboardingDismissBtn" type="button">我知道了</button>
+            </div>
+            <div class="role-onboarding-grid" id="roleOnboardingSteps"></div>
+          </section>
 
           <section class="panel go-live-gate-panel" id="goLiveGatePanel" hidden>
             <div class="go-live-gate-head">
@@ -1840,6 +1854,12 @@
                 </div>
                 <span class="status-pill" id="simpleSealUploadStatus">尚未選擇檔案</span>
               </div>
+              <div class="segmented seal-vault-tabs" role="tablist" aria-label="印章檔案庫功能">
+                <button class="segment" type="button" role="tab" data-seal-vault-tab="upload" aria-selected="false">上傳新版</button>
+                <button class="segment active" type="button" role="tab" data-seal-vault-tab="versions" aria-selected="true">版本清冊</button>
+                <button class="segment" type="button" role="tab" data-seal-vault-tab="usage" aria-selected="false">使用紀錄</button>
+              </div>
+              <div class="seal-vault-tab-panel" data-seal-vault-panel="upload" role="tabpanel" hidden>
               <form class="compact-form simple-seal-upload-form" id="simpleSealUploadForm">
                 <p class="seal-custodian-notice" data-seal-custodian-notice hidden>僅執行長／行政部門主任可變更。</p>
                 <div class="simple-seal-form-grid">
@@ -1894,7 +1914,22 @@
                 </div>
               </form>
               <p class="field-hint">原始圖檔只會送進 private Seal Vault，瀏覽器不會取得 storage path、原始 URL 或 service role。畫面僅呈現可稽核的版本、掃描與雜湊 metadata。</p>
+              </div>
+              <div class="seal-vault-tab-panel active" data-seal-vault-panel="versions" role="tabpanel">
+                <div class="seal-vault-tab-intro">
+                  <strong>目前版本與歷史狀態</strong>
+                  <p>先確認 current、掃描結果與校準尺寸；需要換檔時再切到「上傳新版」。</p>
+                </div>
               <div class="simple-seal-uploaded-list" id="simpleSealUploadedList"></div>
+                <section class="simple-seal-version-history" id="simpleSealVersionHistory" aria-live="polite"></section>
+              </div>
+              <div class="seal-vault-tab-panel" data-seal-vault-panel="usage" role="tabpanel" hidden>
+                <div class="seal-vault-tab-intro">
+                  <strong>最近用印與版本異動</strong>
+                  <p>只顯示稽核必要資訊，不呈現原始章圖或檔案路徑。</p>
+                </div>
+                <div class="simple-seal-usage-list" id="simpleSealUsageList"></div>
+              </div>
             </section>
             <div class="panel-heading">
               <div>
@@ -3070,6 +3105,23 @@
             </section>
           </div>
 
+          <section class="panel ux-health-panel" id="uxHealthPanel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">使用體驗指標</p>
+                <h3>流程是否真的變簡單</h3>
+              </div>
+              <span class="status-pill" id="uxHealthScope">依可見資料統計</span>
+            </div>
+            <div class="ux-health-grid">
+              <article><span>平均完成時間</span><strong id="uxTaskCompletion">尚無資料</strong><small id="uxTaskCompletionNote">依已完成申請單計算</small></article>
+              <article><span>退回補正率</span><strong id="uxReturnRate">0%</strong><small id="uxReturnRateNote">依簽核歷程計算</small></article>
+              <article><span>需要功能導引</span><strong id="uxGuidanceRate">0%</strong><small id="uxGuidanceRateNote">點擊使用提示的工作階段</small></article>
+              <article><span>手機使用比例</span><strong id="uxMobileRatio">0%</strong><small id="uxMobileRatioNote">依匿名裝置類型事件計算</small></article>
+            </div>
+            <p class="field-hint" id="uxHealthPrivacyNote">只統計頁面、裝置類型與操作結果，不記錄公文內容、搜尋文字、附件或個人資料。</p>
+          </section>
+
           <div class="report-workbench">
             <section class="panel">
               <div class="panel-heading">
@@ -3214,13 +3266,10 @@
 
           <div class="notification-toolbar panel">
             <div class="segmented" role="group" aria-label="通知篩選">
-              <button class="segment active" data-notification-filter="all">全部</button>
-              <button class="segment" data-notification-filter="收文">收文</button>
-              <button class="segment" data-notification-filter="待清稿">待清稿</button>
-              <button class="segment" data-notification-filter="交換失敗">交換失敗</button>
-              <button class="segment" data-notification-filter="Token 到期">Token 到期</button>
-              <button class="segment" data-notification-filter="逾期查核">逾期查核</button>
+              <button class="segment active" data-notification-filter="my_unread_overdue">我的未讀與逾期</button>
               <button class="segment" data-notification-filter="未讀">未讀</button>
+              <button class="segment" data-notification-filter="overdue">逾期</button>
+              <button class="segment" data-notification-filter="all">全部</button>
             </div>
             <label class="toolbar-search">搜尋<input id="notificationSearch" type="search" placeholder="通知、文號、機關、對象" /></label>
           </div>
@@ -3256,60 +3305,6 @@
               </div>
               <div id="notificationDetail"></div>
             </aside>
-          </div>
-
-          <div class="notification-workbench">
-            <section class="panel">
-              <div class="panel-heading">
-                <h3>新增通知</h3>
-                <button class="text-button" id="notificationAddBtn" type="button">新增</button>
-              </div>
-              <form class="compact-form" id="notificationForm">
-                <label>通知類型<select id="notificationType"><option>收文</option><option>待清稿</option><option>交換失敗</option><option>Token 到期</option><option>逾期查核</option></select></label>
-                <label>通知對象<select id="notificationTarget"><option>總務</option><option>行政部主任</option><option>業務助理</option><option>行政部主任</option></select></label>
-                <label>通知通道<select id="notificationChannel"><option>系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
-                <label>通知內容<textarea id="notificationBody" rows="3">請確認公文收發電子用印系統待辦事項。</textarea></label>
-              </form>
-            </section>
-
-            <section class="panel">
-              <div class="panel-heading">
-                <h3>派送通道</h3>
-                <button class="text-button" id="notificationTestChannelsBtn" type="button">測試通道</button>
-              </div>
-              <form class="compact-form" id="notificationGatewayForm">
-                <label>Email SMTP / API<input id="notificationEmailApi" value="讀取後端 SMTP 環境設定" /></label>
-                <label>Line Webhook<input id="notificationLineWebhook" value="讀取後端 LINE_WEBHOOK_URL" /></label>
-                <div class="inline-fields">
-                  <label>Email 憑證到期<input id="notificationEmailCertExpiry" type="date" value="2026-12-31" /></label>
-                  <label>LINE 憑證到期<input id="notificationLineCertExpiry" type="date" value="2026-12-31" /></label>
-                </div>
-                <label>測試通道<select id="notificationTestChannel"><option>Email + Line + 系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option><option>系統通知</option></select></label>
-                <label>測試收件 Email<input id="notificationTestEmail" value="records@suiyuecare.com" /></label>
-                <label>測試訊息<textarea id="notificationTestBody" rows="2">通知通道實測：請確認 Email、LINE 與站內通知派送紀錄。</textarea></label>
-                <label>站內通知保留<select id="notificationInboxRetention"><option>90 天</option><option>180 天</option><option>永久保存</option></select></label>
-                <div class="form-actions">
-                  <button class="primary-button" id="notificationSaveGatewayBtn" type="button">儲存通道</button>
-                  <button class="secondary-button" id="notificationValidateCredentialsBtn" type="button">驗證正式憑證</button>
-                </div>
-              </form>
-              <div class="archive-grid" id="notificationCredentialGrid"></div>
-              <div class="archive-grid" id="notificationTestReportGrid"></div>
-              <div class="address-results" id="notificationTestReportDetail"></div>
-            </section>
-
-            <section class="panel">
-              <div class="panel-heading">
-                <h3>提醒規則</h3>
-                <button class="text-button" id="notificationApplyRulesBtn" type="button">套用規則</button>
-              </div>
-              <form class="compact-form" id="notificationScheduleForm">
-                <label>逾期排程<select id="notificationOverdueSchedule"><option>每日 09:00</option><option>每 4 小時</option><option>每小時</option></select></label>
-                <label>Token 到期提醒<select id="notificationTokenSchedule"><option>到期前 30 分鐘</option><option>到期前 60 分鐘</option><option>到期前 2 小時</option></select></label>
-                <label>交換失敗警示<select id="notificationFailureChannel"><option>Email + Line + 系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
-              </form>
-              <div class="archive-grid" id="notificationRuleGrid"></div>
-            </section>
           </div>
 
           <div class="notification-workbench">
@@ -4006,6 +4001,70 @@
               <div class="address-results config-list" id="settingsFormatTemplateList"></div>
             </section>
           </div>
+
+          <section class="panel settings-notification-panel" id="settingsNotificationPanel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">通知與提醒</p>
+                <h3>通知規則設定</h3>
+                <p class="field-hint">一般使用者的待辦中心只顯示與本人有關的未讀與逾期；通道、測試與排程集中在此管理。</p>
+              </div>
+              <span class="status-pill">管理設定</span>
+            </div>
+            <div class="notification-settings-grid">
+              <section>
+                <div class="panel-heading tight">
+                  <h3>新增通知</h3>
+                  <button class="text-button" id="notificationAddBtn" type="button">新增</button>
+                </div>
+                <form class="compact-form" id="notificationForm">
+                  <label>通知類型<select id="notificationType"><option>收文</option><option>待清稿</option><option>交換失敗</option><option>Token 到期</option><option>逾期查核</option></select></label>
+                  <label>通知對象<select id="notificationTarget"><option>總務</option><option>行政部主任</option><option>業務助理</option><option>執行長</option></select></label>
+                  <label>通知通道<select id="notificationChannel"><option>系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
+                  <label>通知內容<textarea id="notificationBody" rows="3">請確認公文收發電子用印系統待辦事項。</textarea></label>
+                </form>
+              </section>
+
+              <section>
+                <div class="panel-heading tight">
+                  <h3>派送通道</h3>
+                  <button class="text-button" id="notificationTestChannelsBtn" type="button">測試通道</button>
+                </div>
+                <form class="compact-form" id="notificationGatewayForm">
+                  <label>Email SMTP / API<input id="notificationEmailApi" value="讀取後端 SMTP 環境設定" /></label>
+                  <label>Line Webhook<input id="notificationLineWebhook" value="讀取後端 LINE_WEBHOOK_URL" /></label>
+                  <div class="inline-fields">
+                    <label>Email 憑證到期<input id="notificationEmailCertExpiry" type="date" value="2026-12-31" /></label>
+                    <label>LINE 憑證到期<input id="notificationLineCertExpiry" type="date" value="2026-12-31" /></label>
+                  </div>
+                  <label>測試通道<select id="notificationTestChannel"><option>Email + Line + 系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option><option>系統通知</option></select></label>
+                  <label>測試收件 Email<input id="notificationTestEmail" value="records@suiyuecare.com" /></label>
+                  <label>測試訊息<textarea id="notificationTestBody" rows="2">通知通道實測：請確認 Email、LINE 與站內通知派送紀錄。</textarea></label>
+                  <label>站內通知保留<select id="notificationInboxRetention"><option>90 天</option><option>180 天</option><option>永久保存</option></select></label>
+                  <div class="form-actions">
+                    <button class="primary-button" id="notificationSaveGatewayBtn" type="button">儲存通道</button>
+                    <button class="secondary-button" id="notificationValidateCredentialsBtn" type="button">驗證正式憑證</button>
+                  </div>
+                </form>
+                <div class="archive-grid" id="notificationCredentialGrid"></div>
+                <div class="archive-grid" id="notificationTestReportGrid"></div>
+                <div class="address-results" id="notificationTestReportDetail"></div>
+              </section>
+
+              <section>
+                <div class="panel-heading tight">
+                  <h3>提醒規則</h3>
+                  <button class="text-button" id="notificationApplyRulesBtn" type="button">套用規則</button>
+                </div>
+                <form class="compact-form" id="notificationScheduleForm">
+                  <label>逾期排程<select id="notificationOverdueSchedule"><option>每日 09:00</option><option>每 4 小時</option><option>每小時</option></select></label>
+                  <label>Token 到期提醒<select id="notificationTokenSchedule"><option>到期前 30 分鐘</option><option>到期前 60 分鐘</option><option>到期前 2 小時</option></select></label>
+                  <label>交換失敗警示<select id="notificationFailureChannel"><option>Email + Line + 系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
+                </form>
+                <div class="archive-grid" id="notificationRuleGrid"></div>
+              </section>
+            </div>
+          </section>
 
           <div class="settings-workbench">
             <section class="panel">

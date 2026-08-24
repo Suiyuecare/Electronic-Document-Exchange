@@ -28285,6 +28285,162 @@ def supabase_mark_notification_read(notification_id: str, session: Dict[str, Any
     return updated
 
 
+UI_USAGE_EVENT_TYPES = frozenset({"session_started", "route_view", "guidance_used", "search_result"})
+UI_USAGE_DEVICE_CLASSES = frozenset({"desktop", "tablet", "mobile"})
+UI_USAGE_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{12,80}$")
+UI_USAGE_ROUTE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
+
+
+def normalize_ui_usage_payload(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = (session or {}).get("user") or {}
+    if not user.get("id"):
+        raise PermissionError("unauthorized")
+    company_id = str(user.get("company_id") or "").strip()
+    if not company_id:
+        raise PermissionError("finance_company_unmapped")
+    event_type = str(payload.get("eventType") or payload.get("event_type") or "").strip()
+    session_id = str(payload.get("sessionId") or payload.get("session_id") or "").strip()
+    device_class = str(payload.get("deviceClass") or payload.get("device_class") or "").strip()
+    route = str(payload.get("route") or "dashboard").strip()
+    if event_type not in UI_USAGE_EVENT_TYPES:
+        raise ValueError("ui_usage_event_invalid")
+    if not UI_USAGE_SESSION_PATTERN.fullmatch(session_id):
+        raise ValueError("ui_usage_session_invalid")
+    if device_class not in UI_USAGE_DEVICE_CLASSES:
+        raise ValueError("ui_usage_device_invalid")
+    if not UI_USAGE_ROUTE_PATTERN.fullmatch(route):
+        raise ValueError("ui_usage_route_invalid")
+    result_count = payload.get("resultCount", payload.get("result_count", 0))
+    if isinstance(result_count, bool):
+        raise ValueError("ui_usage_result_count_invalid")
+    try:
+        result_count = int(result_count or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ui_usage_result_count_invalid") from exc
+    if result_count < 0 or result_count > 1000:
+        raise ValueError("ui_usage_result_count_invalid")
+    return {
+        "schemaVersion": 1,
+        "eventType": event_type,
+        "sessionId": session_id,
+        "deviceClass": device_class,
+        "route": route,
+        "resultEmpty": payload.get("resultEmpty", payload.get("result_empty")) is True,
+        "resultCount": result_count,
+        "companyId": company_id[:80],
+        "privacySafe": True,
+    }
+
+
+def record_ui_usage(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    event = normalize_ui_usage_payload(payload, session)
+    log_audit(
+        conn,
+        "Authenticated user",
+        "UI usage event",
+        "ui_usage",
+        event["sessionId"],
+        "privacy_safe_ui_usage",
+        event_type="submit",
+        module_code="uiux",
+        resource_type="ui_usage",
+        resource_id=event["sessionId"],
+        metadata=event,
+    )
+    return {"ok": True, "accepted": event["eventType"], "privacySafe": True}
+
+
+def supabase_record_ui_usage(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    event = normalize_ui_usage_payload(payload, session)
+    timestamp = now()
+    supabase_insert("audit_logs", {
+        "id": f"AUD-UI-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}",
+        "actor": "Authenticated user",
+        "action": "UI usage event",
+        "target_type": "ui_usage",
+        "target_id": event["sessionId"],
+        "detail": "privacy_safe_ui_usage",
+        "event_type": "submit",
+        "severity": "info",
+        "result": "success",
+        "module_code": "uiux",
+        "resource_type": "ui_usage",
+        "resource_id": event["sessionId"],
+        "data_scope": "company",
+        "metadata_json": json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        "created_at": timestamp,
+    })
+    return {"ok": True, "accepted": event["eventType"], "privacySafe": True}
+
+
+def ui_usage_summary_from_rows(rows: List[Dict[str, Any]], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = (session or {}).get("user") or {}
+    if (
+        not session_has_any_permission(session, ["reports.operational_view", "audit_logs.view", "audit_logs.export"])
+        and str(user.get("role") or "") not in {"總務", "行政部主任", "行政部門主任", "執行長", "系統管理員"}
+    ):
+        raise PermissionError("ui_usage_summary_forbidden")
+    company_id = str(user.get("company_id") or "").strip()
+    if not company_id:
+        raise PermissionError("finance_company_unmapped")
+    cutoff = datetime.now() - timedelta(days=30)
+    sessions: Dict[str, str] = {}
+    guidance_sessions: set[str] = set()
+    route_views = 0
+    search_events = 0
+    empty_search_events = 0
+    for row in rows:
+        created_at = parse_time(str(row.get("created_at") or ""))
+        if created_at and created_at < cutoff:
+            continue
+        metadata = parse_json_field(row.get("metadata_json"))
+        if metadata.get("privacySafe") is not True or metadata.get("companyId", "") != company_id:
+            continue
+        session_id = str(metadata.get("sessionId") or "")
+        if not UI_USAGE_SESSION_PATTERN.fullmatch(session_id):
+            continue
+        event_type = str(metadata.get("eventType") or "")
+        device_class = str(metadata.get("deviceClass") or "")
+        if event_type == "session_started" and device_class in UI_USAGE_DEVICE_CLASSES:
+            sessions.setdefault(session_id, device_class)
+        elif event_type == "guidance_used":
+            guidance_sessions.add(session_id)
+        elif event_type == "route_view":
+            route_views += 1
+        elif event_type == "search_result":
+            search_events += 1
+            if metadata.get("resultEmpty") is True:
+                empty_search_events += 1
+    session_count = len(sessions)
+    mobile_count = sum(1 for device in sessions.values() if device == "mobile")
+    guided_count = len(guidance_sessions & set(sessions))
+    return {
+        "periodDays": 30,
+        "sessions": session_count,
+        "mobileSessions": mobile_count,
+        "guidanceSessions": guided_count,
+        "mobileRatio": round((mobile_count / max(session_count, 1)) * 100),
+        "guidanceRate": round((guided_count / max(session_count, 1)) * 100),
+        "routeViews": route_views,
+        "searchEvents": search_events,
+        "emptySearchEvents": empty_search_events,
+        "source": "近 30 日匿名操作事件",
+        "privacySafe": True,
+    }
+
+
+def ui_usage_summary(conn: sqlite3.Connection, session: Dict[str, Any] | None) -> Dict[str, Any]:
+    rows = [row_to_dict(row) for row in conn.execute(
+        "SELECT metadata_json, created_at FROM audit_logs WHERE target_type = 'ui_usage' ORDER BY created_at DESC LIMIT 2000"
+    ).fetchall()]
+    return ui_usage_summary_from_rows(rows, session)
+
+
+def supabase_ui_usage_summary(session: Dict[str, Any] | None) -> Dict[str, Any]:
+    rows = supabase_filter_rows("audit_logs", {"target_type": "ui_usage"}, order="created_at.desc", limit=2000)
+    return ui_usage_summary_from_rows(rows, session)
+
+
 OFFICIAL_DELEGATION_MANAGE_PERMISSION = "workflow.delegations.manage"
 
 
@@ -39249,6 +39405,14 @@ class Handler(SimpleHTTPRequestHandler):
                     session = supabase_current_session(self.bearer_token())
                     self.send_json(supabase_mark_notification_read(parts[1], session))
                     return
+                if method == "POST" and parts == ["ui-usage"]:
+                    session = supabase_current_session(self.bearer_token())
+                    self.send_json(supabase_record_ui_usage(self.read_json(), session), 202)
+                    return
+                if method == "GET" and parts == ["ui-usage", "summary"]:
+                    session = supabase_current_session(self.bearer_token())
+                    self.send_json(supabase_ui_usage_summary(session))
+                    return
                 if method == "GET" and parts == ["workflow-delegations"]:
                     session = supabase_current_session(self.bearer_token())
                     self.send_json(supabase_list_official_workflow_delegations(session))
@@ -40086,6 +40250,16 @@ class Handler(SimpleHTTPRequestHandler):
                     result = mark_notification_read(conn, parts[1], session)
                     conn.commit()
                     self.send_json(result)
+                    return
+                if method == "POST" and parts == ["ui-usage"]:
+                    session = current_session(conn, self.bearer_token())
+                    result = record_ui_usage(conn, self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result, 202)
+                    return
+                if method == "GET" and parts == ["ui-usage", "summary"]:
+                    session = current_session(conn, self.bearer_token())
+                    self.send_json(ui_usage_summary(conn, session))
                     return
                 if method == "GET" and parts == ["workflow-delegations"]:
                     session = current_session(conn, self.bearer_token())
