@@ -21,8 +21,9 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         navigation = self.js[start:end]
         self.assertNotIn('"contractSeal"', navigation)
         self.assertNotIn('"workflow"', navigation)
-        for route in ("dashboard", "compose", "electronicSeal", "approvalLog", "search"):
+        for route in ("dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"):
             self.assertIn(f'"{route}"', navigation)
+        self.assertNotIn('"search"', navigation)
 
     def test_legacy_contract_route_remains_available_without_being_primary(self) -> None:
         start = self.js.index("const secondaryRoutesByIdentity = {")
@@ -93,25 +94,67 @@ class UiUxSimplificationContractTest(unittest.TestCase):
 
     def test_mobile_primary_controls_have_44px_touch_targets(self) -> None:
         normalized = re.sub(r"\s+", " ", self.css)
-        self.assertIn(".nav-item { display: inline-flex; flex: 0 0 auto; min-height: 44px;", normalized)
+        self.assertIn(".nav-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));", normalized)
+        self.assertIn(".nav-item { display: inline-flex; justify-content: center; min-width: 0; min-height: 44px;", normalized)
         self.assertIn(".module-switch-button, .topbar-notification-button { min-height: 44px;", normalized)
         self.assertIn(".flow-step-chip, .segment, .page-arrow, .text-button, .unified-flow-row-button, .contract-link, .pdf-editor-v2 button { min-height: 44px;", normalized)
         self.assertIn(".page-arrow { min-width: 44px;", normalized)
         self.assertIn(".contract-link { display: inline-flex; align-items: center;", normalized)
         self.assertIn(".view button.primary-button, .view button.secondary-button, .view button.icon-button { min-height: 44px;", normalized)
 
-    def test_navigation_uses_four_workspaces_and_contextual_tabs(self) -> None:
-        self.assertEqual(self.html.count('class="nav-item workspace-nav-item'), 4)
-        for group in ("work", "documents", "seals", "admin"):
-            self.assertIn(f'data-workspace-group="{group}"', self.html)
-        self.assertIn('id="workspaceSubnav"', self.html)
+    def test_active_major_navigation_uses_readable_brand_orange(self) -> None:
+        self.assertIn("--accent-readable: #b74f08;", self.css)
+        normalized = re.sub(r"\s+", " ", self.css)
+        self.assertIn(".nav-item:hover, .nav-item.active { background: var(--accent-readable); color: #fff;", normalized)
+
+    def test_navigation_uses_exactly_six_major_functions_without_second_row(self) -> None:
+        nav_start = self.html.index('<nav class="nav-list"')
+        nav_end = self.html.index("</nav>", nav_start)
+        navigation = self.html[nav_start:nav_end]
+        routes_and_labels = re.findall(r'class="nav-item(?: active)?" data-target="([^"]+)" data-icon="[^"]+">([^<]+)</button>', navigation)
+        self.assertEqual(routes_and_labels, [
+            ("dashboard", "首頁"),
+            ("compose", "撰寫公文"),
+            ("electronicSeal", "電子用印"),
+            ("approvalLog", "簽核紀錄"),
+            ("inbound", "收發管理"),
+            ("settings", "系統設定"),
+        ])
+        self.assertEqual(navigation.count('class="nav-item'), 6)
+        self.assertNotIn('id="workspaceSubnav"', self.html)
         self.assertNotIn('id="navMoreBtn"', self.html)
         self.assertNotIn('id="navMoreDialog"', self.html)
-        self.assertIn("const workspaceNavigationGroups", self.js)
-        self.assertIn('aliases: ["contractSeal"]', self.js)
-        self.assertIn("function renderWorkspaceSubnavigation", self.js)
-        self.assertIn('event.target.closest("[data-workspace-route]")', self.js)
-        self.assertIn(".workspace-subnav-button", self.css)
+        self.assertNotIn("workspaceNavigationGroups", self.js)
+        self.assertNotIn("renderWorkspaceSubnavigation", self.js)
+        self.assertNotIn("workspace-subnav-button", self.css)
+
+    def test_legacy_pages_are_folded_into_one_of_the_six_major_functions(self) -> None:
+        start = self.js.index("const mergedNavigationParents = Object.freeze({")
+        end = self.js.index("\n});", start) + 4
+        parents = self.js[start:end]
+        for route, parent in (
+            ("notifications", "dashboard"),
+            ("search", "inbound"),
+            ("tracking", "inbound"),
+            ("contracts", "electronicSeal"),
+            ("contractSeal", "electronicSeal"),
+            ("seals", "electronicSeal"),
+            ("workflow", "settings"),
+            ("reports", "approvalLog"),
+            ("accounts", "settings"),
+            ("ops", "settings"),
+        ):
+            self.assertIn(f'{route}: "{parent}"', parents)
+        self.assertIn("const activeMajorRoute = majorRouteForRoute(target);", self.js)
+        self.assertIn("simpleRouteTitle(activeMajorRoute)", self.js)
+
+    def test_notification_bell_opens_home_task_center(self) -> None:
+        start = self.js.index('document.querySelector("#headerNotificationBtn")')
+        end = self.js.index("\n});", start) + 4
+        handler = self.js[start:end]
+        self.assertIn('setView("dashboard");', handler)
+        self.assertIn('document.querySelector("#dailyActionCenter")', handler)
+        self.assertNotIn('setView(isRouteAllowed("notifications")', handler)
 
     def test_entry_loading_brand_asset_is_packaged_for_vercel(self) -> None:
         vercel = (ROOT / "vercel.json").read_text(encoding="utf-8")

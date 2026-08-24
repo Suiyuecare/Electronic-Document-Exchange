@@ -2608,15 +2608,14 @@ function setView(target) {
   document.body.dataset.activeRoute = target;
   const viewTarget = target === "contractSeal" ? "electronicSeal" : target;
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === viewTarget));
-  const activeWorkspaceGroup = workspaceGroupForRoute(target);
-  document.querySelectorAll(".workspace-nav-item").forEach((item) => {
-    const active = item.dataset.workspaceGroup === activeWorkspaceGroup;
+  const activeMajorRoute = majorRouteForRoute(target);
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    const active = item.dataset.target === activeMajorRoute;
     item.classList.toggle("active", active);
     if (active) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   });
-  renderWorkspaceSubnavigation(target);
-  const activeNavItem = document.querySelector(`.workspace-nav-item[data-workspace-group="${activeWorkspaceGroup}"]`);
+  const activeNavItem = document.querySelector(`.nav-item[data-target="${activeMajorRoute}"]`);
   const navList = activeNavItem?.closest(".nav-list");
   if (activeNavItem && navList && window.matchMedia("(max-width: 720px)").matches) {
     window.requestAnimationFrame(() => {
@@ -2624,8 +2623,8 @@ function setView(target) {
       navList.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
     });
   }
-  document.querySelector("#pageTitle").textContent = simpleRouteTitle(target);
-  document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(target);
+  document.querySelector("#pageTitle").textContent = simpleRouteTitle(activeMajorRoute);
+  document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(activeMajorRoute);
   updateHeaderStatus();
   if (target === "approvalLog" && hasAuthenticatedBackendSession()) void loadApprovalProgressFromBackend();
   if (target === "archive" && hasAuthenticatedBackendSession()) void loadArchiveRecordsFromBackend();
@@ -2926,19 +2925,19 @@ function canSyncAuditLogs() {
 }
 
 const navByIdentity = {
-  employee: ["dashboard", "compose", "electronicSeal", "approvalLog", "notifications", "search"],
-  supervisor: ["dashboard", "approvalLog", "compose", "electronicSeal", "inbound", "notifications", "search"],
-  viewer: ["dashboard", "search"],
-  companyOps: ["dashboard", "inbound", "electronicSeal", "approvalLog", "compose", "search", "seals"],
-  executive: ["dashboard", "approvalLog", "electronicSeal", "inbound", "compose", "search", "seals", "settings"]
+  employee: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
+  supervisor: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
+  viewer: ["dashboard", "approvalLog", "inbound"],
+  companyOps: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
+  executive: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"]
 };
 
 const secondaryRoutesByIdentity = {
-  employee: ["notifications", "approvalLog", "contractSeal"],
-  supervisor: ["notifications", "approvalLog", "contractSeal", "workflow"],
-  viewer: ["approvalLog"],
-  companyOps: ["notifications", "approvalLog", "contracts", "contractSeal", "workflow", "tracking", "reports"],
-  executive: ["notifications", "approvalLog", "contracts", "contractSeal", "workflow", "tracking", "reports", "seals", "accounts", "settings", "ops"]
+  employee: ["notifications", "search", "contractSeal"],
+  supervisor: ["notifications", "search", "contractSeal"],
+  viewer: ["search"],
+  companyOps: ["notifications", "search", "contracts", "contractSeal", "tracking", "reports", "seals"],
+  executive: ["notifications", "search", "contracts", "contractSeal", "workflow", "tracking", "reports", "seals", "accounts", "ops"]
 };
 
 function primaryRoutesForRole(role = activeRole()) {
@@ -2970,10 +2969,10 @@ function isRouteAllowed(target) {
 
 function simpleRouteLabels(role = activeRole()) {
   const companyWide = ["行政部主任", "總務", "執行長"].includes(role);
-  if (role === "執行長") return { dashboard: "儀表板", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "公文收錄", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核進度", workflow: "簽核流程設定", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" };
+  if (role === "執行長") return { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程設定", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" };
   return companyWide
-    ? { dashboard: "儀表板", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "公文收錄", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核進度", workflow: "簽核流程", search: "公文查詢", seals: "印章檔案庫" }
-    : { dashboard: "我的工作台", electronicSeal: "電子用印", contractSeal: "合約用印", compose: "撰寫公文", inbound: "公文收錄", notifications: "我的待辦", approvalLog: "簽核進度", workflow: "簽核流程", search: "公文查詢" };
+    ? { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢", seals: "印章檔案庫" }
+    : { dashboard: "首頁", electronicSeal: "電子用印", contractSeal: "合約用印", compose: "撰寫公文", inbound: "收發管理", notifications: "我的待辦", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢" };
 }
 
 function simpleRouteTitle(target, role = activeRole()) {
@@ -2996,70 +2995,42 @@ function simpleRouteEyebrow(target, role = activeRole()) {
   return "全公司收發與交換處理";
 }
 
-const workspaceNavigationGroups = Object.freeze({
-  work: { label: "工作台", routes: ["dashboard", "notifications", "approvalLog"], aliases: [] },
-  documents: { label: "公文作業", routes: ["compose", "inbound", "search"], aliases: [] },
-  seals: { label: "用印作業", routes: ["electronicSeal", "contracts", "seals"], aliases: ["contractSeal"] },
-  admin: { label: "管理中心", routes: ["workflow", "tracking", "reports", "accounts", "settings", "ops"], aliases: [] }
+const mergedNavigationParents = Object.freeze({
+  notifications: "dashboard",
+  search: "inbound",
+  archive: "inbound",
+  tracking: "inbound",
+  exchange: "inbound",
+  contracts: "electronicSeal",
+  contractSeal: "electronicSeal",
+  seals: "electronicSeal",
+  workflow: "settings",
+  reports: "approvalLog",
+  accounts: "settings",
+  ops: "settings",
+  jobs: "settings",
+  database: "settings",
+  security: "settings",
+  fileSecurity: "settings",
+  complianceOps: "settings",
+  features: "settings",
+  format: "settings"
 });
 
-const workspaceRouteLabels = Object.freeze({
-  dashboard: "首頁",
-  notifications: "待辦中心",
-  approvalLog: "簽核進度",
-  compose: "撰寫公文",
-  inbound: "公文收錄",
-  search: "公文查詢",
-  electronicSeal: "電子用印",
-  contracts: "合約管理",
-  seals: "印章版本",
-  workflow: "流程設定",
-  tracking: "稽催追蹤",
-  reports: "報表統計",
-  accounts: "帳號權限",
-  settings: "系統設定",
-  ops: "維運中心"
-});
-
-function workspaceGroupForRoute(route = activeRouteTarget) {
-  const normalized = route === "contractSeal" ? "electronicSeal" : route;
-  return Object.entries(workspaceNavigationGroups).find(([, group]) => (
-    group.routes.includes(normalized) || group.aliases.includes(route)
-  ))?.[0] || "work";
-}
-
-function workspaceRoutesForGroup(groupKey) {
-  const group = workspaceNavigationGroups[groupKey];
-  if (!group) return [];
-  return group.routes.filter((route) => isRouteAllowed(route));
-}
-
-function workspaceDefaultRoute(groupKey) {
-  return workspaceRoutesForGroup(groupKey)[0] || "dashboard";
-}
-
-function renderWorkspaceSubnavigation(target = activeRouteTarget) {
-  const nav = document.querySelector("#workspaceSubnav");
-  if (!nav) return;
-  const groupKey = workspaceGroupForRoute(target);
-  const routes = workspaceRoutesForGroup(groupKey);
-  const selectedRoute = target === "contractSeal" ? "electronicSeal" : target;
-  nav.dataset.workspaceGroup = groupKey;
-  nav.setAttribute("aria-label", `${workspaceNavigationGroups[groupKey]?.label || "工作區"}功能`);
-  nav.innerHTML = routes.map((route) => `
-    <button class="workspace-subnav-button ${route === selectedRoute ? "active" : ""}" type="button" data-workspace-route="${route}" ${route === selectedRoute ? 'aria-current="page"' : ""}>
-      ${escapeHtml(workspaceRouteLabels[route] || simpleRouteTitle(route))}
-    </button>
-  `).join("");
-  nav.hidden = routes.length <= 1;
+function majorRouteForRoute(route = activeRouteTarget) {
+  return mergedNavigationParents[route] || route || "dashboard";
 }
 
 function applyRoleNavigation() {
+  const primary = primaryRoutesForRole();
   const allowed = allowedRoutesForRole();
+  const labels = simpleRouteLabels();
   document.body.dataset.identityKind = identityKindForRole();
-  document.querySelectorAll("[data-workspace-group]").forEach((item) => {
-    const groupKey = item.dataset.workspaceGroup;
-    item.hidden = workspaceRoutesForGroup(groupKey).length === 0;
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    const routeIndex = primary.indexOf(item.dataset.target);
+    item.hidden = routeIndex === -1;
+    item.style.order = String(routeIndex === -1 ? 999 : routeIndex);
+    if (labels[item.dataset.target]) item.textContent = labels[item.dataset.target];
   });
   const companyWide = ["行政部主任", "總務", "執行長"].includes(activeRole());
   document.querySelector("#pullInboundBtn")?.toggleAttribute("hidden", !companyWide);
@@ -3073,7 +3044,6 @@ function applyRoleNavigation() {
     if (!target || !titles[target]) return;
     control.toggleAttribute("hidden", !allowed.includes(target));
   });
-  renderWorkspaceSubnavigation(active);
   if (!allowed.includes(active)) setView("dashboard");
 }
 
@@ -3766,12 +3736,12 @@ const roleOnboardingProfiles = Object.freeze({
     { title: "追蹤到收件完成", body: "簽核頁會直接顯示現在在誰手上與下一步。", route: "approvalLog", action: "查看簽核進度" }
   ],
   supervisor: [
-    { title: "先處理我的簽核", body: "從待辦中心開啟只與你有關的未讀與逾期案件。", route: "notifications", action: "開啟我的待辦" },
+    { title: "先處理我的簽核", body: "首頁已整合只與你有關的未讀、逾期與退回案件。", route: "dashboard", action: "查看首頁待辦" },
     { title: "核對文件再決定", body: "簽核頁可查看附件、PDF 編輯版與完整流程。", route: "approvalLog", action: "查看簽核案件" },
     { title: "追蹤退回與逾期", body: "用報表與進度欄位快速判斷卡關位置。", route: "reports", action: "查看營運指標" }
   ],
   generalAffairs: [
-    { title: "先看總務待辦", body: "從待辦中心處理未讀、逾期與退回補正。", route: "notifications", action: "開啟待辦中心" },
+    { title: "先看總務待辦", body: "首頁已整合未讀、逾期與退回補正。", route: "dashboard", action: "查看首頁待辦" },
     { title: "完成用印與交付", body: "到電子用印確認 PDF、章位及最終檔案。", route: "electronicSeal", action: "前往電子用印" },
     { title: "核對印章版本", body: "版本清冊只顯示 current、掃描與校準尺寸。", route: "seals", action: "查看印章版本" }
   ],
@@ -26803,20 +26773,16 @@ document.querySelector("#settingsClearLogBtn").addEventListener("click", () => {
   clearLogWithConfirm(settingsAuditLog, renderSettingsAuditLog, "設定操作紀錄");
 });
 document.querySelector("#headerNotificationBtn")?.addEventListener("click", () => {
-  setView(isRouteAllowed("notifications") ? "notifications" : "dashboard");
+  setView("dashboard");
+  window.setTimeout(() => {
+    document.querySelector("#dailyActionCenter")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, 80);
 });
 document.querySelector("#headerRefreshBtn")?.addEventListener("click", refreshCurrentWorkspace);
 document.querySelector("#returnPortalBtn")?.addEventListener("click", () => {
   returnToLoggingPortalModulePicker();
 });
 document.querySelector("#logoutBtn")?.addEventListener("click", leaveApp);
-document.querySelectorAll("[data-workspace-group]").forEach((button) => {
-  button.addEventListener("click", () => setView(workspaceDefaultRoute(button.dataset.workspaceGroup)));
-});
-document.querySelector("#workspaceSubnav")?.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-workspace-route]");
-  if (button?.dataset.workspaceRoute) setView(button.dataset.workspaceRoute);
-});
 document.querySelector("#identityWorkbench").addEventListener("click", (event) => {
   const button = event.target.closest("[data-identity-target]");
   if (!button) return;

@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260824-nav-merge-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260824-six-nav-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
@@ -46,10 +46,12 @@
         </div>
 
         <nav class="nav-list" aria-label="公文收發電子用印系統功能">
-          <button class="nav-item workspace-nav-item active" data-workspace-group="work" data-icon="總">工作台</button>
-          <button class="nav-item workspace-nav-item" data-workspace-group="documents" data-icon="文">公文作業</button>
-          <button class="nav-item workspace-nav-item" data-workspace-group="seals" data-icon="章">用印作業</button>
-          <button class="nav-item workspace-nav-item" data-workspace-group="admin" data-icon="管">管理中心</button>
+          <button class="nav-item active" data-target="dashboard" data-icon="首">首頁</button>
+          <button class="nav-item" data-target="compose" data-icon="寫">撰寫公文</button>
+          <button class="nav-item" data-target="electronicSeal" data-icon="章">電子用印</button>
+          <button class="nav-item" data-target="approvalLog" data-icon="簽">簽核紀錄</button>
+          <button class="nav-item" data-target="inbound" data-icon="收">收發管理</button>
+          <button class="nav-item" data-target="settings" data-icon="設">系統設定</button>
         </nav>
 
         <section class="profile-card">
@@ -93,8 +95,6 @@
             <span class="top-info" id="topInfo">即時同步</span>
           </div>
         </header>
-
-        <nav class="workspace-subnav" id="workspaceSubnav" aria-label="目前工作區功能"></nav>
 
         <section class="view active" id="dashboard">
           <div class="dashboard-role-strip">
@@ -4146,6 +4146,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260824-nav-merge-r1"></script>
+    <script src="app.js?v=20260824-six-nav-r1"></script>
   </body>
 </html>

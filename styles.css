@@ -7,6 +7,7 @@
   --soft: #f8f1e7;
   --accent: #f08a24;
   --accent-strong: #c86112;
+  --accent-readable: #b74f08;
   --amber: #f08a24;
   --blue: #f08a24;
   --rose: #b42318;
@@ -1050,7 +1051,7 @@ button {
 
 .nav-item:hover,
 .nav-item.active {
-  background: var(--accent);
+  background: var(--accent-readable);
   color: #fff;
   transform: translateX(2px);
   box-shadow: none;
@@ -1305,54 +1306,6 @@ label textarea[data-validity="needs"] {
   border-bottom: 1px solid var(--line);
   background: rgba(255, 250, 242, 0.92);
   backdrop-filter: blur(16px);
-}
-
-.workspace-subnav {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 8px;
-  align-items: center;
-  min-width: 0;
-  padding: 10px 42px;
-  overflow-x: auto;
-  border-bottom: 1px solid rgba(234, 211, 179, 0.72);
-  background: rgba(255, 255, 255, 0.78);
-  scrollbar-width: thin;
-}
-
-.workspace-subnav[hidden] {
-  display: none;
-}
-
-.workspace-subnav-button {
-  flex: 0 0 auto;
-  min-height: 44px;
-  padding: 9px 16px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 14px;
-  font-weight: 900;
-  white-space: nowrap;
-}
-
-.workspace-subnav-button:hover {
-  border-color: rgba(240, 138, 36, 0.34);
-  background: #fff7ec;
-  color: var(--accent-strong);
-}
-
-.workspace-subnav-button.active {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: #fff;
-}
-
-.workspace-subnav-button:focus-visible {
-  outline: 3px solid rgba(240, 138, 36, 0.34);
-  outline-offset: 2px;
 }
 
 .topbar > div:first-child {
@@ -9666,22 +9619,24 @@ textarea {
   }
 
   .nav-list {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
     max-width: 100%;
-    overflow-x: auto;
+    overflow-x: hidden;
     overflow-y: hidden;
     padding: 8px 0 2px;
-    scrollbar-width: thin;
   }
 
   .nav-item {
     display: inline-flex;
-    flex: 0 0 auto;
+    justify-content: center;
+    min-width: 0;
     min-height: 44px;
-    padding: 10px 12px;
-    border-radius: 999px;
-    font-size: 14px;
+    margin: 0;
+    padding: 10px 6px;
+    border-radius: 14px;
+    font-size: 13px;
     white-space: nowrap;
   }
 
@@ -9877,18 +9832,6 @@ textarea {
   .topbar h2 {
     font-size: 22px;
     line-height: 1.12;
-  }
-
-  .workspace-subnav {
-    gap: 6px;
-    padding: 8px 0 12px;
-    border-bottom-color: var(--line);
-    background: #f7f3ec;
-  }
-
-  .workspace-subnav-button {
-    min-height: 44px;
-    padding: 9px 14px;
   }
 
   .topbar .quick-actions {
