@@ -21959,23 +21959,33 @@ def claim_official_document_stamp(
             raise ValueError("official_stamp_request_not_latest")
         if not bool(document.get("requires_stamp", 1)):
             raise PermissionError("official_document_stamp_required")
+        generation_row = conn.execute(
+            "SELECT MAX(workflow_generation) AS workflow_generation "
+            "FROM official_document_approval_steps WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        workflow_generation = int(generation_row["workflow_generation"] or 0) if generation_row else 0
+        if workflow_generation < 1:
+            raise ValueError("official_document_not_fully_approved_for_stamp_retry")
         unapproved = conn.execute(
             """
             SELECT 1 FROM official_document_approval_steps
-            WHERE document_id = ? AND step_key <> 'applicant_confirm' AND status <> 'approved'
+            WHERE document_id = ? AND workflow_generation = ?
+              AND step_key <> 'applicant_confirm' AND status <> 'approved'
             LIMIT 1
             """,
-            (document_id,),
+            (document_id, workflow_generation),
         ).fetchone()
         if unapproved:
             raise ValueError("official_document_not_fully_approved_for_stamp_retry")
         final_approval = conn.execute(
             """
             SELECT approver_user_id FROM official_document_approval_steps
-            WHERE document_id = ? AND step_key = 'general_affairs_review' AND status = 'approved'
+            WHERE document_id = ? AND workflow_generation = ?
+              AND step_key = 'general_affairs_review' AND status = 'approved'
             LIMIT 1
             """,
-            (document_id,),
+            (document_id, workflow_generation),
         ).fetchone()
         if not final_approval:
             raise ValueError("official_document_not_fully_approved_for_stamp_retry")

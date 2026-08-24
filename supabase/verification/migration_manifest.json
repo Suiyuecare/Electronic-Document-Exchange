@@ -33,6 +33,7 @@
     "20260821181430_finance_master_auto_mirror.sql",
     "20260823191041_backfill_company_seal_upload_slots.sql",
     "20260824034730_dedicated_edoc_private_storage_buckets.sql",
+    "20260824061729_fix_official_stamp_latest_workflow_generation.sql",
     "20260824124500_finance_login_fast_path.sql"
   ]
 }

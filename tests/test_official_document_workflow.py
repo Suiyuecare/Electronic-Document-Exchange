@@ -298,6 +298,81 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
                 employee,
             )
 
+    def test_returned_document_resubmits_and_stamps_using_latest_workflow_generation(self) -> None:
+        employee = self.login_session("sales-assistant@suiyuecare.com")
+        seal_id = self.seed_seal_id()
+        detail = backend.create_official_document(
+            self.conn,
+            {
+                "source_type": "blank_editor",
+                "company_id": "CO-001",
+                "seal_id": seal_id,
+                "title": "退回補正後重新用印測試",
+                "subject": "退回補正後重新用印測試",
+                "description": "第一版去識別化說明文字。",
+                "method": "依測試程序辦理。",
+                "recipient": "測試機關",
+                "request_reason": "驗證退回補正後仍可完成用印。",
+                "document_category": "主管機關 申請或回覆文件（與 費用、法令無關）",
+                "dispatch_method": "electronic_official_document_by_general_affairs",
+                "submit": True,
+                "stamp_position": {"page": 1, "x": 420, "y": 130, "width": 85, "height": 85},
+            },
+            employee,
+        )
+
+        rejected_step = next(step for step in detail["approval_steps"] if step["step_key"] == detail["current_step"])
+        approver = self.session_for_user_id(rejected_step["approver_user_id"])
+        for file_meta in detail["files"]:
+            if file_meta["file_type"] in {"generated_pdf", "prepared_pdf", "attachment"}:
+                backend.official_document_download_file(
+                    self.conn,
+                    detail["id"],
+                    file_meta["id"],
+                    approver,
+                    "127.0.0.1",
+                    "unit-test-review",
+                )
+        detail = backend.reject_official_document(
+            self.conn,
+            detail["id"],
+            {
+                "expected_step_id": rejected_step["id"],
+                "comment": "請補正說明內容後重新送簽。",
+                "reason_category": "內容補正",
+                "missing_items": ["補正公文說明"],
+            },
+            approver,
+        )
+        self.assertEqual(detail["current_status"], "rejected")
+
+        backend.update_official_document_correction(
+            self.conn,
+            detail["id"],
+            {
+                "title": "退回補正後重新用印測試（補正版）",
+                "subject": "退回補正後重新用印測試（補正版）",
+                "description": "第二版已完成補正的去識別化說明文字。",
+            },
+            employee,
+        )
+        detail = backend.resubmit_official_document(
+            self.conn,
+            detail["id"],
+            {"comment": "申請人已完成補正並重新送簽。"},
+            employee,
+        )
+        generations = self.conn.execute(
+            "SELECT DISTINCT workflow_generation FROM official_document_approval_steps WHERE document_id = ? ORDER BY workflow_generation",
+            (detail["id"],),
+        ).fetchall()
+        self.assertEqual([row["workflow_generation"] for row in generations], [1, 2])
+
+        detail = self.approve_until_after_stamp(detail)
+        self.assertEqual(detail["current_status"], "pending_general_affairs_dispatch")
+        self.assertEqual(detail["stamp_request"]["status"], "stamped")
+        self.assertEqual(len([file for file in detail["files"] if file["file_type"] == "stamped_pdf"]), 1)
+
     def test_uploaded_pdf_source_is_private_original_pdf_and_rejects_non_pdf(self) -> None:
         employee = self.login_session("sales-assistant@suiyuecare.com")
         seal_id = self.seed_seal_id()

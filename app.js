@@ -7211,6 +7211,24 @@ async function loadOfficialWorkflow(scope = officialWorkflowScope) {
   refreshDashboardWorkEntryPoints();
 }
 
+function resetOfficialWorkflowListFilters() {
+  officialWorkflowStatusFilter = "";
+  officialWorkflowSearchTerm = "";
+  const statusFilter = document.querySelector("#officialWorkflowStatusFilter");
+  const searchInput = document.querySelector("#officialWorkflowSearch");
+  if (statusFilter) statusFilter.value = "";
+  if (searchInput) searchInput.value = "";
+}
+
+async function showSubmittedOfficialDocument(documentId) {
+  selectedOfficialDocumentId = documentId;
+  editingOfficialDocumentId = "";
+  officialWorkflowScope = "mine";
+  resetOfficialWorkflowListFilters();
+  await loadOfficialWorkflow("mine");
+  if (documentId) await loadOfficialDocumentDetail(documentId);
+}
+
 async function loadApprovalProgressFromBackend() {
   try {
     const items = await backendRequest("/official-documents");
@@ -8454,10 +8472,7 @@ async function createOfficialWorkflow(submit = true) {
     }
     const attachmentInput = document.querySelector("#officialAttachmentsInput");
     if (attachmentInput) attachmentInput.value = "";
-    selectedOfficialDocumentId = result.id;
-    editingOfficialDocumentId = "";
-    officialWorkflowScope = "mine";
-    await loadOfficialWorkflow("mine");
+    await showSubmittedOfficialDocument(result.id);
     showToast(submit
       ? (correctionId ? "補正完成，已從第一關重新送簽。" : "已送出發文用印簽核。")
       : (correctionId ? "補正草稿已確實保存。" : "已建立發文草稿。"));
@@ -21982,9 +21997,7 @@ async function submitUploadedSealApplication() {
       method: "POST",
       body: JSON.stringify({ comment: contractMode ? "合約 PDF 標記完成後送出簽核" : "PDF 章位確認後送出簽核" })
     });
-    selectedOfficialDocumentId = result.id;
-    officialWorkflowScope = "mine";
-    await loadOfficialWorkflow("mine");
+    await showSubmittedOfficialDocument(result.id);
     addSealAudit("送出 PDF 用印", `${title} 已送出，章位 ${expandedStampPositions.length} 處、文字 ${uploadedSealTextOverlays.length} 處。`);
     showToast(contractMode ? "合約用印申請已送出簽核。" : "PDF 用印申請已送出簽核。");
   } catch (error) {
@@ -24058,9 +24071,7 @@ async function submitUploadedSealApplication() {
     uploadedSealEditorRuntime.locked = true;
     document.querySelector("#uploadedPdfEditor")?.setAttribute("data-editor-locked", "true");
     setUploadedEditorSaveStatus("locked", "已送簽並鎖定");
-    selectedOfficialDocumentId = result.id || uploadedSealEditorRuntime.documentId;
-    officialWorkflowScope = "mine";
-    await loadOfficialWorkflow("mine");
+    await showSubmittedOfficialDocument(result.id || uploadedSealEditorRuntime.documentId);
     addSealAudit("鎖定 PDF V2 送簽版本", `document ${uploadedSealEditorRuntime.documentId} · revision ${uploadedSealEditorState.revisionNo} · manifest ${uploadedSealEditorState.manifestSha256.slice(0, 16)}… · prepared ${uploadedSealEditorRuntime.preparedSha256.slice(0, 16)}…`);
     showToast(contractMode ? "合約用印確認版已鎖定並送出簽核。" : "電子用印確認版已鎖定並送出簽核。");
     renderUploadedSealWorkbench();

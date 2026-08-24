@@ -124,6 +124,16 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn('hasBackendPermission("settings.manage")', body)
         self.assertIn("await refreshNotificationGatewayStatus(true);", body)
 
+    def test_submit_result_clears_hidden_filters_and_opens_created_document(self) -> None:
+        start = self.js.index("function resetOfficialWorkflowListFilters()")
+        end = self.js.index("\nasync function loadApprovalProgressFromBackend", start)
+        body = self.js[start:end]
+        self.assertIn('officialWorkflowStatusFilter = "";', body)
+        self.assertIn('officialWorkflowSearchTerm = "";', body)
+        self.assertIn('await loadOfficialWorkflow("mine");', body)
+        self.assertIn("await loadOfficialDocumentDetail(documentId);", body)
+        self.assertGreaterEqual(self.js.count("await showSubmittedOfficialDocument("), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
