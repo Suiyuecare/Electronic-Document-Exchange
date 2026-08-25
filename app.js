@@ -1342,6 +1342,8 @@ function clearUploadedEditorSensitivePreviews() {
     uploadedSealEditorRuntime.revisionId = "";
     uploadedSealEditorRuntime.baseManifestSha256 = "";
     uploadedSealEditorRuntime.locked = false;
+    uploadedSealEditorRuntime.uploading = false;
+    uploadedSealEditorRuntime.directoryLoading = false;
   }
   uploadedSealEditorState = emptyUploadedSealEditorState();
   uploadedSealPdf = null;
@@ -1363,6 +1365,8 @@ const uploadedSealEditorRuntime = {
   zoom: 1,
   fitPage: true,
   locked: false,
+  uploading: false,
+  directoryLoading: false,
   saving: false,
   savePromise: null,
   saveQueued: false,
@@ -2609,8 +2613,8 @@ function setView(target) {
   if (target === "approvalLog" && hasAuthenticatedBackendSession()) void loadApprovalProgressFromBackend();
   if (target === "archive" && hasAuthenticatedBackendSession()) void loadArchiveRecordsFromBackend();
   if (target === "contractSeal" || target === "electronicSeal") {
+    uploadedSealEditorRuntime.directoryLoading = !companySealCompanies.length;
     configureUploadedSealMode(target);
-    void initializeUploadedSealWorkspace();
   }
   openIntegratedPageSection(target);
   void loadRouteBackendData(target, true);
@@ -4714,6 +4718,12 @@ async function loadRouteBackendData(target, silent = true) {
         loadOfficialSealOptions(),
       ]);
     }
+    if (["contractSeal", "electronicSeal"].includes(target)) {
+      renderUploadedSealCompanyOptions();
+      await loadUploadedSealOptions(document.querySelector("#uploadedSealCompany")?.value || "");
+      uploadedSealEditorRuntime.directoryLoading = false;
+      renderUploadedSealWorkbench();
+    }
     if (["compose", "workflow"].includes(target)) await loadOfficialWorkflowConfig(silent);
     if (target === "workflow") await loadWorkflowDelegations(silent);
     if (target === "inbound") await loadInternalDispatches(silent);
@@ -4724,6 +4734,11 @@ async function loadRouteBackendData(target, silent = true) {
     if (["ops", "settings"].includes(target)) await syncGoLiveAuditFromBackend(silent);
   } catch (error) {
     routeBackendDataLoaded.delete(target);
+    if (["contractSeal", "electronicSeal"].includes(target)) {
+      uploadedSealEditorRuntime.directoryLoading = false;
+      setUploadedEditorSaveStatus("error", "公司與印章權限載入失敗，請按選擇 PDF 重試");
+      renderUploadedSealWorkbench();
+    }
     console.warn(`[edoc-route:${target}] background data load failed`, error);
   }
 }
@@ -22016,14 +22031,12 @@ function configureUploadedSealMode(target = activeRouteTarget) {
     if (node) node.textContent = value;
   };
   setText("#uploadedSealHeaderTitle", contractMode ? "合約用印" : "電子用印");
-  setText("#uploadedSealApplicationTitle", contractMode ? "申請人與合約資料" : "申請人與用印資料");
-  setText("#uploadedSealWorkspaceTitle", contractMode ? "合約標記與用印位置" : "選擇印章與用印位置");
+  setText("#uploadedSealApplicationTitle", "申請資訊");
+  setText("#uploadedSealWorkspaceTitle", contractMode ? "合約電子用印編輯" : "電子用印編輯");
   if (type) {
     type.value = contractMode ? "contract" : "official_document";
     type.disabled = classificationLocked;
   }
-  document.querySelector("#uploadedSealTypeField")?.removeAttribute("hidden");
-  document.querySelector("#uploadedSealCounterpartyField")?.toggleAttribute("hidden", !contractMode);
   const approvalRouteSection = document.querySelector("#uploadedSealApprovalRouteSection");
   const approvalCategorySelect = document.querySelector("#uploadedSealApprovalCategorySelect");
   approvalRouteSection?.removeAttribute("hidden");
@@ -22320,35 +22333,6 @@ function renderUploadedSealWorkbench() {
   }
 }
 
-async function handleUploadedSealPdfChange() {
-  const input = document.querySelector("#uploadedSealPdfInput");
-  const file = input?.files?.[0];
-  if (!file) return;
-  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
-    input.value = "";
-    return showToast("請上傳 PDF 檔。");
-  }
-  if (uploadedSealObjectUrl) URL.revokeObjectURL(uploadedSealObjectUrl);
-  if (uploadedSealPreviewObjectUrl) URL.revokeObjectURL(uploadedSealPreviewObjectUrl);
-  uploadedSealPreviewObjectUrl = "";
-  uploadedSealObjectUrl = URL.createObjectURL(file);
-  uploadedSealPdf = {
-    file,
-    name: file.name,
-    size: file.size,
-    contentBase64: await fileToBase64(file),
-    hash: await hashBlob(file)
-  };
-  uploadedSealPageCount = await detectUploadedPdfPageCount(file);
-  uploadedSealCurrentPage = 1;
-  uploadedSealStampPositions = [];
-  uploadedSealTextOverlays = [];
-  const title = document.querySelector("#uploadedSealTitle");
-  if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
-  renderUploadedSealWorkbench();
-  addSealAudit("上傳 PDF 用印來源", `PDF 已載入前端工作台，頁數 ${uploadedSealPageCount}，hash ${uploadedSealPdf.hash}。`);
-}
-
 function localSealRequestFromBackend(result) {
   return {
     id: result.id,
@@ -22587,12 +22571,16 @@ function markUploadedEditorDirty() {
   setUploadedEditorSaveStatus("dirty", "尚未儲存");
   window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
   uploadedSealEditorRuntime.saveTimer = window.setTimeout(() => {
-    void saveUploadedEditorState();
+    void saveUploadedEditorState().catch((error) => {
+      setUploadedEditorSaveStatus("error", "自動儲存失敗，請重試");
+      console.warn("PDF editor autosave failed", error);
+    });
   }, PDF_EDITOR_AUTOSAVE_DELAY_MS);
 }
 
 function commitUploadedEditorMutation(mutator, { render = true } = {}) {
   if (uploadedSealEditorRuntime.locked) return showToast("送簽版本已鎖定，不能再修改。");
+  if (uploadedSealEditorRuntime.uploading) return showToast("PDF 正在更換，完成前暫停編輯。");
   const previous = cloneUploadedEditorValue(uploadedSealEditorState);
   mutator(uploadedSealEditorState);
   uploadedSealEditorState.elements = uploadedSealEditorState.elements
@@ -22616,7 +22604,7 @@ function commitUploadedEditorMutation(mutator, { render = true } = {}) {
 
 function undoUploadedEditor() {
   const previous = uploadedSealEditorRuntime.undoStack.pop();
-  if (!previous || uploadedSealEditorRuntime.locked) return;
+  if (!previous || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading) return;
   uploadedSealEditorRuntime.redoStack.push(cloneUploadedEditorValue(uploadedSealEditorState));
   const revisionNo = uploadedSealEditorState.revisionNo;
   const manifestSha256 = uploadedSealEditorState.manifestSha256;
@@ -22635,7 +22623,7 @@ function undoUploadedEditor() {
 
 function redoUploadedEditor() {
   const next = uploadedSealEditorRuntime.redoStack.pop();
-  if (!next || uploadedSealEditorRuntime.locked) return;
+  if (!next || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading) return;
   uploadedSealEditorRuntime.undoStack.push(cloneUploadedEditorValue(uploadedSealEditorState));
   const revisionNo = uploadedSealEditorState.revisionNo;
   const manifestSha256 = uploadedSealEditorState.manifestSha256;
@@ -22858,39 +22846,48 @@ async function loadPdfJsAsset(file, assetId, serverPages = []) {
     void loadingTask.destroy();
   };
   let pdfDocument;
+  let committed = false;
   try {
     pdfDocument = await loadingTask.promise;
   } catch (error) {
     if (passwordProtected || error?.name === "PasswordException") throw new Error("密碼加密 PDF 不接受編輯，請提供未加密版本。");
     throw new Error("PDF 無法解析或已損毀，請重新輸出後再上傳。");
   }
-  await validateUploadedPdfDocument(pdfDocument);
-  uploadedSealEditorRuntime.pdfDocuments.set(assetId, pdfDocument);
-  uploadedSealEditorRuntime.assetFiles.set(assetId, file);
-  const fileUrl = URL.createObjectURL(file);
-  const oldUrl = uploadedSealEditorRuntime.assetUrls.get(assetId);
-  if (oldUrl) URL.revokeObjectURL(oldUrl);
-  uploadedSealEditorRuntime.assetUrls.set(assetId, fileUrl);
-  const pages = [];
-  for (let index = 0; index < pdfDocument.numPages; index += 1) {
-    const proxy = await pdfDocument.getPage(index + 1);
-    const unit = Number(proxy.userUnit || 1);
-    const view = proxy.view.map((value) => roundEditorPoint(Number(value) * unit));
-    const serverPage = serverPages[index] || {};
-    const pageId = serverPage.pageId || serverPage.page_id || `page-${assetId}-${index + 1}`;
-    pages.push({
-      pageId,
-      sourceAssetId: assetId,
-      sourcePageIndex: index,
-      widthPt: roundEditorPoint(view[2] - view[0]),
-      heightPt: roundEditorPoint(view[3] - view[1]),
-      cropBox: view,
-      rotation: normalizeEditorDegrees(serverPage.rotation ?? proxy.rotate),
-      order: 0
-    });
-    uploadedSealEditorRuntime.pageProxies.set(pageId, { proxy, userUnit: unit, assetId });
+  try {
+    await validateUploadedPdfDocument(pdfDocument);
+    const pages = [];
+    const stagedPageProxies = new Map();
+    for (let index = 0; index < pdfDocument.numPages; index += 1) {
+      const proxy = await pdfDocument.getPage(index + 1);
+      const unit = Number(proxy.userUnit || 1);
+      const view = proxy.view.map((value) => roundEditorPoint(Number(value) * unit));
+      const serverPage = serverPages[index] || {};
+      const pageId = serverPage.pageId || serverPage.page_id || `page-${assetId}-${index + 1}`;
+      pages.push({
+        pageId,
+        sourceAssetId: assetId,
+        sourcePageIndex: index,
+        widthPt: roundEditorPoint(view[2] - view[0]),
+        heightPt: roundEditorPoint(view[3] - view[1]),
+        cropBox: view,
+        rotation: normalizeEditorDegrees(serverPage.rotation ?? proxy.rotate),
+        order: 0
+      });
+      stagedPageProxies.set(pageId, { proxy, userUnit: unit, assetId });
+    }
+    const previousDocument = uploadedSealEditorRuntime.pdfDocuments.get(assetId);
+    if (previousDocument && previousDocument !== pdfDocument) void previousDocument.destroy?.();
+    const previousUrl = uploadedSealEditorRuntime.assetUrls.get(assetId);
+    if (String(previousUrl || "").startsWith("blob:")) URL.revokeObjectURL(previousUrl);
+    uploadedSealEditorRuntime.pdfDocuments.set(assetId, pdfDocument);
+    uploadedSealEditorRuntime.assetFiles.set(assetId, file);
+    uploadedSealEditorRuntime.assetUrls.set(assetId, URL.createObjectURL(file));
+    stagedPageProxies.forEach((runtime, pageId) => uploadedSealEditorRuntime.pageProxies.set(pageId, runtime));
+    committed = true;
+    return pages;
+  } finally {
+    if (!committed) void pdfDocument?.destroy?.();
   }
-  return pages;
 }
 
 function applyEditorRevisionFromResponse(result) {
@@ -22936,19 +22933,40 @@ async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = fal
   const previousState = append ? cloneUploadedEditorValue(uploadedSealEditorState) : null;
   const asset = finalized?.asset || {};
   const assetId = asset.id || asset.asset_id || intent.asset_id || `asset-${crypto.randomUUID?.() || Date.now()}`;
+  const finalizedState = finalized?.editor_state || finalized?.state || {};
+  const canonicalPages = (finalizedState.pages || [])
+    .filter((page) => (page.sourceAssetId || page.source_asset_id) === assetId)
+    .sort((left, right) => Number(left.sourcePageIndex ?? left.source_page_index ?? 0) - Number(right.sourcePageIndex ?? right.source_page_index ?? 0));
+  const incomingPages = await loadPdfJsAsset(file, assetId, canonicalPages.length ? canonicalPages : finalized?.pages || []);
+  const combinedCount = (append ? uploadedSealEditorState.pages.length : 0) + incomingPages.length;
+  if (combinedCount > PDF_EDITOR_MAX_PAGES) {
+    void uploadedSealEditorRuntime.pdfDocuments.get(assetId)?.destroy?.();
+    uploadedSealEditorRuntime.pdfDocuments.delete(assetId);
+    uploadedSealEditorRuntime.assetFiles.delete(assetId);
+    const rejectedUrl = uploadedSealEditorRuntime.assetUrls.get(assetId);
+    if (String(rejectedUrl || "").startsWith("blob:")) URL.revokeObjectURL(rejectedUrl);
+    uploadedSealEditorRuntime.assetUrls.delete(assetId);
+    incomingPages.forEach((page) => uploadedSealEditorRuntime.pageProxies.delete(page.pageId));
+    throw new Error(`合併後超過 ${PDF_EDITOR_MAX_PAGES} 頁上限。`);
+  }
   if (!append) {
-    uploadedSealEditorRuntime.pdfDocuments.forEach((document) => { void document.destroy?.(); });
+    const incomingDocument = uploadedSealEditorRuntime.pdfDocuments.get(assetId);
+    const incomingFile = uploadedSealEditorRuntime.assetFiles.get(assetId);
+    const incomingUrl = uploadedSealEditorRuntime.assetUrls.get(assetId);
+    const incomingPageRuntimes = new Map(incomingPages.map((page) => [page.pageId, uploadedSealEditorRuntime.pageProxies.get(page.pageId)]));
+    uploadedSealEditorRuntime.pdfDocuments.forEach((document, id) => { if (id !== assetId) void document.destroy?.(); });
     uploadedSealEditorRuntime.pdfDocuments.clear();
+    if (incomingDocument) uploadedSealEditorRuntime.pdfDocuments.set(assetId, incomingDocument);
     uploadedSealEditorRuntime.pageProxies.clear();
+    incomingPageRuntimes.forEach((runtime, pageId) => { if (runtime) uploadedSealEditorRuntime.pageProxies.set(pageId, runtime); });
     uploadedSealEditorRuntime.assetFiles.clear();
-    uploadedSealEditorRuntime.assetUrls.forEach((url) => { if (String(url).startsWith("blob:")) URL.revokeObjectURL(url); });
+    if (incomingFile) uploadedSealEditorRuntime.assetFiles.set(assetId, incomingFile);
+    uploadedSealEditorRuntime.assetUrls.forEach((url, id) => { if (id !== assetId && String(url).startsWith("blob:")) URL.revokeObjectURL(url); });
     uploadedSealEditorRuntime.assetUrls.clear();
+    if (incomingUrl) uploadedSealEditorRuntime.assetUrls.set(assetId, incomingUrl);
     uploadedSealEditorRuntime.imageUrls.forEach((url) => { if (String(url).startsWith("blob:")) URL.revokeObjectURL(url); });
     uploadedSealEditorRuntime.imageUrls.clear();
   }
-  const incomingPages = await loadPdfJsAsset(file, assetId, finalized?.pages || []);
-  const combinedCount = (append ? uploadedSealEditorState.pages.length : 0) + incomingPages.length;
-  if (combinedCount > PDF_EDITOR_MAX_PAGES) throw new Error(`合併後超過 ${PDF_EDITOR_MAX_PAGES} 頁上限。`);
   applyEditorRevisionFromResponse(finalized);
   const sourceEntry = {
     assetId,
@@ -23355,6 +23373,7 @@ async function renderUploadedPdfPage() {
   const canvas = document.querySelector("#uploadedPdfCanvas");
   const stage = document.querySelector("#uploadedPdfStage");
   const empty = document.querySelector("#uploadedPdfEmpty");
+  const stampLayer = document.querySelector("#uploadedStampLayer");
   const page = currentUploadedEditorPage();
   const runtime = page ? uploadedEditorPageRuntime(page.pageId) : null;
   if (!canvas || !stage) return;
@@ -23380,6 +23399,8 @@ async function renderUploadedPdfPage() {
   if (!page || !runtime) {
     canvas.hidden = true;
     empty?.toggleAttribute("hidden", false);
+    stampLayer?.toggleAttribute("hidden", true);
+    stampLayer?.setAttribute("aria-hidden", "true");
     stage.style.removeProperty("width");
     stage.style.removeProperty("height");
     uploadedSealEditorRuntime.currentViewport = null;
@@ -23388,6 +23409,8 @@ async function renderUploadedPdfPage() {
   }
   canvas.hidden = false;
   empty?.toggleAttribute("hidden", true);
+  stampLayer?.toggleAttribute("hidden", false);
+  stampLayer?.setAttribute("aria-hidden", "false");
   if (uploadedSealEditorRuntime.fitPage) uploadedSealEditorRuntime.zoom = calculateUploadedEditorFitScale(runtime, page.rotation);
   const viewport = runtime.proxy.getViewport({ scale: uploadedSealEditorRuntime.zoom, rotation: page.rotation });
   uploadedSealEditorRuntime.currentViewport = viewport;
@@ -23704,6 +23727,7 @@ function setUploadedEditorMode(mode) {
 }
 
 function setUploadedEditorTool(tool) {
+  if (uploadedSealEditorRuntime.uploading) return;
   if (!["select", ...PDF_EDITOR_ALLOWED_KINDS].includes(tool)) return;
   if (uploadedSealEditorRuntime.mode === "general" && !["select", "seal", "text"].includes(tool)) return;
   uploadedSealEditorRuntime.tool = tool;
@@ -23749,7 +23773,7 @@ function selectUploadedEditorElement(elementId, additive = false) {
 }
 
 function beginUploadedEditorPointer(event) {
-  if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.reviewMode !== "edited") return;
+  if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
   if (event.pointerType === "touch") {
     uploadedSealEditorRuntime.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     if (uploadedSealEditorRuntime.touchPointers.size === 2) {
@@ -24351,10 +24375,59 @@ async function preflightUploadedEditor() {
   return result;
 }
 
+async function refreshUploadedEditorAccess() {
+  if (uploadedSealEditorRuntime.directoryLoading) return;
+  uploadedSealEditorRuntime.directoryLoading = true;
+  renderUploadedSealWorkbench();
+  try {
+    await loadFinanceCompanyDirectory();
+    renderUploadedSealCompanyOptions();
+    const companyId = document.querySelector("#uploadedSealCompany")?.value || "";
+    if (!companyId) throw new Error("此帳號尚未連動可送簽公司，請聯絡系統管理員。");
+    await loadUploadedSealOptions(companyId);
+    if (!uploadedEditorV2FeatureEnabled(companyId)) throw new Error("此公司尚未開啟 PDF Editor V2。");
+    setUploadedEditorSaveStatus("saved", "公司與印章權限已載入，可選擇 PDF");
+  } catch (error) {
+    setUploadedEditorSaveStatus("error", error.message || "公司與印章權限載入失敗");
+    showToast(error.message || "公司與印章權限載入失敗，請稍後重試。");
+  } finally {
+    uploadedSealEditorRuntime.directoryLoading = false;
+    renderUploadedSealWorkbench();
+  }
+}
+
+function openUploadedPdfPicker() {
+  const input = document.querySelector("#uploadedSealPdfInput");
+  if (!input) return;
+  if (uploadedSealEditorRuntime.locked) return showToast("此案件已送簽鎖定，不能更換 PDF。");
+  if (uploadedSealEditorRuntime.uploading) return showToast("PDF 正在上傳與檢查，請稍候。");
+  if (uploadedSealEditorRuntime.directoryLoading) return showToast("正在載入公司與印章權限，請稍候。");
+  if (!uploadedEditorV2FeatureEnabled()) {
+    showToast("正在重新載入公司與 PDF 編輯權限，完成後請再按一次。");
+    void refreshUploadedEditorAccess();
+    return;
+  }
+  const form = document.querySelector("#uploadedSealForm");
+  if (form && !form.reportValidity()) {
+    form.querySelector(":invalid")?.focus();
+    showToast("請先完成上方六項申請資訊，再選擇 PDF。");
+    return;
+  }
+  if (uploadedSealEditorState.pages.length && !window.confirm("更換 PDF 會清除目前文件上的全部文字、章位與頁面編輯。原始版本仍會保留在稽核紀錄中，確定要繼續嗎？")) return;
+  input.value = "";
+  input.click();
+}
+
 async function handleUploadedSealPdfChange() {
   const input = document.querySelector("#uploadedSealPdfInput");
   const file = input?.files?.[0];
   if (!file) return;
+  const form = document.querySelector("#uploadedSealForm");
+  if (form && !form.reportValidity()) {
+    input.value = "";
+    form.querySelector(":invalid")?.focus();
+    return showToast("請先完成上方六項申請資訊，再上傳 PDF。");
+  }
   if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
     input.value = "";
     return showToast("請上傳 PDF 檔。");
@@ -24363,7 +24436,23 @@ async function handleUploadedSealPdfChange() {
     input.value = "";
     return showToast("PDF 不得超過 50 MB。");
   }
+  if (uploadedSealEditorRuntime.uploading) {
+    input.value = "";
+    return showToast("已有 PDF 正在上傳，請等待完成。");
+  }
+  uploadedSealEditorRuntime.uploading = true;
+  const fileName = document.querySelector("#uploadedPdfFileName");
+  if (fileName) fileName.textContent = `正在檢查 ${file.name}`;
+  renderUploadedSealWorkbench();
   try {
+    if (
+      uploadedSealEditorRuntime.documentId
+      && (uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration)
+    ) {
+      setUploadedEditorSaveStatus("saving", "正在保存目前版本，再更換 PDF");
+      await saveUploadedEditorState({ immediate: true });
+      if (uploadedSealEditorRuntime.conflict) throw new Error("目前草稿有版本衝突，請先重新載入或保留本機版本。");
+    }
     setUploadedPdfA4Status("checking", "正在檢查每一頁是否為 A4…");
     setUploadedEditorSaveStatus("uploading", "TUS 私密直傳中 0%");
     const intent = await requestEditorUpload(file, "source_pdf");
@@ -24379,10 +24468,13 @@ async function handleUploadedSealPdfChange() {
     addSealAudit("PDF 編輯來源已通過預檢", `asset ${uploadedSealPdf.assetId || "-"} · ${uploadedSealPageCount} 頁 · hash ${intent.sha256.slice(0, 16)}…`);
     showToast(`PDF 已安全載入，共 ${uploadedSealPageCount} 頁。`);
   } catch (error) {
-    input.value = "";
     setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
     setUploadedEditorSaveStatus("error", "PDF 未通過上傳或預檢");
     showToast(`PDF 無法開啟：${pdfA4UiErrorMessage(error)}`);
+  } finally {
+    uploadedSealEditorRuntime.uploading = false;
+    input.value = "";
+    renderUploadedSealWorkbench();
   }
 }
 
@@ -24411,18 +24503,37 @@ function renderUploadedSealWorkbench() {
     editor.dataset.editorMode = uploadedSealEditorRuntime.mode;
     editor.dataset.editorLocked = String(uploadedSealEditorRuntime.locked);
     editor.dataset.featureEnabled = String(featureEnabled);
+    editor.dataset.uploading = String(uploadedSealEditorRuntime.uploading);
   }
   const sourceInput = document.querySelector("#uploadedSealPdfInput");
-  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked;
+  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.directoryLoading;
+  const uploadActionDisabled = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.directoryLoading;
   const emptyUploadButton = document.querySelector("#uploadedPdfEmptyUploadBtn");
-  if (emptyUploadButton) emptyUploadButton.disabled = Boolean(sourceInput?.disabled);
+  if (emptyUploadButton) emptyUploadButton.disabled = uploadActionDisabled;
+  const replaceButton = document.querySelector("#uploadedPdfReplaceBtn");
+  if (replaceButton) {
+    replaceButton.disabled = uploadActionDisabled;
+    replaceButton.textContent = uploadedSealEditorRuntime.uploading
+      ? "PDF 處理中…"
+      : uploadedSealEditorState.pages.length
+        ? "更換 PDF"
+        : featureEnabled
+          ? "選擇 PDF"
+          : "重新載入權限";
+  }
+  const fileName = document.querySelector("#uploadedPdfFileName");
+  if (fileName && !uploadedSealEditorRuntime.uploading) {
+    fileName.textContent = uploadedSealPdf?.name || uploadedSealEditorState.sourceFiles.find((item) => item.kind === "source_pdf")?.fileName || "尚未選擇檔案";
+  }
   const saveStatus = document.querySelector("#uploadedEditorSaveStatus");
-  if (!featureEnabled && !uploadedSealEditorRuntime.documentId) {
-    setUploadedEditorSaveStatus("offline", "此公司尚未開啟 PDF Editor V2");
+  if (uploadedSealEditorRuntime.directoryLoading) {
+    setUploadedEditorSaveStatus("checking", "正在載入公司與印章權限");
+  } else if (!featureEnabled && !uploadedSealEditorRuntime.documentId) {
+    setUploadedEditorSaveStatus("error", "尚未取得 PDF 編輯權限，可按上傳按鈕重試");
   } else if (
     featureEnabled
     && !uploadedSealEditorRuntime.documentId
-    && saveStatus?.textContent === "此公司尚未開啟 PDF Editor V2"
+    && ["此公司尚未開啟 PDF Editor V2", "尚未取得 PDF 編輯權限，可按上傳按鈕重試"].includes(saveStatus?.textContent)
   ) {
     setUploadedEditorSaveStatus("saved", "PDF Editor V2 已開啟，可上傳文件");
   }
@@ -24465,8 +24576,13 @@ function renderUploadedSealWorkbench() {
   if (next) next.disabled = currentIndex < 0 || currentIndex >= uploadedSealEditorState.pages.length - 1;
   const empty = document.querySelector("#uploadedPdfEmpty");
   if (empty) empty.hidden = Boolean(page);
-  document.querySelector("#uploadedEditorUndoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.undoStack.length || uploadedSealEditorRuntime.locked);
-  document.querySelector("#uploadedEditorRedoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.redoStack.length || uploadedSealEditorRuntime.locked);
+  const stampLayer = document.querySelector("#uploadedStampLayer");
+  if (stampLayer) {
+    stampLayer.hidden = !page;
+    stampLayer.setAttribute("aria-hidden", String(!page));
+  }
+  document.querySelector("#uploadedEditorUndoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.undoStack.length || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading);
+  document.querySelector("#uploadedEditorRedoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.redoStack.length || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading);
   renderUploadedEditorThumbnails();
   renderUploadedEditorProperties();
   const markerCount = uploadedSealEditorState.elements.length;
@@ -24499,6 +24615,24 @@ async function initializeUploadedSealWorkspace() {
   renderUploadedSealWorkbench();
 }
 
+async function syncUploadedSealApplicationDraft() {
+  if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
+  const draft = editorDraftPayload();
+  setUploadedEditorSaveStatus("saving", "正在同步申請資訊");
+  await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      title: draft.title,
+      subject: draft.title,
+      description: draft.description,
+      request_reason: draft.request_reason,
+      handler_name: draft.handler_name,
+      dispatch_unit: draft.dispatch_unit
+    })
+  });
+  setUploadedEditorSaveStatus("saved", "申請資訊與 PDF 草稿已同步");
+}
+
 async function submitUploadedSealApplication() {
   const form = document.querySelector("#uploadedSealForm");
   if (form && !form.reportValidity()) return;
@@ -24511,6 +24645,7 @@ async function submitUploadedSealApplication() {
   const submitButton = document.querySelector("#submitUploadedSealBtn");
   try {
     if (submitButton) submitButton.disabled = true;
+    await syncUploadedSealApplicationDraft();
     const prepared = await preflightUploadedEditor();
     const confirmed = window.confirm(`後端已產生送簽確認版。\n\n頁數：${uploadedSealEditorState.pages.length}\n編輯物件：${uploadedSealEditorState.elements.length}\n印章：${seals.length}\nprepared hash：${uploadedSealEditorRuntime.preparedSha256.slice(0, 16)}…\n\n確認內容正確並鎖定送簽？`);
     if (!confirmed) return;
@@ -26200,7 +26335,8 @@ document.querySelector("#uploadedEditorImportPdfInput")?.addEventListener("chang
   }
 });
 document.querySelector("#uploadedEditorImageInput")?.addEventListener("change", (event) => void handleUploadedEditorImage(event.target.files?.[0]));
-document.querySelector("#uploadedPdfEmptyUploadBtn")?.addEventListener("click", () => document.querySelector("#uploadedSealPdfInput")?.click());
+document.querySelector("#uploadedPdfEmptyUploadBtn")?.addEventListener("click", openUploadedPdfPicker);
+document.querySelector("#uploadedPdfReplaceBtn")?.addEventListener("click", openUploadedPdfPicker);
 document.querySelectorAll("[data-editor-page-action]").forEach((button) => button.addEventListener("click", () => runUploadedEditorPageAction(button.dataset.editorPageAction)));
 document.querySelectorAll("[data-editor-review]").forEach((button) => button.addEventListener("click", () => void showUploadedEditorReview(button.dataset.editorReview)));
 document.querySelector("#clearUploadedStampsBtn")?.addEventListener("click", () => {
@@ -26218,9 +26354,10 @@ document.querySelector("#uploadedSealType")?.addEventListener("change", (event) 
   }
   uploadedSealMode = event.target.value === "contract" ? "contract" : "official_document";
   const contractMode = uploadedSealMode === "contract";
-  document.querySelector("#uploadedSealCounterpartyField")?.toggleAttribute("hidden", !contractMode);
-  document.querySelector("#uploadedSealApplicationTitle").textContent = contractMode ? "申請人與合約資料" : "申請人與用印資料";
-  document.querySelector("#uploadedSealWorkspaceTitle").textContent = contractMode ? "合約標記與用印位置" : "選擇印章與用印位置";
+  const applicationTitle = document.querySelector("#uploadedSealApplicationTitle");
+  const workspaceTitle = document.querySelector("#uploadedSealWorkspaceTitle");
+  if (applicationTitle) applicationTitle.textContent = "申請資訊";
+  if (workspaceTitle) workspaceTitle.textContent = contractMode ? "合約電子用印編輯" : "電子用印編輯";
   renderUploadedSealApprovalRoute();
   renderUploadedSealWorkbench();
 });
@@ -26264,7 +26401,7 @@ window.addEventListener("resize", () => {
 });
 document.addEventListener("keydown", (event) => {
   const editorVisible = document.querySelector("#electronicSeal")?.classList.contains("active") || document.querySelector("#contractSeal")?.classList.contains("active");
-  if (!editorVisible || uploadedSealEditorRuntime.locked || event.target.closest("input, textarea, select")) return;
+  if (!editorVisible || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || event.target.closest("input, textarea, select")) return;
   const command = event.metaKey || event.ctrlKey;
   if (command && event.key.toLowerCase() === "z") {
     event.preventDefault();

@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260825-six-page-r3" />
+    <link rel="stylesheet" href="styles.css?v=20260825-electronic-seal-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
@@ -1533,72 +1533,57 @@
             <span class="status-pill" id="uploadedSealPdfStatus">尚未上傳 PDF</span>
           </div>
 
-          <div class="electronic-seal-layout">
-            <aside class="panel electronic-seal-form-panel">
+          <div class="electronic-seal-layout electronic-seal-layout-stacked">
+            <section class="panel electronic-seal-form-panel electronic-seal-application-panel" id="uploadedSealApplicationPanel" aria-labelledby="uploadedSealApplicationTitle">
               <div class="panel-heading tight">
                 <div>
-                  <h3 id="uploadedSealApplicationTitle">申請人與用印資料</h3>
+                  <p class="eyebrow">上方</p>
+                  <h3 id="uploadedSealApplicationTitle">申請資訊</h3>
                 </div>
-                <span class="status-pill">必填</span>
+                <span class="status-pill">六項資料</span>
               </div>
               <form class="compact-form" id="uploadedSealForm">
-                <div class="inline-fields">
+                <div class="electronic-seal-application-grid">
                   <label>申請人<input id="uploadedSealApplicant" autocomplete="name" placeholder="請輸入姓名" required /></label>
-                  <label>部門<input id="uploadedSealDepartment" placeholder="請輸入部門" required /></label>
-                </div>
-                <div class="inline-fields">
-                  <label>電子郵件<input id="uploadedSealEmail" type="email" autocomplete="email" placeholder="name@suiyuecare.com" required /></label>
-                  <label>聯絡電話<input id="uploadedSealPhone" type="tel" autocomplete="tel" placeholder="分機或手機" required /></label>
-                </div>
-                <div class="inline-fields">
-                  <label id="uploadedSealTypeField">文件類型<select id="uploadedSealType">
-                    <option value="official_document">電子公文</option>
-                    <option value="contract">電子合約</option>
-                    <option value="other">其他文件</option>
-                  </select></label>
-                  <label>公司別<select id="uploadedSealCompany"></select></label>
-                </div>
-                <section class="approval-route-picker" id="uploadedSealApprovalRouteSection">
-                  <label>用印文件類型
-                    <select id="uploadedSealApprovalCategorySelect" required aria-describedby="uploadedSealApprovalCategoryHint">
-                      <option value="" selected disabled>請選擇文件細項</option>
-                    </select>
-                    <span class="field-hint" id="uploadedSealApprovalCategoryHint">合約與公文都必須選擇文件細項；系統會依 A／B／C／D 級鎖定簽核流程。</span>
-                  </label>
-                  <div class="approval-route-summary" aria-live="polite">
-                    <div class="approval-route-heading">
-                      <span>自動判定流程</span>
-                      <strong id="uploadedSealApprovalRouteBadge">尚未選擇</strong>
-                    </div>
-                    <p id="uploadedSealApprovalRouteName">選擇文件細項後顯示 A／B／C／D 流程。</p>
-                    <ol class="compose-approval-flow compact" id="uploadedSealApprovalRoutePreview">
-                      <li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>
-                    </ol>
-                    <p class="approval-route-outcome" id="uploadedSealApprovalRouteOutcome"></p>
+                  <div class="electronic-seal-document-type-field" id="uploadedSealApprovalRouteSection">
+                    <label>用印文件類型
+                      <select id="uploadedSealApprovalCategorySelect" required aria-describedby="uploadedSealApprovalCategoryHint">
+                        <option value="" selected disabled>請選擇文件細項</option>
+                      </select>
+                      <span class="field-hint" id="uploadedSealApprovalCategoryHint">選擇後，系統會自動套用 A／B／C／D 簽核層級。</span>
+                    </label>
                   </div>
-                </section>
-                <label>申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
-                <label id="uploadedSealCounterpartyField" hidden>合約相對人<input id="uploadedSealCounterparty" placeholder="公司、機關或個人名稱" /></label>
-                <label>用印原因<textarea id="uploadedSealReason" rows="4" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
-                <label class="electronic-seal-upload-drop">PDF 文件
-                  <input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="uploadedPdfA4Rule" required />
-                  <span>支援多頁 PDF</span>
-                </label>
-                <div class="pdf-a4-rule" id="uploadedPdfA4Rule" data-state="idle">
-                  <strong>公文與合約 PDF 只接受 A4</strong>
-                  <span>可使用直式 210 × 297 mm 或橫式 297 × 210 mm；多頁文件每一頁都必須是 A4。匯入或合併 PDF 也適用相同規則。</span>
-                  <em id="uploadedPdfA4Status" role="status" aria-live="polite">尚未檢查 PDF 頁面尺寸。</em>
+                  <label>部門<input id="uploadedSealDepartment" placeholder="請輸入部門" required /></label>
+                  <label>公司<select id="uploadedSealCompany" required></select></label>
+                  <label class="electronic-seal-application-wide">申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
+                  <label class="electronic-seal-application-wide">用印原因<textarea id="uploadedSealReason" rows="3" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
                 </div>
-                <button class="primary-button" id="submitUploadedSealBtn" type="button">確認標記並送出簽核</button>
+                <div class="electronic-seal-route-result approval-route-summary" aria-live="polite">
+                  <span>系統自動簽核</span>
+                  <strong id="uploadedSealApprovalRouteBadge">尚未選擇</strong>
+                  <p id="uploadedSealApprovalRouteName">選擇用印文件類型後顯示簽核層級。</p>
+                  <ol class="compose-approval-flow compact" id="uploadedSealApprovalRoutePreview" hidden>
+                    <li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>
+                  </ol>
+                  <p class="approval-route-outcome" id="uploadedSealApprovalRouteOutcome" hidden></p>
+                </div>
+                <select id="uploadedSealType" hidden aria-hidden="true">
+                  <option value="official_document">電子公文</option>
+                  <option value="contract">電子合約</option>
+                  <option value="other">其他文件</option>
+                </select>
+                <input id="uploadedSealEmail" type="hidden" />
+                <input id="uploadedSealPhone" type="hidden" />
+                <input id="uploadedSealCounterparty" type="hidden" />
               </form>
-            </aside>
+            </section>
 
-            <section class="panel electronic-seal-workspace-panel pdf-editor-v2" id="uploadedPdfEditor" data-editor-mode="general" data-editor-locked="false">
+            <section class="panel electronic-seal-workspace-panel pdf-editor-v2" id="uploadedPdfEditor" data-editor-mode="general" data-editor-locked="false" aria-labelledby="uploadedSealWorkspaceTitle">
               <div class="electronic-seal-toolbar pdf-editor-commandbar">
                 <div>
-                  <p class="eyebrow">PDF Editor V2</p>
-                  <h3 id="uploadedSealWorkspaceTitle">選擇印章與用印位置</h3>
-                  <p id="uploadedSealWorkspaceDescription">原稿永久保留；所有標記會建立可追蹤的新版本。</p>
+                  <p class="eyebrow">下方</p>
+                  <h3 id="uploadedSealWorkspaceTitle">電子用印編輯</h3>
+                  <p id="uploadedSealWorkspaceDescription">上傳後可直接加文字、選擇印章並拖曳到正確位置；原稿不會被覆寫。</p>
                 </div>
                 <div class="pdf-editor-command-status">
                   <div class="pdf-editor-mode-switch" role="group" aria-label="PDF 編輯模式">
@@ -1609,6 +1594,20 @@
                   <button class="text-button pdf-editor-conflict-action" id="uploadedEditorConflictCopyBtn" type="button" hidden>複製本機版本</button>
                   <button class="text-button pdf-editor-conflict-action" id="uploadedEditorResolveConflictBtn" type="button" hidden>重新載入伺服器版本</button>
                 </div>
+              </div>
+
+              <div class="pdf-editor-source-bar" id="uploadedPdfSourceBar">
+                <div class="pdf-editor-source-copy">
+                  <strong>PDF 文件</strong>
+                  <span id="uploadedPdfFileName">尚未選擇檔案</span>
+                </div>
+                <button class="secondary-button" id="uploadedPdfReplaceBtn" type="button" aria-controls="uploadedSealPdfInput">選擇 PDF</button>
+                <input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="uploadedPdfA4Rule" hidden />
+              </div>
+              <div class="pdf-a4-rule pdf-editor-a4-rule" id="uploadedPdfA4Rule" data-state="idle">
+                <strong>只接受 A4 PDF（直式或橫式）</strong>
+                <span>支援多頁，且每一頁都必須是 A4；上限 50 MB／300 頁。</span>
+                <em id="uploadedPdfA4Status" role="status" aria-live="polite">尚未檢查 PDF 頁面尺寸。</em>
               </div>
 
               <div class="pdf-editor-toolbar" id="uploadedEditorToolTray" role="toolbar" aria-label="PDF 編輯工具">
@@ -1692,8 +1691,9 @@
                         <svg id="uploadedEditorSvgLayer" role="application" aria-label="PDF 編輯物件層"></svg>
                       </div>
                       <div class="uploaded-pdf-empty" id="uploadedPdfEmpty">
-                        <strong>尚未上傳 PDF</strong>
-                        <button class="primary-button" id="uploadedPdfEmptyUploadBtn" type="button">上傳 PDF</button>
+                        <strong>先上傳 A4 PDF</strong>
+                        <span>上傳後即可在文件上加文字、選印章並拖曳定位。</span>
+                        <button class="primary-button" id="uploadedPdfEmptyUploadBtn" type="button" aria-controls="uploadedSealPdfInput">選擇 PDF 並開始編輯</button>
                       </div>
                     </div>
                     <div class="pdf-editor-change-summary" id="uploadedEditorChangeSummaryPanel" hidden></div>
@@ -1744,7 +1744,10 @@
 
               <div class="uploaded-workspace-actions pdf-editor-footer-actions">
                 <span id="uploadedEditorPreflightStatus" class="pdf-editor-preflight-status">尚未產生送簽確認版</span>
-                <button class="text-button" id="clearUploadedStampsBtn" type="button">清除全部編輯</button>
+                <div class="pdf-editor-submit-actions">
+                  <button class="text-button" id="clearUploadedStampsBtn" type="button">清除全部編輯</button>
+                  <button class="primary-button" id="submitUploadedSealBtn" type="button">確認編輯並送出簽核</button>
+                </div>
               </div>
               <div class="uploaded-stamp-list" id="uploadedStampSummary"></div>
             </section>
@@ -4097,6 +4100,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260825-fax-copy-r1"></script>
+    <script src="app.js?v=20260825-electronic-seal-r1"></script>
   </body>
 </html>
