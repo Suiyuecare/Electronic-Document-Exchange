@@ -23,9 +23,10 @@ from typing import Any, Dict, Tuple
 FINANCE_BRIDGE_SCHEMA_VERSION = 1
 FINANCE_BRIDGE_MAX_RESPONSE_BYTES = 1024 * 1024
 FINANCE_MEMBER_SYNC_SCHEMA_VERSION = 1
-FINANCE_MEMBER_SYNC_MAX_REQUEST_BYTES = 256 * 1024
+FINANCE_ORGANIZATION_SYNC_SCHEMA_VERSION = 2
+FINANCE_MEMBER_SYNC_MAX_REQUEST_BYTES = 1024 * 1024
 FINANCE_MEMBER_SYNC_MAX_AGE_SECONDS = 60
-FINANCE_MEMBER_SYNC_EVENT_TYPES = {"member.changed", "company.changed"}
+FINANCE_MEMBER_SYNC_EVENT_TYPES = {"member.changed", "company.changed", "organization.published"}
 FINANCE_MEMBER_SYNC_ACTOR_SLOTS = {
     "applicantManager",
     "departmentHead",
@@ -101,6 +102,197 @@ def _validate_sync_auth_user_id(parent: Dict[str, Any]) -> None:
         raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid") from exc
     if str(parsed) != text.lower():
         raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+
+
+def _sync_uuid(parent: Dict[str, Any], key: str) -> str:
+    text = _sync_required_text(parent, key, max_length=36).lower()
+    try:
+        parsed = uuid.UUID(text)
+    except (ValueError, AttributeError) as exc:
+        raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid") from exc
+    if str(parsed) != text:
+        raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+    return text
+
+
+def _sync_optional_timestamp(parent: Dict[str, Any], key: str) -> None:
+    value = parent.get(key)
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 64:
+        raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+
+
+def _validate_finance_organization(payload: Any, source_revision: int) -> Dict[str, Any]:
+    """Validate the PII-minimized Finance published organization manifest."""
+    if not isinstance(payload, dict):
+        raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+    allowed = {
+        "tenantId", "versionId", "versionNo", "etag", "schemaVersion",
+        "publishedAt", "units", "assignments", "reportingOverrides",
+    }
+    if set(payload) - allowed:
+        raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+    tenant_id = _sync_uuid(payload, "tenantId")
+    _sync_uuid(payload, "versionId")
+    version_no = payload.get("versionNo")
+    if (
+        isinstance(version_no, bool)
+        or not isinstance(version_no, int)
+        or version_no != source_revision
+        or payload.get("schemaVersion") != FINANCE_ORGANIZATION_SYNC_SCHEMA_VERSION
+    ):
+        raise FinanceMemberSyncContractError("finance_member_sync_revision_mismatch")
+    etag = _sync_required_text(payload, "etag", max_length=64).lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", etag):
+        raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+    _sync_optional_timestamp(payload, "publishedAt")
+
+    units = payload.get("units")
+    assignments = payload.get("assignments")
+    overrides = payload.get("reportingOverrides")
+    if (
+        not isinstance(units, list)
+        or len(units) > 500
+        or not isinstance(assignments, list)
+        or len(assignments) > 2000
+        or not isinstance(overrides, list)
+        or len(overrides) > 2000
+    ):
+        raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+
+    unit_ids: set[str] = set()
+    unit_codes: set[str] = set()
+    allowed_unit_types = {"shareholders", "board", "executive", "division", "department", "section", "team"}
+    allowed_scope_modes = {"inherit", "all", "explicit"}
+    for unit in units:
+        if not isinstance(unit, dict):
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        if set(unit) - {
+            "id", "code", "name", "parentOrgUnitId", "unitType", "sortOrder",
+            "active", "isPostingUnit", "entityScopeMode", "entityCodes",
+        }:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        unit_id = _sync_uuid(unit, "id")
+        code = _sync_required_text(unit, "code", max_length=64).upper()
+        if not re.fullmatch(r"[A-Z0-9_-]{2,64}", code):
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        _sync_required_text(unit, "name", max_length=300)
+        parent_id = unit.get("parentOrgUnitId")
+        if parent_id is not None:
+            parent_id = _sync_uuid(unit, "parentOrgUnitId")
+            if parent_id == unit_id:
+                raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        unit_type = _sync_required_text(unit, "unitType", max_length=32).lower()
+        scope_mode = _sync_required_text(unit, "entityScopeMode", max_length=16).lower()
+        if unit_type not in allowed_unit_types or scope_mode not in allowed_scope_modes:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        sort_order = unit.get("sortOrder")
+        if isinstance(sort_order, bool) or not isinstance(sort_order, int) or not -1_000_000 <= sort_order <= 1_000_000:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        for key in ("active", "isPostingUnit"):
+            if not isinstance(unit.get(key), bool):
+                raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        entity_codes = unit.get("entityCodes")
+        if not isinstance(entity_codes, list) or len(entity_codes) > 100:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        normalized_entity_codes: set[str] = set()
+        for entity_code in entity_codes:
+            if not isinstance(entity_code, str) or not entity_code.strip() or len(entity_code.strip()) > 80:
+                raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+            normalized = entity_code.strip()
+            if normalized in normalized_entity_codes:
+                raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+            normalized_entity_codes.add(normalized)
+        if unit_id in unit_ids or code in unit_codes:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        unit_ids.add(unit_id)
+        unit_codes.add(code)
+
+    for unit in units:
+        parent_id = unit.get("parentOrgUnitId")
+        if parent_id is not None and str(parent_id).lower() not in unit_ids:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+    parent_by_unit = {
+        str(unit["id"]).lower(): (
+            str(unit.get("parentOrgUnitId")).lower()
+            if unit.get("parentOrgUnitId") is not None
+            else ""
+        )
+        for unit in units
+    }
+    for unit_id in parent_by_unit:
+        visited: set[str] = set()
+        cursor = unit_id
+        while cursor:
+            if cursor in visited:
+                raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+            visited.add(cursor)
+            cursor = parent_by_unit.get(cursor, "")
+
+    assignment_ids: set[str] = set()
+    allowed_positions = {
+        "CHAIRMAN", "BOARD_MEMBER", "GENERAL_MANAGER", "EXECUTIVE_DIRECTOR",
+        "DIVISION_HEAD", "DEPARTMENT_HEAD", "SECTION_HEAD", "TEAM_HEAD", "DIRECTOR", "MEMBER",
+    }
+    for assignment in assignments:
+        if not isinstance(assignment, dict) or set(assignment) - {
+            "id", "financeUserId", "orgUnitId", "positionCode", "assignmentKind",
+            "headKind", "canApprove", "effectiveFrom", "effectiveTo", "active",
+        }:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        # Finance has deterministic governance/reporting identifiers such as
+        # ``governance_<user-id>`` in addition to UUID-backed assignments.
+        # Treat them as opaque safe master ids instead of rewriting them.
+        assignment_id = _sync_required_text(assignment, "id", max_length=160)
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", assignment_id):
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        _sync_required_text(assignment, "financeUserId", max_length=160)
+        org_unit_id = _sync_uuid(assignment, "orgUnitId")
+        position_code = _sync_required_text(assignment, "positionCode", max_length=64).upper()
+        assignment_kind = _sync_required_text(assignment, "assignmentKind", max_length=16).lower()
+        head_kind = assignment.get("headKind")
+        if head_kind is not None and (
+            not isinstance(head_kind, str) or head_kind.strip().lower() not in {"", "permanent", "acting"}
+        ):
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        if position_code not in allowed_positions or assignment_kind not in {"primary", "secondary"}:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        if org_unit_id not in unit_ids:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        for key in ("canApprove", "active"):
+            if not isinstance(assignment.get(key), bool):
+                raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        _sync_optional_timestamp(assignment, "effectiveFrom")
+        _sync_optional_timestamp(assignment, "effectiveTo")
+        if assignment_id in assignment_ids:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        assignment_ids.add(assignment_id)
+
+    override_ids: set[str] = set()
+    for override in overrides:
+        if not isinstance(override, dict) or set(override) - {
+            "id", "financeUserId", "supervisorFinanceUserId", "effectiveFrom", "effectiveTo", "active",
+        }:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        override_id = _sync_required_text(override, "id", max_length=160)
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", override_id):
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        user_id = _sync_required_text(override, "financeUserId", max_length=160)
+        supervisor_id = _sync_required_text(override, "supervisorFinanceUserId", max_length=160)
+        if user_id == supervisor_id or not isinstance(override.get("active"), bool):
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        _sync_optional_timestamp(override, "effectiveFrom")
+        _sync_optional_timestamp(override, "effectiveTo")
+        if override_id in override_ids:
+            raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+        override_ids.add(override_id)
+
+    # Keep the tenant variable alive as an explicit validation result; this is
+    # also a guard against accidentally relaxing UUID validation later.
+    if not tenant_id:
+        raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
+    return payload
 
 
 def _validate_member_sync_company(
@@ -273,12 +465,24 @@ def verify_finance_member_sync_request(
         raise FinanceMemberSyncContractError("finance_member_sync_json_invalid") from exc
     if not isinstance(payload, dict):
         raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
-    common = {"source", "schemaVersion", "eventId", "eventType", "sourceRevision", "occurredAt", "company"}
     event_type = payload.get("eventType")
-    allowed = common | ({"identity", "actors", "workflowReady", "issues"} if event_type == "member.changed" else set())
+    common = {"source", "schemaVersion", "eventId", "eventType", "sourceRevision", "occurredAt"}
+    if event_type == "member.changed":
+        allowed = common | {"company", "identity", "actors", "workflowReady", "issues"}
+    elif event_type == "company.changed":
+        allowed = common | {"company"}
+    elif event_type == "organization.published":
+        allowed = common | {"tenantId", "organization"}
+    else:
+        allowed = common
     if set(payload) - allowed or payload.get("source") != "finance":
         raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
-    if payload.get("schemaVersion") != FINANCE_MEMBER_SYNC_SCHEMA_VERSION or event_type not in FINANCE_MEMBER_SYNC_EVENT_TYPES:
+    expected_schema = (
+        FINANCE_ORGANIZATION_SYNC_SCHEMA_VERSION
+        if event_type == "organization.published"
+        else FINANCE_MEMBER_SYNC_SCHEMA_VERSION
+    )
+    if payload.get("schemaVersion") != expected_schema or event_type not in FINANCE_MEMBER_SYNC_EVENT_TYPES:
         raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
     event_id = _sync_required_text(payload, "eventId", max_length=160)
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", event_id):
@@ -287,7 +491,12 @@ def verify_finance_member_sync_request(
     if isinstance(source_revision, bool) or not isinstance(source_revision, int) or source_revision < 1:
         raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")
     _sync_required_text(payload, "occurredAt", max_length=64)
-    if event_type == "company.changed":
+    if event_type == "organization.published":
+        envelope_tenant_id = _sync_uuid(payload, "tenantId")
+        organization = _validate_finance_organization(payload.get("organization"), source_revision)
+        if envelope_tenant_id != str(organization.get("tenantId") or "").strip().lower():
+            raise FinanceMemberSyncContractError("finance_member_sync_tenant_mismatch")
+    elif event_type == "company.changed":
         company = _validate_member_sync_company(payload.get("company"))
         if "active" not in company or "sourceUpdatedAt" not in company:
             raise FinanceMemberSyncContractError("finance_member_sync_contract_invalid")

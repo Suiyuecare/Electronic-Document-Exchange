@@ -1210,23 +1210,11 @@ const workflowProofLog = [
 
 let selectedSealId = "SEAL-001";
 let selectedSealRequestId = "REQ-001";
-let companyRegistry = [
-  { id: "CO-001", financeEntityId: "E1", name: "歲悅股份有限公司", taxId: "60792234", address: "110臺北市信義區基隆路一段364巷6號1樓", status: "啟用" },
-  { id: "CO-002", financeEntityId: "E2", name: "樂齡歲悅股份有限公司", taxId: "60541552", address: "110臺北市信義區基隆路一段364巷6號1樓", status: "啟用" },
-  { id: "CO-003", financeEntityId: "E3", name: "移站式股份有限公司", taxId: "", address: "", status: "啟用" },
-  { id: "CO-004", financeEntityId: "E4", name: "大齡好好投資有限公司", taxId: "", address: "", status: "啟用" },
-  { id: "CO-005", financeEntityId: "E5", name: "歲悅股份有限公司附設臺北市私立歲悅居家長照機構", taxId: "00602175", address: "111臺北市士林區社子街63巷21弄2號1樓", status: "啟用" },
-  { id: "CO-006", financeEntityId: "E6", name: "樂齡歲悅股份有限公司附設臺北市私立歲悅萬華社區長照機構", taxId: "00667423", address: "108臺北市萬華區康定路43號2樓", status: "啟用" },
-  { id: "CO-007", financeEntityId: "E7", name: "愛無限整合服務有限公司", taxId: "90691342", address: "", status: "啟用" },
-  { id: "CO-008", financeEntityId: "E8", name: "愛無限整合有限公司附設新北市私立愛無限居家長照機構", taxId: "91254360", address: "", status: "啟用" },
-  { id: "CO-009", financeEntityId: "E9", name: "好窩居家職能治療所", taxId: "", address: "", status: "啟用" },
-  { id: "CO-010", financeEntityId: "E10", name: "歲悅萬華二館股份有限公司籌備處", taxId: "A128403108", address: "臺北市萬華區成都路159號2樓", status: "啟用" }
-];
-const departmentRegistry = [
-  { id: "DEP-001", company: "歲悅長照股份有限公司", name: "總管理處", manager: "執行長", status: "啟用" },
-  { id: "DEP-002", company: "歲悅長照股份有限公司", name: "行政部", manager: "行政部主任", status: "啟用" },
-  { id: "DEP-003", company: "歲悅長照股份有限公司", name: "總務", manager: "總務", status: "啟用" }
-];
+// Finance is the only mutable source for companies and organization units.
+// Historical documents keep their own text snapshots; these live registries
+// are only used to populate choices for new work.
+let companyRegistry = [];
+const departmentRegistry = [];
 const sealTypeRegistry = [
   { id: "ST-001", name: "一般章", scope: "日常公文、一般函稿", status: "啟用" },
   { id: "ST-002", name: "公司設立章", scope: "設立登記、公司變更、重大文件", status: "啟用" },
@@ -1585,6 +1573,22 @@ let activeRouteTarget = "dashboard";
 let companySealModuleLoaded = false;
 let companySealCompanies = [];
 let companySealCompanySyncError = "";
+const FINANCE_DIRECTORY_REFRESH_INTERVAL_MS = 30_000;
+let financeDirectoryRefreshPromise = null;
+let financeDirectoryRefreshTimer = 0;
+let financeDirectoryRefreshGeneration = 0;
+let financeDirectoryState = {
+  source: "finance",
+  schemaVersion: 2,
+  directoryVersion: "",
+  currentCompanyId: "",
+  syncedAt: "",
+  lastAttemptAt: 0,
+  lastSuccessAt: 0,
+  status: "idle",
+  error: "",
+  organization: null
+};
 let companySealReferences = { grouped: {} };
 let companySealLibrary = [];
 let companySealFiles = [];
@@ -2621,6 +2625,7 @@ function setView(target) {
     uploadedSealEditorRuntime.directoryLoading = !companySealCompanies.length;
     configureUploadedSealMode(target);
   }
+  if (hasAuthenticatedBackendSession()) void refreshFinanceDirectory({ silent: true });
   openIntegratedPageSection(target);
   void loadRouteBackendData(target, true);
   trackUiUsage("route_view", { route: target });
@@ -4495,7 +4500,6 @@ function applyEdocRoleOptions() {
     "#securityCertOwner",
     "#sealOwnerInput",
     "#complianceOwnerSelect",
-    "#departmentManagerInput",
     "#contractOwnerInput"
   ].forEach((selector) => setSelectOptions(selector, edocAllowedRoles, workflowRole));
   setSelectOptions("#trackingNotifyTarget", ["總務", "主任", "行政部主任", "人資", "會計", "業務助理"], "總務");
@@ -4721,6 +4725,7 @@ async function rejectNonSetupUserDuringLaunchSetup(session = authState, provider
 function runAuthenticatedStartupSyncs(silent = true) {
   if (!hasAuthenticatedBackendSession()) return;
   trackUiUsage("session_started", { route: activeRouteTarget || "dashboard" });
+  void refreshFinanceDirectory({ silent: true });
   const workflowScope = officialWorkflowScope === "new" ? "all" : officialWorkflowScope || "all";
   // Keep first paint task-focused.  The previous startup fired more than ten
   // authenticated APIs at once; each request also revalidated Finance and
@@ -4738,10 +4743,9 @@ async function loadRouteBackendData(target, silent = true) {
   routeBackendDataLoaded.add(target);
   try {
     if (["compose", "contractSeal", "electronicSeal"].includes(target)) {
-      await Promise.all([
-        loadFinanceCompanyDirectory(),
-        loadOfficialSealOptions(),
-      ]);
+      await loadFinanceCompanyDirectory();
+      const officialCompanyId = document.querySelector("#officialCompanySelect")?.value || "";
+      if (officialCompanyId) await loadOfficialSealOptions(officialCompanyId);
     }
     if (["contractSeal", "electronicSeal"].includes(target)) {
       renderUploadedSealCompanyOptions();
@@ -4788,20 +4792,312 @@ function finishModuleEntryProgress() {
   window.setTimeout(() => document.querySelector("#moduleEntryProgress")?.classList.add("hidden"), 180);
 }
 
-async function loadFinanceCompanyDirectory() {
-  try {
-    const companies = await backendRequest("/companies");
-    if (!Array.isArray(companies) || !companies.length) return;
-    companySealCompanies = companies;
-    syncCompanyRegistryFromFinance(companies);
-    renderOfficialCompanyOptions();
-    renderUploadedSealCompanyOptions();
-    // Feature flags arrive after the initial workspace paint. Refresh the
-    // editor so an enabled company is not left showing the fail-closed state.
-    renderUploadedSealWorkbench();
-  } catch (error) {
-    console.warn("Finance company directory sync failed", error);
+function financeDirectoryEntityCodes(value) {
+  if (Array.isArray(value)) return [...new Set(value.map((item) => String(item || "").trim()).filter(Boolean))];
+  if (!value) return [];
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return financeDirectoryEntityCodes(parsed);
+    } catch (_error) {
+      // Older projections used comma-separated entity codes.
+    }
+    return [...new Set(value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean))];
   }
+  return [];
+}
+
+function financeDirectoryStatus(value) {
+  const normalized = String(value || "active").trim().toLowerCase();
+  return ["active", "enabled", "啟用", "1", "true"].includes(normalized) ? "active" : normalized || "inactive";
+}
+
+function normalizeFinanceDirectoryCompany(item = {}) {
+  const id = String(item.id || item.companyId || item.company_id || item.financeEntityId || item.finance_entity_id || "").trim();
+  const financeEntityId = String(item.financeEntityId || item.finance_entity_id || item.entityCode || item.entity_code || id).trim();
+  const featureFlags = item.featureFlags || item.feature_flags || {};
+  return {
+    ...item,
+    id,
+    company_id: id,
+    financeEntityId,
+    finance_entity_id: financeEntityId,
+    name: String(item.name || item.companyName || item.company_name || "").trim(),
+    taxId: String(item.taxId || item.tax_id || "").trim(),
+    tax_id: String(item.taxId || item.tax_id || "").trim(),
+    address: String(item.address || "").trim(),
+    status: financeDirectoryStatus(item.status),
+    featureFlags,
+    feature_flags: featureFlags
+  };
+}
+
+function normalizeFinanceDirectoryDepartment(item = {}) {
+  const financeUnitId = String(item.financeUnitId || item.finance_unit_id || item.departmentId || item.department_id || "").trim();
+  const id = String(item.id || financeUnitId).trim();
+  return {
+    ...item,
+    id,
+    financeUnitId,
+    finance_unit_id: financeUnitId,
+    code: String(item.code || item.unitCode || item.unit_code || "").trim(),
+    name: String(item.name || item.departmentName || item.department_name || "").trim(),
+    unitType: String(item.unitType || item.unit_type || "").trim(),
+    parentUnitId: String(item.parentUnitId || item.parent_unit_id || "").trim(),
+    sortOrder: Number(item.sortOrder ?? item.sort_order ?? 0),
+    entityScopeMode: String(item.entityScopeMode || item.entity_scope_mode || "").trim(),
+    entityCodes: financeDirectoryEntityCodes(item.entityCodes || item.entity_codes),
+    companyId: String(item.companyId || item.company_id || "").trim(),
+    companyName: String(item.companyName || item.company_name || item.company || "").trim(),
+    status: financeDirectoryStatus(item.status)
+  };
+}
+
+function financeDirectoryCompanyByReference(reference = "") {
+  const value = String(reference || "").trim();
+  return companySealCompanies.find((company) => [
+    company.id,
+    company.company_id,
+    company.financeEntityId,
+    company.finance_entity_id,
+    company.name
+  ].some((candidate) => String(candidate || "").trim() === value)) || null;
+}
+
+function financeDepartmentMatchesCompany(department, companyReference) {
+  const company = typeof companyReference === "object" && companyReference
+    ? companyReference
+    : financeDirectoryCompanyByReference(companyReference);
+  if (!company) return false;
+  const directCompanyReferences = [department.companyId, department.companyName].filter(Boolean);
+  if (directCompanyReferences.length) {
+    return directCompanyReferences.some((reference) => [company.id, company.company_id, company.name].includes(reference));
+  }
+  const scopeMode = String(department.entityScopeMode || "").trim().toLowerCase();
+  if (["all", "all_entities", "global", "any"].includes(scopeMode)) return true;
+  const companyReferences = new Set([
+    company.id,
+    company.company_id,
+    company.financeEntityId,
+    company.finance_entity_id,
+    company.name
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+  if (department.entityCodes?.some((code) => companyReferences.has(String(code || "").trim()))) return true;
+  // A one-company response is already authorization-scoped by the backend;
+  // accepting an older unit without entityCodes keeps backward compatibility.
+  return !department.entityCodes?.length && companySealCompanies.length === 1;
+}
+
+function financeDirectoryCompanies({ includeInactive = false } = {}) {
+  const companies = launchScopedCompanyOptions(companySealCompanies);
+  return includeInactive ? companies : companies.filter((company) => company.status === "active");
+}
+
+function financeDepartmentsForCompany(companyReference, { includeInactive = false } = {}) {
+  const departments = departmentRegistry.filter((department) => (
+    (includeInactive || department.status === "啟用")
+    && financeDepartmentMatchesCompany(department, companyReference)
+  ));
+  return departments.sort((left, right) => (
+    Number(left.sortOrder || 0) - Number(right.sortOrder || 0)
+    || String(left.code || "").localeCompare(String(right.code || ""), "zh-Hant")
+    || String(left.name || "").localeCompare(String(right.name || ""), "zh-Hant")
+  ));
+}
+
+function financeDirectoryCurrentCompany() {
+  const references = [
+    financeDirectoryState.currentCompanyId,
+    authState?.user?.company_id,
+    authState?.user?.finance_entity_id,
+    authState?.user?.company_name
+  ];
+  for (const reference of references) {
+    const match = financeDirectoryCompanyByReference(reference);
+    if (match) return match;
+  }
+  return financeDirectoryCompanies()[0] || null;
+}
+
+function financeDirectoryDepartmentCompanyLabel(department) {
+  if (["all", "all_entities", "global", "any"].includes(String(department.entityScopeMode || "").toLowerCase())) return "所有公司";
+  const names = financeDirectoryCompanies({ includeInactive: true })
+    .filter((company) => financeDepartmentMatchesCompany(department, company))
+    .map((company) => company.name);
+  return names.join("、") || department.companyName || "依 Finance 公司範圍";
+}
+
+function formatFinanceDirectoryTime(value) {
+  if (!value) return "尚未同步";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-TW", { hour12: false });
+}
+
+function renderFinanceDirectorySyncStatus() {
+  const source = document.querySelector("#financeDirectorySource");
+  const syncedAt = document.querySelector("#financeDirectoryLastSynced");
+  const status = document.querySelector("#financeDirectoryStatus");
+  if (source) {
+    const version = financeDirectoryState.directoryVersion ? ` · 版本 ${financeDirectoryState.directoryVersion}` : "";
+    source.textContent = `會計系統 Finance${version}`;
+  }
+  if (syncedAt) syncedAt.textContent = formatFinanceDirectoryTime(financeDirectoryState.syncedAt);
+  if (status) {
+    const labels = {
+      idle: "等待同步",
+      syncing: "同步中",
+      synced: "Finance 已同步",
+      error: "同步失敗"
+    };
+    status.textContent = labels[financeDirectoryState.status] || "Finance 唯讀";
+    status.className = `status-pill ${financeDirectoryState.status === "error" ? "issue" : financeDirectoryState.status === "synced" ? "ok" : ""}`.trim();
+    status.title = financeDirectoryState.error || "公司與部門只在會計系統維護";
+  }
+}
+
+function renderFinanceReportUnitOptions() {
+  const select = document.querySelector("#reportUnit");
+  if (!select) return;
+  const previous = select.value || "全部單位";
+  const names = [...new Set(departmentRegistry.filter((item) => item.status === "啟用").map((item) => item.name))];
+  select.innerHTML = ["全部單位", ...names]
+    .map((name) => `<option value="${escapeDraftHtml(name)}">${escapeDraftHtml(name)}</option>`)
+    .join("");
+  select.value = ["全部單位", ...names].includes(previous) ? previous : "全部單位";
+}
+
+function renderFinanceDirectoryConsumers() {
+  renderComposeCompanyOptions();
+  renderOfficialCompanyOptions();
+  renderInboundArchiveDepartmentOptions();
+  renderUploadedSealCompanyOptions();
+  renderUploadedSealDepartmentOptions();
+  renderContractFormOptions();
+  renderFinanceReportUnitOptions();
+  renderExecutiveSealAdmin();
+  renderFinanceDirectorySyncStatus();
+  if (document.querySelector("#companySealModule")) renderCompanySealModule();
+  applyComposeContactDefaults(false);
+}
+
+function applyFinanceDirectoryPayload(payload = {}) {
+  const rawCompanies = Array.isArray(payload.companies) ? payload.companies : [];
+  const rawDepartments = Array.isArray(payload.departments) ? payload.departments : [];
+  const companies = rawCompanies.map(normalizeFinanceDirectoryCompany).filter((item) => item.id && item.name);
+  const departments = rawDepartments.map(normalizeFinanceDirectoryDepartment).filter((item) => item.id && item.name);
+  companySealCompanies = companies;
+  companyRegistry = companies.map((item) => ({
+    id: item.id,
+    financeEntityId: item.financeEntityId,
+    name: item.name,
+    taxId: item.taxId,
+    address: item.address,
+    status: item.status === "active" ? "啟用" : "停用",
+    featureFlags: item.featureFlags
+  }));
+  departmentRegistry.splice(0, departmentRegistry.length, ...departments.map((item) => ({
+    ...item,
+    company: financeDirectoryDepartmentCompanyLabel(item),
+    manager: String(item.manager || item.managerRole || item.manager_role || "Finance 組織主檔"),
+    status: item.status === "active" ? "啟用" : "停用"
+  })));
+  financeDirectoryState = {
+    ...financeDirectoryState,
+    source: payload.source || "finance",
+    schemaVersion: Number(payload.schemaVersion ?? payload.schema_version ?? 2),
+    directoryVersion: String(payload.directoryVersion || payload.directory_version || ""),
+    currentCompanyId: String(payload.currentCompanyId || payload.current_company_id || ""),
+    syncedAt: String(payload.syncedAt || payload.synced_at || new Date().toISOString()),
+    lastSuccessAt: Date.now(),
+    status: "synced",
+    error: "",
+    organization: payload.organization || null
+  };
+  if (!companySealCompanies.some((company) => company.id === selectedCompanySealCompanyId)) {
+    setCompanySealCompanySelection(financeDirectoryCurrentCompany()?.id || "");
+  }
+  renderFinanceDirectoryConsumers();
+}
+
+async function refreshFinanceDirectory({ silent = true } = {}) {
+  if (!hasAuthenticatedBackendSession()) return null;
+  if (financeDirectoryRefreshPromise) return financeDirectoryRefreshPromise;
+  const now = Date.now();
+  if (financeDirectoryState.lastAttemptAt && now - financeDirectoryState.lastAttemptAt < FINANCE_DIRECTORY_REFRESH_INTERVAL_MS) {
+    return { throttled: true, state: financeDirectoryState };
+  }
+  financeDirectoryState.lastAttemptAt = now;
+  financeDirectoryState.status = "syncing";
+  financeDirectoryState.error = "";
+  renderFinanceDirectorySyncStatus();
+  const refreshGeneration = ++financeDirectoryRefreshGeneration;
+  const actorId = String(authState?.user?.id || authState?.user?.email || "");
+  financeDirectoryRefreshPromise = (async () => {
+    try {
+      const payload = await backendRequest("/finance-directory");
+      if (
+        refreshGeneration !== financeDirectoryRefreshGeneration
+        || actorId !== String(authState?.user?.id || authState?.user?.email || "")
+      ) return null;
+      if (!payload || !Array.isArray(payload.companies) || !Array.isArray(payload.departments)) {
+        throw new Error("Finance 目錄回應缺少 companies 或 departments");
+      }
+      applyFinanceDirectoryPayload(payload);
+      return payload;
+    } catch (error) {
+      if (refreshGeneration !== financeDirectoryRefreshGeneration) return null;
+      financeDirectoryState.status = "error";
+      financeDirectoryState.error = error.message || "finance_directory_sync_failed";
+      renderFinanceDirectorySyncStatus();
+      console.warn("Finance directory sync failed", error);
+      if (!silent) showToast("會計系統公司與部門清單暫時無法更新；已保留最近一次成功同步的資料。");
+      return null;
+    } finally {
+      if (refreshGeneration === financeDirectoryRefreshGeneration) financeDirectoryRefreshPromise = null;
+    }
+  })();
+  return financeDirectoryRefreshPromise;
+}
+
+function startFinanceDirectoryRefresh() {
+  if (financeDirectoryRefreshTimer) window.clearInterval(financeDirectoryRefreshTimer);
+  void loadFinanceCompanyDirectory();
+  financeDirectoryRefreshTimer = window.setInterval(() => {
+    if (document.visibilityState !== "visible" || !hasAuthenticatedBackendSession()) return;
+    void loadFinanceCompanyDirectory();
+  }, FINANCE_DIRECTORY_REFRESH_INTERVAL_MS);
+}
+
+function stopFinanceDirectoryAutoRefresh() {
+  if (!financeDirectoryRefreshTimer) return;
+  window.clearInterval(financeDirectoryRefreshTimer);
+  financeDirectoryRefreshTimer = 0;
+}
+
+function clearFinanceDirectoryCache() {
+  financeDirectoryRefreshGeneration += 1;
+  companySealCompanies = [];
+  companyRegistry = [];
+  departmentRegistry.splice(0, departmentRegistry.length);
+  financeDirectoryRefreshPromise = null;
+  financeDirectoryState = {
+    source: "finance",
+    schemaVersion: 2,
+    directoryVersion: "",
+    currentCompanyId: "",
+    syncedAt: "",
+    lastAttemptAt: 0,
+    lastSuccessAt: 0,
+    status: "idle",
+    error: "",
+    organization: null
+  };
+  renderFinanceDirectorySyncStatus();
+}
+
+async function loadFinanceCompanyDirectory() {
+  return refreshFinanceDirectory({ silent: true });
 }
 
 function enterApp(message = "登入成功，已進入公文收發電子用印系統。") {
@@ -4810,6 +5106,7 @@ function enterApp(message = "登入成功，已進入公文收發電子用印系
   document.querySelector("#loginScreen").setAttribute("aria-hidden", "true");
   document.querySelector("#appShell").classList.remove("hidden");
   applyAuthUser();
+  startFinanceDirectoryRefresh();
   const requestedRoute = location.hash?.slice(1);
   setView(requestedRoute && titles[requestedRoute] && isRouteAllowed(requestedRoute) ? requestedRoute : "dashboard");
   runAuthenticatedStartupSyncs(true);
@@ -4865,6 +5162,8 @@ function leaveApp() {
     backendRequest("/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
   }
   authState = null;
+  stopFinanceDirectoryAutoRefresh();
+  clearFinanceDirectoryCache();
   clearUploadedEditorSensitivePreviews();
   clearComposeAutosave();
   composeAutosaveRestoredForIdentity = "";
@@ -5109,6 +5408,17 @@ function setInboundSection(section = "records") {
   }
 }
 
+function renderInboundArchiveDepartmentOptions({ preferAccount = false } = {}) {
+  const select = document.querySelector("#inboundArchiveDepartment");
+  if (!select) return;
+  const company = financeDirectoryCurrentCompany();
+  const departments = financeDepartmentsForCompany(company?.id || "");
+  const previous = select.value || "";
+  const accountDepartment = preferredFinanceDepartment(departments);
+  const preferred = preferAccount ? accountDepartment?.name || departments[0]?.name || "" : previous || accountDepartment?.name || departments[0]?.name || "";
+  renderFinanceNameOptions(select, departments.map((item) => item.name), preferred, { emptyLabel: "目前公司尚無可用部門" });
+}
+
 function prepareInboundArchiveForm() {
   const user = authState?.user || {};
   const role = activeRole();
@@ -5123,8 +5433,7 @@ function prepareInboundArchiveForm() {
   }
   const receivedDate = document.querySelector("#inboundArchiveReceivedDate");
   if (receivedDate && !receivedDate.value) receivedDate.value = new Date().toISOString().slice(0, 10);
-  const department = document.querySelector("#inboundArchiveDepartment");
-  if (department && !department.value) department.value = user.unit || "";
+  renderInboundArchiveDepartmentOptions({ preferAccount: !document.querySelector("#inboundArchiveDepartment")?.value });
   const owner = document.querySelector("#inboundArchiveOwnerLabel");
   if (owner) owner.textContent = `${user.name || "目前帳號"}｜${user.unit || "未設定單位"}`;
 }
@@ -5870,18 +6179,20 @@ function renderComposeSaveStatus() {
 function renderComposeCompanyOptions(preferAccount = false) {
   const select = document.querySelector("#composeCompanySelect");
   if (!select) return;
-  const accountCompany = authState?.user?.company_name || "";
-  const accountCompanyId = authState?.user?.company_id || "";
-  const company = companyRegistry.find((item) => item.id === accountCompanyId || item.name === accountCompany)
-    || (accountCompanyId && accountCompany ? { id: accountCompanyId, name: accountCompany } : null);
-  if (!company) {
+  const previous = select.value;
+  const companies = financeDirectoryCompanies();
+  const company = financeDirectoryCurrentCompany();
+  if (!companies.length) {
     select.innerHTML = `<option value="">登入帳號尚未連動 Finance 公司</option>`;
     select.disabled = true;
     return;
   }
   select.disabled = false;
-  select.innerHTML = optionTags([company.name], company.name);
-  select.dataset.autoDefault = "true";
+  select.innerHTML = companies.map((item) => `<option value="${escapeDraftHtml(item.name)}">${escapeDraftHtml(item.name)}</option>`).join("");
+  if (!preferAccount && companies.some((item) => item.name === previous)) select.value = previous;
+  else if (company) select.value = company.name;
+  else select.value = companies[0].name;
+  if (company && select.value === company.name) select.dataset.autoDefault = "true";
 }
 
 function renderDraftSealPlaceholder(kind, label, sealType, sizeClass) {
@@ -7671,12 +7982,15 @@ async function beginOfficialCorrection(item = officialCurrentItem()) {
   setValue("#officialSourceType", item.source_type || "blank_editor");
   renderOfficialCompanyOptions();
   setValue("#officialCompanySelect", item.company_id || "");
+  renderOfficialDispatchUnitOptions({
+    selected: item.dispatch_unit || item.applicant_department_name || "",
+    preserveHistorical: true
+  });
   await loadOfficialSealOptions(item.company_id || "");
   const sealId = item.stamp_request?.seal_id || item.seal_id || item.metadata?.official_seal?.seal_id || "";
   setValue("#officialSealSelect", sealId);
   renderApprovalCategorySelect("#officialApprovalCategorySelect", item.document_category || item.metadata?.document_category || "", { requireSelection: true });
   setValue("#officialRecipientInput", item.recipient || "");
-  setValue("#officialDispatchUnitInput", item.dispatch_unit || item.applicant_department_name || "");
   setValue("#officialHandlerInput", item.handler_name || item.applicant_name || "");
   setValue("#officialSubjectInput", item.subject || item.title || "");
   setValue("#officialDescriptionInput", item.description || "");
@@ -7711,12 +8025,7 @@ function renderOfficialCompanyOptions(preferAccount = false) {
   const select = document.querySelector("#officialCompanySelect");
   if (!select) return;
   const previousValue = select.value;
-  const allCompanies = availableCompanySealCompanies();
-  const accountCompanyId = authState?.user?.company_id || "";
-  const accountCompanyName = authState?.user?.company_name || "";
-  const companies = launchScopedCompanyOptions(allCompanies).filter(
-    (item) => item.id === accountCompanyId || item.name === accountCompanyName
-  );
+  const companies = financeDirectoryCompanies();
   if (!companies.length) {
     select.innerHTML = `<option value="">尚未開放可送簽公司</option>`;
     select.disabled = true;
@@ -7725,15 +8034,35 @@ function renderOfficialCompanyOptions(preferAccount = false) {
   select.disabled = false;
   const scopeNote = launchCompanyScopeSummaryText();
   select.innerHTML = companies.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}${scopeNote ? "（上線範圍）" : ""}</option>`).join("");
-  const accountCompany = companies.find((item) => item.id === accountCompanyId || item.name === accountCompanyName);
+  const accountCompany = financeDirectoryCurrentCompany();
   const shouldUseAccount = Boolean(accountCompany && (preferAccount || select.dataset.userEdited !== "true"));
   if (shouldUseAccount) select.value = accountCompany.id;
   else if (companies.some((item) => item.id === previousValue)) select.value = previousValue;
   else if (companies[0]) select.value = companies[0].id;
   if (shouldUseAccount) select.dataset.autoDefault = "true";
+  renderOfficialDispatchUnitOptions({ preferAccount });
 }
 
-async function loadOfficialSealOptions(companyId = document.querySelector("#officialCompanySelect")?.value || "CO-001") {
+function renderOfficialDispatchUnitOptions({ selected = "", preferAccount = false, preserveHistorical = false } = {}) {
+  const select = document.querySelector("#officialDispatchUnitInput");
+  if (!select) return;
+  const companyId = document.querySelector("#officialCompanySelect")?.value || financeDirectoryCurrentCompany()?.id || "";
+  const departments = financeDepartmentsForCompany(companyId);
+  const previous = selected || select.value || "";
+  const accountDepartment = preferredFinanceDepartment(departments);
+  const preferred = preferAccount ? accountDepartment?.name || departments[0]?.name || "" : previous || accountDepartment?.name || departments[0]?.name || "";
+  renderFinanceNameOptions(select, departments.map((item) => item.name), preferred, {
+    emptyLabel: "此公司尚無可用部門",
+    historical: preserveHistorical ? previous : ""
+  });
+}
+
+async function loadOfficialSealOptions(companyId = document.querySelector("#officialCompanySelect")?.value || "") {
+  if (!companyId) {
+    officialSealOptions = [];
+    renderOfficialSealOptions();
+    return;
+  }
   try {
     const result = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals`);
     officialSealOptions = Array.isArray(result) ? result.filter((item) => item.is_active !== 0 && item.is_active !== false) : [];
@@ -8079,9 +8408,8 @@ function renderOfficialWorkflowDetail() {
   if (officialWorkflowScope === "new") {
     syncOfficialWorkflowFormMode();
     const handlerInput = document.querySelector("#officialHandlerInput");
-    const unitInput = document.querySelector("#officialDispatchUnitInput");
     if (handlerInput && !handlerInput.value.trim()) handlerInput.value = authState?.user?.name || "";
-    if (unitInput && !unitInput.value.trim()) unitInput.value = authState?.user?.unit || "";
+    renderOfficialDispatchUnitOptions({ preferAccount: !document.querySelector("#officialDispatchUnitInput")?.value });
     target.innerHTML = `
       <div class="doc-detail">
         <strong>${editingOfficialDocumentId ? "退回案件補正" : "發文申請單是主檔"}</strong>
@@ -10389,10 +10717,45 @@ function persistContractApproval(approval) {
   persistToBackend(`/contract_approvals/${approval.id}`, backendContractApprovalPayload(approval), "PATCH");
 }
 
+function renderFinanceNameOptions(select, names, selected = "", { emptyLabel = "尚無可用資料", historical = "" } = {}) {
+  if (!select) return;
+  const values = [...new Set(names.map((name) => String(name || "").trim()).filter(Boolean))];
+  const keepHistorical = Boolean(historical && !values.includes(historical));
+  select.innerHTML = [
+    ...values.map((name) => `<option value="${escapeDraftHtml(name)}">${escapeDraftHtml(name)}</option>`),
+    keepHistorical ? `<option value="${escapeDraftHtml(historical)}" data-historical-snapshot="true">${escapeDraftHtml(historical)}（歷史快照）</option>` : ""
+  ].join("") || `<option value="">${escapeDraftHtml(emptyLabel)}</option>`;
+  if (selected && [...select.options].some((option) => option.value === selected)) select.value = selected;
+  else if (keepHistorical) select.value = historical;
+  select.dataset.financeDirectoryEmpty = String(!values.length && !keepHistorical);
+  select.disabled = !values.length && !keepHistorical;
+}
+
+function renderContractDepartmentOptions({ selected = "", preferAccount = false, preserveHistorical = true } = {}) {
+  const select = document.querySelector("#contractDepartmentInput");
+  const companyName = document.querySelector("#contractCompanyInput")?.value || "";
+  const departments = financeDepartmentsForCompany(companyName);
+  const previous = selected || select?.value || "";
+  const accountDepartment = preferredFinanceDepartment(departments);
+  const preferred = preferAccount ? accountDepartment?.name || departments[0]?.name || "" : previous || accountDepartment?.name || departments[0]?.name || "";
+  renderFinanceNameOptions(select, departments.map((item) => item.name), preferred, {
+    emptyLabel: "此公司尚無可用部門",
+    historical: preserveHistorical ? previous : ""
+  });
+}
+
 function renderContractFormOptions() {
-  setSelectOptions("#contractCompanyInput", companyRegistry.map((item) => item.name), currentContract()?.companyName || companyRegistry[0]?.name || "歲悅長照股份有限公司");
+  const contract = currentContract();
+  const companySelect = document.querySelector("#contractCompanyInput");
+  const previousCompany = companySelect?.value || "";
+  const currentCompany = financeDirectoryCurrentCompany();
+  const selectedCompany = contract?.companyName || previousCompany || currentCompany?.name || "";
+  renderFinanceNameOptions(companySelect, financeDirectoryCompanies().map((item) => item.name), selectedCompany, {
+    emptyLabel: "尚無 Finance 公司資料",
+    historical: contract?.companyName || ""
+  });
   renderApprovalCategorySelect("#contractTypeInput", currentContract()?.type || "服務委託合約");
-  setSelectOptions("#contractDepartmentInput", departmentRegistry.map((item) => item.name), currentContract()?.dept || activeUnit() || departmentRegistry[0]?.name || "行政部");
+  renderContractDepartmentOptions({ selected: contract?.dept || "", preferAccount: !contract, preserveHistorical: Boolean(contract) });
   setSelectOptions("#contractOwnerInput", edocAllowedRoles, currentContract()?.owner || activeRole());
 }
 
@@ -17921,23 +18284,11 @@ function mapBackendContractApproval(row) {
 }
 
 function applyPersistentRegistries(companies = [], departments = [], sealTypes = []) {
-  if (companies.length) {
-    companyRegistry.splice(0, companyRegistry.length, ...companies.map((row) => ({
-      id: row.id,
-      name: row.name,
-      taxId: row.tax_id || row.taxId || "待設定",
-      status: row.status || "啟用"
-    })));
-  }
-  if (departments.length) {
-    departmentRegistry.splice(0, departmentRegistry.length, ...departments.map((row) => ({
-      id: row.id,
-      company: row.company_name || row.company || "歲悅長照股份有限公司",
-      name: row.name,
-      manager: row.manager_role || row.manager || "行政部主任",
-      status: row.status || "啟用"
-    })));
-  }
+  // Legacy database snapshots must not overwrite the live Finance directory.
+  // Keep the parameters for response compatibility while company/department
+  // choices are exclusively refreshed through GET /api/finance-directory.
+  void companies;
+  void departments;
   if (sealTypes.length) {
     sealTypeRegistry.splice(0, sealTypeRegistry.length, ...sealTypes.map((row) => ({
       id: row.id,
@@ -18302,8 +18653,6 @@ async function syncDatabaseFromBackend(silent = false) {
   try {
     const tables = await Promise.all([
       fetchBackendTable("/documents", "documents"),
-      fetchBackendTable("/company_registry", "companyRegistry"),
-      fetchBackendTable("/department_registry", "departmentRegistry"),
       fetchBackendTable("/seal_type_registry", "sealTypeRegistry"),
       fetchBackendTable("/workflow_tasks", "workflowTasks"),
       fetchBackendTable("/contracts", "contracts"),
@@ -18324,10 +18673,8 @@ async function syncDatabaseFromBackend(silent = false) {
         detail: "目前角色未開啟稽核紀錄權限；系統已跳過背景同步，避免不必要的權限錯誤。"
       };
     }
-    const [documents, companies, departments, sealTypes, workflowRows, contracts, contractParties, contractApprovalsRows, recipients, attachments, tasks, events, inboundBackendRows] = tables;
+    const [documents, sealTypes, workflowRows, contracts, contractParties, contractApprovalsRows, recipients, attachments, tasks, events, inboundBackendRows] = tables;
     const safeDocuments = documents || [];
-    const safeCompanies = companies || [];
-    const safeDepartments = departments || [];
     const safeSealTypes = sealTypes || [];
     const safeWorkflowRows = workflowRows || [];
     const safeContracts = contracts || [];
@@ -18351,8 +18698,8 @@ async function syncDatabaseFromBackend(silent = false) {
       assignee: row.assignee_name,
       dueAt: row.due_at
     }));
-    databaseTables.companyRegistry = safeCompanies.map(mapBackendCompany);
-    databaseTables.departmentRegistry = safeDepartments.map(mapBackendDepartment);
+    databaseTables.companyRegistry = companyRegistry.map((item) => ({ ...item }));
+    databaseTables.departmentRegistry = departmentRegistry.map((item) => ({ ...item }));
     databaseTables.sealTypeRegistry = safeSealTypes.map(mapBackendSealType);
     databaseTables.contracts = safeContracts.map(mapBackendContract);
     databaseTables.contractParties = safeContractParties.map(mapBackendContractParty);
@@ -18363,7 +18710,7 @@ async function syncDatabaseFromBackend(silent = false) {
     databaseTables.exchangeTasks = safeTasks.map(mapBackendTask);
     databaseTables.exchangeEvents = safeEvents.map(mapBackendEvent);
     databaseTables.auditLogs = safeAudits.map(mapBackendAudit);
-    applyPersistentRegistries(safeCompanies, safeDepartments, safeSealTypes);
+    applyPersistentRegistries([], [], safeSealTypes);
     applyPersistentWorkflowTasks(safeWorkflowRows);
     applyPersistentContracts(safeContracts, safeContractApprovals);
     databaseTables.documentFlows = buildUnifiedDocumentFlows().map((flow) => ({ id: flow.id, sourceNo: flow.sourceNo, kind: flow.kind, title: flow.title, currentStep: flow.currentStep, owner: flow.currentOwner, status: flow.status }));
@@ -20106,20 +20453,8 @@ function addSealAudit(title, body) {
   renderSealAuditLog();
 }
 
-function companySealFallbackCompanies() {
-  return companyRegistry.map((item) => ({
-    id: item.id,
-    name: item.name,
-    tax_id: item.tax_id || item.taxId || "待設定",
-    address: item.address || "",
-    finance_entity_id: item.financeEntityId || item.finance_entity_id || "",
-    status: item.status === "啟用" ? "active" : item.status
-  }));
-}
-
 function availableCompanySealCompanies() {
-  if (companySealCompanies.length) return companySealCompanies;
-  return isProductionEdocHost() ? [] : companySealFallbackCompanies();
+  return companySealCompanies;
 }
 
 function companySealCompaniesForCurrentUser(companies = availableCompanySealCompanies()) {
@@ -20127,13 +20462,10 @@ function companySealCompaniesForCurrentUser(companies = availableCompanySealComp
     const status = String(item.status || "").trim().toLowerCase();
     return !status || ["active", "enabled", "啟用"].includes(status);
   });
-  if (!hasAuthenticatedBackendSession() || isCompanySealCustodian()) return activeCompanies;
-  const accountCompanyId = String(authState?.user?.company_id || "").trim();
-  const accountCompanyName = String(authState?.user?.company_name || "").trim();
-  return activeCompanies.filter((item) =>
-    (accountCompanyId && String(item.id || item.company_id || "") === accountCompanyId)
-    || (accountCompanyName && String(item.name || item.company_name || "") === accountCompanyName)
-  );
+  // GET /api/finance-directory is already authorization scoped: ordinary
+  // users receive one company while approved operational roles receive the
+  // complete active directory. Never broaden or second-guess that scope here.
+  return activeCompanies;
 }
 
 function resetCompanySealSelectionForIdentityChange() {
@@ -20402,7 +20734,7 @@ function applyCompanySealCustodianUi() {
   ];
   mutationSelectors.forEach((selector) => {
     const control = document.querySelector(selector);
-    if (control) control.disabled = !canCalibrate;
+    if (control) control.disabled = !canCalibrate || control.dataset.financeDirectoryEmpty === "true";
   });
   document.querySelectorAll("[data-simple-seal-category], [data-company-seal-preset]").forEach((button) => {
     button.disabled = !canCalibrate;
@@ -20828,20 +21160,12 @@ async function handleCompanySealGlobalTask(companyId, category, sealId = "") {
 
 async function loadCompanySealModule(silent = false) {
   try {
-    const [companiesResult, referencesResult] = await Promise.all([
-      backendRequest("/companies"),
+    const [, referencesResult] = await Promise.all([
+      refreshFinanceDirectory({ silent: true }),
       backendRequest("/seal-reference-options").catch(() => ({ grouped: {} }))
     ]);
-    companySealCompanies = (Array.isArray(companiesResult) ? companiesResult : []).map((item) => ({
-      ...item,
-      tax_id: item.tax_id || item.taxId || "待設定"
-    }));
     companySealReferences = referencesResult || { grouped: {} };
-    if (!companySealCompanies.length) {
-      if (isProductionEdocHost()) throw new Error("finance_company_sync_required");
-      companySealCompanies = companySealFallbackCompanies();
-    }
-    syncCompanyRegistryFromFinance(companySealCompanies);
+    if (!companySealCompanies.length) throw new Error("finance_company_sync_required");
     setCompanySealCompanySelection(preferredCompanySealCompanyId(
       companySealCompaniesForCurrentUser(companySealCompanies)
     ));
@@ -20849,7 +21173,6 @@ async function loadCompanySealModule(silent = false) {
     await ensureCompanySealLaunchAudit();
     await loadCompanySealCompanyData(silent);
   } catch (error) {
-    companySealCompanies = isProductionEdocHost() ? [] : companySealFallbackCompanies();
     companySealLibrary = [];
     companySealRequests = [];
     companySealFiles = [];
@@ -20862,10 +21185,7 @@ async function loadCompanySealModule(silent = false) {
     companySealModuleLoaded = false;
     renderCompanySealModule();
     if (!silent) {
-      const message = isProductionEdocHost()
-        ? "會計系統公司清單同步失敗，已停用印章建立與上傳；請重新整理或聯絡管理員。"
-        : `公司印章模組載入失敗：${error.message}`;
-      showToast(message);
+      showToast("會計系統公司清單同步失敗，已停用印章建立與上傳；請重新整理或聯絡管理員。");
     }
   }
 }
@@ -21783,37 +22103,6 @@ async function stampCompanySealUsageRequest(requestId = "", automatic = false) {
   }
 }
 
-function addCompanyRegistryItem() {
-  if (activeRole() !== "執行長") return showToast("只有執行長可以新增公司。");
-  const name = document.querySelector("#companyNameInput").value.trim();
-  const taxId = document.querySelector("#companyTaxIdInput").value.trim() || "待設定";
-  if (!hasMinimumText(name, 2)) return showToast("請輸入公司名稱。");
-  if (companyRegistry.some((item) => item.name === name)) return showToast("此公司已存在。");
-  const item = { id: `CO-${Date.now().toString().slice(-5)}`, name, taxId, status: "啟用" };
-  companyRegistry.unshift(item);
-  persistToBackend("/company_registry", { id: item.id, name: item.name, tax_id: item.taxId, status: item.status });
-  renderComposeCompanyOptions();
-  renderSeals();
-  renderDraftPreview();
-  addSealAudit("新增公司", `執行長新增公司：${name}。`);
-  showToast("公司已新增。");
-}
-
-function addDepartmentRegistryItem() {
-  if (activeRole() !== "執行長") return showToast("只有執行長可以新增部門。");
-  const company = document.querySelector("#departmentCompanyInput").value;
-  const name = document.querySelector("#departmentNameInput").value.trim();
-  const manager = document.querySelector("#departmentManagerInput").value;
-  if (!hasMinimumText(name, 2)) return showToast("請輸入部門名稱。");
-  if (departmentRegistry.some((item) => item.company === company && item.name === name)) return showToast("此部門已存在。");
-  const item = { id: `DEP-${Date.now().toString().slice(-5)}`, company, name, manager, status: "啟用" };
-  departmentRegistry.unshift(item);
-  persistToBackend("/department_registry", { id: item.id, company_name: item.company, name: item.name, manager_role: item.manager, status: item.status });
-  renderSeals();
-  addSealAudit("新增部門", `執行長新增 ${company} / ${name}，主管角色 ${manager}。`);
-  showToast("部門已新增。");
-}
-
 function addSealTypeRegistryItem() {
   if (!requireCompanySealCustodian("新增印章類別")) return;
   if (authState?.user?.role !== "執行長") return showToast("只有 Finance 執行長可以新增印章類別。");
@@ -21868,37 +22157,48 @@ function optionTags(values, selected = values[0]) {
   return values.map((value) => `<option${value === selected ? " selected" : ""}>${value}</option>`).join("");
 }
 
+function renderLegacySealDepartmentOptions({ preferAccount = false } = {}) {
+  const select = document.querySelector("#sealDepartmentInput");
+  const companyName = document.querySelector("#sealCompanyInput")?.value || "";
+  const departments = financeDepartmentsForCompany(companyName);
+  const previous = select?.value || "";
+  const accountDepartment = preferredFinanceDepartment(departments);
+  const preferred = preferAccount ? accountDepartment?.name || departments[0]?.name || "" : previous || accountDepartment?.name || departments[0]?.name || "";
+  renderFinanceNameOptions(select, departments.map((item) => item.name), preferred, { emptyLabel: "此公司尚無可用部門" });
+}
+
 function renderExecutiveSealAdmin() {
   const panel = document.querySelector("#executiveSealAdmin");
   if (!panel) return;
-  const isExecutive = activeRole() === "執行長";
-  panel.hidden = !isExecutive;
-  if (!isExecutive) return;
-  const companyNames = companyRegistry.map((item) => item.name);
-  const departmentNames = departmentRegistry.map((item) => item.name);
+  panel.hidden = false;
+  const companyNames = financeDirectoryCompanies().map((item) => item.name);
   const sealTypeNames = sealTypeRegistry.map((item) => item.name);
-  document.querySelector("#departmentCompanyInput").innerHTML = optionTags(companyNames);
-  document.querySelector("#sealCompanyInput").innerHTML = optionTags(companyNames);
-  document.querySelector("#sealDepartmentInput").innerHTML = optionTags(departmentNames, departmentNames[1] || departmentNames[0]);
-  document.querySelector("#sealTypeInput").innerHTML = optionTags(sealTypeNames);
-  document.querySelector("#companyRegistryList").innerHTML = companyRegistry.map((item) => `
+  const sealCompanySelect = document.querySelector("#sealCompanyInput");
+  const currentCompany = financeDirectoryCurrentCompany();
+  renderFinanceNameOptions(sealCompanySelect, companyNames, sealCompanySelect?.value || currentCompany?.name || "", { emptyLabel: "尚無 Finance 公司資料" });
+  renderLegacySealDepartmentOptions({ preferAccount: !sealCompanySelect?.value });
+  renderFinanceNameOptions(document.querySelector("#sealTypeInput"), sealTypeNames, document.querySelector("#sealTypeInput")?.value || sealTypeNames[0] || "", { emptyLabel: "尚無印章類別" });
+  document.querySelector("#companyRegistryList").innerHTML = companyRegistry.length ? companyRegistry.map((item) => `
     <article class="address-card">
-      <strong>${item.name}</strong>
-      <p>統一編號：${item.taxId} · ${item.status}</p>
+      <strong>${escapeDraftHtml(item.name)}</strong>
+      <p>統一編號：${escapeDraftHtml(item.taxId || "未設定")} · ${escapeDraftHtml(item.status)}</p>
+      ${item.address ? `<small>${escapeDraftHtml(item.address)}</small>` : ""}
     </article>
-  `).join("");
-  document.querySelector("#departmentRegistryList").innerHTML = departmentRegistry.map((item) => `
+  `).join("") : `<p class="empty-text">尚未取得 Finance 公司清單。</p>`;
+  document.querySelector("#departmentRegistryList").innerHTML = departmentRegistry.length ? departmentRegistry.map((item) => `
     <article class="address-card">
-      <strong>${item.name}</strong>
-      <p>${item.company} · 主管：${item.manager} · ${item.status}</p>
+      <strong>${escapeDraftHtml(item.name)}</strong>
+      <p>${escapeDraftHtml(item.company)}${item.code ? ` · ${escapeDraftHtml(item.code)}` : ""} · ${escapeDraftHtml(item.status)}</p>
+      <small>${escapeDraftHtml(item.unitType || "組織單位")} · Finance 唯讀</small>
     </article>
-  `).join("");
+  `).join("") : `<p class="empty-text">尚未取得 Finance 部門清單。</p>`;
   document.querySelector("#sealTypeRegistryList").innerHTML = sealTypeRegistry.map((item) => `
     <article class="address-card">
-      <strong>${item.name}</strong>
-      <p>${item.scope} · ${item.status}</p>
+      <strong>${escapeDraftHtml(item.name)}</strong>
+      <p>${escapeDraftHtml(item.scope)} · ${escapeDraftHtml(item.status)}</p>
     </article>
   `).join("");
+  renderFinanceDirectorySyncStatus();
 }
 
 function renderSealRegistry() {
@@ -22037,12 +22337,9 @@ function stageRectToUploadedStamp(left, top, width, height, stamp) {
 }
 
 function uploadedSealCompanies() {
-  const source = availableCompanySealCompanies();
-  const accountCompanyId = authState?.user?.company_id || "";
-  const accountCompanyName = authState?.user?.company_name || "";
-  return launchScopedCompanyOptions(source).filter(
-    (item) => item.id === accountCompanyId || item.name === accountCompanyName
-  );
+  // The backend has already scoped this response to the authenticated actor.
+  // Do not rebuild a broader list in the browser.
+  return financeDirectoryCompanies();
 }
 
 function uploadedEditorV2FeatureEnabled(companyId = document.querySelector("#uploadedSealCompany")?.value || authState?.user?.company_id || "") {
@@ -22060,9 +22357,7 @@ function renderUploadedSealCompanyOptions() {
   if (!select) return;
   const companies = uploadedSealCompanies();
   const previous = select.value;
-  const accountCompanyId = authState?.user?.company_id || "";
-  const accountCompanyName = authState?.user?.company_name || "";
-  const accountCompany = companies.find((item) => item.id === accountCompanyId || item.name === accountCompanyName);
+  const accountCompany = financeDirectoryCurrentCompany();
   select.innerHTML = companies.length
     ? companies.map((item) => `<option value="${escapeDraftHtml(item.id)}">${escapeDraftHtml(item.name)}</option>`).join("")
     : `<option value="">尚未開放可送簽公司</option>`;
@@ -22070,6 +22365,38 @@ function renderUploadedSealCompanyOptions() {
   if (companies.some((item) => item.id === previous)) select.value = previous;
   else if (accountCompany) select.value = accountCompany.id;
   else if (companies[0]) select.value = companies[0].id;
+  renderUploadedSealDepartmentOptions();
+}
+
+function preferredFinanceDepartment(departments = []) {
+  const user = authState?.user || {};
+  const financeUnitId = String(user.finance_unit_id || user.financeUnitId || user.unit_id || user.department_id || "").trim();
+  const unitName = String(user.unit || user.department_name || "").trim();
+  return departments.find((department) => (
+    (financeUnitId && [department.id, department.financeUnitId].includes(financeUnitId))
+    || (unitName && department.name === unitName)
+  )) || null;
+}
+
+function renderUploadedSealDepartmentOptions({ preferAccount = false } = {}) {
+  const select = document.querySelector("#uploadedSealDepartment");
+  if (!select) return;
+  const companyId = document.querySelector("#uploadedSealCompany")?.value || financeDirectoryCurrentCompany()?.id || "";
+  const departments = financeDepartmentsForCompany(companyId);
+  const previous = String(select.value || "").trim();
+  const accountDepartment = preferredFinanceDepartment(departments);
+  const preserveHistorical = Boolean(previous && !departments.some((department) => department.name === previous) && uploadedSealEditorRuntime.documentId);
+  select.innerHTML = [
+    ...departments.map((department) => `<option value="${escapeDraftHtml(department.name)}" data-finance-unit-id="${escapeDraftHtml(department.financeUnitId || department.id)}">${escapeDraftHtml(department.name)}${department.code ? `（${escapeDraftHtml(department.code)}）` : ""}</option>`),
+    preserveHistorical ? `<option value="${escapeDraftHtml(previous)}" data-historical-snapshot="true">${escapeDraftHtml(previous)}（歷史快照）</option>` : ""
+  ].join("") || `<option value="">此公司尚無可用部門</option>`;
+  const preferredName = preferAccount ? accountDepartment?.name : previous;
+  if (preferredName && [...select.options].some((option) => option.value === preferredName)) select.value = preferredName;
+  else if (accountDepartment) select.value = accountDepartment.name;
+  else if (departments[0]) select.value = departments[0].name;
+  select.dataset.financeDirectoryEmpty = String(!departments.length && !preserveHistorical);
+  select.dataset.financeCompanyId = companyId;
+  select.disabled = (!departments.length && !preserveHistorical) || uploadedSealEditorRuntime.locked;
 }
 
 function renderUploadedSealOptions() {
@@ -24608,11 +24935,14 @@ function renderUploadedSealWorkbench() {
   const emailInput = document.querySelector("#uploadedSealEmail");
   const phoneInput = document.querySelector("#uploadedSealPhone");
   if (applicantInput && !applicantInput.value) applicantInput.value = authState?.user?.name || "";
-  if (departmentInput && !departmentInput.value) departmentInput.value = activeUnit() || "";
   if (emailInput && !emailInput.value) emailInput.value = authState?.user?.email || "";
   if (phoneInput && !phoneInput.value) phoneInput.value = "02-66045432 #";
   const companySelect = document.querySelector("#uploadedSealCompany");
   if (companySelect && !companySelect.options.length) renderUploadedSealCompanyOptions();
+  if (departmentInput && (
+    !departmentInput.options.length
+    || departmentInput.dataset.financeCompanyId !== (companySelect?.value || "")
+  )) renderUploadedSealDepartmentOptions({ preferAccount: true });
   if (companySelect) companySelect.disabled = !companySelect.options.length || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
   const typeSelect = document.querySelector("#uploadedSealType");
   if (typeSelect) typeSelect.disabled = Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
@@ -26015,6 +26345,7 @@ document.querySelector("#officialWorkflowSearch")?.addEventListener("input", (ev
 document.querySelector("#officialCompanySelect")?.addEventListener("change", (event) => {
   event.currentTarget.dataset.userEdited = "true";
   event.currentTarget.dataset.autoDefault = "false";
+  renderOfficialDispatchUnitOptions({ preferAccount: true });
   clearOfficialWorkflowValidation();
   void loadOfficialSealOptions(event.target.value);
 });
@@ -26111,6 +26442,9 @@ document.querySelector("#contractArchiveBtn").addEventListener("click", archiveC
 document.querySelector("#contractForm").addEventListener("submit", (event) => {
   event.preventDefault();
   void saveContractDraft();
+});
+document.querySelector("#contractCompanyInput")?.addEventListener("change", () => {
+  renderContractDepartmentOptions({ preferAccount: true, preserveHistorical: false });
 });
 document.querySelector("#contractSearch").addEventListener("input", (event) => {
   contractSearchTerm = event.target.value;
@@ -26428,6 +26762,7 @@ document.querySelector("#uploadedSealPdfInput")?.addEventListener("change", hand
 document.querySelector("#addSelectedStampBtn")?.addEventListener("click", () => addUploadedStamp(document.querySelector("#uploadedSealStampType")?.value || "current_page"));
 document.querySelector("#addUploadedTextBtn")?.addEventListener("click", () => addUploadedTextAtPoint());
 document.querySelector("#uploadedSealCompany")?.addEventListener("change", async (event) => {
+  renderUploadedSealDepartmentOptions({ preferAccount: true });
   await loadUploadedSealOptions(event.target.value);
   renderUploadedSealWorkbench();
 });
@@ -26653,15 +26988,9 @@ document.querySelector("#sealForm").addEventListener("submit", (event) => {
   event.preventDefault();
   addSealFromForm();
 });
-document.querySelector("#addCompanyBtn").addEventListener("click", addCompanyRegistryItem);
-document.querySelector("#companyRegistryForm").addEventListener("submit", (event) => {
-  event.preventDefault();
-  addCompanyRegistryItem();
-});
-document.querySelector("#addDepartmentBtn").addEventListener("click", addDepartmentRegistryItem);
-document.querySelector("#departmentRegistryForm").addEventListener("submit", (event) => {
-  event.preventDefault();
-  addDepartmentRegistryItem();
+document.querySelector("#sealCompanyInput")?.addEventListener("change", () => {
+  renderLegacySealDepartmentOptions({ preferAccount: true });
+  applyCompanySealCustodianUi();
 });
 document.querySelector("#addSealTypeBtn").addEventListener("click", addSealTypeRegistryItem);
 document.querySelector("#sealTypeRegistryForm").addEventListener("submit", (event) => {
@@ -27296,6 +27625,11 @@ function scheduleDeferredWorkspaceInitialization() {
 
 updateHeaderStatus();
 window.setInterval(updateHeaderStatus, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && hasAuthenticatedBackendSession()) {
+    void refreshFinanceDirectory({ silent: true });
+  }
+});
 setModuleEntryProgress(18, "正在啟動電子公文", "準備安全登入與您的個人工作台。");
 void tryResumePlatformSession().then((resumed) => {
   if (resumed || isProductionEdocHost()) return;

@@ -676,7 +676,7 @@
                   <option value="local_unit_physical">地方單位收到實體信件／公文</option>
                 </select></label>
                 <label>收到日期<input id="inboundArchiveReceivedDate" type="date" /></label>
-                <label>收件單位<input id="inboundArchiveDepartment" /></label>
+                <label>收件單位<select id="inboundArchiveDepartment"></select></label>
               </div>
               <div class="inline-fields">
                 <label>來文單位／寄件人<input id="inboundArchiveSenderName" required placeholder="請填寫來文單位或寄件人" /></label>
@@ -922,7 +922,7 @@
               </section>
               <div class="inline-fields">
                 <label>受文者<input id="officialRecipientInput" placeholder="臺北市政府社會局" /><span class="field-hint" id="officialRecipientHint"></span></label>
-                <label>發文單位<input id="officialDispatchUnitInput" placeholder="居家照顧部" /></label>
+                <label>發文單位<select id="officialDispatchUnitInput"></select></label>
                 <label>承辦人<input id="officialHandlerInput" placeholder="承辦人" /></label>
               </div>
               <label>主旨<input id="officialSubjectInput" placeholder="請輸入發文主旨" /><span class="field-hint" id="officialSubjectHint"></span></label>
@@ -1553,7 +1553,7 @@
                       <span class="field-hint" id="uploadedSealApprovalCategoryHint">選擇後，系統會自動套用 A／B／C／D 簽核層級。</span>
                     </label>
                   </div>
-                  <label>部門<input id="uploadedSealDepartment" placeholder="請輸入部門" required /></label>
+                  <label>部門<select id="uploadedSealDepartment" required></select></label>
                   <label>公司<select id="uploadedSealCompany" required></select></label>
                   <label class="electronic-seal-application-wide">申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
                   <label class="electronic-seal-application-wide">用印原因<textarea id="uploadedSealReason" rows="3" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
@@ -2026,33 +2026,29 @@
           <section class="panel executive-seal-admin" id="executiveSealAdmin">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Executive Registry</p>
-                <h3>執行長公司、部門與印章類別設定</h3>
+                <p class="eyebrow">Finance Directory</p>
+                <h3>公司、部門與印章類別</h3>
+                <p class="field-hint" role="status" aria-live="polite">
+                  來源：<strong id="financeDirectorySource">會計系統 Finance</strong>
+                  · 最後同步：<span id="financeDirectoryLastSynced">尚未同步</span>
+                  · 公司與部門請至會計系統維護
+                </p>
               </div>
-              <span class="status-pill" id="executiveSealAdminStatus">僅執行長</span>
+              <span class="status-pill" id="financeDirectoryStatus">等待同步</span>
             </div>
             <div class="executive-admin-grid">
               <section>
                 <div class="panel-heading tight">
-                  <h3>公司</h3>
-                  <button class="text-button" id="addCompanyBtn" type="button">新增公司</button>
+                  <h3>公司（唯讀）</h3>
+                  <span class="status-pill">Finance</span>
                 </div>
-                <form class="compact-form" id="companyRegistryForm">
-                  <label>公司名稱<input id="companyNameInput" value="歲悅長照股份有限公司" /></label>
-                  <label>統一編號<input id="companyTaxIdInput" value="待設定" /></label>
-                </form>
                 <div class="address-results compact-list" id="companyRegistryList"></div>
               </section>
               <section>
                 <div class="panel-heading tight">
-                  <h3>部門</h3>
-                  <button class="text-button" id="addDepartmentBtn" type="button">新增部門</button>
+                  <h3>部門（唯讀）</h3>
+                  <span class="status-pill">Finance</span>
                 </div>
-                <form class="compact-form" id="departmentRegistryForm">
-                  <label>所屬公司<select id="departmentCompanyInput"></select></label>
-                  <label>部門名稱<input id="departmentNameInput" value="行政部" /></label>
-                  <label>主管角色<select id="departmentManagerInput"><option>執行長</option><option>行政部主任</option><option>總務</option><option>主任</option><option>人資</option><option>會計</option><option>業務助理</option></select></label>
-                </form>
                 <div class="address-results compact-list" id="departmentRegistryList"></div>
               </section>
               <section>
@@ -2925,7 +2921,7 @@
 
           <div class="report-filter panel">
             <label>統計期間<select id="reportPeriod"><option>今日</option><option selected>近 7 日</option><option>近 30 日</option><option>本年度</option></select></label>
-            <label>統計單位<select id="reportUnit"><option>全部單位</option><option>總管理處</option><option>居家照顧課</option><option>社區據點課</option></select></label>
+            <label>統計單位<select id="reportUnit"></select></label>
             <label>機關範圍<input id="reportAgencyQuery" value="全部機關" /></label>
             <label>報表版次<select id="reportVersion"><option selected>營運日報</option><option>主管週報</option><option>月度內控報表</option><option>法遵稽核報表</option></select></label>
             <button class="primary-button" id="reportsApplyFilterBtn" type="button">套用篩選</button>

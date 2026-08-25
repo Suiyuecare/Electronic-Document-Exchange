@@ -962,6 +962,7 @@ def normalize_finance_bridge_actor(
         raise FinanceBridgeContractError("finance_bridge_actor_invalid")
     return {
         "slot": slot,
+        "tenant_id": roster_text(actor.get("tenantId")),
         "finance_user_id": finance_user_id,
         "name": name,
         "email": email,
@@ -1002,6 +1003,7 @@ def normalize_finance_bridge_snapshot(
         else "inactive"
     )
     applicant = {
+        "tenant_id": roster_text(identity.get("tenantId")),
         "finance_user_id": roster_text(identity.get("financeUserId")),
         "name": roster_text(identity.get("name")),
         "email": roster_text(identity.get("email")).lower(),
@@ -1022,7 +1024,7 @@ def normalize_finance_bridge_snapshot(
         "projection_state": projection_state,
         "profile": applicant_profile,
     }
-    if not all(applicant.get(key) for key in ("finance_user_id", "name", "email", "entity_id")):
+    if not all(applicant.get(key) for key in ("tenant_id", "finance_user_id", "name", "email", "entity_id")):
         raise FinanceBridgeContractError("finance_bridge_identity_invalid")
     required_slots = {
         FINANCE_BRIDGE_ACTOR_SLOTS[key]
@@ -3589,7 +3591,13 @@ def is_production() -> bool:
     return DEPLOYMENT_ENV in {"production", "prod"}
 
 
-FINANCE_MASTER_GENERIC_WRITE_TABLES = {"users", "companies", "module_account_links"}
+FINANCE_MASTER_GENERIC_WRITE_TABLES = {
+    "users",
+    "companies",
+    "company_registry",
+    "department_registry",
+    "module_account_links",
+}
 
 
 def finance_master_generic_write_blocked(table: str) -> bool:
@@ -13512,9 +13520,6 @@ TABLE_WRITE_PERMISSIONS: Dict[str, List[str]] = {
 # registries used by the shell. Workflow, identity, file, seal-vault, audit,
 # notification and exchange state must go through dedicated scoped endpoints.
 GENERIC_API_READ_ONLY_TABLES = frozenset({
-    "companies",
-    "company_registry",
-    "department_registry",
     "seal_type_registry",
     "seal_reference_options",
 })
@@ -35022,11 +35027,12 @@ def supabase_upsert_finance_company_snapshot(
     resolved without mutating its independently revisioned master fields, while
     a previously unseen company can still be provisioned.
     """
+    tenant_id = roster_text(source.get("tenantId") or source.get("tenant_id"))
     entity_id = roster_text(source.get("entityId") or source.get("entity_id"))
     name = roster_text(source.get("name"))
     tax_id = roster_text(source.get("taxId") if "taxId" in source else source.get("tax_id"))
     address = roster_text(source.get("address"))
-    if not entity_id or not name:
+    if not tenant_id or not entity_id or not name:
         raise FinanceBridgeContractError("finance_company_invalid")
     if isinstance(source_revision, bool) or not isinstance(source_revision, int) or source_revision < 0:
         raise FinanceBridgeContractError("finance_company_revision_invalid")
@@ -35034,6 +35040,10 @@ def supabase_upsert_finance_company_snapshot(
     if len(rows) > 1:
         raise FinanceBridgeDenied("finance_company_ambiguous")
     existing = rows[0] if rows else None
+    if existing:
+        existing_tenant_id = roster_text(existing.get("finance_tenant_id"))
+        if existing_tenant_id and existing_tenant_id != tenant_id:
+            raise FinanceBridgeDenied("finance_company_tenant_conflict")
     adopted_by_name = False
     if not existing:
         name_rows = supabase_filter_rows("companies", {"name": name}, order="id.asc", limit=2)
@@ -35048,8 +35058,13 @@ def supabase_upsert_finance_company_snapshot(
                 raise FinanceBridgeDenied("finance_company_identity_conflict")
             existing = candidate
             adopted_by_name = True
+    if existing:
+        existing_tenant_id = roster_text(existing.get("finance_tenant_id"))
+        if existing_tenant_id and existing_tenant_id != tenant_id:
+            raise FinanceBridgeDenied("finance_company_tenant_conflict")
     active = source.get("active", True) is not False
     values: Dict[str, Any] = {
+        "finance_tenant_id": tenant_id,
         "name": name,
         "tax_id": tax_id,
         "address": address,
@@ -35072,9 +35087,10 @@ def supabase_upsert_finance_company_snapshot(
             if not adopted_by_name:
                 return existing, "resolved"
             # A legacy exact-name row may be safely bound to the stable Finance
-            # entity id, but member snapshots must not rewrite company master
-            # attributes (name/address/tax/status) without company revision CAS.
+            # entity/tenant ids, but member snapshots must not rewrite company
+            # master attributes (name/address/tax/status) without company CAS.
             identity_values = {
+                "finance_tenant_id": tenant_id,
                 "finance_entity_id": entity_id,
                 "source_system": "finance",
                 "last_synced_from_finance_at": now(),
@@ -35108,7 +35124,7 @@ def supabase_upsert_finance_company_snapshot(
                 return latest, "stale"
             raise FinanceBridgeUnavailable("finance_company_revision_conflict")
         return supabase_patch("companies", existing["id"], values), "applied"
-    company_id = f"FINCO-{hashlib.sha256(entity_id.encode('utf-8')).hexdigest()[:12].upper()}"
+    company_id = f"FINCO-{hashlib.sha256(f'{tenant_id}:{entity_id}'.encode('utf-8')).hexdigest()[:12].upper()}"
     try:
         return supabase_insert("companies", {"id": company_id, **values, "created_at": now()}), "applied"
     except RuntimeError:
@@ -35367,10 +35383,13 @@ def _supabase_finance_snapshot_user_candidate(
     if existing:
         existing_source = roster_text(existing.get("account_source")).lower()
         existing_finance_id = roster_text(existing.get("logging_account_id") or existing.get("finance_employee_id"))
+        existing_tenant_id = roster_text(existing.get("finance_tenant_id"))
         if existing_source not in {"", "finance"}:
             raise FinanceBridgeDenied("finance_identity_conflict")
         if existing_finance_id and existing_finance_id != finance_user_id:
             raise FinanceBridgeDenied("finance_identity_conflict")
+        if existing_tenant_id and existing_tenant_id != roster_text(source.get("tenant_id")):
+            raise FinanceBridgeDenied("finance_identity_tenant_conflict")
     return existing
 
 
@@ -35395,6 +35414,7 @@ def _supabase_upsert_finance_snapshot_user(
         raise FinanceBridgeContractError("finance_identity_revision_invalid")
     values: Dict[str, Any] = {
         "account_source": "finance",
+        "finance_tenant_id": source["tenant_id"],
         "logging_account_id": source["finance_user_id"],
         "logging_role_key": profile["logging_role_key"],
         "finance_employee_id": source["finance_user_id"],
@@ -35465,7 +35485,8 @@ def _supabase_upsert_finance_snapshot_user(
                 return latest, "stale"
             raise FinanceBridgeUnavailable("finance_identity_revision_conflict")
         return supabase_patch("users", existing["id"], values), "applied"
-    user_id = f"FIN-{hashlib.sha256(source['finance_user_id'].encode('utf-8')).hexdigest()[:12].upper()}"
+    projection_key = f"{source['tenant_id']}:{source['finance_user_id']}"
+    user_id = f"FIN-{hashlib.sha256(projection_key.encode('utf-8')).hexdigest()[:12].upper()}"
     try:
         return supabase_insert("users", {
             "id": user_id,
@@ -35771,6 +35792,24 @@ def supabase_record_finance_sync_receipt(
     company_id: str = "",
 ) -> Dict[str, Any]:
     event_id = roster_text(payload.get("eventId"))
+    event_type = roster_text(payload.get("eventType"))
+    identity = payload.get("identity") or {}
+    company = payload.get("company") or {}
+    organization = payload.get("organization") or {}
+    tenant_id = roster_text(
+        organization.get("tenantId")
+        or company.get("tenantId")
+        or identity.get("tenantId")
+    )
+    if event_type == "member.changed":
+        aggregate_type = "member"
+        aggregate_id = roster_text(identity.get("financeUserId"))
+    elif event_type == "company.changed":
+        aggregate_type = "company"
+        aggregate_id = roster_text(company.get("entityId"))
+    else:
+        aggregate_type = "organization"
+        aggregate_id = tenant_id
     existing = supabase_finance_sync_receipt(event_id)
     if existing and (
         existing.get("payload_sha256") != payload_sha256
@@ -35779,10 +35818,13 @@ def supabase_record_finance_sync_receipt(
     ):
         raise FinanceBridgeDenied("finance_member_sync_event_id_conflict")
     values = {
-        "event_type": payload["eventType"],
+        "event_type": event_type,
         "source_revision": int(payload["sourceRevision"]),
-        "finance_user_id": roster_text((payload.get("identity") or {}).get("financeUserId")) or None,
-        "finance_entity_id": roster_text((payload.get("company") or {}).get("entityId")) or None,
+        "finance_tenant_id": tenant_id or None,
+        "aggregate_type": aggregate_type,
+        "aggregate_id": aggregate_id or None,
+        "finance_user_id": roster_text(identity.get("financeUserId")) or None,
+        "finance_entity_id": roster_text(company.get("entityId")) or None,
         "projected_user_id": roster_text(user_id) or None,
         "projected_company_id": roster_text(company_id) or None,
         "payload_sha256": payload_sha256,
@@ -35821,6 +35863,7 @@ def _supabase_deactivate_unsupported_finance_member(
     """Deactivate an old unsupported/system account without inventing a role."""
     identity = snapshot.get("identity") or {}
     source = {
+        "tenant_id": roster_text(identity.get("tenantId")),
         "finance_user_id": roster_text(identity.get("financeUserId")),
         "email": roster_text(identity.get("email")).lower(),
     }
@@ -35925,11 +35968,64 @@ def _supabase_deactivate_unmapped_finance_member(
     return user, disposition
 
 
-def supabase_apply_finance_member_sync_event(payload: Dict[str, Any]) -> Dict[str, Any]:
+def supabase_apply_finance_organization_sync_event(
+    payload: Dict[str, Any],
+    payload_sha256: str,
+) -> Dict[str, Any]:
+    """Atomically replace eDoc's read-only projection of one published graph."""
+    organization = payload.get("organization") or {}
+    tenant_id = roster_text(organization.get("tenantId"))
+    if not re.fullmatch(r"[0-9a-f]{64}", roster_text(payload_sha256).lower()):
+        raise FinanceBridgeContractError("finance_organization_payload_hash_invalid")
+    try:
+        raw = supabase_request(
+            "POST",
+            "rpc/edoc_apply_finance_organization_projection_v2",
+            {
+                "p_event_id": payload["eventId"],
+                "p_tenant_id": tenant_id,
+                "p_source_revision": int(payload["sourceRevision"]),
+                "p_payload_sha256": payload_sha256.lower(),
+                "p_occurred_at": payload["occurredAt"],
+                "p_organization": organization,
+            },
+        )
+    except RuntimeError as exc:
+        error_text = str(exc)
+        if "finance_organization_revision_conflict" in error_text or "finance_member_sync_event_id_conflict" in error_text:
+            raise FinanceBridgeDenied("finance_organization_revision_conflict") from exc
+        raise
+    if isinstance(raw, list):
+        result = raw[0] if raw and isinstance(raw[0], dict) else {}
+    else:
+        result = raw if isinstance(raw, dict) else {}
+    status = roster_text(result.get("status"))
+    if status not in {"applied", "stale", "replayed"}:
+        raise FinanceBridgeUnavailable("finance_organization_projection_invalid_response")
+    return {
+        "status": status,
+        "sourceRevision": int(payload["sourceRevision"]),
+        "organizationVersion": int(result.get("organizationVersion") or payload["sourceRevision"]),
+        "organizationUnitCount": int(result.get("organizationUnitCount") or 0),
+        "organizationAssignmentCount": int(result.get("organizationAssignmentCount") or 0),
+        **(
+            {"originalStatus": roster_text(result.get("originalStatus"))}
+            if result.get("originalStatus")
+            else {}
+        ),
+    }
+
+
+def supabase_apply_finance_member_sync_event(
+    payload: Dict[str, Any],
+    payload_sha256: str = "",
+) -> Dict[str, Any]:
     """Apply one validated member/company event using stable ids and revision CAS."""
     event_type = payload["eventType"]
     event_id = payload["eventId"]
     source_revision = int(payload["sourceRevision"])
+    if event_type == "organization.published":
+        return supabase_apply_finance_organization_sync_event(payload, payload_sha256)
     if event_type == "company.changed":
         company, disposition = supabase_upsert_finance_company_snapshot(
             payload["company"],
@@ -35962,6 +36058,7 @@ def supabase_apply_finance_member_sync_event(payload: Dict[str, Any]) -> Dict[st
             "projectionState": "inactive",
         }
     source_probe = {
+        "tenant_id": roster_text(identity.get("tenantId")),
         "finance_user_id": roster_text(identity.get("financeUserId")),
         "email": roster_text(identity.get("email")).lower(),
     }
@@ -36042,6 +36139,244 @@ def finance_member_sync_success_response(
         "applied": disposition == "applied",
         "stale": disposition == "stale",
         "replayed": disposition == "replayed",
+    }
+
+
+def _finance_directory_json_list(value: Any) -> List[str]:
+    parsed = parse_json_any(value, [])
+    if not isinstance(parsed, list):
+        return []
+    return [roster_text(item) for item in parsed if roster_text(item)]
+
+
+def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Return a tenant-scoped, read-only Finance company/department directory.
+
+    Browsers never read the Finance database or the service-only projection
+    tables directly. Existing document rows continue to carry their immutable
+    company/department snapshots even when this current directory changes.
+    """
+    user = (session or {}).get("user") or {}
+    if not user:
+        raise PermissionError("finance_directory_forbidden")
+
+    tenant_id = roster_text(user.get("finance_tenant_id"))
+    current_company = supabase_get("companies", roster_text(user.get("company_id"))) if user.get("company_id") else None
+    if not tenant_id:
+        tenant_id = roster_text((current_company or {}).get("finance_tenant_id"))
+
+    # Fetch at most two global states to determine whether pre-tenant legacy
+    # rows can be attributed safely. In a multi-tenant projection, blank
+    # tenant ids are never exposed to either tenant.
+    state_candidates = supabase_filter_rows(
+        "finance_organization_projection_state",
+        {},
+        order="finance_tenant_id.asc",
+        limit=2,
+    )
+    all_states: List[Dict[str, Any]] = []
+    if tenant_id:
+        all_states = [
+            row for row in state_candidates
+            if roster_text(row.get("finance_tenant_id")) == tenant_id
+        ]
+        if not all_states:
+            all_states = supabase_filter_rows(
+                "finance_organization_projection_state",
+                {"finance_tenant_id": tenant_id},
+                limit=1,
+            )
+    elif len(state_candidates) == 1:
+        # Compatibility for rows projected before tenant_id was introduced is
+        # safe only when eDoc currently holds exactly one Finance tenant.
+        tenant_id = roster_text(state_candidates[0].get("finance_tenant_id"))
+        all_states = state_candidates
+    if not tenant_id:
+        raise FinanceBridgeUnavailable("finance_organization_projection_pending")
+
+    state = all_states[0] if all_states else None
+    legacy_unscoped_rows_allowed = (
+        len(state_candidates) == 1
+        and roster_text(state_candidates[0].get("finance_tenant_id")) == tenant_id
+    )
+    finance_companies = supabase_filter_rows(
+        "companies",
+        {"source_system": "finance"},
+        order="name.asc",
+        limit=500,
+    )
+    privileged_directory = (
+        roster_text(user.get("role")) in {"執行長", "行政部主任", "總務"}
+        or roster_text(user.get("logging_role_key")) in {"ceo", "admin_director", "ga_chief"}
+    )
+    current_company_id = roster_text(user.get("company_id"))
+    companies: List[Dict[str, Any]] = []
+    for company in finance_companies:
+        company_tenant_id = roster_text(company.get("finance_tenant_id"))
+        if company_tenant_id and company_tenant_id != tenant_id:
+            continue
+        if not company_tenant_id and not legacy_unscoped_rows_allowed:
+            continue
+        if roster_text(company.get("status")).lower() not in {"active", "啟用"}:
+            continue
+        if not privileged_directory and roster_text(company.get("id")) != current_company_id:
+            continue
+        entity_id = roster_text(company.get("finance_entity_id"))
+        if not entity_id:
+            continue
+        company_id = roster_text(company.get("id"))
+        editor_v2_enabled = pdf_editor_v2_enabled_for_company(company_id)
+        companies.append({
+            "id": company_id,
+            "financeEntityId": entity_id,
+            "name": roster_text(company.get("name")),
+            "taxId": roster_text(company.get("tax_id")),
+            "address": roster_text(company.get("address")),
+            "status": "active",
+            # Company capability metadata must travel with the scoped Finance
+            # directory. The browser no longer loads the legacy /companies
+            # endpoint, while the mutable editor API still enforces the same
+            # entitlement again on the server.
+            "pdf_editor_v2": editor_v2_enabled,
+            "feature_flags": {"pdf_editor_v2": editor_v2_enabled},
+            "featureFlags": {"pdf_editor_v2": editor_v2_enabled},
+        })
+
+    company_entity_ids = {item["financeEntityId"] for item in companies}
+    unit_rows = supabase_filter_rows(
+        "finance_organization_units",
+        {"finance_tenant_id": tenant_id, "status": "active"},
+        order="sort_order.asc,code.asc",
+        limit=500,
+    ) if state else []
+    units_by_finance_id = {
+        roster_text(unit.get("finance_unit_id")): unit
+        for unit in unit_rows
+        if roster_text(unit.get("finance_unit_id"))
+        and roster_text(unit.get("finance_tenant_id")) == tenant_id
+        and roster_text(unit.get("status")).lower() in {"active", "啟用"}
+    }
+
+    def effective_entity_codes(unit: Dict[str, Any]) -> List[str]:
+        current = unit
+        visited: set[str] = set()
+        for _depth in range(32):
+            current_id = roster_text(current.get("finance_unit_id"))
+            if not current_id or current_id in visited:
+                return []
+            visited.add(current_id)
+            mode = roster_text(current.get("entity_scope_mode")).lower() or "inherit"
+            if mode == "all":
+                return sorted(company_entity_ids)
+            if mode == "explicit":
+                return sorted(set(_finance_directory_json_list(current.get("entity_codes"))) & company_entity_ids)
+            parent_id = roster_text(current.get("parent_finance_unit_id"))
+            if not parent_id or parent_id not in units_by_finance_id:
+                return []
+            current = units_by_finance_id[parent_id]
+        return []
+
+    departments: List[Dict[str, Any]] = []
+    for unit in unit_rows:
+        if roster_text(unit.get("finance_tenant_id")) != tenant_id:
+            continue
+        if roster_text(unit.get("status")).lower() not in {"active", "啟用"}:
+            continue
+        if roster_text(unit.get("unit_type")).lower() not in {"department", "section", "team"}:
+            continue
+        entity_codes = effective_entity_codes(unit)
+        if not entity_codes:
+            continue
+        parent_finance_id = roster_text(unit.get("parent_finance_unit_id"))
+        parent = units_by_finance_id.get(parent_finance_id) or {}
+        departments.append({
+            "id": roster_text(unit.get("id")),
+            "financeUnitId": roster_text(unit.get("finance_unit_id")),
+            "code": roster_text(unit.get("code")),
+            "name": roster_text(unit.get("name")),
+            "unitType": roster_text(unit.get("unit_type")),
+            "parentId": roster_text(parent.get("id")) or None,
+            "parentFinanceUnitId": parent_finance_id or None,
+            "sortOrder": int(unit.get("sort_order") or 0),
+            "isPostingUnit": bool(unit.get("is_posting_unit")),
+            "entityCodes": entity_codes,
+        })
+
+    etag = roster_text((state or {}).get("etag"))
+    version_no = int((state or {}).get("version_no") or 0)
+    return {
+        "source": "finance",
+        "schemaVersion": 2,
+        "directoryVersion": f"{tenant_id}:{version_no}:{etag[:12]}" if state else f"{tenant_id}:pending",
+        "syncedAt": roster_text((state or {}).get("last_synced_from_finance_at")),
+        "currentCompanyId": current_company_id,
+        "companies": companies,
+        "departments": departments,
+        "organization": {
+            "tenantId": tenant_id,
+            "versionNo": version_no,
+            "etag": etag,
+        },
+    }
+
+
+def local_finance_directory(conn: sqlite3.Connection, session: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Development-only compatibility shape; production always uses Finance."""
+    user = (session or {}).get("user") or {}
+    if not user:
+        raise PermissionError("finance_directory_forbidden")
+    company_rows = conn.execute(
+        "SELECT id, name, tax_id, address, finance_entity_id, status FROM companies ORDER BY name"
+    ).fetchall()
+    companies = [
+        {
+            "id": row["id"],
+            "financeEntityId": row["finance_entity_id"] or row["id"],
+            "name": row["name"],
+            "taxId": row["tax_id"] or "",
+            "address": row["address"] or "",
+            "status": "active",
+            "pdf_editor_v2": pdf_editor_v2_enabled_for_company(row["id"]),
+            "feature_flags": {
+                "pdf_editor_v2": pdf_editor_v2_enabled_for_company(row["id"]),
+            },
+            "featureFlags": {
+                "pdf_editor_v2": pdf_editor_v2_enabled_for_company(row["id"]),
+            },
+        }
+        for row in company_rows
+        if roster_text(row["status"]).lower() in {"active", "啟用"}
+    ]
+    department_rows = conn.execute(
+        "SELECT id, company_name, name, status FROM department_registry ORDER BY company_name, name"
+    ).fetchall()
+    company_ids_by_name = {item["name"]: item["financeEntityId"] for item in companies}
+    departments = [
+        {
+            "id": row["id"],
+            "financeUnitId": row["id"],
+            "code": row["id"],
+            "name": row["name"],
+            "unitType": "department",
+            "parentId": None,
+            "parentFinanceUnitId": None,
+            "sortOrder": index,
+            "isPostingUnit": True,
+            "entityCodes": [company_ids_by_name[row["company_name"]]],
+        }
+        for index, row in enumerate(department_rows)
+        if roster_text(row["status"]).lower() in {"active", "啟用"}
+        and row["company_name"] in company_ids_by_name
+    ]
+    return {
+        "source": "local-development",
+        "schemaVersion": 2,
+        "directoryVersion": "local-development",
+        "syncedAt": now(),
+        "currentCompanyId": roster_text(user.get("company_id")),
+        "companies": companies,
+        "departments": departments,
+        "organization": {"tenantId": "local-development", "versionNo": 0, "etag": ""},
     }
 
 
@@ -38922,16 +39257,20 @@ class Handler(SimpleHTTPRequestHandler):
                         response_headers,
                     )
                     return
-            result = supabase_apply_finance_member_sync_event(payload)
-            disposition = result.get("status") if result.get("status") in {"applied", "stale"} else "applied"
-            supabase_record_finance_sync_receipt(
-                payload,
-                verified["payloadSha256"],
-                apply_status=disposition,
-                result_code=f"finance_member_sync_{disposition}",
-                user_id=result.get("userId") or "",
-                company_id=result.get("companyId") or "",
-            )
+            result = supabase_apply_finance_member_sync_event(payload, verified["payloadSha256"])
+            disposition = result.get("status") if result.get("status") in {"applied", "stale", "replayed"} else "applied"
+            # The organization RPC commits its projection and receipt in the
+            # same database transaction. Member/company events keep the
+            # existing receiver-side receipt path.
+            if payload.get("eventType") != "organization.published":
+                supabase_record_finance_sync_receipt(
+                    payload,
+                    verified["payloadSha256"],
+                    apply_status=disposition,
+                    result_code=f"finance_member_sync_{disposition}",
+                    user_id=result.get("userId") or "",
+                    company_id=result.get("companyId") or "",
+                )
             self.send_json(
                 finance_member_sync_success_response(payload, result, status=disposition),
                 200,
@@ -39163,8 +39502,13 @@ class Handler(SimpleHTTPRequestHandler):
                     if not self.cron_authorized():
                         self.send_json({"error": "unauthorized"}, 401)
                         return
-                elif not supabase_current_session(self.bearer_token()):
-                    self.send_json({"error": "unauthorized"}, 401)
+                else:
+                    session = supabase_current_session(self.bearer_token())
+                    if not session:
+                        self.send_json({"error": "unauthorized"}, 401)
+                        return
+                if method == "GET" and parts == ["finance-directory"]:
+                    self.send_json(supabase_finance_directory(session))
                     return
                 if is_operations_maintenance_endpoint(method, parts):
                     session = supabase_current_session(self.bearer_token())
@@ -40083,8 +40427,13 @@ class Handler(SimpleHTTPRequestHandler):
                     if not self.cron_authorized():
                         self.send_json({"error": "unauthorized"}, 401)
                         return
-                elif not current_session(conn, self.bearer_token()):
-                    self.send_json({"error": "unauthorized"}, 401)
+                else:
+                    session = current_session(conn, self.bearer_token())
+                    if not session:
+                        self.send_json({"error": "unauthorized"}, 401)
+                        return
+                if method == "GET" and parts == ["finance-directory"]:
+                    self.send_json(local_finance_directory(conn, session))
                     return
                 if is_operations_maintenance_endpoint(method, parts):
                     session = current_session(conn, self.bearer_token())
