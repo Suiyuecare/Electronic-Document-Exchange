@@ -2,8 +2,9 @@
 
 ## 監控端點
 
-- `GET /api/healthz`：給 uptime monitor 使用，只確認 API 與資料層可回應。
-- `GET /api/readyz`：給部署門檻使用，production 必須通過必要環境變數與 blocker 檢查。
+- `GET /api/healthz`：給 uptime monitor 使用，只確認 API 程序可回應；不代表資料庫或外部服務已就緒。
+- `GET /api/readyz`：目前核准的內部 eDoc 模組部署門檻，檢查 Supabase、私密儲存、掃毒、Finance SSO 與公司開放範圍。
+- `GET /api/production/readiness`：政府正式交換與法定簽章切換門檻；provider 尚未取得規格及人工核准前維持 fail-closed。
 - `GET /api/production/deployment`：顯示環境、版本、分支、Vercel region、資料庫與儲存設定。
 - `GET /api/production/monitoring`：彙整 readiness、Cron、通知憑證、交換失敗、背景任務、檔案儲存。
 - `POST /api/production/monitoring/check`：由維運中心手動執行，會寫入 audit log 並在有告警時呼叫 webhook。
@@ -27,7 +28,8 @@
 ## 上線門檻
 
 - GitHub Actions `Static checks`、`vercel build --prod`、`Smoke test production` 全數通過。
-- `/api/production/readiness` 在 production 回傳 `ready: true`。
+- `/api/healthz` 與 `/api/readyz` 在 production 回傳 HTTP 200。
+- 政府正式交換尚未核准時，`/api/production/readiness` 維持 HTTP 503 為預期；取得 jAgent／API／SDK／封包規格並人工核准正式 provider 後，才要求回傳 `ready: true`。
 - `/api/production/monitoring` 沒有 `critical` alert。
 - Vercel Dashboard 可看到 `/api/cron/run-due` 與 `/api/cron/monitoring` 的正式排程。
 - Supabase 具備正式備份策略，且已完成一次還原演練紀錄。

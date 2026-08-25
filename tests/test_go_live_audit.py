@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sqlite3
@@ -159,6 +160,51 @@ class GoLiveAuditTestCase(unittest.TestCase):
         self.assertFalse(audit["formalGo"])
         self.assertTrue(audit["internalPilotAllowed"])
         self.assertTrue(any(item["key"] == "exchange" and item["status"] != "pass" for item in audit["categories"]))
+
+    def test_readyz_uses_internal_boundary_without_weakening_formal_readiness(self) -> None:
+        internal = {"ready": True, "formalGo": False}
+        formal = {"ready": False, "formalGo": False}
+        with (
+            mock.patch.object(backend, "internal_readiness", return_value=internal) as internal_probe,
+            mock.patch.object(backend, "production_readiness", return_value=formal) as formal_probe,
+        ):
+            self.assertIs(backend.readiness_for_public_endpoint(["readyz"]), internal)
+            self.assertIs(backend.readiness_for_public_endpoint(["production", "readiness"]), formal)
+
+        internal_probe.assert_called_once_with()
+        formal_probe.assert_called_once_with()
+
+    def test_public_production_readiness_response_remains_masked(self) -> None:
+        formal = {"ready": False, "missing": ["SECRET_NAME"], "blockers": ["private detail"]}
+        with (
+            mock.patch.object(backend, "is_production", return_value=True),
+            mock.patch.object(backend, "production_readiness", return_value=formal),
+        ):
+            payload, status = backend.public_readiness_response(["production", "readiness"])
+
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["status"], "not_ready")
+        self.assertNotIn("missing", payload)
+        self.assertNotIn("blockers", payload)
+
+    def test_readyz_returns_200_only_when_internal_module_is_ready(self) -> None:
+        with (
+            mock.patch.object(backend, "is_production", return_value=True),
+            mock.patch.object(backend, "internal_readiness", return_value={"ready": True}),
+        ):
+            ready_payload, ready_status = backend.public_readiness_response(["readyz"])
+        with (
+            mock.patch.object(backend, "is_production", return_value=True),
+            mock.patch.object(backend, "internal_readiness", return_value={"ready": False}),
+        ):
+            blocked_payload, blocked_status = backend.public_readiness_response(["readyz"])
+
+        self.assertEqual((ready_status, ready_payload["status"]), (200, "ready"))
+        self.assertEqual((blocked_status, blocked_payload["status"]), (503, "not_ready"))
+
+    def test_supabase_and_sqlite_handlers_share_readiness_boundary(self) -> None:
+        source = inspect.getsource(backend.Handler.handle_api)
+        self.assertEqual(source.count("payload, status = public_readiness_response(parts)"), 2)
 
     def test_edoc_password_login_is_blocked_in_production(self) -> None:
         conn = sqlite3.connect(":memory:")

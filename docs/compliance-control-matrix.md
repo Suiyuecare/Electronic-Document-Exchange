@@ -33,7 +33,7 @@
 - 每一份押章 PDF 都保留押章前版本、押章後版本、用印申請單、座標、章戳序號與 SHA-256。
 - 系統帳號必須具備角色、單位、職稱、職等、登入紀錄、裝置紀錄與可停用機制。
 - 通知派送不可只在畫面模擬，應有 Email、LINE、站內通知或失敗紀錄。
-- 正式部署必須通過 `/api/production/readiness`。
+- 內部 eDoc 正式部署必須通過 `/api/healthz` 與 `/api/readyz`；`/api/production/readiness` 僅作為政府正式交換與法定簽章 provider 的額外切換門檻，未取得規格及人工核准前必須維持 fail-closed。
 
 ## 4. 季檢輸出
 

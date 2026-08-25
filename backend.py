@@ -4305,6 +4305,26 @@ def internal_readiness() -> Dict[str, Any]:
     }
 
 
+def readiness_for_public_endpoint(parts: List[str]) -> Dict[str, Any]:
+    """Select the readiness boundary without weakening formal go-live gates.
+
+    ``/readyz`` is the runtime probe for the currently approved internal eDoc
+    module, so it must not fail solely because the separately governed formal
+    exchange/signature providers are intentionally disabled.  The explicit
+    ``/production/readiness`` endpoint keeps the stricter formal prerequisites
+    and therefore remains fail-closed until those providers are approved.
+    """
+    if parts == ["readyz"]:
+        return internal_readiness()
+    return production_readiness()
+
+
+def public_readiness_response(parts: List[str]) -> Tuple[Dict[str, Any], int]:
+    readiness = readiness_for_public_endpoint(parts)
+    status = 200 if readiness["ready"] or not is_production() else 503
+    return public_readiness_payload(readiness), status
+
+
 def compact_evidence(items: List[str], limit: int = 3) -> str:
     if not items:
         return "無"
@@ -39045,9 +39065,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(public_health_payload(database="supabase", project=SUPABASE_URL))
                     return
                 if method == "GET" and parts in (["production", "readiness"], ["readyz"]):
-                    readiness = production_readiness()
-                    status = 200 if readiness["ready"] or not is_production() else 503
-                    self.send_json(public_readiness_payload(readiness), status)
+                    payload, status = public_readiness_response(parts)
+                    self.send_json(payload, status)
                     return
                 if method == "GET" and parts in (
                     ["production", "internal-readiness"],
@@ -39966,9 +39985,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(public_health_payload(database=str(DB_PATH)))
                     return
                 if method == "GET" and parts in (["production", "readiness"], ["readyz"]):
-                    readiness = production_readiness()
-                    status = 200 if readiness["ready"] or not is_production() else 503
-                    self.send_json(public_readiness_payload(readiness), status)
+                    payload, status = public_readiness_response(parts)
+                    self.send_json(payload, status)
                     return
                 if method == "GET" and parts in (
                     ["production", "internal-readiness"],

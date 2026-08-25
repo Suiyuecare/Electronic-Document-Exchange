@@ -169,6 +169,7 @@ GitHub Actions 部署：
 
 ```bash
 curl https://edoc.suiyuecare.com/api/healthz
+curl https://edoc.suiyuecare.com/api/readyz
 curl https://edoc.suiyuecare.com/api/production/readiness
 curl https://edoc.suiyuecare.com/api/production/deployment
 curl https://edoc.suiyuecare.com/api/production/monitoring
@@ -189,7 +190,8 @@ curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cro
 判斷標準：
 
 - `/api/healthz` 回傳 `ok: true`。
-- `/api/production/readiness` 在 production 回傳 `ready: true`。
+- `/api/readyz` 回傳 HTTP 200 與 `ready: true`，代表目前核准的內部 eDoc 模組可服務。
+- 正式電子公文交換尚未核准時，`/api/production/readiness` 回傳 HTTP 503 為預期；取得機關規格、完成測試並人工核准正式 provider 後，才要求回傳 `ready: true`。
 - `/api/production/deployment` 顯示 production、revision、branch、deployment URL、Supabase 與 Storage 設定。
 - `/api/files/storage-health` 顯示 `ready: true`，且 provider、bucket、object endpoint、加密、AV provider、AV endpoint、短效 URL 都已設定。
 - `/api/notifications/test` 回傳 `report.ok: true`，Email 有 Message-ID，LINE 有 request id 或 webhook receipt，站內通知有 inbox id。

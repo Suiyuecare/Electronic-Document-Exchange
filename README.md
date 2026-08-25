@@ -98,7 +98,8 @@ EDOC_CRL_DISTRIBUTION_URL=https://<crl-url>
 正式部署手冊：[`docs/deployment-production.md`](docs/deployment-production.md)。
 正式環境檢查端點：
 
-- `GET /api/production/readiness`
+- `GET /api/readyz`：目前核准的內部 eDoc 模組就緒檢查；不會因尚未核准的正式交換／法定簽章 provider 而誤判故障。
+- `GET /api/production/readiness`：完整正式交換與法定簽章就緒檢查；相關 provider 未核准前維持 fail-closed。
 - `GET /api/cron/run-due`，需 `Authorization: Bearer <CRON_SECRET>`
 
 PDF 與檔案儲存：
