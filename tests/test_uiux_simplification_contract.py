@@ -143,7 +143,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
             ("tracking", "inbound"),
             ("archive", "inbound"),
             ("contractSeal", "electronicSeal"),
-            ("seals", "electronicSeal"),
+            ("seals", "settings"),
             ("format", "compose"),
             ("workflow", "settings"),
             ("exchange", "settings"),
@@ -179,11 +179,58 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertNotIn('"contracts"', retired)
         self.assertNotIn('"format"', retired)
 
-        electronic_seal_start = groups.index("electronicSeal:")
-        electronic_seal_end = groups.index("  ],", electronic_seal_start)
-        electronic_seal_group = groups[electronic_seal_start:electronic_seal_end]
+        electronic_seal_match = re.search(
+            r"electronicSeal:\s*\[(.*?)\]\s*,\s*approvalLog:",
+            groups,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(electronic_seal_match)
+        electronic_seal_group = electronic_seal_match.group(1)
         self.assertNotIn('"contracts"', electronic_seal_group)
         self.assertNotIn("合約案件", electronic_seal_group)
+        self.assertNotIn('"seals"', electronic_seal_group)
+
+        settings_match = re.search(r"settings:\s*\[(.*?)\]\s*\n\}\);", groups, re.DOTALL)
+        self.assertIsNotNone(settings_match)
+        settings_group = settings_match.group(1)
+        self.assertIn('["seals", "印章檔案", false]', settings_group)
+
+        primary_start = self.js.index("function primaryRoutesForRole(")
+        primary_end = self.js.index("\nfunction secondaryRoutesForRole(", primary_start)
+        primary_routes = self.js[primary_start:primary_end]
+        self.assertIn('role === "行政部主任"', primary_routes)
+        self.assertIn("navByIdentity.administrativeDirector", primary_routes)
+
+        primary_identity_start = self.js.index("const navByIdentity = {")
+        primary_identity_end = self.js.index("\n};", primary_identity_start)
+        primary_identity = self.js[primary_identity_start:primary_identity_end]
+        company_ops_primary = next(line for line in primary_identity.splitlines() if line.strip().startswith("companyOps:"))
+        self.assertIn('"settings"', company_ops_primary)
+
+        secondary_start = self.js.index("const secondaryRoutesByIdentity = {")
+        secondary_end = self.js.index("\n};", secondary_start)
+        secondary_routes = self.js[secondary_start:secondary_end]
+        company_ops_line = next(line for line in secondary_routes.splitlines() if line.strip().startswith("companyOps:"))
+        administrative_director_line = next(line for line in secondary_routes.splitlines() if line.strip().startswith("administrativeDirector:"))
+        self.assertIn('"seals"', company_ops_line)
+        self.assertIn('"seals"', administrative_director_line)
+
+        role_navigation_start = self.js.index("function canViewSystemSettingsBase()")
+        role_navigation_end = self.js.index("\nfunction internalDispatchRecipientForCurrentUser", role_navigation_start)
+        role_navigation = self.js[role_navigation_start:role_navigation_end]
+        self.assertIn("hasAuthenticatedBackendSession()", role_navigation)
+        self.assertIn("authState?.permissions", role_navigation)
+        self.assertIn('permissionCodes.includes("settings.system_manage")', role_navigation)
+        self.assertIn('permissionCodes.includes("settings.manage")', role_navigation)
+        self.assertIn('.integrated-page-section[data-integrated-base="settings"]', role_navigation)
+        self.assertIn("const canViewSettingsBase = canViewSystemSettingsBase();", role_navigation)
+        self.assertIn('document.querySelectorAll("[data-settings-base-controls]")', role_navigation)
+        self.assertIn("control.disabled = !canViewSettingsBase;", role_navigation)
+        self.assertIn("data-settings-base-controls", self.html)
+
+        self.assertIn("function companySealCompaniesForCurrentUser(", self.js)
+        self.assertIn("function preferredCompanySealCompanyId(", self.js)
+        self.assertIn('authState?.user?.company_id', self.js)
 
         self.assertIn("function initializeIntegratedMajorPages()", self.js)
         self.assertIn("function openIntegratedPageSection(", self.js)

@@ -1593,6 +1593,8 @@ let companySealLogs = [];
 let companySealVaultReadinessReport = null;
 let selectedCompanySealCompanyId = "";
 let selectedCompanySealId = "";
+let companySealCompanySelectionTouched = false;
+let companySealSelectionUserId = String(authState?.user?.id || "");
 let simpleSealCategory = "establishment_seal";
 let selectedSimpleSealRecordId = "";
 let companySealVaultTab = "versions";
@@ -2916,7 +2918,8 @@ const navByIdentity = {
   employee: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
   supervisor: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
   viewer: ["dashboard", "approvalLog", "inbound"],
-  companyOps: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
+  companyOps: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"],
+  administrativeDirector: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"],
   executive: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"]
 };
 
@@ -2925,6 +2928,7 @@ const secondaryRoutesByIdentity = {
   supervisor: ["notifications", "search", "contractSeal", "format"],
   viewer: ["search"],
   companyOps: ["notifications", "search", "dispatch", "contracts", "contractSeal", "tracking", "archive", "reports", "seals"],
+  administrativeDirector: ["notifications", "search", "dispatch", "contracts", "contractSeal", "tracking", "archive", "reports", "seals"],
   executive: [
     "notifications", "search", "dispatch", "contracts", "contractSeal", "workflow", "tracking", "archive", "reports", "seals",
     "accounts", "exchange", "security", "fileSecurity", "jobs", "database", "complianceOps", "ops", "format"
@@ -2934,7 +2938,8 @@ const secondaryRoutesByIdentity = {
 function primaryRoutesForRole(role = activeRole()) {
   let routes = navByIdentity.employee;
   if (role === "執行長") routes = navByIdentity.executive;
-  else if (["行政部主任", "總務"].includes(role)) routes = navByIdentity.companyOps;
+  else if (role === "行政部主任") routes = navByIdentity.administrativeDirector;
+  else if (role === "總務") routes = navByIdentity.companyOps;
   else if (["主管", "主任"].includes(role)) routes = navByIdentity.supervisor;
   else if (["董事會", "股東", "外部檢核單位"].includes(role)) routes = navByIdentity.viewer;
   const canManageSeals = (rolePermissions[role] || []).includes("seals.manage")
@@ -2944,7 +2949,8 @@ function primaryRoutesForRole(role = activeRole()) {
 
 function secondaryRoutesForRole(role = activeRole()) {
   if (role === "執行長") return secondaryRoutesByIdentity.executive;
-  if (["行政部主任", "總務", "執行長"].includes(role)) return secondaryRoutesByIdentity.companyOps;
+  if (role === "行政部主任") return secondaryRoutesByIdentity.administrativeDirector;
+  if (role === "總務") return secondaryRoutesByIdentity.companyOps;
   if (["主管", "主任"].includes(role)) return secondaryRoutesByIdentity.supervisor;
   if (["董事會", "股東", "外部檢核單位"].includes(role)) return secondaryRoutesByIdentity.viewer;
   return secondaryRoutesByIdentity.employee;
@@ -2962,7 +2968,7 @@ function simpleRouteLabels(role = activeRole()) {
   const companyWide = ["行政部主任", "總務", "執行長"].includes(role);
   if (role === "執行長") return { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程設定", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" };
   return companyWide
-    ? { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢", seals: "印章檔案庫" }
+    ? { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" }
     : { dashboard: "首頁", electronicSeal: "電子用印", contractSeal: "合約用印", compose: "撰寫公文", inbound: "收發管理", notifications: "我的待辦", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢" };
 }
 
@@ -2978,7 +2984,7 @@ const mergedNavigationParents = Object.freeze({
   tracking: "inbound",
   exchange: "settings",
   contractSeal: "electronicSeal",
-  seals: "electronicSeal",
+  seals: "settings",
   workflow: "settings",
   reports: "approvalLog",
   accounts: "settings",
@@ -2998,9 +3004,7 @@ const integratedMajorPageGroups = Object.freeze({
   compose: [
     ["format", "文書與格式檢核", false]
   ],
-  electronicSeal: [
-    ["seals", "印章檔案", false]
-  ],
+  electronicSeal: [],
   approvalLog: [
     ["reports", "簽核統計", false]
   ],
@@ -3011,6 +3015,7 @@ const integratedMajorPageGroups = Object.freeze({
     ["archive", "歸檔保存", false]
   ],
   settings: [
+    ["seals", "印章檔案", false],
     ["workflow", "簽核流程", false],
     ["accounts", "公司與人員", false],
     ["exchange", "交換系統狀態", false],
@@ -3124,10 +3129,18 @@ function majorRouteForRoute(route = activeRouteTarget) {
   return mergedNavigationParents[route] || route || "dashboard";
 }
 
+function canViewSystemSettingsBase() {
+  const permissionCodes = hasAuthenticatedBackendSession()
+    ? (authState?.permissions || [])
+    : (isProductionEdocHost() ? [] : (rolePermissions[activeRole()] || []));
+  return permissionCodes.includes("settings.system_manage") || permissionCodes.includes("settings.manage");
+}
+
 function applyRoleNavigation() {
   const primary = primaryRoutesForRole();
   const allowed = allowedRoutesForRole();
   const labels = simpleRouteLabels();
+  const canViewSettingsBase = canViewSystemSettingsBase();
   document.body.dataset.identityKind = identityKindForRole();
   document.querySelectorAll(".nav-item").forEach((item) => {
     const routeIndex = primary.indexOf(item.dataset.target);
@@ -3151,6 +3164,17 @@ function applyRoleNavigation() {
     const hidden = !allowed.includes(section.dataset.integratedRoute);
     section.hidden = hidden;
     if (hidden) setIntegratedSectionState(section, false);
+  });
+  document.querySelectorAll('.integrated-page-section[data-integrated-base="settings"]').forEach((section) => {
+    const hidden = !canViewSettingsBase;
+    section.hidden = hidden;
+    if (hidden) setIntegratedSectionState(section, false);
+  });
+  document.querySelectorAll("[data-settings-base-controls]").forEach((controls) => {
+    controls.hidden = !canViewSettingsBase;
+    controls.querySelectorAll("button, input, select, textarea").forEach((control) => {
+      control.disabled = !canViewSettingsBase;
+    });
   });
   document.querySelectorAll(".integrated-page-sections").forEach((host) => {
     host.hidden = !Array.from(host.querySelectorAll(":scope > .integrated-page-section"))
@@ -14888,8 +14912,8 @@ async function createBackendUploadedPdfLaunchSmokeTest() {
     showToast("已建立去識別化 PDF 用印走測單，請依序完成主管、行政部主任與總務簽核。");
   } catch (error) {
     if (error.rawMessage === "launch_smoke_current_seal_required" || error.code === "launch_smoke_current_seal_required") {
-      setView("seals");
-      showToast("找不到已有 Seal Vault current 版本的可用印章，請先由總務補章後再建立 PDF 用印走測。");
+      setView(isRouteAllowed("seals") ? "seals" : "electronicSeal");
+      showToast("找不到可用的印章版本，請由執行長／行政部門主任至「系統設定 > 印章檔案」補章後，再建立 PDF 用印走測。");
       return;
     }
     showToast(`建立 PDF 用印走測失敗：${error.message}`);
@@ -20098,6 +20122,64 @@ function availableCompanySealCompanies() {
   return isProductionEdocHost() ? [] : companySealFallbackCompanies();
 }
 
+function companySealCompaniesForCurrentUser(companies = availableCompanySealCompanies()) {
+  const activeCompanies = (companies || []).filter((item) => {
+    const status = String(item.status || "").trim().toLowerCase();
+    return !status || ["active", "enabled", "啟用"].includes(status);
+  });
+  if (!hasAuthenticatedBackendSession() || isCompanySealCustodian()) return activeCompanies;
+  const accountCompanyId = String(authState?.user?.company_id || "").trim();
+  const accountCompanyName = String(authState?.user?.company_name || "").trim();
+  return activeCompanies.filter((item) =>
+    (accountCompanyId && String(item.id || item.company_id || "") === accountCompanyId)
+    || (accountCompanyName && String(item.name || item.company_name || "") === accountCompanyName)
+  );
+}
+
+function resetCompanySealSelectionForIdentityChange() {
+  const userId = String(authState?.user?.id || "");
+  if (userId === companySealSelectionUserId) return;
+  companySealSelectionUserId = userId;
+  companySealCompanySelectionTouched = false;
+  selectedCompanySealCompanyId = "";
+  selectedCompanySealId = "";
+  selectedSimpleSealRecordId = "";
+  companySealLibrary = [];
+  companySealFiles = [];
+  companySealRequests = [];
+  companySealLogs = [];
+  companySealModuleLoaded = false;
+  routeBackendDataLoaded.delete("seals");
+}
+
+function setCompanySealCompanySelection(companyId, { touched = false } = {}) {
+  const nextCompanyId = String(companyId || "");
+  if (nextCompanyId !== selectedCompanySealCompanyId) {
+    selectedCompanySealCompanyId = nextCompanyId;
+    selectedCompanySealId = "";
+    selectedSimpleSealRecordId = "";
+    companySealLibrary = [];
+    companySealFiles = [];
+    companySealRequests = [];
+    companySealLogs = [];
+  }
+  if (touched) companySealCompanySelectionTouched = true;
+  return selectedCompanySealCompanyId;
+}
+
+function preferredCompanySealCompanyId(companies = companySealCompaniesForCurrentUser()) {
+  resetCompanySealSelectionForIdentityChange();
+  const current = companies.find((item) => String(item.id || item.company_id || "") === selectedCompanySealCompanyId);
+  const accountCompanyId = String(authState?.user?.company_id || "").trim();
+  const accountCompanyName = String(authState?.user?.company_name || "").trim();
+  const accountCompany = companies.find((item) =>
+    (accountCompanyId && String(item.id || item.company_id || "") === accountCompanyId)
+    || (accountCompanyName && String(item.name || item.company_name || "") === accountCompanyName)
+  );
+  if (companySealCompanySelectionTouched && current) return String(current.id || current.company_id || "");
+  return String(accountCompany?.id || accountCompany?.company_id || current?.id || current?.company_id || companies[0]?.id || companies[0]?.company_id || "");
+}
+
 function syncCompanyRegistryFromFinance(companies = []) {
   if (!Array.isArray(companies) || !companies.length) return;
   companyRegistry = companies
@@ -20224,8 +20306,8 @@ function companySealDocumentPayload(documentId) {
 }
 
 function currentCompanySealCompany() {
-  const companies = availableCompanySealCompanies();
-  return companies.find((item) => item.id === selectedCompanySealCompanyId) || companies[0] || null;
+  const companies = companySealCompaniesForCurrentUser();
+  return companies.find((item) => (item.id || item.company_id) === selectedCompanySealCompanyId) || companies[0] || null;
 }
 
 function currentCompanySeal() {
@@ -20734,7 +20816,7 @@ async function handleCompanySealReadinessAction(category, sealId, ready = false)
 async function handleCompanySealGlobalTask(companyId, category, sealId = "") {
   if (!requireCompanySealCustodian("處理 Seal Vault 缺件")) return;
   if (!companyId) return;
-  selectedCompanySealCompanyId = companyId;
+  setCompanySealCompanySelection(companyId, { touched: true });
   const companySelect = document.querySelector("#companySealCompanySelect");
   if (companySelect) companySelect.value = companyId;
   await loadCompanySealCompanyData(true);
@@ -20760,7 +20842,9 @@ async function loadCompanySealModule(silent = false) {
       companySealCompanies = companySealFallbackCompanies();
     }
     syncCompanyRegistryFromFinance(companySealCompanies);
-    if (!selectedCompanySealCompanyId) selectedCompanySealCompanyId = companySealCompanies[0]?.id || "";
+    setCompanySealCompanySelection(preferredCompanySealCompanyId(
+      companySealCompaniesForCurrentUser(companySealCompanies)
+    ));
     companySealModuleLoaded = true;
     await ensureCompanySealLaunchAudit();
     await loadCompanySealCompanyData(silent);
@@ -20770,7 +20854,9 @@ async function loadCompanySealModule(silent = false) {
     companySealRequests = [];
     companySealFiles = [];
     companySealLogs = [];
-    selectedCompanySealCompanyId = companySealCompanies[0]?.id || "";
+    setCompanySealCompanySelection(preferredCompanySealCompanyId(
+      companySealCompaniesForCurrentUser(companySealCompanies)
+    ));
     selectedCompanySealId = "";
     selectedSimpleSealRecordId = "";
     companySealModuleLoaded = false;
@@ -20785,26 +20871,38 @@ async function loadCompanySealModule(silent = false) {
 }
 
 async function loadCompanySealCompanyData(silent = false) {
-  if (!selectedCompanySealCompanyId) {
+  const companyId = selectedCompanySealCompanyId;
+  if (!companyId) {
     renderCompanySealModule();
     return;
   }
   try {
     const [seals, requests, logs] = await Promise.all([
-      backendRequest(`/companies/${encodeURIComponent(selectedCompanySealCompanyId)}/seals`),
-      backendRequest(`/seal-requests?company_id=${encodeURIComponent(selectedCompanySealCompanyId)}`).catch(() => []),
+      backendRequest(`/companies/${encodeURIComponent(companyId)}/seals`),
+      backendRequest(`/seal-requests?company_id=${encodeURIComponent(companyId)}`).catch(() => []),
       backendRequest("/seal-usage-logs").catch(() => [])
     ]);
-    companySealLibrary = Array.isArray(seals) ? seals : [];
+    if (companyId !== selectedCompanySealCompanyId) return;
+    const nextLibrary = Array.isArray(seals) ? seals : [];
+    const nextSealId = nextLibrary.some((item) => item.id === selectedCompanySealId)
+      ? selectedCompanySealId
+      : (nextLibrary[0]?.id || "");
+    const nextFiles = nextSealId
+      ? await backendRequest(`/seals/${encodeURIComponent(nextSealId)}/files`).catch(() => [])
+      : [];
+    if (companyId !== selectedCompanySealCompanyId) return;
+    companySealLibrary = nextLibrary;
     companySealRequests = Array.isArray(requests) ? requests : [];
     companySealLogs = Array.isArray(logs) ? logs : [];
-    if (!companySealLibrary.some((item) => item.id === selectedCompanySealId)) selectedCompanySealId = companySealLibrary[0]?.id || "";
-    companySealFiles = selectedCompanySealId ? await backendRequest(`/seals/${encodeURIComponent(selectedCompanySealId)}/files`).catch(() => []) : [];
+    selectedCompanySealId = nextSealId;
+    companySealFiles = nextFiles;
     renderCompanySealModule();
     if (!silent) addSealAudit("同步公司印章庫", `${currentCompanySealCompany()?.name || "公司"} 已載入 ${companySealLibrary.length} 顆印章。`);
   } catch (error) {
+    if (companyId !== selectedCompanySealCompanyId) return;
     companySealLibrary = [];
     companySealRequests = [];
+    companySealFiles = [];
     companySealLogs = [];
     renderCompanySealModule();
     if (!silent) showToast(`公司印章庫同步失敗：${error.message}`);
@@ -20813,8 +20911,8 @@ async function loadCompanySealCompanyData(silent = false) {
 
 function renderCompanySealModule() {
   if (!document.querySelector("#companySealModule")) return;
-  const companies = availableCompanySealCompanies();
-  if (!selectedCompanySealCompanyId) selectedCompanySealCompanyId = companies[0]?.id || "";
+  const companies = companySealCompaniesForCurrentUser();
+  setCompanySealCompanySelection(preferredCompanySealCompanyId(companies));
   const selectedSeal = currentCompanySeal();
   const canManageSealVault = isCompanySealCustodian();
   renderSimpleSealUpload();
@@ -20967,7 +21065,7 @@ function financeLinkedSealCompanies() {
   const source = availableCompanySealCompanies();
   const active = source.filter((company) => !company.status || ["active", "啟用"].includes(company.status));
   const linked = active.filter((company) => company.finance_entity_id || company.financeEntityId || company.source_system === "finance");
-  return linked.length || isProductionEdocHost() ? linked : active;
+  return companySealCompaniesForCurrentUser(linked.length || isProductionEdocHost() ? linked : active);
 }
 
 function simpleSealFileValidation(file) {
@@ -21242,7 +21340,7 @@ function renderSimpleSealUpload() {
   if (!companySelect || !list) return;
   const companies = financeLinkedSealCompanies();
   const canManageSealVault = isCompanySealCustodian();
-  if (!selectedCompanySealCompanyId) selectedCompanySealCompanyId = companies[0]?.id || "";
+  setCompanySealCompanySelection(preferredCompanySealCompanyId(companies));
   companySelect.innerHTML = companySealOptionTags(companies, selectedCompanySealCompanyId);
   companySelect.disabled = !companies.length;
   const uploadButton = document.querySelector("#simpleSealUploadBtn");
@@ -26486,14 +26584,12 @@ document.querySelector("#sealExportBtn").addEventListener("click", () => {
   showToast("用印紀錄已匯出。");
 });
 document.querySelector("#companySealCompanySelect").addEventListener("change", (event) => {
-  selectedCompanySealCompanyId = event.target.value;
-  selectedCompanySealId = "";
+  setCompanySealCompanySelection(event.target.value, { touched: true });
   loadCompanySealCompanyData();
 });
 document.querySelector("#sealUsageCompanySelect").addEventListener("change", (event) => {
-  selectedCompanySealCompanyId = event.target.value;
+  setCompanySealCompanySelection(event.target.value, { touched: true });
   document.querySelector("#companySealCompanySelect").value = selectedCompanySealCompanyId;
-  selectedCompanySealId = "";
   loadCompanySealCompanyData();
 });
 document.querySelector("#sealUsageSealSelect")?.addEventListener("change", () => {
@@ -26507,9 +26603,7 @@ document.querySelector("#sealUsageSealSelect")?.addEventListener("change", () =>
 document.querySelector("#companySealReloadBtn").addEventListener("click", () => loadCompanySealModule());
 document.querySelector("#simpleSealUploadForm")?.addEventListener("submit", uploadSimpleCompanySeal);
 document.querySelector("#simpleSealCompanySelect")?.addEventListener("change", async (event) => {
-  selectedCompanySealCompanyId = event.target.value;
-  selectedCompanySealId = "";
-  selectedSimpleSealRecordId = "";
+  setCompanySealCompanySelection(event.target.value, { touched: true });
   await loadCompanySealCompanyData(true);
 });
 document.querySelector("#simpleSealRecordSelect")?.addEventListener("change", (event) => fillSimpleSealRecord(event.target.value));
