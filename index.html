@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260825-electronic-seal-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260825-electronic-seal-r2" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
@@ -1678,12 +1678,15 @@
                     <button type="button" data-editor-page-action="rotate-right">右轉</button>
                     <button class="danger" type="button" data-editor-page-action="delete">刪除頁面</button>
                   </div>
-                  <div class="pdf-editor-review-switch" id="uploadedEditorReviewSwitch" role="group" aria-label="簽核檢視版本">
-                    <button type="button" data-editor-review="original">原稿</button>
-                    <button class="active" type="button" data-editor-review="edited">編輯版</button>
-                    <button type="button" data-editor-review="prepared">送簽確認版</button>
-                    <button type="button" data-editor-review="changes">按頁變更清單</button>
-                  </div>
+                  <label class="pdf-editor-review-picker" id="uploadedEditorReviewSwitch">
+                    <span>預覽版本</span>
+                    <select id="uploadedEditorReviewSelect" aria-label="預覽版本">
+                      <option value="edited">編輯版</option>
+                      <option value="original">原稿</option>
+                      <option value="prepared">送簽確認版</option>
+                      <option value="changes">按頁變更清單</option>
+                    </select>
+                  </label>
                   <div class="pdf-editor-scroll" id="uploadedEditorScroll">
                     <div class="uploaded-pdf-stage" id="uploadedPdfStage">
                       <canvas id="uploadedPdfCanvas" aria-label="PDF 目前頁面"></canvas>
@@ -4100,6 +4103,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260825-electronic-seal-r1"></script>
+    <script src="app.js?v=20260825-electronic-seal-r2"></script>
   </body>
 </html>

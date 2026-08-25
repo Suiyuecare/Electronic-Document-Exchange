@@ -349,33 +349,34 @@
   white-space: nowrap;
 }
 
-.pdf-editor-review-switch {
+.pdf-editor-review-picker {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 3px;
-  margin: 0 auto 8px;
-  overflow-x: auto;
-}
-
-.pdf-editor-review-switch button {
-  min-height: 36px;
-  padding: 6px 10px;
-  border: 1px solid var(--editor-border);
-  border-radius: 7px;
-  background: #fff;
-  color: #475569;
-  font: inherit;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0 0 8px;
+  color: #64748b;
   font-size: 11px;
   font-weight: 900;
-  white-space: nowrap;
+}
+
+.pdf-editor-review-picker select {
+  width: min(190px, 100%);
+  min-height: 44px;
+  padding: 8px 34px 8px 11px;
+  border: 1px solid var(--editor-border);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
   cursor: pointer;
 }
 
-.pdf-editor-review-switch button.active {
-  border-color: #7c3aed;
-  background: #f5f3ff;
-  color: #6d28d9;
+.pdf-editor-review-picker select:focus-visible {
+  outline: 3px solid rgba(124, 58, 237, 0.22);
+  outline-offset: 2px;
 }
 
 .pdf-editor-scroll {
@@ -729,6 +730,15 @@ input[readonly].seal-dimension-locked {
 .pdf-editor-v2[data-feature-enabled="false"] .pdf-editor-footer-actions {
   pointer-events: none;
   opacity: 0.55;
+}
+
+.pdf-editor-v2:not([data-review-mode="edited"]) .pdf-editor-general-options,
+.pdf-editor-v2:not([data-review-mode="edited"]) .pdf-editor-page-actions,
+.pdf-editor-v2:not([data-review-mode="edited"]) .pdf-editor-property-form,
+.pdf-editor-v2:not([data-review-mode="edited"]) .pdf-editor-page-import,
+.pdf-editor-v2:not([data-review-mode="edited"]) #clearUploadedStampsBtn {
+  pointer-events: none;
+  opacity: 0.5;
 }
 
 .mobile-only {

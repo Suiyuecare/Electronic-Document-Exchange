@@ -1344,6 +1344,8 @@ function clearUploadedEditorSensitivePreviews() {
     uploadedSealEditorRuntime.locked = false;
     uploadedSealEditorRuntime.uploading = false;
     uploadedSealEditorRuntime.directoryLoading = false;
+    uploadedSealEditorRuntime.reviewMode = "edited";
+    uploadedSealEditorRuntime.reviewGeneration += 1;
   }
   uploadedSealEditorState = emptyUploadedSealEditorState();
   uploadedSealPdf = null;
@@ -1359,6 +1361,7 @@ const uploadedSealEditorRuntime = {
   preparedUrl: "",
   preparedPdfDocument: null,
   reviewMode: "edited",
+  reviewGeneration: 0,
   changeSummary: null,
   mode: "general",
   tool: "select",
@@ -22555,6 +22558,10 @@ function markUploadedEditorDirty() {
   uploadedSealEditorRuntime.dirtyGeneration += 1;
   uploadedSealEditorRuntime.preparedFileId = "";
   uploadedSealEditorRuntime.preparedSha256 = "";
+  void uploadedSealEditorRuntime.preparedPdfDocument?.destroy?.();
+  uploadedSealEditorRuntime.preparedPdfDocument = null;
+  uploadedSealEditorRuntime.preparedUrl = "";
+  uploadedSealEditorRuntime.changeSummary = null;
   const preflight = document.querySelector("#uploadedEditorPreflightStatus");
   if (preflight) preflight.textContent = "內容已變更，送簽前需重新產生確認版";
   if (uploadedSealEditorRuntime.conflict) {
@@ -22581,6 +22588,7 @@ function markUploadedEditorDirty() {
 function commitUploadedEditorMutation(mutator, { render = true } = {}) {
   if (uploadedSealEditorRuntime.locked) return showToast("送簽版本已鎖定，不能再修改。");
   if (uploadedSealEditorRuntime.uploading) return showToast("PDF 正在更換，完成前暫停編輯。");
+  if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再修改內容。");
   const previous = cloneUploadedEditorValue(uploadedSealEditorState);
   mutator(uploadedSealEditorState);
   uploadedSealEditorState.elements = uploadedSealEditorState.elements
@@ -22604,7 +22612,7 @@ function commitUploadedEditorMutation(mutator, { render = true } = {}) {
 
 function undoUploadedEditor() {
   const previous = uploadedSealEditorRuntime.undoStack.pop();
-  if (!previous || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading) return;
+  if (!previous || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
   uploadedSealEditorRuntime.redoStack.push(cloneUploadedEditorValue(uploadedSealEditorState));
   const revisionNo = uploadedSealEditorState.revisionNo;
   const manifestSha256 = uploadedSealEditorState.manifestSha256;
@@ -22623,7 +22631,7 @@ function undoUploadedEditor() {
 
 function redoUploadedEditor() {
   const next = uploadedSealEditorRuntime.redoStack.pop();
-  if (!next || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading) return;
+  if (!next || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
   uploadedSealEditorRuntime.undoStack.push(cloneUploadedEditorValue(uploadedSealEditorState));
   const revisionNo = uploadedSealEditorState.revisionNo;
   const manifestSha256 = uploadedSealEditorState.manifestSha256;
@@ -23377,7 +23385,9 @@ async function renderUploadedPdfPage() {
   const page = currentUploadedEditorPage();
   const runtime = page ? uploadedEditorPageRuntime(page.pageId) : null;
   if (!canvas || !stage) return;
-  if (uploadedSealEditorRuntime.reviewMode === "changes") {
+  const reviewMode = uploadedSealEditorRuntime.reviewMode;
+  const renderNonce = ++uploadedSealEditorRuntime.renderNonce;
+  if (reviewMode === "changes") {
     canvas.hidden = true;
     stage.hidden = true;
     renderUploadedEditorSvgLayer();
@@ -23386,15 +23396,17 @@ async function renderUploadedPdfPage() {
   }
   stage.hidden = false;
   document.querySelector("#uploadedEditorChangeSummaryPanel")?.toggleAttribute("hidden", true);
-  if (uploadedSealEditorRuntime.reviewMode === "prepared") {
+  if (reviewMode === "prepared") {
     const preparedDocument = await ensureUploadedPreparedPdfDocument();
+    if (renderNonce !== uploadedSealEditorRuntime.renderNonce || uploadedSealEditorRuntime.reviewMode !== reviewMode) return;
     if (preparedDocument) {
       const preparedPage = await preparedDocument.getPage(Math.max(1, Math.min(preparedDocument.numPages, currentUploadedEditorPageIndex() + 1)));
-      return renderUploadedReadOnlyPdfProxy(preparedPage, preparedPage.rotate, "送簽確認版");
+      if (renderNonce !== uploadedSealEditorRuntime.renderNonce || uploadedSealEditorRuntime.reviewMode !== reviewMode) return;
+      return renderUploadedReadOnlyPdfProxy(preparedPage, preparedPage.rotate, "送簽確認版", renderNonce, reviewMode);
     }
   }
-  if (uploadedSealEditorRuntime.reviewMode === "original" && runtime) {
-    return renderUploadedReadOnlyPdfProxy(runtime.proxy, runtime.proxy.rotate, "不可變原稿");
+  if (reviewMode === "original" && runtime) {
+    return renderUploadedReadOnlyPdfProxy(runtime.proxy, runtime.proxy.rotate, "不可變原稿", renderNonce, reviewMode);
   }
   if (!page || !runtime) {
     canvas.hidden = true;
@@ -23424,7 +23436,6 @@ async function renderUploadedPdfPage() {
   stage.style.height = `${viewport.height}px`;
   const context = canvas.getContext("2d", { alpha: false });
   uploadedSealEditorRuntime.renderTask?.cancel?.();
-  const nonce = ++uploadedSealEditorRuntime.renderNonce;
   const renderTask = runtime.proxy.render({ canvasContext: context, viewport, transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0], annotationMode: window.pdfjsLib.AnnotationMode?.DISABLE ?? 0 });
   uploadedSealEditorRuntime.renderTask = renderTask;
   try {
@@ -23432,15 +23443,17 @@ async function renderUploadedPdfPage() {
   } catch (error) {
     if (error?.name !== "RenderingCancelledException") showToast("PDF 頁面顯示失敗，請重新整理後再試。");
   }
-  if (nonce !== uploadedSealEditorRuntime.renderNonce) return;
+  if (renderNonce !== uploadedSealEditorRuntime.renderNonce || uploadedSealEditorRuntime.reviewMode !== reviewMode) return;
   renderUploadedEditorSvgLayer();
   const zoomInput = document.querySelector("#uploadedEditorZoom");
   const zoomOutput = document.querySelector("#uploadedEditorZoomValue");
   if (zoomInput) zoomInput.value = String(Math.round(uploadedSealEditorRuntime.zoom * 100));
   if (zoomOutput) zoomOutput.textContent = `${Math.round(uploadedSealEditorRuntime.zoom * 100)}%`;
+  const geometry = document.querySelector("#uploadedPdfGeometryLabel");
+  if (geometry) geometry.textContent = `${Math.round(page.widthPt)} × ${Math.round(page.heightPt)} pt · CropBox · ${page.rotation}°`;
 }
 
-async function renderUploadedReadOnlyPdfProxy(proxy, rotation, label) {
+async function renderUploadedReadOnlyPdfProxy(proxy, rotation, label, renderNonce, reviewMode) {
   const canvas = document.querySelector("#uploadedPdfCanvas");
   const stage = document.querySelector("#uploadedPdfStage");
   const empty = document.querySelector("#uploadedPdfEmpty");
@@ -23462,6 +23475,7 @@ async function renderUploadedReadOnlyPdfProxy(proxy, rotation, label) {
   const task = proxy.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0], annotationMode: window.pdfjsLib.AnnotationMode?.DISABLE ?? 0 });
   uploadedSealEditorRuntime.renderTask = task;
   try { await task.promise; } catch (error) { if (error?.name !== "RenderingCancelledException") throw error; }
+  if (renderNonce !== uploadedSealEditorRuntime.renderNonce || uploadedSealEditorRuntime.reviewMode !== reviewMode) return;
   const svg = document.querySelector("#uploadedEditorSvgLayer");
   svg?.replaceChildren();
   const geometry = document.querySelector("#uploadedPdfGeometryLabel");
@@ -23481,9 +23495,7 @@ async function ensureUploadedPreparedPdfDocument() {
   if (uploadedSealEditorRuntime.preparedPdfDocument) return uploadedSealEditorRuntime.preparedPdfDocument;
   if (!uploadedSealEditorRuntime.preparedUrl) await loadUploadedEditorChangeSummary();
   if (!uploadedSealEditorRuntime.preparedUrl) {
-    showToast("尚未產生可檢視的送簽確認版。");
-    uploadedSealEditorRuntime.reviewMode = "edited";
-    return null;
+    throw new Error("尚未產生可檢視的送簽確認版。");
   }
   const blob = await fetchEditorAuthorizedBlob(uploadedSealEditorRuntime.preparedUrl);
   const pdfjsLib = await ensurePdfJsLibrary();
@@ -23643,12 +23655,24 @@ function renderUploadedEditorChangeSummary() {
 
 async function showUploadedEditorReview(mode) {
   if (!["original", "edited", "prepared", "changes"].includes(mode)) return;
+  const reviewGeneration = ++uploadedSealEditorRuntime.reviewGeneration;
   uploadedSealEditorRuntime.reviewMode = mode;
-  document.querySelectorAll("[data-editor-review]").forEach((button) => button.classList.toggle("active", button.dataset.editorReview === mode));
-  if (mode === "changes" && !uploadedSealEditorRuntime.changeSummary) {
-    try { await loadUploadedEditorChangeSummary(); } catch (error) { showToast(`變更清單載入失敗：${error.message}`); }
+  const reviewSelect = document.querySelector("#uploadedEditorReviewSelect");
+  if (reviewSelect) reviewSelect.value = mode;
+  try {
+    if (mode === "changes" && !uploadedSealEditorRuntime.changeSummary) await loadUploadedEditorChangeSummary();
+    if (reviewGeneration !== uploadedSealEditorRuntime.reviewGeneration || uploadedSealEditorRuntime.reviewMode !== mode) return;
+    await renderUploadedPdfPage();
+  } catch (error) {
+    if (reviewGeneration !== uploadedSealEditorRuntime.reviewGeneration) return;
+    uploadedSealEditorRuntime.reviewMode = "edited";
+    if (reviewSelect) reviewSelect.value = "edited";
+    showToast(`預覽載入失敗：${error.message}`);
+    await renderUploadedPdfPage();
   }
-  await renderUploadedPdfPage();
+  if (reviewGeneration !== uploadedSealEditorRuntime.reviewGeneration) return;
+  if (reviewSelect) reviewSelect.value = uploadedSealEditorRuntime.reviewMode;
+  renderUploadedSealWorkbench();
 }
 
 async function renderUploadedEditorThumbnail(pageId, canvas) {
@@ -23728,6 +23752,7 @@ function setUploadedEditorMode(mode) {
 
 function setUploadedEditorTool(tool) {
   if (uploadedSealEditorRuntime.uploading) return;
+  if (uploadedSealEditorRuntime.reviewMode !== "edited") return;
   if (!["select", ...PDF_EDITOR_ALLOWED_KINDS].includes(tool)) return;
   if (uploadedSealEditorRuntime.mode === "general" && !["select", "seal", "text"].includes(tool)) return;
   uploadedSealEditorRuntime.tool = tool;
@@ -24056,6 +24081,7 @@ function runUploadedEditorPageAction(action) {
 }
 
 async function handleUploadedEditorImportPdf(files) {
+  if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再匯入 PDF。");
   for (const file of files) {
     if (!file || (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf"))) return showToast("匯入只接受 PDF。");
     if (file.size > PDF_EDITOR_MAX_FILE_BYTES) return showToast("單一 PDF 不得超過 50 MB。");
@@ -24072,6 +24098,7 @@ async function handleUploadedEditorImportPdf(files) {
 
 async function handleUploadedEditorImage(file) {
   if (!file) return;
+  if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再插入圖片。");
   if (!["image/png", "image/jpeg"].includes(file.type)) return showToast("圖片只接受 PNG 或 JPEG。");
   if (file.size > PDF_EDITOR_MAX_IMAGE_BYTES) return showToast("單張圖片不得超過 10 MB。");
   try {
@@ -24401,6 +24428,7 @@ function openUploadedPdfPicker() {
   if (!input) return;
   if (uploadedSealEditorRuntime.locked) return showToast("此案件已送簽鎖定，不能更換 PDF。");
   if (uploadedSealEditorRuntime.uploading) return showToast("PDF 正在上傳與檢查，請稍候。");
+  if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再更換 PDF。");
   if (uploadedSealEditorRuntime.directoryLoading) return showToast("正在載入公司與印章權限，請稍候。");
   if (!uploadedEditorV2FeatureEnabled()) {
     showToast("正在重新載入公司與 PDF 編輯權限，完成後請再按一次。");
@@ -24499,15 +24527,17 @@ function renderUploadedSealWorkbench() {
   }
   const editor = document.querySelector("#uploadedPdfEditor");
   const featureEnabled = Boolean(uploadedSealEditorRuntime.documentId || uploadedEditorV2FeatureEnabled());
+  const reviewReadOnly = uploadedSealEditorRuntime.reviewMode !== "edited";
   if (editor) {
     editor.dataset.editorMode = uploadedSealEditorRuntime.mode;
     editor.dataset.editorLocked = String(uploadedSealEditorRuntime.locked);
     editor.dataset.featureEnabled = String(featureEnabled);
     editor.dataset.uploading = String(uploadedSealEditorRuntime.uploading);
+    editor.dataset.reviewMode = uploadedSealEditorRuntime.reviewMode;
   }
   const sourceInput = document.querySelector("#uploadedSealPdfInput");
-  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.directoryLoading;
-  const uploadActionDisabled = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.directoryLoading;
+  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
+  const uploadActionDisabled = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
   const emptyUploadButton = document.querySelector("#uploadedPdfEmptyUploadBtn");
   if (emptyUploadButton) emptyUploadButton.disabled = uploadActionDisabled;
   const replaceButton = document.querySelector("#uploadedPdfReplaceBtn");
@@ -24537,8 +24567,22 @@ function renderUploadedSealWorkbench() {
   ) {
     setUploadedEditorSaveStatus("saved", "PDF Editor V2 已開啟，可上傳文件");
   }
-  document.querySelectorAll("[data-editor-review]").forEach((button) => button.classList.toggle("active", button.dataset.editorReview === uploadedSealEditorRuntime.reviewMode));
-  document.querySelectorAll("[data-editor-tool]").forEach((button) => button.classList.toggle("active", button.dataset.editorTool === uploadedSealEditorRuntime.tool));
+  const reviewSelect = document.querySelector("#uploadedEditorReviewSelect");
+  if (reviewSelect) {
+    reviewSelect.value = uploadedSealEditorRuntime.reviewMode;
+    reviewSelect.disabled = !uploadedSealEditorState.pages.length || uploadedSealEditorRuntime.uploading;
+  }
+  document.querySelectorAll("[data-editor-tool]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.editorTool === uploadedSealEditorRuntime.tool);
+    button.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
+  });
+  document.querySelectorAll("[data-editor-page-action], [data-editor-layer], [data-editor-copy-selected], [data-editor-delete-selected]").forEach((control) => {
+    control.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
+  });
+  ["#uploadedEditorImportPdfBtn", "#addSelectedStampBtn", "#addUploadedTextBtn", "#uploadedEditorCopyPagesBtn", "#clearUploadedStampsBtn"].forEach((selector) => {
+    const control = document.querySelector(selector);
+    if (control) control.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
+  });
   document.querySelectorAll("[data-uploaded-placement-mode]").forEach((button) => button.classList.toggle("active", button.dataset.uploadedPlacementMode === uploadedSealPlacementMode));
   const generalOptions = document.querySelector("#uploadedEditorGeneralOptions");
   if (generalOptions) generalOptions.hidden = !["seal", "text", "replacement"].includes(uploadedSealEditorRuntime.tool);
@@ -24581,8 +24625,8 @@ function renderUploadedSealWorkbench() {
     stampLayer.hidden = !page;
     stampLayer.setAttribute("aria-hidden", String(!page));
   }
-  document.querySelector("#uploadedEditorUndoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.undoStack.length || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading);
-  document.querySelector("#uploadedEditorRedoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.redoStack.length || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading);
+  document.querySelector("#uploadedEditorUndoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.undoStack.length || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || reviewReadOnly);
+  document.querySelector("#uploadedEditorRedoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.redoStack.length || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || reviewReadOnly);
   renderUploadedEditorThumbnails();
   renderUploadedEditorProperties();
   const markerCount = uploadedSealEditorState.elements.length;
@@ -24592,7 +24636,7 @@ function renderUploadedSealWorkbench() {
       ? uploadedSealEditorState.elements.map((element, index) => {
           const pageNumber = uploadedSealEditorState.pages.findIndex((pageItem) => pageItem.pageId === element.pageId) + 1;
           const label = element.kind === "seal" ? element.properties?.sealName || "印章" : element.kind === "replacement" ? `取代：${element.properties?.text || ""}` : element.kind === "text" ? element.properties?.text || "文字" : ({ image: "圖片", shape: "形狀", checkmark: "勾選", highlight: "螢光", redaction: "安全遮蔽" }[element.kind] || element.kind);
-          return `<article class="uploaded-stamp-summary-item"><button type="button" data-editor-summary-id="${escapeDraftHtml(element.id)}"><span class="uploaded-stamp-number">${index + 1}</span><span><strong>${escapeDraftHtml(label)}</strong><small>第 ${pageNumber} 頁 · X ${Math.round(element.x)} / Y ${Math.round(element.y)} · ${Math.round(element.width)} × ${Math.round(element.height)} pt</small></span></button><button class="icon-button" type="button" data-editor-summary-delete="${escapeDraftHtml(element.id)}" aria-label="刪除物件">×</button></article>`;
+          return `<article class="uploaded-stamp-summary-item"><button type="button" data-editor-summary-id="${escapeDraftHtml(element.id)}"><span class="uploaded-stamp-number">${index + 1}</span><span><strong>${escapeDraftHtml(label)}</strong><small>第 ${pageNumber} 頁 · X ${Math.round(element.x)} / Y ${Math.round(element.y)} · ${Math.round(element.width)} × ${Math.round(element.height)} pt</small></span></button><button class="icon-button" type="button" data-editor-summary-delete="${escapeDraftHtml(element.id)}" aria-label="刪除物件"${reviewReadOnly || uploadedSealEditorRuntime.locked ? " disabled" : ""}>×</button></article>`;
         }).join("")
       : `<p class="empty-text">尚未加入編輯物件；請從工具列選擇印章、文字或進階工具。</p>`;
     summary.querySelectorAll("[data-editor-summary-id]").forEach((button) => button.addEventListener("click", () => {
@@ -26338,7 +26382,7 @@ document.querySelector("#uploadedEditorImageInput")?.addEventListener("change", 
 document.querySelector("#uploadedPdfEmptyUploadBtn")?.addEventListener("click", openUploadedPdfPicker);
 document.querySelector("#uploadedPdfReplaceBtn")?.addEventListener("click", openUploadedPdfPicker);
 document.querySelectorAll("[data-editor-page-action]").forEach((button) => button.addEventListener("click", () => runUploadedEditorPageAction(button.dataset.editorPageAction)));
-document.querySelectorAll("[data-editor-review]").forEach((button) => button.addEventListener("click", () => void showUploadedEditorReview(button.dataset.editorReview)));
+document.querySelector("#uploadedEditorReviewSelect")?.addEventListener("change", (event) => void showUploadedEditorReview(event.target.value));
 document.querySelector("#clearUploadedStampsBtn")?.addEventListener("click", () => {
   if (!uploadedSealEditorState.elements.length || uploadedSealEditorRuntime.locked) return;
   if (!window.confirm("確定清除目前草稿的全部編輯物件？原始 PDF 不會被刪除。")) return;
@@ -26401,7 +26445,13 @@ window.addEventListener("resize", () => {
 });
 document.addEventListener("keydown", (event) => {
   const editorVisible = document.querySelector("#electronicSeal")?.classList.contains("active") || document.querySelector("#contractSeal")?.classList.contains("active");
-  if (!editorVisible || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || event.target.closest("input, textarea, select")) return;
+  if (
+    !editorVisible
+    || uploadedSealEditorRuntime.locked
+    || uploadedSealEditorRuntime.uploading
+    || uploadedSealEditorRuntime.reviewMode !== "edited"
+    || event.target.closest("input, textarea, select")
+  ) return;
   const command = event.metaKey || event.ctrlKey;
   if (command && event.key.toLowerCase() === "z") {
     event.preventDefault();

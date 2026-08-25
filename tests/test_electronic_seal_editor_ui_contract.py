@@ -242,6 +242,46 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         for tool in ("select", "seal", "text"):
             self.assertIn(f'data-editor-tool="{tool}"', editor)
 
+    def test_review_versions_are_consolidated_into_one_compact_picker(self) -> None:
+        editor = html_element(self.page, "uploadedPdfEditor")
+        picker = html_element(editor, "uploadedEditorReviewSwitch")
+        self.assertIn('id="uploadedEditorReviewSelect"', picker)
+        self.assertNotIn('data-editor-review=', picker)
+        self.assertNotIn("<button", picker)
+        self.assertEqual(
+            re.findall(r'<option value="([^"]+)">', picker),
+            ["edited", "original", "prepared", "changes"],
+        )
+        self.assertRegex(
+            self.js,
+            r'document\.querySelector\("#uploadedEditorReviewSelect"\)\?\.addEventListener\("change",\s*\(event\)\s*=>\s*void showUploadedEditorReview\(event\.target\.value\)\)',
+        )
+        show_review = javascript_function(self.js, "showUploadedEditorReview")
+        self.assertIn('document.querySelector("#uploadedEditorReviewSelect")', show_review)
+        self.assertIn("reviewGeneration", show_review)
+        self.assertIn('uploadedSealEditorRuntime.reviewMode = "edited"', show_review)
+        self.assertIn("await renderUploadedPdfPage()", show_review)
+        self.assertRegex(
+            self.js,
+            r'document\.addEventListener\("keydown",[\s\S]*?uploadedSealEditorRuntime\.reviewMode\s*!==\s*"edited"',
+        )
+
+        dirty = javascript_function(self.js, "markUploadedEditorDirty")
+        for stale_preview in (
+            'uploadedSealEditorRuntime.preparedPdfDocument = null',
+            'uploadedSealEditorRuntime.preparedUrl = ""',
+            'uploadedSealEditorRuntime.changeSummary = null',
+        ):
+            self.assertIn(stale_preview, dirty)
+
+        mutation = javascript_function(self.js, "commitUploadedEditorMutation")
+        self.assertIn('uploadedSealEditorRuntime.reviewMode !== "edited"', mutation)
+
+        picker_rule = re.search(r"\.pdf-editor-review-picker select\s*\{(?P<body>[^}]*)}", self.css)
+        self.assertIsNotNone(picker_rule)
+        self.assertRegex(picker_rule.group("body"), r"min-height:\s*44px")
+        self.assertIn(':not([data-review-mode="edited"])', self.css)
+
     def test_invalid_or_non_a4_file_fails_without_destroying_current_editor(self) -> None:
         handler = javascript_function(self.js, "handleUploadedSealPdfChange")
         self.assertIn('file.type !== "application/pdf"', handler)
