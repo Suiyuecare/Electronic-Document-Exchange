@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260824-six-nav-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260825-six-page-r3" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
@@ -75,7 +75,6 @@
       <main class="workspace">
         <header class="topbar">
           <div>
-            <p class="eyebrow" id="pageEyebrow">機關層公文收發模組 jAgent 介接作業台</p>
             <h2 id="pageTitle">交換總覽</h2>
           </div>
           <div class="quick-actions module-switch-actions" aria-label="頁首操作">
@@ -104,20 +103,8 @@
             </div>
             <div class="dashboard-role-actions">
               <span class="status-pill" id="dashboardRoleScope">依登入身份載入</span>
-              <button class="text-button" id="roleOnboardingShowBtn" type="button" hidden>使用提示</button>
             </div>
           </div>
-
-          <section class="panel role-onboarding" id="roleOnboarding" hidden aria-labelledby="roleOnboardingTitle">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">第一次使用</p>
-                <h3 id="roleOnboardingTitle">三步開始今天的工作</h3>
-              </div>
-              <button class="text-button" id="roleOnboardingDismissBtn" type="button">我知道了</button>
-            </div>
-            <div class="role-onboarding-grid" id="roleOnboardingSteps"></div>
-          </section>
 
           <section class="panel go-live-gate-panel" id="goLiveGatePanel" hidden>
             <div class="go-live-gate-head">
@@ -163,8 +150,7 @@
           <section class="panel daily-action-center" id="dailyActionCenter">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">今日待辦</p>
-                <h3>今天先做這三件事</h3>
+                <h3>今日待辦</h3>
               </div>
               <span class="status-pill" id="dailyActionCount">0 件</span>
             </div>
@@ -997,7 +983,6 @@
         <section class="view" id="compose">
           <div class="section-header">
             <div>
-              <p class="eyebrow">兩步完成</p>
               <h3>撰寫公文</h3>
             </div>
             <span class="status-pill" id="composeStepStatus">第 1 頁：填寫資料</span>
@@ -1538,25 +1523,15 @@
         <section class="view" id="electronicSeal">
           <div class="section-header electronic-seal-header">
             <div>
-              <p class="eyebrow" id="uploadedSealHeaderEyebrow">四步完成</p>
               <h3 id="uploadedSealHeaderTitle">電子用印</h3>
-              <p id="uploadedSealHeaderDescription">填寫申請資料、上傳 PDF，直接在文件畫面標示每一個用印位置。</p>
             </div>
             <span class="status-pill" id="uploadedSealPdfStatus">尚未上傳 PDF</span>
-          </div>
-
-          <div class="electronic-seal-stepper" aria-label="電子用印步驟">
-            <span class="active"><b>1</b> 填寫申請</span>
-            <span><b>2</b> 上傳 PDF</span>
-            <span><b>3</b> 標示章位或文字</span>
-            <span><b>4</b> 送出簽核</span>
           </div>
 
           <div class="electronic-seal-layout">
             <aside class="panel electronic-seal-form-panel">
               <div class="panel-heading tight">
                 <div>
-                  <p class="eyebrow">第一步</p>
                   <h3 id="uploadedSealApplicationTitle">申請人與用印資料</h3>
                 </div>
                 <span class="status-pill">必填</span>
@@ -1602,7 +1577,7 @@
                 <label>用印原因<textarea id="uploadedSealReason" rows="4" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
                 <label class="electronic-seal-upload-drop">PDF 文件
                   <input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="uploadedPdfA4Rule" required />
-                  <span>選擇 PDF 後會立即顯示，支援多頁文件。</span>
+                  <span>支援多頁 PDF</span>
                 </label>
                 <div class="pdf-a4-rule" id="uploadedPdfA4Rule" data-state="idle">
                   <strong>公文與合約 PDF 只接受 A4</strong>
@@ -1686,7 +1661,7 @@
                   </div>
                 </aside>
 
-                <main class="uploaded-pdf-workspace pdf-editor-canvas-column">
+                <div class="uploaded-pdf-workspace pdf-editor-canvas-column">
                   <div class="uploaded-pdf-navigation" aria-label="PDF 頁面切換">
                     <button class="page-arrow" id="uploadedPdfPrevBtn" type="button" aria-label="上一頁">‹</button>
                     <div class="uploaded-page-strip" id="uploadedPdfPageStrip"></div>
@@ -1712,8 +1687,8 @@
                         <svg id="uploadedEditorSvgLayer" role="application" aria-label="PDF 編輯物件層"></svg>
                       </div>
                       <div class="uploaded-pdf-empty" id="uploadedPdfEmpty">
-                        <strong>先上傳 PDF 文件</strong>
-                        <span>系統完成權限、雜湊、掃毒及 PDF 預檢後才會開啟編輯。</span>
+                        <strong>尚未上傳 PDF</strong>
+                        <button class="primary-button" id="uploadedPdfEmptyUploadBtn" type="button">上傳 PDF</button>
                       </div>
                     </div>
                     <div class="pdf-editor-change-summary" id="uploadedEditorChangeSummaryPanel" hidden></div>
@@ -1722,14 +1697,14 @@
                     <span id="uploadedPdfPageLabel">尚未載入頁面</span>
                     <span id="uploadedPdfGeometryLabel">等待 PDF 幾何資訊</span>
                   </div>
-                </main>
+                </div>
 
                 <aside class="pdf-editor-properties" id="uploadedEditorProperties" aria-label="物件屬性">
                   <div class="pdf-editor-pane-heading">
                     <strong>屬性</strong>
                     <span id="uploadedEditorSelectionCount">未選取</span>
                   </div>
-                  <div class="pdf-editor-property-empty" id="uploadedEditorPropertyEmpty">選取物件後，可精準設定座標、尺寸、旋轉、透明度與圖層。</div>
+                  <div class="pdf-editor-property-empty" id="uploadedEditorPropertyEmpty">未選取物件</div>
                   <form class="pdf-editor-property-form" id="uploadedEditorPropertyForm" hidden>
                     <label class="editor-property-text">內容<textarea id="uploadedEditorPropertyText" rows="3" maxlength="1000"></textarea></label>
                     <label class="editor-property-shape" hidden>形狀類型<select id="uploadedEditorPropertyShapeType"><option value="rectangle">矩形</option><option value="line">線條</option></select></label>
@@ -1883,7 +1858,7 @@
               <div class="seal-vault-tab-panel active" data-seal-vault-panel="versions" role="tabpanel">
                 <div class="seal-vault-tab-intro">
                   <strong>目前版本與歷史狀態</strong>
-                  <p>先確認 current、掃描結果與校準尺寸；需要換檔時再切到「上傳新版」。</p>
+                  <p>目前版本、掃描結果與校準尺寸。</p>
                 </div>
               <div class="simple-seal-uploaded-list" id="simpleSealUploadedList"></div>
                 <section class="simple-seal-version-history" id="simpleSealVersionHistory" aria-live="polite"></section>
@@ -3070,23 +3045,6 @@
             </section>
           </div>
 
-          <section class="panel ux-health-panel" id="uxHealthPanel">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">使用體驗指標</p>
-                <h3>流程是否真的變簡單</h3>
-              </div>
-              <span class="status-pill" id="uxHealthScope">依可見資料統計</span>
-            </div>
-            <div class="ux-health-grid">
-              <article><span>平均完成時間</span><strong id="uxTaskCompletion">尚無資料</strong><small id="uxTaskCompletionNote">依已完成申請單計算</small></article>
-              <article><span>退回補正率</span><strong id="uxReturnRate">0%</strong><small id="uxReturnRateNote">依簽核歷程計算</small></article>
-              <article><span>需要功能導引</span><strong id="uxGuidanceRate">0%</strong><small id="uxGuidanceRateNote">點擊使用提示的工作階段</small></article>
-              <article><span>手機使用比例</span><strong id="uxMobileRatio">0%</strong><small id="uxMobileRatioNote">依匿名裝置類型事件計算</small></article>
-            </div>
-            <p class="field-hint" id="uxHealthPrivacyNote">只統計頁面、裝置類型與操作結果，不記錄公文內容、搜尋文字、附件或個人資料。</p>
-          </section>
-
           <div class="report-workbench">
             <section class="panel">
               <div class="panel-heading">
@@ -3245,11 +3203,11 @@
                 <h3>通知佇列</h3>
                 <span class="status-pill" id="notificationCount">0 則</span>
               </div>
-              <div class="table-wrap">
+              <div class="table-wrap" tabindex="0" aria-label="通知佇列表格">
                 <table>
                   <thead>
                     <tr>
-                      <th></th>
+                      <th>選取</th>
                       <th>通知</th>
                       <th>類型</th>
                       <th>對象</th>
@@ -3518,17 +3476,6 @@
               <div class="timeline" id="databaseAuditLog"></div>
             </section>
           </div>
-        </section>
-
-        <section class="view" id="features">
-          <div class="section-header">
-            <div>
-              <p class="eyebrow">Feature Scope</p>
-              <h3>完整功能總表</h3>
-            </div>
-            <span class="status-pill">一次列出</span>
-          </div>
-          <div class="feature-grid" id="featureGrid"></div>
         </section>
 
         <section class="view" id="complianceOps">
@@ -3826,7 +3773,6 @@
         <section class="view" id="settings">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Admin</p>
               <h3>系統設定</h3>
             </div>
             <div class="quick-actions">
@@ -4146,6 +4092,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260824-six-nav-r1"></script>
+    <script src="app.js?v=20260825-six-page-r3"></script>
   </body>
 </html>

@@ -53,24 +53,33 @@ class UiUxP1P2ContractTest(unittest.TestCase):
         self.assertIn("function renderSimpleSealUsage", self.js)
         self.assertIn(".seal-vault-tab-panel[hidden]", self.css)
 
-    def test_role_onboarding_is_compact_and_not_modal(self) -> None:
-        self.assertIn('id="roleOnboarding"', self.html)
-        self.assertIn("const roleOnboardingProfiles", self.js)
-        self.assertIn("三步開始方式", self.js)
-        onboarding_start = self.html.index('id="roleOnboarding"')
-        onboarding_end = self.html.index("</section>", onboarding_start)
-        self.assertNotIn('role="dialog"', self.html[onboarding_start:onboarding_end])
+    def test_role_onboarding_tutorial_is_removed(self) -> None:
+        for element_id in ("roleOnboarding", "roleOnboardingShowBtn", "roleOnboardingDismissBtn", "roleOnboardingSteps"):
+            self.assertNotIn(f'id="{element_id}"', self.html)
+        for implementation in (
+            "roleOnboardingProfiles",
+            "roleOnboardingStorageKey",
+            "renderRoleOnboarding",
+            "dismissRoleOnboarding",
+            "showRoleOnboarding",
+        ):
+            self.assertNotIn(implementation, self.js)
+        self.assertNotIn("三步開始方式", self.js)
 
-    def test_ux_metrics_are_visible_and_privacy_scoped(self) -> None:
+    def test_ux_telemetry_is_privacy_scoped_but_not_user_facing(self) -> None:
         for field_id in ("uxTaskCompletion", "uxReturnRate", "uxGuidanceRate", "uxMobileRatio"):
-            self.assertIn(f'id="{field_id}"', self.html)
-        self.assertIn("不記錄公文內容、搜尋文字、附件或個人資料", self.html)
+            self.assertNotIn(f'id="{field_id}"', self.html)
+        self.assertNotIn("需要功能導引", self.html)
+        render_start = self.js.index("function renderUxHealthMetrics()")
+        render_end = self.js.index("\nfunction ", render_start + len("function renderUxHealthMetrics()"))
+        render_body = self.js[render_start:render_end]
+        guard = 'if (!document.querySelector("#uxHealthPanel")) return;'
+        self.assertIn(guard, render_body)
+        self.assertLess(render_body.index(guard), render_body.index("#uxTaskCompletion"))
         self.assertIn('backendRequest("/ui-usage"', self.js)
         self.assertIn('backendRequest("/ui-usage/summary")', self.js)
 
     def test_mobile_layout_stacks_new_panels(self) -> None:
-        self.assertIn(".role-onboarding-grid,", self.css)
-        self.assertIn(".ux-health-grid,", self.css)
         self.assertIn(".notification-settings-grid,", self.css)
         self.assertIn("grid-template-columns: minmax(0, 1fr);", self.css)
 

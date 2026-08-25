@@ -30,7 +30,8 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         end = self.js.index("\n};", start) + 3
         secondary = self.js[start:end]
         self.assertIn('"contractSeal"', secondary)
-        self.assertNotIn('"exchange"', secondary)
+        self.assertIn('"format"', secondary)
+        self.assertIn('"exchange"', secondary)
 
     def test_internal_launch_dashboard_does_not_promote_disabled_exchange(self) -> None:
         start = self.js.index("function dashboardRoleData()")
@@ -87,8 +88,10 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn('id="logoutBtn"', self.html)
 
     def test_core_page_guidance_uses_plain_chinese(self) -> None:
-        for label in ("今日待辦", "簽核案件", "兩步完成", "四步完成", "固定簽核規則", "印章版本控管"):
+        for label in ("今日待辦", "簽核案件", "固定簽核規則", "印章版本控管"):
             self.assertIn(label, self.html)
+        for teaching_copy in ("兩步完成", "四步完成", "第一次使用", "三步開始今天的工作"):
+            self.assertNotIn(teaching_copy, self.html + self.js)
         for label in ("General Affairs Desk", "General Affairs Home", "Contract Seal Application"):
             self.assertNotIn(label, self.js)
 
@@ -128,25 +131,98 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertNotIn("renderWorkspaceSubnavigation", self.js)
         self.assertNotIn("workspace-subnav-button", self.css)
 
-    def test_legacy_pages_are_folded_into_one_of_the_six_major_functions(self) -> None:
+    def test_legacy_pages_are_integrated_into_the_six_major_pages_at_runtime(self) -> None:
         start = self.js.index("const mergedNavigationParents = Object.freeze({")
         end = self.js.index("\n});", start) + 4
         parents = self.js[start:end]
         for route, parent in (
             ("notifications", "dashboard"),
             ("search", "inbound"),
+            ("dispatch", "inbound"),
             ("tracking", "inbound"),
+            ("archive", "inbound"),
             ("contracts", "electronicSeal"),
             ("contractSeal", "electronicSeal"),
             ("seals", "electronicSeal"),
+            ("format", "compose"),
             ("workflow", "settings"),
+            ("exchange", "settings"),
             ("reports", "approvalLog"),
             ("accounts", "settings"),
             ("ops", "settings"),
         ):
             self.assertIn(f'{route}: "{parent}"', parents)
-        self.assertIn("const activeMajorRoute = majorRouteForRoute(target);", self.js)
-        self.assertIn("simpleRouteTitle(activeMajorRoute)", self.js)
+
+        groups_start = self.js.index("const integratedMajorPageGroups")
+        groups_end = self.js.index("\n});", groups_start) + 4
+        groups = self.js[groups_start:groups_end]
+        for route in (
+            "notifications",
+            "search",
+            "dispatch",
+            "tracking",
+            "archive",
+            "contracts",
+            "seals",
+            "format",
+            "workflow",
+            "exchange",
+            "reports",
+            "accounts",
+            "ops",
+        ):
+            self.assertIn(f'"{route}"', groups)
+
+        retired_start = self.js.index("const retiredMergedRoutes")
+        retired_end = self.js.index(";", retired_start) + 1
+        retired = self.js[retired_start:retired_end]
+        self.assertIn('"contractSeal"', retired)
+        self.assertNotIn('"format"', retired)
+
+        self.assertIn("function initializeIntegratedMajorPages()", self.js)
+        self.assertIn("function openIntegratedPageSection(", self.js)
+        self.assertIn("initializeIntegratedMajorPages();", self.js)
+        self.assertLess(
+            self.js.index("initializeIntegratedMajorPages();"),
+            self.js.index("void tryResumePlatformSession()"),
+        )
+
+        initialize_start = self.js.index("function initializeIntegratedMajorPages()")
+        initialize_end = self.js.index("\nfunction ", initialize_start + len("function initializeIntegratedMajorPages()"))
+        initialize_body = self.js[initialize_start:initialize_end]
+        self.assertIn("dataset.integratedRoute", initialize_body)
+        self.assertRegex(
+            initialize_body,
+            r'classList\.remove\("view",\s*"active"\)',
+        )
+        self.assertIn(".append(", initialize_body)
+
+        view_start = self.js.index("function setView(target)")
+        view_end = self.js.index("\nwindow.addEventListener(\"hashchange\"", view_start)
+        set_view = self.js[view_start:view_end]
+        self.assertIn("const activeMajorRoute = majorRouteForRoute(target);", set_view)
+        self.assertRegex(
+            set_view,
+            r'classList\.toggle\("active",\s*view\.id\s*===\s*activeMajorRoute\)',
+        )
+        self.assertIn("openIntegratedPageSection(target", set_view)
+        self.assertNotIn('target === "contractSeal" ? "electronicSeal" : target', set_view)
+        self.assertIn("simpleRouteTitle(activeMajorRoute)", set_view)
+
+    def test_tutorial_and_feature_catalog_are_removed_not_merely_hidden(self) -> None:
+        for element_id in ("roleOnboarding", "roleOnboardingShowBtn", "roleOnboardingDismissBtn", "features", "featureGrid"):
+            self.assertNotIn(f'id="{element_id}"', self.html)
+        for implementation in (
+            "roleOnboardingProfiles",
+            "roleOnboardingStorageKey",
+            "renderRoleOnboarding",
+            "dismissRoleOnboarding",
+            "showRoleOnboarding",
+            "featureGroups",
+            "renderFeatureGrid",
+        ):
+            self.assertNotIn(implementation, self.js)
+        self.assertNotIn('features: "settings"', self.js)
 
     def test_notification_bell_opens_home_task_center(self) -> None:
         start = self.js.index('document.querySelector("#headerNotificationBtn")')

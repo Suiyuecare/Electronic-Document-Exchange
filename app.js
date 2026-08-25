@@ -731,26 +731,6 @@ const formatAuditLog = [
   ["10:18", "載入文書格式", "已載入預設函稿格式與附件清冊。"]
 ];
 
-const featureGroups = [
-  ["01 收文管理", "jAgent 拉取來文後統一由總務收文登錄，再分發給各部門主管，並保留誤送漏送通知、收文列印與批次匯出。"],
-  ["02 發文管理", "建立函稿、受文者與副本管理、清稿檢核、附件封裝、送交 jAgent、查詢交換結果、重送與撤回處理。"],
-  ["03 jAgent 介接", "憑證登入、Token 管理、API 狀態、交換中心連線、地址簿查詢、送件、收件、回覆與狀態同步。"],
-  ["04 文書格式", "文號、文別、速別、密等、主旨、說明、辦法、附件清冊、受文者機關代碼與標準交換資料欄位。"],
-  ["05 流程控管", "依員工清冊職等與職稱推導員工、主管、總務、行政、人資、會計、執行長與檢核角色；收文由總務統一收件後分派部門主管。"],
-  ["06 稽催追蹤", "發文翌日查核、逾期提醒、未收確認提醒、異常重送、退回補正與處理時限儀表板。"],
-  ["07 歸檔保存", "原文、附件、交換事件、操作軌跡、檔案雜湊、版本、下載紀錄與保存年限控管。"],
-  ["08 資安控管", "憑證卡、權限 RBAC、IP/裝置限制、敏感欄位遮罩、登入登出、Token 過期與操作不可否認性。"],
-  ["09 報表統計", "收發量、機關往來量、成功率、異常類型、承辦量、逾期件、交換中心服務狀態與月報。"],
-  ["10 系統設定", "機關代碼、交換中心、API URL、防火牆、憑證、角色、通知、保存年限、測試/正式環境切換。"],
-  ["11 通知中心", "收文通知、待清稿提醒、交換失敗、Token 即將過期、逾期查核、主管退回與稽核警示。"],
-  ["12 後端資料庫", "公文主檔、受文者、附件、交換任務、交換事件、jAgent session、audit log 與地址簿快取。"],
-  ["13 帳號登入與權限", "使用者帳號、單位職稱、RBAC、SSO、Google Workspace / Microsoft Entra、MFA、登入紀錄、裝置紀錄與 IP 限制。"],
-  ["14 檔案與資安控管", "附件防毒掃描、檔案大小限制、敏感資料遮罩、密件權限隔離、下載浮水印、檔案存取紀錄、備份與還原。"],
-  ["15 排程與背景任務", "每日收文拉取、發文翌日查核、Token 到期檢查、逾期稽催、合約續約提醒、交換狀態同步、歸檔封存與報表產生。"],
-  ["16 管理者維運功能", "jAgent 連線健康檢查、API log 查詢、錯誤碼查詢、系統參數版控、操作紀錄匯出、資料備份與測試/正式環境切換。"],
-  ["17 合約管理與簽核", "合約起案、相對人資料、附件清冊、條件式簽核、退回補正、移交合約用印、續約提醒、歸檔與合約 audit log。"]
-];
-
 const roleNotes = {
   員工: "可撰寫公文、處理自己的待辦，並查詢所屬部門收發公文。",
   主管: "可處理所屬部門待辦、簽核與退回補正，並查詢部門公文。",
@@ -2428,7 +2408,6 @@ const titles = {
   database: "後端資料庫",
   ops: "維運中心",
   complianceOps: "法遵營運",
-  features: "完整功能總表",
   settings: "系統設定"
 };
 
@@ -2606,9 +2585,10 @@ function setView(target) {
   if (!isRouteAllowed(target)) target = "dashboard";
   activeRouteTarget = target;
   document.body.dataset.activeRoute = target;
-  const viewTarget = target === "contractSeal" ? "electronicSeal" : target;
-  document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === viewTarget));
   const activeMajorRoute = majorRouteForRoute(target);
+  document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === activeMajorRoute));
+  const activeView = document.getElementById(activeMajorRoute);
+  if (activeView && target === activeMajorRoute) activeView.scrollTo({ top: 0, left: 0, behavior: "auto" });
   document.querySelectorAll(".nav-item").forEach((item) => {
     const active = item.dataset.target === activeMajorRoute;
     item.classList.toggle("active", active);
@@ -2624,7 +2604,6 @@ function setView(target) {
     });
   }
   document.querySelector("#pageTitle").textContent = simpleRouteTitle(activeMajorRoute);
-  document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(activeMajorRoute);
   updateHeaderStatus();
   if (target === "approvalLog" && hasAuthenticatedBackendSession()) void loadApprovalProgressFromBackend();
   if (target === "archive" && hasAuthenticatedBackendSession()) void loadArchiveRecordsFromBackend();
@@ -2632,6 +2611,7 @@ function setView(target) {
     configureUploadedSealMode(target);
     void initializeUploadedSealWorkspace();
   }
+  openIntegratedPageSection(target);
   void loadRouteBackendData(target, true);
   trackUiUsage("route_view", { route: target });
   if (location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
@@ -2933,11 +2913,14 @@ const navByIdentity = {
 };
 
 const secondaryRoutesByIdentity = {
-  employee: ["notifications", "search", "contractSeal"],
-  supervisor: ["notifications", "search", "contractSeal"],
+  employee: ["notifications", "search", "contractSeal", "format"],
+  supervisor: ["notifications", "search", "contractSeal", "format"],
   viewer: ["search"],
-  companyOps: ["notifications", "search", "contracts", "contractSeal", "tracking", "reports", "seals"],
-  executive: ["notifications", "search", "contracts", "contractSeal", "workflow", "tracking", "reports", "seals", "accounts", "ops"]
+  companyOps: ["notifications", "search", "dispatch", "contracts", "contractSeal", "tracking", "archive", "reports", "seals"],
+  executive: [
+    "notifications", "search", "dispatch", "contracts", "contractSeal", "workflow", "tracking", "archive", "reports", "seals",
+    "accounts", "exchange", "security", "fileSecurity", "jobs", "database", "complianceOps", "ops", "format"
+  ]
 };
 
 function primaryRoutesForRole(role = activeRole()) {
@@ -2979,28 +2962,13 @@ function simpleRouteTitle(target, role = activeRole()) {
   return simpleRouteLabels(role)[target] || titles[target] || "電子公文";
 }
 
-function simpleRouteEyebrow(target, role = activeRole()) {
-  const kind = identityKindForRole(role);
-  if (target === "dashboard" && canSeeCompanyWideDocs(role)) return "全公司公文、合約、交換與風險儀表板";
-  if (target === "compose") return "填寫與預覽 -> 確認 -> 送簽";
-  if (target === "notifications") return "今天要處理、即將逾期、已退回與交換失敗";
-  if (target === "contracts") return "本單位合約台帳與簽核";
-  if (target === "contractSeal") return "上傳合約 PDF、標示印章與文字位置、送出簽核";
-  if (target === "electronicSeal") return "填寫申請、預覽 PDF 並直接標示用印位置";
-  if (target === "search") return canSeeCompanyWideDocs(role) ? "可查詢全公司公文" : "可查詢授權範圍內公文";
-  if (target === "approvalLog") return canSeeCompanyWideDocs(role) ? "全公司簽核流程" : "我的簽核與部門流程";
-  if (target === "inbound") return "信件與公文歸檔、內部派發與處理回覆";
-  if (kind === "employee") return "我的待辦與退回補正";
-  if (kind === "supervisor") return "主管簽核與部門風險";
-  return "全公司收發與交換處理";
-}
-
 const mergedNavigationParents = Object.freeze({
   notifications: "dashboard",
   search: "inbound",
+  dispatch: "inbound",
   archive: "inbound",
   tracking: "inbound",
-  exchange: "inbound",
+  exchange: "settings",
   contracts: "electronicSeal",
   contractSeal: "electronicSeal",
   seals: "electronicSeal",
@@ -3013,9 +2981,138 @@ const mergedNavigationParents = Object.freeze({
   security: "settings",
   fileSecurity: "settings",
   complianceOps: "settings",
-  features: "settings",
-  format: "settings"
+  format: "compose"
 });
+
+const integratedMajorPageGroups = Object.freeze({
+  dashboard: [
+    ["notifications", "全部待辦與通知", true]
+  ],
+  compose: [
+    ["format", "文書與格式檢核", false]
+  ],
+  electronicSeal: [
+    ["contracts", "合約案件", false],
+    ["seals", "印章檔案", false]
+  ],
+  approvalLog: [
+    ["reports", "簽核統計", false]
+  ],
+  inbound: [
+    ["search", "公文查詢", false],
+    ["dispatch", "寄發管理", false],
+    ["tracking", "稽催追蹤", false],
+    ["archive", "歸檔保存", false]
+  ],
+  settings: [
+    ["workflow", "簽核流程", false],
+    ["accounts", "公司與人員", false],
+    ["exchange", "交換系統狀態", false],
+    ["security", "存取安全", false],
+    ["fileSecurity", "檔案安全", false],
+    ["jobs", "背景工作", false],
+    ["database", "資料狀態", false],
+    ["complianceOps", "法遵與稽核", false],
+    ["ops", "維運狀態", false]
+  ]
+});
+
+const retiredMergedRoutes = Object.freeze(["contractSeal"]);
+let integratedMajorPagesInitialized = false;
+
+function integratedPageSummary(label) {
+  const summary = document.createElement("summary");
+  const text = document.createElement("span");
+  text.textContent = label;
+  const state = document.createElement("span");
+  state.className = "integrated-page-summary-state";
+  state.setAttribute("aria-hidden", "true");
+  state.textContent = "展開";
+  summary.append(text, state);
+  return summary;
+}
+
+function setIntegratedSectionState(details, open) {
+  details.open = open;
+  const state = details.querySelector(":scope > summary .integrated-page-summary-state");
+  if (state) state.textContent = open ? "收合" : "展開";
+}
+
+function initializeIntegratedMajorPages() {
+  if (integratedMajorPagesInitialized) return;
+  integratedMajorPagesInitialized = true;
+
+  retiredMergedRoutes.forEach((route) => {
+    const legacy = document.getElementById(route);
+    if (!legacy) return;
+    legacy.classList.remove("view", "active");
+    legacy.classList.add("legacy-merged-form");
+    legacy.hidden = true;
+    legacy.setAttribute("aria-hidden", "true");
+  });
+
+  Object.entries(integratedMajorPageGroups).forEach(([parentRoute, entries]) => {
+    const parent = document.getElementById(parentRoute);
+    if (!parent || !entries.length) return;
+    const host = document.createElement("div");
+    host.className = "integrated-page-sections";
+    host.dataset.integratedParent = parentRoute;
+
+    if (parentRoute === "settings") {
+      const baseContent = document.createElement("div");
+      baseContent.className = "integrated-page-content integrated-settings-base";
+      Array.from(parent.children)
+        .filter((child) => !child.classList.contains("section-header"))
+        .forEach((child) => baseContent.append(child));
+      const baseDetails = document.createElement("details");
+      baseDetails.className = "integrated-page-section";
+      baseDetails.dataset.integratedBase = "settings";
+      baseDetails.append(integratedPageSummary("一般設定"), baseContent);
+      setIntegratedSectionState(baseDetails, true);
+      baseDetails.addEventListener("toggle", () => {
+        setIntegratedSectionState(baseDetails, baseDetails.open);
+        if (!baseDetails.open) return;
+        host.querySelectorAll(".integrated-page-section[open]").forEach((sibling) => {
+          if (sibling !== baseDetails) setIntegratedSectionState(sibling, false);
+        });
+      });
+      host.append(baseDetails);
+    }
+
+    entries.forEach(([route, label, openByDefault]) => {
+      const content = document.getElementById(route);
+      if (!content || content === parent) return;
+      content.classList.remove("view", "active");
+      content.classList.add("integrated-page-content");
+      const details = document.createElement("details");
+      details.className = "integrated-page-section";
+      details.dataset.integratedRoute = route;
+      details.append(integratedPageSummary(label), content);
+      setIntegratedSectionState(details, Boolean(openByDefault));
+      details.addEventListener("toggle", () => {
+        setIntegratedSectionState(details, details.open);
+        if (!details.open) return;
+        if (!isRouteAllowed(route)) {
+          setIntegratedSectionState(details, false);
+          return;
+        }
+        host.querySelectorAll(".integrated-page-section[open]").forEach((sibling) => {
+          if (sibling !== details) setIntegratedSectionState(sibling, false);
+        });
+        void loadRouteBackendData(route, true);
+      });
+      host.append(details);
+    });
+    parent.append(host);
+  });
+}
+
+function openIntegratedPageSection(target) {
+  const details = document.querySelector(`.integrated-page-section[data-integrated-route="${target}"]`);
+  if (!details || !isRouteAllowed(target)) return;
+  setIntegratedSectionState(details, true);
+  window.requestAnimationFrame(() => details.scrollIntoView({ behavior: "smooth", block: "start" }));
+}
 
 function majorRouteForRoute(route = activeRouteTarget) {
   return mergedNavigationParents[route] || route || "dashboard";
@@ -3036,13 +3133,22 @@ function applyRoleNavigation() {
   document.querySelector("#pullInboundBtn")?.toggleAttribute("hidden", !companyWide);
   document.querySelector("#sendQueueBtn")?.toggleAttribute("hidden", !companyWide);
   const active = document.body.dataset.activeRoute || document.querySelector(".view.active")?.id || "dashboard";
-  document.querySelector("#pageTitle").textContent = simpleRouteTitle(active);
-  document.querySelector("#pageEyebrow").textContent = simpleRouteEyebrow(active);
+  const activeMajorRoute = majorRouteForRoute(active);
+  document.querySelector("#pageTitle").textContent = simpleRouteTitle(activeMajorRoute);
   updateHeaderStatus();
   document.querySelectorAll("[data-target]").forEach((control) => {
     const target = control.dataset.target;
     if (!target || !titles[target]) return;
     control.toggleAttribute("hidden", !allowed.includes(target));
+  });
+  document.querySelectorAll(".integrated-page-section[data-integrated-route]").forEach((section) => {
+    const hidden = !allowed.includes(section.dataset.integratedRoute);
+    section.hidden = hidden;
+    if (hidden) setIntegratedSectionState(section, false);
+  });
+  document.querySelectorAll(".integrated-page-sections").forEach((host) => {
+    host.hidden = !Array.from(host.querySelectorAll(":scope > .integrated-page-section"))
+      .some((section) => !section.hidden);
   });
   if (!allowed.includes(active)) setView("dashboard");
 }
@@ -3449,13 +3555,6 @@ function dailyActionItems() {
     .slice(0, 3);
 }
 
-function dailyActionReason(item, index) {
-  if (item.tone === "issue") return "有逾期、退回或流程異常，建議優先處理。";
-  if (item.priority >= 2) return "今天若未處理，流程會卡在目前關卡。";
-  if (index === 0) return "這是目前最接近你角色職責的下一步。";
-  return "可在主要急件完成後接著處理。";
-}
-
 function openDailyAction(index) {
   const item = dailyActionCache[Number(index)];
   if (!item) return;
@@ -3507,13 +3606,11 @@ function renderDailyActionCenter() {
       <strong>${item.title}</strong>
       <small>${item.meta}</small>
       <p>${item.body}</p>
-      <span class="daily-action-reason">${dailyActionReason(item, index)}</span>
       <em>${item.action}</em>
     </button>
   `).join("") : `
     <article class="daily-action-empty">
-      <strong>目前沒有急件</strong>
-      <p>可以先撰寫新公文、查詢公文，或確認通知中心沒有補件提醒。</p>
+      <strong>目前沒有待辦</strong>
       <button class="secondary-button" type="button" data-daily-action-empty="compose">撰寫公文</button>
     </article>
   `;
@@ -3729,84 +3826,6 @@ function dashboardRoleData() {
   };
 }
 
-const roleOnboardingProfiles = Object.freeze({
-  employee: [
-    { title: "先看今天的待辦", body: "從首頁確認退回補正、待收件與即將逾期。", route: "dashboard", action: "查看今日待辦" },
-    { title: "建立或補正申請", body: "在撰寫公文完成用途、附件與送簽資料。", route: "compose", action: "前往撰寫公文" },
-    { title: "追蹤到收件完成", body: "簽核頁會直接顯示現在在誰手上與下一步。", route: "approvalLog", action: "查看簽核進度" }
-  ],
-  supervisor: [
-    { title: "先處理我的簽核", body: "首頁已整合只與你有關的未讀、逾期與退回案件。", route: "dashboard", action: "查看首頁待辦" },
-    { title: "核對文件再決定", body: "簽核頁可查看附件、PDF 編輯版與完整流程。", route: "approvalLog", action: "查看簽核案件" },
-    { title: "追蹤退回與逾期", body: "用報表與進度欄位快速判斷卡關位置。", route: "reports", action: "查看營運指標" }
-  ],
-  generalAffairs: [
-    { title: "先看總務待辦", body: "首頁已整合未讀、逾期與退回補正。", route: "dashboard", action: "查看首頁待辦" },
-    { title: "完成用印與交付", body: "到電子用印確認 PDF、章位及最終檔案。", route: "electronicSeal", action: "前往電子用印" },
-    { title: "核對印章版本", body: "版本清冊只顯示 current、掃描與校準尺寸。", route: "seals", action: "查看印章版本" }
-  ],
-  viewer: [
-    { title: "從公文查詢開始", body: "依授權範圍查找公文、附件與歷史紀錄。", route: "search", action: "開啟公文查詢" },
-    { title: "檢視完整簽核軌跡", body: "確認每一關的人員、時間與決定。", route: "approvalLog", action: "查看簽核紀錄" },
-    { title: "查看營運摘要", body: "用統計資料觀察完成時間、退回與裝置使用。", route: "reports", action: "查看報表" }
-  ]
-});
-
-function roleOnboardingStorageKey() {
-  const userId = String(authState?.user?.id || "user").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60);
-  const roleKey = String(authState?.bridge?.loggingRoleKey || authState?.user?.logging_role_key || activeRole() || "employee")
-    .replace(/[^A-Za-z0-9_\u4e00-\u9fff-]/g, "_")
-    .slice(0, 60);
-  return `edoc-role-onboarding-v1:${userId}:${roleKey}`;
-}
-
-function renderRoleOnboarding(forceShow = false) {
-  const panel = document.querySelector("#roleOnboarding");
-  const stepsTarget = document.querySelector("#roleOnboardingSteps");
-  const showButton = document.querySelector("#roleOnboardingShowBtn");
-  if (!panel || !stepsTarget || !showButton) return;
-  const kind = identityKindForRole();
-  const steps = (roleOnboardingProfiles[kind] || roleOnboardingProfiles.employee).filter((step) => isRouteAllowed(step.route));
-  const dismissed = localStorage.getItem(roleOnboardingStorageKey()) === "dismissed";
-  const shouldShow = forceShow || !dismissed;
-  panel.hidden = !shouldShow;
-  showButton.hidden = shouldShow;
-  if (!steps.length) {
-    panel.hidden = true;
-    showButton.hidden = true;
-    return;
-  }
-  document.querySelector("#roleOnboardingTitle").textContent = `${activeRole()}的三步開始方式`;
-  stepsTarget.innerHTML = steps.map((step, index) => `
-    <article class="role-onboarding-step">
-      <span>${index + 1}</span>
-      <div>
-        <strong>${escapeHtml(step.title)}</strong>
-        <p>${escapeHtml(step.body)}</p>
-        <button class="text-button" type="button" data-onboarding-target="${escapeHtml(step.route)}">${escapeHtml(step.action)}</button>
-      </div>
-    </article>
-  `).join("");
-  stepsTarget.querySelectorAll("[data-onboarding-target]").forEach((button) => {
-    button.addEventListener("click", () => {
-      trackUiUsage("guidance_used", { route: button.dataset.onboardingTarget });
-      setView(button.dataset.onboardingTarget);
-    });
-  });
-}
-
-function dismissRoleOnboarding() {
-  localStorage.setItem(roleOnboardingStorageKey(), "dismissed");
-  renderRoleOnboarding();
-}
-
-function showRoleOnboarding() {
-  localStorage.removeItem(roleOnboardingStorageKey());
-  trackUiUsage("guidance_used", { route: "dashboard" });
-  renderRoleOnboarding(true);
-  document.querySelector("#roleOnboarding")?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
 function renderRoleDashboard() {
   const data = dashboardRoleData();
   const backendMetrics = backendDashboardMetrics;
@@ -3872,7 +3891,6 @@ function renderRoleDashboard() {
     </article>
   `).join("");
   renderDailyActionCenter();
-  renderRoleOnboarding();
   renderDashboardApprovalProgress();
   renderSupervisorCommandDashboard();
 }
@@ -9983,7 +10001,7 @@ function visibleContracts() {
 
 function currentContract() {
   if (!selectedContractId) return null;
-  if (document.querySelector(".view.active")?.id === "contractSeal") {
+  if (activeRouteTarget === "contractSeal") {
     return contractRecords.find((contract) => contract.id === selectedContractId) || null;
   }
   const rows = visibleContracts();
@@ -18829,16 +18847,6 @@ function addDatabaseRowFromForm() {
   showToast("資料列已新增。");
 }
 
-function renderFeatureGrid() {
-  document.querySelector("#featureGrid").innerHTML = featureGroups.map(([title, body], index) => `
-    <article class="feature-card">
-      <span>${String(index + 1).padStart(2, "0")}</span>
-      <strong>${title}</strong>
-      <p>${body}</p>
-    </article>
-  `).join("");
-}
-
 function addFormatAudit(title, body) {
   formatAuditLog.unshift([nowTime(), title, body]);
   renderFormatAuditLog();
@@ -21947,28 +21955,29 @@ function selectedUploadedSeal() {
 }
 
 function configureUploadedSealMode(target = activeRouteTarget) {
-  uploadedSealMode = target === "contractSeal" ? "contract" : "official_document";
+  const type = document.querySelector("#uploadedSealType");
+  const classificationLocked = Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+  if (!classificationLocked) {
+    uploadedSealMode = target === "contractSeal" || type?.value === "contract" ? "contract" : "official_document";
+  }
   const contractMode = uploadedSealMode === "contract";
   const setText = (selector, value) => {
     const node = document.querySelector(selector);
     if (node) node.textContent = value;
   };
-  setText("#uploadedSealHeaderEyebrow", contractMode ? "合約四步完成" : "四步完成");
   setText("#uploadedSealHeaderTitle", contractMode ? "合約用印" : "電子用印");
-  setText("#uploadedSealHeaderDescription", contractMode
-    ? "上傳 A4 合約 PDF，標示印章與文字位置後送簽；用印完成後交申請人確認與下載，不進入公文寄送待辦。"
-    : "填寫申請資料、上傳 A4 PDF 並標示用印位置；用印完成後交申請人確認與下載，不進入公文寄送待辦。");
   setText("#uploadedSealApplicationTitle", contractMode ? "申請人與合約資料" : "申請人與用印資料");
   setText("#uploadedSealWorkspaceTitle", contractMode ? "合約標記與用印位置" : "選擇印章與用印位置");
-  const type = document.querySelector("#uploadedSealType");
-  if (type) type.value = contractMode ? "contract" : "official_document";
-  document.querySelector("#uploadedSealTypeField")?.toggleAttribute("hidden", contractMode);
+  if (type) {
+    type.value = contractMode ? "contract" : "official_document";
+    type.disabled = classificationLocked;
+  }
+  document.querySelector("#uploadedSealTypeField")?.removeAttribute("hidden");
   document.querySelector("#uploadedSealCounterpartyField")?.toggleAttribute("hidden", !contractMode);
   const approvalRouteSection = document.querySelector("#uploadedSealApprovalRouteSection");
   const approvalCategorySelect = document.querySelector("#uploadedSealApprovalCategorySelect");
   approvalRouteSection?.removeAttribute("hidden");
   if (approvalCategorySelect) {
-    const classificationLocked = Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
     approvalCategorySelect.disabled = classificationLocked;
     approvalCategorySelect.required = true;
   }
@@ -22229,11 +22238,6 @@ function renderUploadedSealWorkbench() {
   const pageLabel = document.querySelector("#uploadedPdfPageLabel");
   if (pageLabel) pageLabel.textContent = uploadedSealPdf ? `第 ${uploadedSealCurrentPage} / ${uploadedSealPageCount} 頁` : "尚未載入頁面";
   const markerCount = uploadedSealStampPositions.length + uploadedSealTextOverlays.length;
-  const phase = !uploadedSealPdf ? 1 : markerCount ? 4 : 3;
-  document.querySelectorAll("#electronicSeal .electronic-seal-stepper span").forEach((step, index) => {
-    step.classList.toggle("active", index + 1 === phase);
-    step.classList.toggle("completed", index + 1 < phase);
-  });
   const summary = document.querySelector("#uploadedStampSummary");
   if (summary) {
     const stampItems = uploadedSealStampPositions.map((stamp, index) => `<article class="uploaded-stamp-summary-item">
@@ -24344,6 +24348,8 @@ function renderUploadedSealWorkbench() {
   const companySelect = document.querySelector("#uploadedSealCompany");
   if (companySelect && !companySelect.options.length) renderUploadedSealCompanyOptions();
   if (companySelect) companySelect.disabled = !companySelect.options.length || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+  const typeSelect = document.querySelector("#uploadedSealType");
+  if (typeSelect) typeSelect.disabled = Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
   const approvalCategorySelect = document.querySelector("#uploadedSealApprovalCategorySelect");
   if (approvalCategorySelect) {
     approvalCategorySelect.required = true;
@@ -24358,6 +24364,8 @@ function renderUploadedSealWorkbench() {
   }
   const sourceInput = document.querySelector("#uploadedSealPdfInput");
   if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked;
+  const emptyUploadButton = document.querySelector("#uploadedPdfEmptyUploadBtn");
+  if (emptyUploadButton) emptyUploadButton.disabled = Boolean(sourceInput?.disabled);
   const saveStatus = document.querySelector("#uploadedEditorSaveStatus");
   if (!featureEnabled && !uploadedSealEditorRuntime.documentId) {
     setUploadedEditorSaveStatus("offline", "此公司尚未開啟 PDF Editor V2");
@@ -24412,11 +24420,6 @@ function renderUploadedSealWorkbench() {
   renderUploadedEditorThumbnails();
   renderUploadedEditorProperties();
   const markerCount = uploadedSealEditorState.elements.length;
-  const phase = !uploadedSealEditorState.pages.length ? 1 : markerCount ? 4 : 3;
-  document.querySelectorAll("#electronicSeal .electronic-seal-stepper span").forEach((step, index) => {
-    step.classList.toggle("active", index + 1 === phase);
-    step.classList.toggle("completed", index + 1 < phase);
-  });
   const summary = document.querySelector("#uploadedStampSummary");
   if (summary) {
     summary.innerHTML = markerCount
@@ -26032,8 +26035,6 @@ document.querySelector("#dashboardApprovalOpenBtn").addEventListener("click", ()
   document.querySelector("#approvalProgressPanel")?.scrollIntoView({ behavior: "smooth", block: "center" });
 });
 document.querySelector("#dashboardApprovalExportBtn").addEventListener("click", exportApprovalProgress);
-document.querySelector("#roleOnboardingDismissBtn")?.addEventListener("click", dismissRoleOnboarding);
-document.querySelector("#roleOnboardingShowBtn")?.addEventListener("click", showRoleOnboarding);
 document.querySelector("#permissionTestForm").addEventListener("submit", (event) => {
   event.preventDefault();
   checkPermission(document.querySelector("#permissionAction").value);
@@ -26144,6 +26145,7 @@ document.querySelector("#uploadedEditorImportPdfInput")?.addEventListener("chang
   }
 });
 document.querySelector("#uploadedEditorImageInput")?.addEventListener("change", (event) => void handleUploadedEditorImage(event.target.files?.[0]));
+document.querySelector("#uploadedPdfEmptyUploadBtn")?.addEventListener("click", () => document.querySelector("#uploadedSealPdfInput")?.click());
 document.querySelectorAll("[data-editor-page-action]").forEach((button) => button.addEventListener("click", () => runUploadedEditorPageAction(button.dataset.editorPageAction)));
 document.querySelectorAll("[data-editor-review]").forEach((button) => button.addEventListener("click", () => void showUploadedEditorReview(button.dataset.editorReview)));
 document.querySelector("#clearUploadedStampsBtn")?.addEventListener("click", () => {
@@ -26153,7 +26155,20 @@ document.querySelector("#clearUploadedStampsBtn")?.addEventListener("click", () 
   uploadedSealEditorRuntime.selectedIds.clear();
 });
 document.querySelector("#submitUploadedSealBtn")?.addEventListener("click", submitUploadedSealApplication);
-document.querySelector("#uploadedSealType")?.addEventListener("change", renderUploadedSealWorkbench);
+document.querySelector("#uploadedSealType")?.addEventListener("change", (event) => {
+  if (uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) {
+    event.target.value = uploadedSealMode === "contract" ? "contract" : "official_document";
+    showToast("文件類型已隨草稿鎖定；如需變更，請建立新的用印申請。");
+    return;
+  }
+  uploadedSealMode = event.target.value === "contract" ? "contract" : "official_document";
+  const contractMode = uploadedSealMode === "contract";
+  document.querySelector("#uploadedSealCounterpartyField")?.toggleAttribute("hidden", !contractMode);
+  document.querySelector("#uploadedSealApplicationTitle").textContent = contractMode ? "申請人與合約資料" : "申請人與用印資料";
+  document.querySelector("#uploadedSealWorkspaceTitle").textContent = contractMode ? "合約標記與用印位置" : "選擇印章與用印位置";
+  renderUploadedSealApprovalRoute();
+  renderUploadedSealWorkbench();
+});
 const uploadedStampLayer = document.querySelector("#uploadedStampLayer");
 uploadedStampLayer?.addEventListener("pointerdown", beginUploadedEditorPointer);
 uploadedStampLayer?.addEventListener("pointermove", moveUploadedEditorPointer);
@@ -26849,6 +26864,7 @@ function removeProductionDemonstrationData() {
 }
 
 removeProductionDemonstrationData();
+initializeIntegratedMajorPages();
 applyEdocRoleOptions();
 syncConfigurableSelectOptions();
 renderApprovalCategorySelect("#composeApprovalCategorySelect", "", { requireSelection: true });
@@ -26924,7 +26940,6 @@ function initializeDeferredWorkspace() {
   renderDatabase();
   renderOps();
   renderComplianceOps();
-  renderFeatureGrid();
   renderSettings();
   renderSearch();
   applyFormalExchangeUiState();
