@@ -25,10 +25,11 @@ class UiUxSimplificationContractTest(unittest.TestCase):
             self.assertIn(f'"{route}"', navigation)
         self.assertNotIn('"search"', navigation)
 
-    def test_legacy_contract_route_remains_available_without_being_primary(self) -> None:
+    def test_legacy_contract_route_remains_context_only_without_being_primary(self) -> None:
         start = self.js.index("const secondaryRoutesByIdentity = {")
         end = self.js.index("\n};", start) + 3
         secondary = self.js[start:end]
+        self.assertIn('"contracts"', secondary)
         self.assertIn('"contractSeal"', secondary)
         self.assertIn('"format"', secondary)
         self.assertIn('"exchange"', secondary)
@@ -141,7 +142,6 @@ class UiUxSimplificationContractTest(unittest.TestCase):
             ("dispatch", "inbound"),
             ("tracking", "inbound"),
             ("archive", "inbound"),
-            ("contracts", "electronicSeal"),
             ("contractSeal", "electronicSeal"),
             ("seals", "electronicSeal"),
             ("format", "compose"),
@@ -162,7 +162,6 @@ class UiUxSimplificationContractTest(unittest.TestCase):
             "dispatch",
             "tracking",
             "archive",
-            "contracts",
             "seals",
             "format",
             "workflow",
@@ -177,7 +176,14 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         retired_end = self.js.index(";", retired_start) + 1
         retired = self.js[retired_start:retired_end]
         self.assertIn('"contractSeal"', retired)
+        self.assertNotIn('"contracts"', retired)
         self.assertNotIn('"format"', retired)
+
+        electronic_seal_start = groups.index("electronicSeal:")
+        electronic_seal_end = groups.index("  ],", electronic_seal_start)
+        electronic_seal_group = groups[electronic_seal_start:electronic_seal_end]
+        self.assertNotIn('"contracts"', electronic_seal_group)
+        self.assertNotIn("合約案件", electronic_seal_group)
 
         self.assertIn("function initializeIntegratedMajorPages()", self.js)
         self.assertIn("function openIntegratedPageSection(", self.js)

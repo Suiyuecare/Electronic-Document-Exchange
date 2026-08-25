@@ -2977,7 +2977,6 @@ const mergedNavigationParents = Object.freeze({
   archive: "inbound",
   tracking: "inbound",
   exchange: "settings",
-  contracts: "electronicSeal",
   contractSeal: "electronicSeal",
   seals: "electronicSeal",
   workflow: "settings",
@@ -3000,7 +2999,6 @@ const integratedMajorPageGroups = Object.freeze({
     ["format", "文書與格式檢核", false]
   ],
   electronicSeal: [
-    ["contracts", "合約案件", false],
     ["seals", "印章檔案", false]
   ],
   approvalLog: [
