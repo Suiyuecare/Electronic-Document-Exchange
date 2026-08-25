@@ -23,6 +23,7 @@ DIRECTOR_ID = "00000000-0000-0000-0000-000000002000"
 ROOT = Path(__file__).resolve().parents[1]
 ORGANIZATION_MIGRATION = ROOT / "supabase" / "migrations" / "20260825101840_finance_organization_directory_v2.sql"
 ORGANIZATION_REVISION_LOCK_MIGRATION = ROOT / "supabase" / "migrations" / "20260825102459_lock_finance_organization_revisions.sql"
+FINANCE_TENANT_BACKFILL_MIGRATION = ROOT / "supabase" / "migrations" / "20260825143558_backfill_finance_tenant_scope.sql"
 
 
 def organization_event(*, revision: int = 14) -> dict:
@@ -248,6 +249,15 @@ class FinanceOrganizationPublishedContractTest(unittest.TestCase):
         self.assertIn("before update or delete", sql)
         self.assertIn("before truncate", sql)
         self.assertIn("finance_organization_revision_immutable", sql)
+
+    def test_legacy_finance_rows_are_backfilled_only_for_one_tenant(self) -> None:
+        sql = FINANCE_TENANT_BACKFILL_MIGRATION.read_text(encoding="utf-8").lower()
+        self.assertIn("v_tenant_count <> 1", sql)
+        self.assertIn("finance_tenant_backfill_requires_exactly_one_projection_tenant", sql)
+        self.assertIn("update public.companies", sql)
+        self.assertIn("update public.users", sql)
+        self.assertIn("update public.finance_member_sync_receipts", sql)
+        self.assertIn("finance_tenant_backfill_incomplete", sql)
 
 
 class FinanceOrganizationRevisionApplyTest(unittest.TestCase):

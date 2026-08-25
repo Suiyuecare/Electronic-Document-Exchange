@@ -36,6 +36,7 @@
     "20260824061729_fix_official_stamp_latest_workflow_generation.sql",
     "20260824124500_finance_login_fast_path.sql",
     "20260825101840_finance_organization_directory_v2.sql",
-    "20260825102459_lock_finance_organization_revisions.sql"
+    "20260825102459_lock_finance_organization_revisions.sql",
+    "20260825143558_backfill_finance_tenant_scope.sql"
   ]
 }
