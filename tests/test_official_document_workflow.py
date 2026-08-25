@@ -9,6 +9,7 @@ from pathlib import Path
 
 import backend
 from PIL import Image, ImageDraw
+from pypdf import PdfReader
 
 
 class OfficialDocumentWorkflowTestCase(unittest.TestCase):
@@ -372,6 +373,113 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
         self.assertEqual(detail["current_status"], "pending_general_affairs_dispatch")
         self.assertEqual(detail["stamp_request"]["status"], "stamped")
         self.assertEqual(len([file for file in detail["files"] if file["file_type"] == "stamped_pdf"]), 1)
+
+    def test_fax_and_copy_recipients_survive_correction_and_resubmit(self) -> None:
+        employee = self.login_session("sales-assistant@suiyuecare.com")
+        seal_id = self.seed_seal_id()
+        detail = backend.create_official_document(
+            self.conn,
+            {
+                "source_type": "blank_editor",
+                "company_id": "CO-001",
+                "seal_id": seal_id,
+                "title": "傳真與副本保留測試",
+                "subject": "傳真與副本保留測試",
+                "description": "第一版去識別化說明文字。",
+                "recipient": "測試機關",
+                "request_reason": "驗證補正與重送不會遺失欄位。",
+                "document_category": "主管機關 申請或回覆文件（與 費用、法令無關）",
+                "dispatch_method": "electronic_official_document_by_general_affairs",
+                "metadata": {
+                    "source": "compose_form",
+                    "company_name": "歲悅股份有限公司",
+                    "contact_fax": "N/A",
+                    "copy_recipients": "歲悅股份有限公司",
+                },
+                "submit": True,
+                "stamp_position": {"page": 1, "x": 420, "y": 130, "width": 85, "height": 85},
+            },
+            employee,
+        )
+
+        rejected_step = next(
+            step for step in detail["approval_steps"]
+            if step["step_key"] == detail["current_step"]
+        )
+        approver = self.session_for_user_id(rejected_step["approver_user_id"])
+        for file_meta in detail["files"]:
+            if file_meta["file_type"] in {"generated_pdf", "prepared_pdf", "attachment"}:
+                backend.official_document_download_file(
+                    self.conn,
+                    detail["id"],
+                    file_meta["id"],
+                    approver,
+                    "127.0.0.1",
+                    "unit-test-review",
+                )
+        detail = backend.reject_official_document(
+            self.conn,
+            detail["id"],
+            {
+                "expected_step_id": rejected_step["id"],
+                "comment": "請增補副本單位。",
+                "reason_category": "內容補正",
+                "missing_items": ["副本單位"],
+            },
+            approver,
+        )
+
+        detail = backend.update_official_document_correction(
+            self.conn,
+            detail["id"],
+            {
+                "description": "第二版已增補副本單位。",
+                "metadata": {
+                    "source": "compose_form",
+                    "company_name": "歲悅股份有限公司",
+                    "contact_fax": "N/A",
+                    "copy_recipients": "歲悅股份有限公司、增補副本單位",
+                },
+            },
+            employee,
+        )
+        self.assertEqual(detail["metadata"]["extra"]["contact_fax"], "N/A")
+        self.assertEqual(
+            detail["metadata"]["extra"]["copy_recipients"],
+            "歲悅股份有限公司、增補副本單位",
+        )
+
+        latest_generated = max(
+            (file_meta for file_meta in detail["files"] if file_meta["file_type"] == "generated_pdf"),
+            key=lambda file_meta: int(file_meta["version"]),
+        )
+        _, _, generated_pdf = backend.official_document_download_file(
+            self.conn,
+            detail["id"],
+            latest_generated["id"],
+            employee,
+            "127.0.0.1",
+            "unit-test-correction-review",
+        )
+        rendered_text = "\n".join(
+            page.extract_text() or ""
+            for page in PdfReader(io.BytesIO(generated_pdf)).pages
+        )
+        self.assertIn("傳真：N/A", rendered_text)
+        self.assertIn("副本：", rendered_text)
+        self.assertIn("歲悅股份有限公司、增補副本單位", rendered_text)
+
+        resubmitted = backend.resubmit_official_document(
+            self.conn,
+            detail["id"],
+            {"comment": "已增補副本並重新送簽。"},
+            employee,
+        )
+        self.assertEqual(resubmitted["metadata"]["extra"]["contact_fax"], "N/A")
+        self.assertEqual(
+            resubmitted["metadata"]["extra"]["copy_recipients"],
+            "歲悅股份有限公司、增補副本單位",
+        )
 
     def test_uploaded_pdf_source_is_private_original_pdf_and_rejects_non_pdf(self) -> None:
         employee = self.login_session("sales-assistant@suiyuecare.com")

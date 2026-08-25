@@ -1059,6 +1059,11 @@
                     <input id="recipient" placeholder="例如：臺北市政府社會局" />
                     <span class="field-hint" id="recipientHint"></span>
                   </label>
+                  <label>
+                    副本
+                    <textarea id="copyRecipients" rows="2" placeholder="送件公司會自動列入；可用頓號或換行增補其他副本"></textarea>
+                    <span class="field-hint">送件公司固定列為第一個副本，可自行增補其他單位或人員。</span>
+                  </label>
                   <label class="compose-purpose-field">
                     這份公文用途
                     <textarea id="documentPurpose" rows="4" placeholder="先用自己的話寫要辦理的事情、原因、希望對方採取的行動，以及重要期限。"></textarea>
@@ -1091,7 +1096,7 @@
                     </label>
                     <label>
                       寄件人傳真
-                      <input id="contactFax" value="(02)2254-4029" />
+                      <input id="contactFax" value="N/A" />
                     </label>
                     <label class="span-all">
                       寄件人電子信箱
@@ -4092,6 +4097,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260825-six-page-r3"></script>
+    <script src="app.js?v=20260825-fax-copy-r1"></script>
   </body>
 </html>

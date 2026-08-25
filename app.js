@@ -914,6 +914,7 @@ let composeSaveState = {
 let approvalLogFilter = "unanswered";
 let approvalLogSearchTerm = "";
 const composeDefaultContactPhone = "02-66045432 #";
+const composeDefaultContactFax = "N/A";
 const composeSealTypes = ["無", "一般章", "公司設立章", "銀行印鑑章", "圖記章"];
 const composeSealPlacements = {
   large: { page: 1, x: 70, y: 80 },
@@ -5546,22 +5547,54 @@ function addDispatchAudit(title, body) {
   renderDispatchAuditLog();
 }
 
+function composePartyItems(value = "") {
+  return [...new Set(
+    String(value || "")
+      .split(/[\n、,，;；]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )];
+}
+
+function composeCopyRecipientsValue(companyName = "", value = "", previousDefault = "") {
+  const company = String(companyName || "").trim();
+  const oldCompany = String(previousDefault || "").trim();
+  const additions = composePartyItems(value).filter((item) => item !== company && item !== oldCompany);
+  return [...new Set([company, ...additions].filter(Boolean))].join("、");
+}
+
+function syncComposeCopyRecipientsDefault(force = false) {
+  const input = document.querySelector("#copyRecipients");
+  if (!input) return "";
+  const companyName = document.querySelector("#composeCompanySelect")?.value
+    || authState?.user?.company_name
+    || "";
+  const previousDefault = input.dataset.defaultCompany || "";
+  input.value = composeCopyRecipientsValue(companyName, force ? "" : input.value, previousDefault);
+  input.dataset.defaultCompany = companyName;
+  input.dataset.autoDefault = composePartyItems(input.value).some((item) => item !== companyName) ? "false" : "true";
+  return input.value;
+}
+
 function composePayload() {
   const selectedLargeSealType = document.querySelector("#largeSealType")?.value || "無";
   const selectedSmallSealType = document.querySelector("#smallSealType")?.value || "無";
   const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
+  const companyName = document.querySelector("#composeCompanySelect")?.value || companyRegistry[0]?.name || "歲悅長照股份有限公司";
+  const copyInput = document.querySelector("#copyRecipients");
   return {
-    companyName: document.querySelector("#composeCompanySelect")?.value || companyRegistry[0]?.name || "歲悅長照股份有限公司",
+    companyName,
     no: document.querySelector("#dispatchNo")?.value.trim() || "",
     type: document.querySelector("#docType")?.value || "函",
     priority: document.querySelector("#priority")?.value || "普通件",
     ...approvalSelection,
     recipient: document.querySelector("#recipient")?.value.trim() || "未指定受文者",
+    copyRecipients: composeCopyRecipientsValue(companyName, copyInput?.value || "", copyInput?.dataset.defaultCompany || ""),
     purpose: document.querySelector("#documentPurpose")?.value.trim() || "",
     contactAddress: document.querySelector("#contactAddress")?.value.trim() || "",
     contactOwner: document.querySelector("#contactOwner")?.value.trim() || activeRole(),
     contactPhone: document.querySelector("#contactPhone")?.value.trim() || composeDefaultContactPhone,
-    contactFax: document.querySelector("#contactFax")?.value.trim() || "(02)2254-4029",
+    contactFax: document.querySelector("#contactFax")?.value.trim() || composeDefaultContactFax,
     contactEmail: document.querySelector("#contactEmail")?.value.trim() || authState?.user?.email || "",
     deliveryMode: "seal_or_manual_dispatch",
     largeSealType: selectedLargeSealType,
@@ -5598,6 +5631,7 @@ const composeAutosaveSelectors = [
   "#composeApprovalCategorySelect",
   "#dispatchNo",
   "#recipient",
+  "#copyRecipients",
   "#documentPurpose",
   "#contactAddress",
   "#contactOwner",
@@ -5750,10 +5784,11 @@ function restoreComposeAutosave() {
     const safeValue = value.slice(0, element.tagName === "TEXTAREA" ? 50000 : 2000);
     if (element.tagName === "SELECT" && ![...element.options].some((option) => option.value === safeValue)) return;
     element.value = safeValue;
-    if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactEmail"].includes(selector)) {
+    if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#copyRecipients"].includes(selector)) {
       element.dataset.autoDefault = "false";
     }
   });
+  syncComposeCopyRecipientsDefault(false);
   ["large", "small"].forEach((kind) => {
     const placement = snapshot.sealPlacements?.[kind] || {};
     composeSealPlacements[kind].page = Math.max(1, Math.min(300, Number(placement.page) || 1));
@@ -6221,7 +6256,7 @@ function composeContactDefaults(role = activeRole()) {
     contactAddress: selectedCompany?.address || authState?.user?.company_address || "",
     contactOwner: authState?.user?.name || account?.name || role,
     contactPhone: composeDefaultContactPhone,
-    contactFax: "(02)2254-4029",
+    contactFax: composeDefaultContactFax,
     contactEmail: authState?.user?.email || account?.email || "",
     unit
   };
@@ -6243,6 +6278,7 @@ function applyComposeContactDefaults(force = false) {
       input.dataset.autoDefault = "true";
     }
   });
+  syncComposeCopyRecipientsDefault(force);
   renderDraftPreview();
 }
 
@@ -6362,6 +6398,7 @@ function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, atta
             <span>地址：${escapeDraftHtml(data.contactAddress)}</span>
             <span>承辦人：${escapeDraftHtml(data.contactOwner)}</span>
             <span>電話：${escapeDraftHtml(data.contactPhone)}</span>
+            <span>傳真：${escapeDraftHtml(data.contactFax || composeDefaultContactFax)}</span>
             <span>電子信箱：${escapeDraftHtml(data.contactEmail)}</span>
           </address>
         </header>
@@ -6397,7 +6434,7 @@ function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, atta
         ${isLastPage ? `
           <section class="draft-distribution-block" aria-label="正本與副本">
             <div><span>正本：</span><strong>${escapeDraftHtml(data.recipient)}</strong></div>
-            <div><span>副本：</span><strong aria-hidden="true">　</strong></div>
+            <div><span>副本：</span><strong>${escapeDraftHtml(data.copyRecipients || data.companyName)}</strong></div>
           </section>
         ` : ""}
       </section>
@@ -7426,9 +7463,12 @@ function officialCorrectionStampPositions(item = {}) {
 }
 
 function officialComposeMetadata(item = {}) {
-  if (item.metadata && typeof item.metadata === "object") return item.metadata;
-  const parsed = parseJsonMaybe(item.metadata_json);
-  return parsed && typeof parsed === "object" ? parsed : {};
+  const metadata = item.metadata && typeof item.metadata === "object"
+    ? item.metadata
+    : parseJsonMaybe(item.metadata_json);
+  if (!metadata || typeof metadata !== "object") return {};
+  const extra = metadata.extra && typeof metadata.extra === "object" ? metadata.extra : {};
+  return { ...extra, ...metadata, extra };
 }
 
 function composeSealTypeFromCategory(category = "") {
@@ -7464,7 +7504,7 @@ function setComposeDraftField(selector, value) {
   const text = String(value);
   if (element.tagName === "SELECT" && ![...element.options].some((option) => option.value === text)) return;
   element.value = text;
-  if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactEmail"].includes(selector)) {
+  if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#copyRecipients"].includes(selector)) {
     element.dataset.autoDefault = "false";
   }
 }
@@ -7498,11 +7538,12 @@ function beginComposeOfficialCorrection(item) {
     "#priority": metadata.priority || "普通件",
     "#dispatchNo": metadata.dispatch_no || "",
     "#recipient": item.recipient || "",
+    "#copyRecipients": metadata.copy_recipients || metadata.copyRecipients || metadata.company_name || item.company_name || authState?.user?.company_name || "",
     "#documentPurpose": metadata.purpose || item.request_reason || "",
     "#contactAddress": metadata.contact_address || authState?.user?.company_address || "",
     "#contactOwner": metadata.contact_owner || item.handler_name || item.applicant_name || authState?.user?.name || "",
     "#contactPhone": metadata.contact_phone || composeDefaultContactPhone,
-    "#contactFax": metadata.contact_fax || "(02)2254-4029",
+    "#contactFax": metadata.contact_fax || composeDefaultContactFax,
     "#contactEmail": metadata.contact_email || authState?.user?.email || "",
     "#largeSealType": largeSealType,
     "#smallSealType": smallSealType,
@@ -7511,6 +7552,9 @@ function beginComposeOfficialCorrection(item) {
     "#attachmentDetails": metadata.attachment_details || item.attachments_summary || ""
   };
   Object.entries(values).forEach(([selector, value]) => setComposeDraftField(selector, value));
+  const copyInput = document.querySelector("#copyRecipients");
+  if (copyInput) copyInput.dataset.defaultCompany = values["#composeCompanySelect"];
+  syncComposeCopyRecipientsDefault(false);
   if (!document.querySelector("#dispatchNo")?.value) assignNextDispatchNo(true);
   Object.assign(composeSealPlacements.large, composePlacementFromOfficial(item, metadata, "large"));
   Object.assign(composeSealPlacements.small, composePlacementFromOfficial(item, metadata, "small"));
@@ -7529,6 +7573,7 @@ function beginComposeOfficialCorrection(item) {
     documentCategory: item.document_category || metadata.document_category || "",
     approvalRouteCode: item.approval_route_code || metadata.approval_route_code || "",
     to: item.recipient || "",
+    copyRecipients: document.querySelector("#copyRecipients")?.value || values["#composeCompanySelect"],
     subject: item.subject || item.title || "",
     body: item.description || "",
     status: "草稿",
@@ -9426,6 +9471,7 @@ function dispatchDocSnapshot(doc) {
     agencyCode: doc.agencyCode || "",
     subject: doc.subject || "",
     body: doc.body || "",
+    copyRecipients: doc.copyRecipients || doc.companyName || "",
     contactAddress: doc.contactAddress || "",
     contactOwner: doc.contactOwner || "",
     contactPhone: doc.contactPhone || "",
@@ -9684,7 +9730,8 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
       contact_owner: data.contactOwner,
       contact_phone: data.contactPhone,
       contact_fax: data.contactFax,
-      contact_email: data.contactEmail
+      contact_email: data.contactEmail,
+      copy_recipients: data.copyRecipients
     },
     submit: false
   };
@@ -9750,6 +9797,7 @@ async function createDispatchFromForm(status = "草稿") {
     agencyCode: "待查詢",
     subject: data.subject,
     body: data.body,
+    copyRecipients: data.copyRecipients,
     attachmentDetails: data.attachmentDetails,
     contactAddress: data.contactAddress,
     contactOwner: data.contactOwner,
@@ -17699,6 +17747,7 @@ function backendDocumentPayload(doc) {
       lockedAttachmentHash: doc.lockedAttachmentHash || "",
       attachmentDetails: doc.attachmentDetails || "",
       attachmentManifest: doc.attachments || [],
+      copy_recipients: doc.copyRecipients || doc.companyName || "",
       documentCategory: doc.documentCategory || "",
       documentCategoryGroup: doc.documentCategoryGroup || "",
       approvalRouteCode: doc.approvalRouteCode || "",
@@ -18015,6 +18064,7 @@ function applyPersistentDocuments(rows = []) {
       agencyCode: row.agency_code || "待查詢",
       subject: row.subject,
       body: row.body || "",
+      copyRecipients: metadata.copy_recipients || metadata.copyRecipients || row.company_name || "",
       attachmentDetails: metadata.attachmentDetails || "",
       status: row.status,
       owner: row.owner,
@@ -18024,7 +18074,7 @@ function applyPersistentDocuments(rows = []) {
       contactAddress: metadata.contact?.address || "",
       contactOwner: metadata.contact?.owner || row.owner,
       contactPhone: metadata.contact?.phone || "",
-      contactFax: metadata.contact?.fax || "",
+      contactFax: metadata.contact?.fax || composeDefaultContactFax,
       contactEmail: metadata.contact?.email || "",
       checks: metadata.checks || { format: true, recipient: true, attachments: true, certificate: true, package: Boolean(metadata.packageId) },
       sealPlan,
@@ -24643,6 +24693,7 @@ function backendPdfPayload(doc, request = null) {
       agencyCode: doc.agencyCode,
       subject: doc.subject,
       body: doc.body,
+      copyRecipients: doc.copyRecipients || companyName,
       attachments: doc.attachments,
       owner: doc.owner,
       department: doc.dept,
@@ -24650,7 +24701,7 @@ function backendPdfPayload(doc, request = null) {
       contactAddress: doc.contactAddress || document.querySelector("#contactAddress")?.value || "220205 新北市板橋區英士路192之1號",
       contactOwner: doc.contactOwner || document.querySelector("#contactOwner")?.value || doc.owner || activeRole(),
       contactPhone: doc.contactPhone || document.querySelector("#contactPhone")?.value || composeDefaultContactPhone,
-      contactFax: doc.contactFax || document.querySelector("#contactFax")?.value || "(02)2254-4029",
+      contactFax: doc.contactFax || document.querySelector("#contactFax")?.value || composeDefaultContactFax,
       contactEmail: doc.contactEmail || document.querySelector("#contactEmail")?.value || "edoc@suiyuecare.com",
       sealPlan
     }
@@ -25883,14 +25934,14 @@ document.querySelector("#composeNextAction").addEventListener("click", (event) =
   });
 });
 syncComposeElectronicExchangeMode();
-["#composeCompanySelect", "#docType", "#priority", "#composeApprovalCategorySelect", "#recipient", "#documentPurpose", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
+["#composeCompanySelect", "#docType", "#priority", "#composeApprovalCategorySelect", "#recipient", "#copyRecipients", "#documentPurpose", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);
   if (!["INPUT", "TEXTAREA"].includes(element?.tagName) || element?.type === "file") {
     element?.addEventListener("change", markDraftDirty);
   }
 });
-["#contactAddress", "#contactOwner", "#contactPhone", "#contactEmail"].forEach((selector) => {
+["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#copyRecipients"].forEach((selector) => {
   document.querySelector(selector)?.addEventListener("input", (event) => {
     event.currentTarget.dataset.autoDefault = "false";
   });
@@ -25899,6 +25950,10 @@ document.querySelector("#composeCompanySelect")?.addEventListener("change", (eve
   event.currentTarget.dataset.userEdited = "true";
   event.currentTarget.dataset.autoDefault = "false";
   applyComposeContactDefaults(false);
+});
+document.querySelector("#copyRecipients")?.addEventListener("change", () => {
+  syncComposeCopyRecipientsDefault(false);
+  markDraftDirty();
 });
 document.querySelector("#composeApprovalCategorySelect")?.addEventListener("change", () => {
   renderComposeApprovalRoute();

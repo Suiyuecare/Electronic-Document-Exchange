@@ -172,6 +172,8 @@ EDOC_CRL_DISTRIBUTION_URL = os.getenv("EDOC_CRL_DISTRIBUTION_URL", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 EDOC_DEFAULT_CONTACT_PHONE = "02-66045432 #"
+EDOC_DEFAULT_CONTACT_FAX = "N/A"
+OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH = 2000
 EDOC_EXCHANGE_ENV = os.getenv("EDOC_EXCHANGE_ENV", "sandbox").strip().lower()
 EDOC_EXCHANGE_PROVIDER = os.getenv("EDOC_EXCHANGE_PROVIDER", "mock").strip().lower()
 EDOC_EXCHANGE_MAX_RETRIES = int(os.getenv("EDOC_EXCHANGE_MAX_RETRIES", "3"))
@@ -10406,16 +10408,30 @@ def official_pdf_font_profile() -> Dict[str, Any]:
         return _OFFICIAL_PDF_FONT_PROFILE
 
 
+def official_pdf_party_items(value: Any) -> List[str]:
+    source = value if isinstance(value, list) else [value]
+    values: List[str] = []
+    seen: set[str] = set()
+    for item in source:
+        if isinstance(item, dict):
+            item = item.get("name") or item.get("title") or item.get("recipient") or ""
+        for token in re.split(r"[、,，;；\n]+", str(item or "")):
+            text_value = token.strip()
+            if not text_value or text_value in seen:
+                continue
+            seen.add(text_value)
+            values.append(text_value)
+    return values
+
+
 def official_pdf_party_text(value: Any) -> str:
-    if isinstance(value, list):
-        values = []
-        for item in value:
-            if isinstance(item, dict):
-                item = item.get("name") or item.get("title") or item.get("recipient") or ""
-            if str(item or "").strip():
-                values.append(str(item).strip())
-        return "、".join(values)
-    return str(value or "").strip()
+    return "、".join(official_pdf_party_items(value))
+
+
+def official_pdf_copy_recipients(value: Any, company_name: Any) -> str:
+    company = str(company_name or "").strip()
+    additions = [item for item in official_pdf_party_items(value) if item != company]
+    return "、".join([company, *additions] if company else additions)
 
 
 def official_pdf_attachment_text(value: Any) -> str:
@@ -10484,6 +10500,10 @@ def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
         or metadata.get("copy_recipients")
         or metadata.get("copyRecipients")
         or metadata.get("cc")
+        or metadata_extra.get("copies")
+        or metadata_extra.get("copy_recipients")
+        or metadata_extra.get("copyRecipients")
+        or metadata_extra.get("cc")
     )
     raw_attachments = doc.get("attachments")
     if raw_attachments in (None, ""):
@@ -10507,7 +10527,7 @@ def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
         "security_display": "" if security in {"", "普通", "普通件", "一般", "無"} else security,
         "recipient": recipient,
         "original_recipients": official_pdf_party_text(originals_value) or recipient,
-        "copy_recipients": official_pdf_party_text(copies_value),
+        "copy_recipients": official_pdf_copy_recipients(copies_value, company),
         "agency_code": doc.get("agency_code") or doc.get("agencyCode") or "",
         "subject": doc.get("subject") or "未填主旨",
         "body": str(body or ""),
@@ -10516,7 +10536,7 @@ def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
         "contact_address": doc.get("contactAddress") or doc.get("contact_address") or contact.get("address") or metadata_extra.get("contact_address") or "",
         "contact_owner": doc.get("contactOwner") or doc.get("contact_owner") or contact.get("owner") or doc.get("owner") or "",
         "contact_phone": doc.get("contactPhone") or doc.get("contact_phone") or contact.get("phone") or EDOC_DEFAULT_CONTACT_PHONE,
-        "contact_fax": doc.get("contactFax") or doc.get("contact_fax") or contact.get("fax") or "",
+        "contact_fax": doc.get("contactFax") or doc.get("contact_fax") or contact.get("fax") or EDOC_DEFAULT_CONTACT_FAX,
         "contact_email": doc.get("contactEmail") or doc.get("contact_email") or contact.get("email") or "",
     }
 
@@ -10589,6 +10609,7 @@ def paginate_official_pdf(
         ("地址", info.get("contact_address")),
         ("承辦人", info.get("contact_owner")),
         ("電話", info.get("contact_phone")),
+        ("傳真", info.get("contact_fax") or EDOC_DEFAULT_CONTACT_FAX),
         ("電子信箱", info.get("contact_email")),
     ):
         if value:
@@ -10601,7 +10622,7 @@ def paginate_official_pdf(
         font_name,
         16.0,
     )
-    recipient_top = 193.85
+    recipient_top = max(193.85, 105.82 + max(1, len(contact_lines)) * 15.0 + 18.0)
     meta_top = recipient_top + max(1, len(recipient_lines)) * 18.0 + 14.0
     metadata_values = [
         f"發文日期：{info['date']}",
@@ -19418,6 +19439,10 @@ def official_pdf_document_payload(conn: sqlite3.Connection, document: Dict[str, 
         "company_name": company.get("name") or "歲悅股份有限公司",
         "doc_type": extra.get("document_type") or metadata.get("document_type") or "函",
         "agency_name": document.get("recipient") or "未指定受文者",
+        "copy_recipients": official_pdf_copy_recipients(
+            extra.get("copy_recipients") or extra.get("copyRecipients") or metadata.get("copy_recipients") or metadata.get("copyRecipients"),
+            company.get("name") or "",
+        ),
         "subject": document.get("subject") or document.get("title") or "未命名發文",
         "body": "\n\n".join(body_parts) or document.get("description") or "尚未填寫說明內容。",
         "owner": document.get("handler_name") or document.get("applicant_name") or "承辦人",
@@ -19427,7 +19452,7 @@ def official_pdf_document_payload(conn: sqlite3.Connection, document: Dict[str, 
         "contact_address": extra.get("contact_address") or extra.get("contactAddress") or company.get("address") or "",
         "contact_owner": extra.get("contact_owner") or extra.get("contactOwner") or document.get("handler_name") or document.get("applicant_name") or "",
         "contact_phone": extra.get("contact_phone") or extra.get("contactPhone") or "",
-        "contact_fax": extra.get("contact_fax") or extra.get("contactFax") or "",
+        "contact_fax": extra.get("contact_fax") or extra.get("contactFax") or EDOC_DEFAULT_CONTACT_FAX,
         "contact_email": extra.get("contact_email") or extra.get("contactEmail") or "",
         "created_at": document.get("created_at"),
     }
@@ -19949,6 +19974,16 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
     extra_metadata.setdefault("contact_owner", payload.get("handler_name") or user.get("name") or "")
     extra_metadata.setdefault("contact_email", user.get("email") or "")
     extra_metadata.setdefault("contact_address", user.get("company_address") or company.get("address") or "")
+    extra_metadata["contact_fax"] = str(
+        extra_metadata.get("contact_fax") or payload.get("contact_fax") or payload.get("contactFax") or EDOC_DEFAULT_CONTACT_FAX
+    ).strip()[:120] or EDOC_DEFAULT_CONTACT_FAX
+    extra_metadata["copy_recipients"] = official_pdf_copy_recipients(
+        extra_metadata.get("copy_recipients")
+        or extra_metadata.get("copyRecipients")
+        or payload.get("copy_recipients")
+        or payload.get("copyRecipients"),
+        company.get("name") or "",
+    )[:OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH]
     requires_stamp = True
     seal_context = require_official_seal_classification(payload)
     workflow_template_key = (seal_context or {}).get("workflow_template_key") or payload.get("workflow_template_key") or "internal_official_dispatch_v1"
@@ -20103,6 +20138,7 @@ OFFICIAL_CORRECTION_METADATA_TEXT_FIELDS = {
     "contact_phone": 120,
     "contact_fax": 120,
     "contact_email": 320,
+    "copy_recipients": OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH,
 }
 OFFICIAL_CORRECTION_RENDER_METADATA_FIELDS = {
     "document_type",
@@ -20114,6 +20150,7 @@ OFFICIAL_CORRECTION_RENDER_METADATA_FIELDS = {
     "contact_phone",
     "contact_fax",
     "contact_email",
+    "copy_recipients",
 }
 
 
@@ -20122,7 +20159,12 @@ def _official_correction_client_metadata(payload: Dict[str, Any]) -> Dict[str, A
     sanitized: Dict[str, Any] = {}
     for key, limit in OFFICIAL_CORRECTION_METADATA_TEXT_FIELDS.items():
         if key in source:
-            sanitized[key] = str(source.get(key) or "").strip()[:limit]
+            value = source.get(key)
+            if key == "contact_fax":
+                value = str(value or EDOC_DEFAULT_CONTACT_FAX).strip() or EDOC_DEFAULT_CONTACT_FAX
+            elif key == "copy_recipients":
+                value = official_pdf_party_text(value)
+            sanitized[key] = str(value or "").strip()[:limit]
     placements = source.get("seal_placements")
     if isinstance(placements, dict):
         safe_placements: Dict[str, Dict[str, float | int]] = {}
@@ -31607,6 +31649,10 @@ def supabase_official_pdf_document_payload(document: Dict[str, Any]) -> Dict[str
         "company_name": company.get("name") or "歲悅股份有限公司",
         "doc_type": extra.get("document_type") or metadata.get("document_type") or "函",
         "agency_name": document.get("recipient") or "未指定受文者",
+        "copy_recipients": official_pdf_copy_recipients(
+            extra.get("copy_recipients") or extra.get("copyRecipients") or metadata.get("copy_recipients") or metadata.get("copyRecipients"),
+            company.get("name") or "",
+        ),
         "subject": document.get("subject") or document.get("title") or "未命名發文",
         "body": "\n\n".join(body_parts) or document.get("description") or "尚未填寫說明內容。",
         "owner": document.get("handler_name") or document.get("applicant_name") or "承辦人",
@@ -31616,7 +31662,7 @@ def supabase_official_pdf_document_payload(document: Dict[str, Any]) -> Dict[str
         "contact_address": extra.get("contact_address") or extra.get("contactAddress") or company.get("address") or "",
         "contact_owner": extra.get("contact_owner") or extra.get("contactOwner") or document.get("handler_name") or document.get("applicant_name") or "",
         "contact_phone": extra.get("contact_phone") or extra.get("contactPhone") or "",
-        "contact_fax": extra.get("contact_fax") or extra.get("contactFax") or "",
+        "contact_fax": extra.get("contact_fax") or extra.get("contactFax") or EDOC_DEFAULT_CONTACT_FAX,
         "contact_email": extra.get("contact_email") or extra.get("contactEmail") or "",
         "created_at": document.get("created_at"),
     }
@@ -32700,6 +32746,16 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
     extra_metadata.setdefault("contact_owner", payload.get("handler_name") or user.get("name") or "")
     extra_metadata.setdefault("contact_email", user.get("email") or "")
     extra_metadata.setdefault("contact_address", user.get("company_address") or company.get("address") or "")
+    extra_metadata["contact_fax"] = str(
+        extra_metadata.get("contact_fax") or payload.get("contact_fax") or payload.get("contactFax") or EDOC_DEFAULT_CONTACT_FAX
+    ).strip()[:120] or EDOC_DEFAULT_CONTACT_FAX
+    extra_metadata["copy_recipients"] = official_pdf_copy_recipients(
+        extra_metadata.get("copy_recipients")
+        or extra_metadata.get("copyRecipients")
+        or payload.get("copy_recipients")
+        or payload.get("copyRecipients"),
+        company.get("name") or "",
+    )[:OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH]
     requires_stamp = True
     seal_context = require_official_seal_classification(payload)
     workflow_template_key = (seal_context or {}).get("workflow_template_key") or payload.get("workflow_template_key") or "internal_official_dispatch_v1"
