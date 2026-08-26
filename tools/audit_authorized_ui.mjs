@@ -82,7 +82,7 @@ for (const viewport of [
         note: document.querySelector(`#dashboardMetricNote${position}`)?.textContent?.trim() || "",
       })),
       pipeline: [...document.querySelectorAll("#dashboardPipeline > div")].map((item) => item.textContent.trim()),
-      moreRoutes: moreNavigationRoutesForRole(activeRole(), false),
+      moreRoutes: secondaryRoutesForRole(activeRole()).filter((route) => isRouteAllowed(route)),
     };
   });
   const pages = [];

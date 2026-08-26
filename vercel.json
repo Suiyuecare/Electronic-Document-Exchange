@@ -8,6 +8,7 @@
       "config": {
         "maxDuration": 180,
         "includeFiles": [
+          "assets/fonts/edukai-5.1_20251208.ttf",
           "assets/fonts/LXGWWenKaiTC-Regular.ttf",
           "supabase/verification/production_cutover_checks.sql",
           "supabase/verification/migration_manifest.json"
@@ -27,6 +28,9 @@
     { "src": "assets/favicon-192.png", "use": "@vercel/static" },
     { "src": "assets/apple-touch-icon.png", "use": "@vercel/static" },
     { "src": "assets/suiyue-milk-favicon.png", "use": "@vercel/static" },
+    { "src": "assets/suiyue-logo-transparent.png", "use": "@vercel/static" },
+    { "src": "assets/fonts/edukai-5.1_20251208.ttf", "use": "@vercel/static" },
+    { "src": "assets/fonts/EDUKAI-NOTICE.txt", "use": "@vercel/static" },
     { "src": "assets/fonts/LXGWWenKaiTC-Regular.woff2", "use": "@vercel/static" },
     { "src": "assets/fonts/LXGWWenKaiTC-OFL.txt", "use": "@vercel/static" }
   ],
@@ -58,6 +62,12 @@
       ]
     },
     {
+      "source": "/assets/fonts/edukai-5.1_20251208.ttf",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
       "source": "/assets/fonts/LXGWWenKaiTC-Regular.woff2",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
@@ -65,6 +75,13 @@
     }
   ],
   "routes": [
+    {
+      "src": "/assets/fonts/edukai-5.1_20251208\\.ttf",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable"
+      },
+      "continue": true
+    },
     {
       "src": "/assets/fonts/LXGWWenKaiTC-Regular\\.woff2",
       "headers": {

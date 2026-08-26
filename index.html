@@ -12,37 +12,41 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260825-electronic-seal-r2" />
+    <link rel="stylesheet" href="styles.css?v=20260826-finance-sso-edukai-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
       <section class="module-entry-card">
-        <img src="assets/suiyue-milk-favicon.png" alt="" width="64" height="64" />
-        <p class="eyebrow">公文收發電子用印系統</p>
+        <img class="module-entry-logo" src="assets/suiyue-logo-transparent.png" alt="" width="54" height="54" />
+        <p class="eyebrow">歲悅長照集團 · 電子公文</p>
         <strong id="moduleEntryProgressTitle">正在確認公司帳號</strong>
         <span id="moduleEntryProgressDetail">沿用會計系統登入狀態，不需要再次登入。</span>
         <div class="module-entry-progress-track" aria-hidden="true">
           <i id="moduleEntryProgressBar"></i>
         </div>
-        <small id="moduleEntryProgressPercent">15%</small>
+        <small class="visually-hidden" id="moduleEntryProgressPercent">15%</small>
       </section>
     </div>
 
     <div class="auth-redirect-screen app hidden" id="loginScreen" aria-hidden="true">
-      <div class="auth-redirect-status" role="status" aria-live="polite">
-        <strong>正在沿用 Finance 公司帳號</strong>
-        <span>即將返回公司共用登入入口。</span>
-      </div>
+      <section class="module-entry-card auth-handoff-card" role="status" aria-live="polite">
+        <img class="module-entry-logo" src="assets/suiyue-logo-transparent.png" alt="" width="54" height="54" />
+        <p class="eyebrow">歲悅長照集團 · 電子公文</p>
+        <strong>需要重新確認公司帳號</strong>
+        <span>本系統沒有獨立登入頁；請回到公司共用入口，以會計系統同一個 Google Workspace 帳號繼續。</span>
+        <button class="auth-handoff-action" id="loginReturnPortalBtn" type="button">返回公司登入入口</button>
+      </section>
     </div>
 
     <div class="app-shell app hidden" id="appShell">
-      <aside class="sidebar">
+      <aside class="sidebar" id="primarySidebar" aria-label="電子公文功能選單">
         <div class="brand">
-          <div class="brand-mark">文</div>
+          <div class="brand-mark"><img src="assets/suiyue-logo-transparent.png" alt="歲悅長照形象標章" /></div>
           <div>
-            <p class="eyebrow">Suiyuecare eDoc</p>
-            <h1>公文收發電子用印系統</h1>
+            <h1>歲悅長照集團</h1>
+            <p class="brand-system">eDoc 電子公文</p>
           </div>
+          <button class="mobile-drawer-close" id="mobileDrawerCloseBtn" type="button" aria-label="關閉功能選單">×</button>
         </div>
 
         <nav class="nav-list" aria-label="公文收發電子用印系統功能">
@@ -55,8 +59,12 @@
         </nav>
 
         <section class="profile-card">
-          <p class="eyebrow">目前角色</p>
-          <strong id="currentRoleLabel">依 Finance 帳號載入</strong>
+          <div class="profile-avatar" id="currentUserAvatar" aria-hidden="true">帳</div>
+          <div class="profile-copy">
+            <p class="eyebrow">目前角色</p>
+            <strong id="currentRoleLabel">依 Finance 帳號載入</strong>
+            <div class="role-note" id="roleNote">目前為內部正式使用；政府電子交換未啟用。</div>
+          </div>
           <select class="hidden" id="roleSelect" aria-hidden="true" tabindex="-1">
             <option>員工</option>
             <option>主管</option>
@@ -68,16 +76,24 @@
             <option selected>總務</option>
             <option>業務助理</option>
           </select>
-          <div class="role-note" id="roleNote">目前為內部正式使用；政府電子交換未啟用。</div>
         </section>
+
+        <div class="mobile-drawer-actions" role="group" aria-label="帳號與模組操作">
+          <button id="mobileDrawerRefreshBtn" type="button">重新整理</button>
+          <button id="mobileDrawerPortalBtn" type="button">回模組頁</button>
+          <button class="danger" id="mobileDrawerLogoutBtn" type="button">登出</button>
+        </div>
       </aside>
 
       <main class="workspace">
         <header class="topbar">
-          <div>
+          <div class="mobile-topbar-heading">
+            <img class="mobile-topbar-logo" src="assets/suiyue-logo-transparent.png" alt="" />
+            <span class="mobile-topbar-system">電子公文</span>
+            <span class="mobile-topbar-divider" aria-hidden="true">／</span>
             <h2 id="pageTitle">交換總覽</h2>
           </div>
-          <div class="quick-actions module-switch-actions" aria-label="頁首操作">
+          <div class="quick-actions module-switch-actions" role="group" aria-label="頁首操作">
             <button class="topbar-notification-button" id="headerNotificationBtn" type="button" aria-label="通知中心">
               <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
                 <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path>
@@ -93,12 +109,15 @@
             <button class="module-switch-button primary" id="logoutBtn" type="button">登出</button>
             <span class="top-info" id="topInfo">即時同步</span>
           </div>
+          <button class="mobile-menu-button" id="mobileMenuButton" type="button" aria-label="開啟功能選單" aria-controls="primarySidebar" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+          </button>
         </header>
 
         <section class="view active" id="dashboard">
           <div class="dashboard-role-strip">
             <div>
-              <p class="eyebrow" id="dashboardRoleEyebrow">Role Home</p>
+              <p class="eyebrow" id="dashboardRoleEyebrow">目前工作</p>
               <h3 id="dashboardRoleTitle">角色首頁</h3>
             </div>
             <div class="dashboard-role-actions">
@@ -125,7 +144,7 @@
             </div>
           </section>
 
-          <section class="panel launch-checklist-panel" id="launchChecklistPanel">
+          <section class="panel launch-checklist-panel" id="launchChecklistPanel" hidden>
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">User Go-Live</p>
@@ -136,7 +155,7 @@
             <div class="launch-checklist-grid" id="launchChecklistGrid"></div>
           </section>
 
-          <section class="panel launch-journey-attestation-panel" id="launchJourneyAttestationPanel">
+          <section class="panel launch-journey-attestation-panel" id="launchJourneyAttestationPanel" hidden>
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">Smoke Test Sign-Off</p>
@@ -157,10 +176,10 @@
             <div class="daily-action-grid" id="dailyActionGrid"></div>
           </section>
 
-          <section class="panel role-perspective-review" id="rolePerspectiveReview">
+          <section class="panel role-perspective-review" id="rolePerspectiveReview" hidden>
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Four-Angle Review</p>
+                  <p class="eyebrow">角色檢視</p>
                 <h3>四角色上線問題檢視</h3>
               </div>
               <span class="status-pill" id="rolePerspectiveStatus">依角色與單位載入</span>
@@ -169,7 +188,7 @@
             <section class="unit-handoff-panel" aria-label="收件單位承接狀態">
               <div class="panel-heading tight">
                 <div>
-                  <p class="eyebrow">Receiving Units</p>
+                  <p class="eyebrow">收件單位</p>
                   <h3>收到公文或合約的單位</h3>
                 </div>
                 <span class="status-pill" id="unitHandoffStatus">0 單位</span>
@@ -181,7 +200,7 @@
           <section class="identity-workbench" id="identityWorkbench">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow" id="identityEyebrow">Role Workspace</p>
+                <p class="eyebrow" id="identityEyebrow">工作區</p>
                 <h3 id="identityTitle">身份工作台</h3>
               </div>
               <span class="status-pill" id="identityStatus">依角色載入</span>
@@ -235,7 +254,7 @@
           <section class="panel supervisor-command-panel" id="supervisorCommandPanel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Supervisor Command</p>
+                <p class="eyebrow">主管決策</p>
                 <h3>主管營運儀表板</h3>
               </div>
               <span class="status-pill" id="supervisorCommandStatus">依角色顯示</span>
@@ -368,10 +387,10 @@
 
           <div class="inbound-toolbar panel">
             <div class="inbound-simple-flow" role="tablist" aria-label="簽核進度篩選">
-              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="unanswered">未回覆</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="draft">草稿</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="approving">簽核中</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="sent">已寄送</button>
+              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="my_pending">我的待簽</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="delegated">代理待簽</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="overdue">逾期</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="processed">已處理</button>
             </div>
             <label class="toolbar-search compact">搜尋<input id="approvalLogSearch" type="search" placeholder="文號、主旨、角色、狀態" /></label>
           </div>
@@ -388,7 +407,7 @@
             <aside class="panel approval-log-detail-panel">
               <div class="panel-heading">
                 <h3>簽核軌跡</h3>
-                <button class="text-button" id="approvalLogOpenWorkflowBtn" type="button">開啟流程控管</button>
+                <button class="text-button" id="approvalLogOpenWorkflowBtn" type="button">查看完整案件</button>
               </div>
               <div id="approvalLogDetail"></div>
             </aside>
@@ -398,7 +417,7 @@
         <section class="view" id="contracts">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Contract Desk</p>
+              <p class="eyebrow">合約管理</p>
               <h3>合約管理與簽核</h3>
             </div>
             <div class="quick-actions">
@@ -532,7 +551,7 @@
         <section class="view" id="contractSeal">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Contract Seal Desk</p>
+              <p class="eyebrow">合約用印</p>
               <h3>合約用印</h3>
             </div>
             <div class="quick-actions">
@@ -791,7 +810,7 @@
         <section class="view" id="dispatch">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Dispatch</p>
+              <p class="eyebrow">發文寄送</p>
               <h3>發文管理</h3>
             </div>
             <div class="segmented" role="group" aria-label="發文篩選">
@@ -852,7 +871,7 @@
 
             <section class="official-dispatch-readiness" id="officialDispatchReadinessPanel">
               <div>
-                <p class="eyebrow">General Affairs Dispatch</p>
+                <p class="eyebrow">總務寄送作業</p>
                 <h3>總務寄發走測任務</h3>
                 <p id="officialDispatchReadinessSummary">請重新整理發文申請單，確認已用印後的寄發與申請人確認流程。</p>
               </div>
@@ -1160,7 +1179,7 @@
               <section class="panel compose-review-preview">
                 <div class="panel-heading draft-preview-heading">
                   <div>
-                    <p class="eyebrow">Review</p>
+                    <p class="eyebrow">送出確認</p>
                     <h3>函稿預覽</h3>
                   </div>
                   <div class="draft-preview-heading-actions">
@@ -1198,7 +1217,7 @@
         <section class="view official-document-entry" id="format">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Document Format</p>
+              <p class="eyebrow">公文格式</p>
               <h3>文書格式</h3>
             </div>
             <div class="quick-actions">
@@ -1315,7 +1334,7 @@
           <section class="panel unified-flow-panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Document Flow Core</p>
+                <p class="eyebrow">簽核流程</p>
                 <h3>統一文件流程</h3>
               </div>
               <span class="status-pill" id="unifiedFlowCount">0 件</span>
@@ -1405,7 +1424,7 @@
           <section class="panel approval-progress-panel" id="approvalProgressPanel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Approval Progress</p>
+                <p class="eyebrow">簽核進度</p>
                 <h3>檢視簽核進度</h3>
               </div>
               <span class="status-pill" id="approvalProgressStatus">未選取</span>
@@ -1537,7 +1556,7 @@
             <section class="panel electronic-seal-form-panel electronic-seal-application-panel" id="uploadedSealApplicationPanel" aria-labelledby="uploadedSealApplicationTitle">
               <div class="panel-heading tight">
                 <div>
-                  <p class="eyebrow">上方</p>
+                  <p class="eyebrow">申請資料</p>
                   <h3 id="uploadedSealApplicationTitle">申請資訊</h3>
                 </div>
                 <span class="status-pill">六項資料</span>
@@ -1578,10 +1597,10 @@
               </form>
             </section>
 
-            <section class="panel electronic-seal-workspace-panel pdf-editor-v2" id="uploadedPdfEditor" data-editor-mode="general" data-editor-locked="false" aria-labelledby="uploadedSealWorkspaceTitle">
+            <section class="panel electronic-seal-workspace-panel pdf-editor-v2" id="uploadedPdfEditor" data-editor-mode="general" data-editor-locked="false" data-has-document="false" aria-labelledby="uploadedSealWorkspaceTitle">
               <div class="electronic-seal-toolbar pdf-editor-commandbar">
                 <div>
-                  <p class="eyebrow">下方</p>
+                  <p class="eyebrow">文件編輯</p>
                   <h3 id="uploadedSealWorkspaceTitle">電子用印編輯</h3>
                   <p id="uploadedSealWorkspaceDescription">上傳後可直接加文字、選擇印章並拖曳到正確位置；原稿不會被覆寫。</p>
                 </div>
@@ -1601,7 +1620,7 @@
                   <strong>PDF 文件</strong>
                   <span id="uploadedPdfFileName">尚未選擇檔案</span>
                 </div>
-                <button class="secondary-button" id="uploadedPdfReplaceBtn" type="button" aria-controls="uploadedSealPdfInput">選擇 PDF</button>
+                <button class="primary-button" id="uploadedPdfReplaceBtn" type="button" aria-controls="uploadedSealPdfInput">選擇 PDF 並開始編輯</button>
                 <input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="uploadedPdfA4Rule" hidden />
               </div>
               <div class="pdf-a4-rule pdf-editor-a4-rule" id="uploadedPdfA4Rule" data-state="idle">
@@ -1884,7 +1903,7 @@
             </section>
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Company Seal Library</p>
+                <p class="eyebrow">公司印章檔案</p>
                 <h3>公司印章與用印管理</h3>
               </div>
               <div class="detail-actions">
@@ -1894,7 +1913,7 @@
             </div>
             <section class="company-seal-readiness" id="companySealReadinessPanel">
               <div>
-                <p class="eyebrow">Seal Vault Readiness</p>
+                <p class="eyebrow">印章檔案完整性</p>
                 <h3>上線印章補件任務</h3>
                 <p id="companySealReadinessSummary">請選擇公司並重新整理，確認必要印章都有目前版本。</p>
               </div>
@@ -2026,7 +2045,7 @@
           <section class="panel executive-seal-admin" id="executiveSealAdmin">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Finance Directory</p>
+                <p class="eyebrow">會計系統名冊</p>
                 <h3>公司、部門與印章類別</h3>
                 <p class="field-hint" role="status" aria-live="polite">
                   來源：<strong id="financeDirectorySource">會計系統 Finance</strong>
@@ -2210,7 +2229,7 @@
         <section class="view" id="tracking">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Follow-up Control</p>
+              <p class="eyebrow">稽催追蹤</p>
               <h3>稽催追蹤</h3>
             </div>
             <div class="quick-actions">
@@ -2526,7 +2545,7 @@
         <section class="view" id="security">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Security</p>
+              <p class="eyebrow">安全設定</p>
               <h3>資安控管</h3>
             </div>
             <div class="quick-actions">
@@ -2626,7 +2645,7 @@
         <section class="view" id="fileSecurity">
           <div class="section-header">
             <div>
-              <p class="eyebrow">File Security</p>
+              <p class="eyebrow">檔案安全</p>
               <h3>檔案與資安控管</h3>
             </div>
             <div class="quick-actions">
@@ -2757,7 +2776,7 @@
         <section class="view" id="accounts">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Identity & Access</p>
+              <p class="eyebrow">帳號與權限</p>
               <h3>會計系統同步帳號與權限</h3>
             </div>
             <div class="quick-actions">
@@ -2791,7 +2810,7 @@
 
           <section class="panel account-readiness-panel" id="accountLaunchReadinessPanel">
             <div>
-              <p class="eyebrow">Login Readiness</p>
+              <p class="eyebrow">登入狀態</p>
               <h3>Finance 人員主檔同步狀態</h3>
               <p id="accountLaunchReadinessSummary">姓名、Email、公司、部門、職稱、職級、主管與在職狀態只需在會計系統維護，eDoc 會自動鏡像。</p>
             </div>
@@ -2909,7 +2928,7 @@
         <section class="view" id="reports">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Reports</p>
+              <p class="eyebrow">報表</p>
               <h3>報表統計</h3>
             </div>
             <div class="quick-actions">
@@ -2930,7 +2949,7 @@
           <section class="panel formal-report-panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Formal Report</p>
+                <p class="eyebrow">正式報表</p>
                 <h3>正式報表簽核包</h3>
               </div>
               <span class="status-pill" id="formalReportStatus">待產製</span>
@@ -2966,7 +2985,7 @@
 
           <section class="panel report-brief">
             <div>
-              <p class="eyebrow">Operational Brief</p>
+              <p class="eyebrow">營運摘要</p>
               <h3>今日營運摘要</h3>
               <p id="reportOpsNarrative">正在整理營運狀態。</p>
             </div>
@@ -3129,7 +3148,7 @@
         <section class="view" id="notifications">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Task Center</p>
+              <p class="eyebrow">待辦中心</p>
               <h3>待辦中心</h3>
             </div>
             <div class="quick-actions">
@@ -3267,7 +3286,7 @@
         <section class="view" id="jobs">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Scheduler</p>
+              <p class="eyebrow">排程作業</p>
               <h3>排程與背景任務</h3>
             </div>
             <div class="quick-actions">
@@ -3380,7 +3399,7 @@
         <section class="view" id="database">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Database</p>
+              <p class="eyebrow">資料庫</p>
               <h3>後端資料庫</h3>
             </div>
             <div class="quick-actions">
@@ -3488,7 +3507,7 @@
         <section class="view" id="complianceOps">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Compliance & Runbook</p>
+              <p class="eyebrow">合規與維運手冊</p>
               <h3>法遵與營運文件</h3>
             </div>
             <div class="quick-actions">
@@ -3525,7 +3544,7 @@
           <section class="panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Acceptance</p>
+                <p class="eyebrow">上線驗收</p>
                 <h3>法遵驗收與內控簽核</h3>
               </div>
               <span class="status-pill" id="complianceAttestationStatus">尚未簽核</span>
@@ -3537,7 +3556,7 @@
           <section class="panel backup-drill-panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Backup Restore Drill</p>
+                <p class="eyebrow">備份還原演練</p>
                 <h3>備份還原演練</h3>
               </div>
               <button class="text-button" id="backupDrillExportBtn" type="button">匯出演練報告</button>
@@ -3627,7 +3646,7 @@
         <section class="view" id="ops">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Operations</p>
+              <p class="eyebrow">維運管理</p>
               <h3>管理者維運中心</h3>
             </div>
             <div class="quick-actions">
@@ -3674,7 +3693,7 @@
             <section class="ops-production-checklist">
               <div class="panel-heading tight">
                 <div>
-                  <p class="eyebrow">Production Setup</p>
+                  <p class="eyebrow">正式環境設定</p>
                   <h3>Production 補件清單</h3>
                 </div>
                 <button class="secondary-button" id="opsProductionChecklistExportBtn" type="button">匯出補件清單</button>
@@ -3781,6 +3800,7 @@
           <div class="section-header">
             <div>
               <h3>系統設定</h3>
+              <p class="section-lead">日常只需查看整體狀態；需要變更時，再展開對應設定群組。</p>
             </div>
             <div class="quick-actions" data-settings-base-controls>
               <button class="primary-button" id="saveSettingsBtn" type="button">儲存設定</button>
@@ -3788,6 +3808,13 @@
               <button class="secondary-button" id="settingsBackupBtn" type="button">匯出設定</button>
             </div>
           </div>
+
+          <section class="settings-governance-summary" aria-label="系統治理摘要">
+            <article><span>公司與人員</span><strong>會計系統同步</strong><small>公司、部門與人員異動由單一來源更新</small></article>
+            <article><span>簽核規則</span><strong>依角色自動縮減</strong><small>申請人、主管、主任與執行長關卡依條件產生</small></article>
+            <article><span>印章管理</span><strong>限制管理權限</strong><small>只有執行長與行政部門主任可變更原圖及尺寸</small></article>
+            <article><span>正式交換</span><strong>尚未啟用</strong><small>取得正式規格並完成驗收前維持停用</small></article>
+          </section>
 
           <div class="jagent-status-strip">
             <article class="metric-card">
@@ -3827,7 +3854,7 @@
 
             <section class="form-panel">
               <h3>API 與憑證</h3>
-              <label>API 模式<select id="settingsApiMode"><option>測試環境</option><option>正式環境</option></select></label>
+              <label>API 模式<select id="settingsApiMode" aria-describedby="settingsApiModeHint"><option>測試環境</option><option disabled>正式環境（尚未啟用）</option></select><span class="field-hint" id="settingsApiModeHint">取得政府交換規格、完成測試並經人工核准前，正式交換維持停用。</span></label>
               <label>API Timeout<select id="settingsApiTimeout"><option>30 秒</option><option>60 秒</option><option>120 秒</option></select></label>
               <label>憑證序號<input id="settingsCertSerial" value="SYC-EDOC-2026-0001" /></label>
               <label>憑證檢核<select id="settingsCertPolicy"><option>必須使用憑證卡</option><option>測試環境允許模擬憑證</option></select></label>
@@ -3842,7 +3869,7 @@
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <p class="eyebrow">Document Types</p>
+                  <p class="eyebrow">文件類型</p>
                   <h3>文件類型設定</h3>
                 </div>
                 <button class="text-button" id="settingsAddDocTypeBtn" type="button">新增 / 更新</button>
@@ -3861,7 +3888,7 @@
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <p class="eyebrow">Workflow Templates</p>
+                  <p class="eyebrow">流程模板</p>
                   <h3>流程模板設定</h3>
                 </div>
                 <button class="text-button" id="settingsAddWorkflowTemplateBtn" type="button">新增 / 更新</button>
@@ -3882,7 +3909,7 @@
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <p class="eyebrow">Permission Matrix</p>
+                  <p class="eyebrow">權限矩陣</p>
                   <h3>權限矩陣設定</h3>
                 </div>
                 <div class="row-actions">
@@ -3900,7 +3927,7 @@
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <p class="eyebrow">Format Templates</p>
+                  <p class="eyebrow">格式模板</p>
                   <h3>格式模板設定</h3>
                 </div>
                 <div class="row-actions">
@@ -4020,13 +4047,29 @@
           </div>
         </section>
       </main>
+
+      <nav class="mobile-primary-nav" aria-label="手機常用功能">
+        <button class="mobile-primary-item active" data-target="dashboard" type="button" aria-label="首頁">
+          <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zM14 20h6V4h-6zM4 20h6v-3H4z"></path></svg></span><b>首頁</b>
+        </button>
+        <button class="mobile-primary-item" data-target="compose" type="button" aria-label="撰寫公文">
+          <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7zM14 3v5h5M10 13h6M10 17h6"></path></svg></span><b>撰寫</b>
+        </button>
+        <button class="mobile-primary-item" data-target="electronicSeal" type="button" aria-label="電子用印">
+          <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 4h10v7a5 5 0 0 1-10 0zM5 18h14v3H5zM9 11h6"></path></svg></span><b>電子用印</b>
+        </button>
+        <button class="mobile-primary-item" data-target="approvalLog" type="button" aria-label="簽核紀錄">
+          <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7M5 4h14v16H5z"></path></svg></span><b>簽核紀錄</b>
+        </button>
+      </nav>
+      <button class="mobile-drawer-backdrop" id="mobileDrawerBackdrop" type="button" aria-label="關閉功能選單" hidden></button>
     </div>
 
     <div class="modal-backdrop hidden" id="contractModal" role="dialog" aria-modal="true" aria-labelledby="contractModalTitle">
       <section class="contract-modal-card">
         <div class="contract-modal-header">
           <div>
-            <p class="eyebrow">Contract Record</p>
+            <p class="eyebrow">合約資料</p>
             <h3 id="contractModalTitle">合約內容</h3>
           </div>
           <button class="secondary-button" id="contractModalCloseBtn" type="button">關閉</button>
@@ -4039,7 +4082,7 @@
       <section class="contract-modal-card inbound-modal-card">
         <div class="contract-modal-header">
           <div>
-            <p class="eyebrow">Inbound Document</p>
+            <p class="eyebrow">收文資料</p>
             <h3 id="inboundModalTitle">收文內容</h3>
           </div>
           <button class="secondary-button" id="inboundModalCloseBtn" type="button">關閉</button>
@@ -4052,13 +4095,20 @@
       <section class="contract-modal-card official-decision-modal-card">
         <div class="contract-modal-header">
           <div>
-            <p class="eyebrow">Approval Decision</p>
+            <p class="eyebrow">簽核決定</p>
             <h3 id="officialDecisionModalTitle">簽核確認</h3>
           </div>
           <button class="secondary-button" id="officialDecisionModalCloseBtn" type="button">取消</button>
         </div>
         <form id="officialDecisionForm" class="official-decision-form">
           <section class="official-decision-summary" id="officialDecisionSummary"></section>
+          <section class="official-decision-evidence" id="officialDecisionEvidence" aria-labelledby="officialDecisionEvidenceTitle">
+            <div>
+              <h4 id="officialDecisionEvidenceTitle">先查看完整案件</h4>
+              <p>請依序確認申請資訊、原稿或送簽版、全部附件，以及 PDF 編輯內容；完成檢視後才能作成決定。</p>
+            </div>
+            <div class="official-decision-evidence-actions" id="officialDecisionEvidenceActions"></div>
+          </section>
           <section id="officialApprovalReviewFields" class="official-decision-section">
             <h4>送出核准前確認</h4>
             <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required />我已查看原稿／送簽 PDF，內容與申請目的相符。</label>
@@ -4099,6 +4149,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260825-electronic-seal-r4"></script>
+    <script src="app.js?v=20260826-finance-sso-edukai-r1"></script>
   </body>
 </html>

@@ -98,6 +98,27 @@ class PortalHandoffDiagnosticsTestCase(unittest.TestCase):
         )
         self.assertIn("return null;", app)
 
+    def test_transient_handoff_and_session_failures_retry_without_discarding_credentials(self) -> None:
+        app = (ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("async function backendAuthRequestWithTransientRetry", app)
+        self.assertIn("const retryDelaysMs = [350, 900];", app)
+        self.assertIn("error.retryable = data.retryable === true;", app)
+        self.assertIn("if (isRetryableAuthError(error)) shouldClearVisibleMarker = false;", app)
+        self.assertIn("if (shouldClearVisibleMarker) clearPostedHandoffMarker();", app)
+
+        resume_start = app.index("async function tryResumePlatformSession()")
+        resume_end = app.index("\nfunction renderQueueRows()", resume_start)
+        resume_source = app[resume_start:resume_end]
+        transient_branch = resume_source.index("if (isRetryableAuthError(error))")
+        discard_session = resume_source.index("localStorage.removeItem(authStorageKey);", transient_branch)
+        self.assertLess(
+            transient_branch,
+            discard_session,
+            "retryable Finance outages must be handled before the valid local session can be discarded",
+        )
+        self.assertIn('returnToLoggingPortalModulePicker("sso_unavailable", "replace")', resume_source)
+
 
 if __name__ == "__main__":
     unittest.main()

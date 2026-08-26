@@ -10,6 +10,7 @@ from pathlib import Path
 import backend
 from PIL import Image, ImageDraw
 from pypdf import PdfReader
+from reportlab.pdfgen import canvas
 
 
 class OfficialDocumentWorkflowTestCase(unittest.TestCase):
@@ -139,6 +140,92 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
                 approver,
             )
         return detail
+
+    def test_editable_legacy_generated_pdf_gets_new_font_revision_but_locked_pdf_stays_immutable(self) -> None:
+        employee = self.login_session("sales-assistant@suiyuecare.com")
+        seal_id = self.seed_seal_id()
+        detail = backend.create_official_document(
+            self.conn,
+            {
+                "source_type": "blank_editor",
+                "company_id": "CO-001",
+                "seal_id": seal_id,
+                "title": "舊字型草稿升版測試",
+                "subject": "舊字型草稿升版測試",
+                "description": "去識別化測試資料。",
+                "recipient": "測試機關",
+                "request_reason": "確認草稿字型版本切換。",
+                "document_category": "主管機關 申請或回覆文件（與 費用、法令無關）",
+                "submit": False,
+                "stamp_position": {"page": 1, "x": 420, "y": 130, "width": 85, "height": 85},
+            },
+            employee,
+        )
+        document = backend.official_document_row(self.conn, detail["id"])
+
+        legacy_stream = io.BytesIO()
+        legacy_canvas = canvas.Canvas(legacy_stream)
+        legacy_canvas.setCreator("Module_edoc legacy-renderer")
+        legacy_canvas.drawString(72, 720, "legacy editable draft")
+        legacy_canvas.save()
+        legacy_row = backend.store_official_pdf_file(
+            self.conn,
+            detail["id"],
+            "generated_pdf",
+            f"{detail['id']}-legacy.pdf",
+            legacy_stream.getvalue(),
+            "unit-test",
+        )
+        before_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM official_document_files WHERE document_id = ? AND file_type = 'generated_pdf'",
+            (detail["id"],),
+        ).fetchone()["count"]
+
+        upgraded = backend.ensure_official_generated_pdf(self.conn, document, "unit-test")
+        self.assertGreater(int(upgraded["version"]), int(legacy_row["version"]))
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM official_document_files WHERE document_id = ? AND file_type = 'generated_pdf'",
+                (detail["id"],),
+            ).fetchone()["count"],
+            before_count + 1,
+        )
+        _, upgraded_bytes = backend.read_file_object_bytes(self.conn, upgraded["file_object_id"])
+        self.assertTrue(backend.official_pdf_uses_current_renderer(upgraded_bytes))
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT action FROM official_document_approval_logs WHERE file_id = ?",
+                (upgraded["id"],),
+            ).fetchone()["action"],
+            "regenerate_pdf_font_revision",
+        )
+
+        locked_legacy = backend.store_official_pdf_file(
+            self.conn,
+            detail["id"],
+            "generated_pdf",
+            f"{detail['id']}-locked-legacy.pdf",
+            legacy_stream.getvalue(),
+            "unit-test",
+        )
+        self.conn.execute(
+            "UPDATE official_documents SET current_status = 'pending_applicant_manager' WHERE id = ?",
+            (detail["id"],),
+        )
+        locked_document = backend.official_document_row(self.conn, detail["id"])
+        locked_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM official_document_files WHERE document_id = ? AND file_type = 'generated_pdf'",
+            (detail["id"],),
+        ).fetchone()["count"]
+        preserved = backend.ensure_official_generated_pdf(self.conn, locked_document, "unit-test")
+        self.assertEqual(preserved["id"], locked_legacy["id"])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM official_document_files WHERE document_id = ? AND file_type = 'generated_pdf'",
+                (detail["id"],),
+            ).fetchone()["count"],
+            locked_count,
+        )
 
     def test_blank_document_runs_workflow_stamps_then_general_affairs_dispatches(self) -> None:
         employee = self.login_session("sales-assistant@suiyuecare.com")
@@ -342,6 +429,11 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
                 "comment": "請補正說明內容後重新送簽。",
                 "reason_category": "內容補正",
                 "missing_items": ["補正公文說明"],
+                "review_acknowledgements": {
+                    "original_reviewed": True,
+                    "edited_version_reviewed": True,
+                    "attachments_reviewed": True,
+                },
             },
             approver,
         )
@@ -425,6 +517,11 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
                 "comment": "請增補副本單位。",
                 "reason_category": "內容補正",
                 "missing_items": ["副本單位"],
+                "review_acknowledgements": {
+                    "original_reviewed": True,
+                    "edited_version_reviewed": True,
+                    "attachments_reviewed": True,
+                },
             },
             approver,
         )
