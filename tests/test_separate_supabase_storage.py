@@ -60,8 +60,57 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     backend._supabase_storage_direct_tus_url(),
-                    "https://storage-project.storage.supabase.co/storage/v1/upload/resumable",
+                    "https://storage-project.storage.supabase.co/storage/v1/upload/resumable/sign",
                 )
+
+    def test_signed_tus_route_contract_never_returns_server_credential(self):
+        with mock.patch.dict(os.environ, {"EDOC_OBJECT_STORAGE_URL": ""}, clear=False):
+            with self.storage_config(
+                storage_url="https://storage-project.supabase.co",
+                storage_key="sb_secret_storage",
+            ), mock.patch.object(
+                backend, "_supabase_create_signed_upload_token", return_value="short-lived-object-signature"
+            ), mock.patch.object(
+                backend, "_supabase_editor_assert_document_access", return_value={"id": "FIN-U1"}
+            ), mock.patch.object(
+                backend, "supabase_official_document_row", return_value={"id": "OD-1"}
+            ), mock.patch.object(
+                backend, "_supabase_editor_latest_revision", return_value={"id": "REV-1", "revision_no": 1}
+            ), mock.patch.object(
+                backend, "supabase_insert", side_effect=lambda _table, row: row
+            ):
+                intent = backend.supabase_create_official_editor_upload_intent(
+                    "OD-1",
+                    {
+                        "file_name": "a4.pdf",
+                        "mime_type": "application/pdf",
+                        "size_bytes": 128,
+                        "sha256": "A" * 64,
+                    },
+                    {"user": {"id": "FIN-U1"}},
+                )
+
+        self.assertTrue(intent["upload_url"].endswith("/upload/resumable/sign"))
+        self.assertEqual(intent["headers"]["x-signature"], "short-lived-object-signature")
+        self.assertNotIn("apikey", intent["headers"])
+        self.assertNotIn("authorization", {key.lower() for key in intent["headers"]})
+        self.assertNotIn("sb_secret_storage", repr(intent))
+
+    def test_dedicated_mode_rejects_database_and_storage_url_alias(self):
+        with self.storage_config(
+            storage_url="https://database-project.supabase.co",
+            storage_key="sb_secret_storage",
+        ), mock.patch.object(backend, "EDOC_STORAGE_SUPABASE_MODE", "dedicated-project"):
+            self.assertEqual(
+                backend.supabase_project_partition_issues(),
+                ["dedicated_storage_project_must_differ_from_database"],
+            )
+
+    def test_auto_mode_preserves_legal_same_project_compatibility(self):
+        with self.storage_config(
+            storage_url="https://database-project.supabase.co",
+        ), mock.patch.object(backend, "EDOC_STORAGE_SUPABASE_MODE", "auto"):
+            self.assertEqual(backend.supabase_project_partition_issues(), [])
 
     def test_storage_status_never_exposes_server_key(self):
         with mock.patch.dict(os.environ, {"EDOC_OBJECT_STORAGE_URL": ""}, clear=False):

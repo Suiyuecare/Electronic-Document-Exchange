@@ -27,6 +27,7 @@ EDOC_MONITORING_EXPECTED_CRON_MINUTES=1440
 SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
 EDOC_STORAGE_PROVIDER=supabase
+EDOC_STORAGE_SUPABASE_MODE=dedicated-project
 EDOC_STORAGE_BUCKET=edoc-private
 EDOC_OBJECT_STORAGE_URL=https://<project-ref>.supabase.co/storage/v1
 EDOC_STORAGE_ACCESS_MODE=server-signed-url
@@ -81,6 +82,7 @@ vercel env add EDOC_MONITORING_EXPECTED_CRON_MINUTES production
 vercel env add SUPABASE_URL production
 vercel env add SUPABASE_SERVICE_ROLE_KEY production --sensitive
 vercel env add EDOC_STORAGE_PROVIDER production
+vercel env add EDOC_STORAGE_SUPABASE_MODE production
 vercel env add EDOC_STORAGE_BUCKET production
 vercel env add EDOC_OBJECT_STORAGE_URL production
 vercel env add EDOC_STORAGE_ACCESS_MODE production

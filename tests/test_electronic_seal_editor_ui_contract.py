@@ -174,8 +174,8 @@ class ElectronicSealPageContractTest(unittest.TestCase):
             r'document\.querySelector\("#uploadedSealPdfInput"\)\?\.addEventListener\("change",\s*handleUploadedSealPdfChange\)',
         )
         picker = javascript_function(self.js, "openUploadedPdfPicker")
-        self.assertIn('document.querySelector("#uploadedSealForm")', picker)
-        self.assertIn("reportValidity()", picker)
+        self.assertNotIn('document.querySelector("#uploadedSealForm")', picker)
+        self.assertNotIn("reportValidity()", picker)
         self.assertIn('document.querySelector("#uploadedSealPdfInput")', picker)
         self.assertRegex(picker, r"input\.value\s*=\s*\"\"")
         self.assertIn("input.click()", picker)

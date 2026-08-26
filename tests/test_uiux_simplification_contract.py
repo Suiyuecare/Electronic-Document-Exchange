@@ -25,14 +25,26 @@ class UiUxSimplificationContractTest(unittest.TestCase):
             self.assertIn(f'"{route}"', navigation)
         self.assertNotIn('"search"', navigation)
 
-    def test_legacy_contract_route_remains_context_only_without_being_primary(self) -> None:
+    def test_legacy_contract_route_is_retired_from_daily_navigation(self) -> None:
         start = self.js.index("const secondaryRoutesByIdentity = {")
         end = self.js.index("\n};", start) + 3
         secondary = self.js[start:end]
         self.assertIn('"contracts"', secondary)
-        self.assertIn('"contractSeal"', secondary)
+        self.assertNotIn('"contractSeal"', secondary)
         self.assertIn('"format"', secondary)
         self.assertIn('"exchange"', secondary)
+
+    def test_executive_does_not_open_legacy_raw_operations_consoles(self) -> None:
+        start = self.js.index("const secondaryRoutesByIdentity = {")
+        end = self.js.index("\n};", start) + 3
+        secondary = self.js[start:end]
+        executive = re.search(r"executive:\s*\[(.*?)\]", secondary, re.DOTALL)
+        self.assertIsNotNone(executive)
+        executive_routes = executive.group(1)
+        self.assertNotIn('"jobs"', executive_routes)
+        self.assertNotIn('"database"', executive_routes)
+        for route in ('"workflow"', '"accounts"', '"security"', '"ops"'):
+            self.assertIn(route, executive_routes)
 
     def test_internal_launch_dashboard_does_not_promote_disabled_exchange(self) -> None:
         start = self.js.index("function dashboardRoleData()")
@@ -98,18 +110,85 @@ class UiUxSimplificationContractTest(unittest.TestCase):
 
     def test_mobile_primary_controls_have_44px_touch_targets(self) -> None:
         normalized = re.sub(r"\s+", " ", self.css)
-        self.assertIn(".nav-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));", normalized)
-        self.assertIn(".nav-item { display: inline-flex; justify-content: center; min-width: 0; min-height: 44px;", normalized)
-        self.assertIn(".module-switch-button, .topbar-notification-button { min-height: 44px;", normalized)
+        self.assertIn(".mobile-primary-item { display: flex; min-width: 0; min-height: 54px;", normalized)
+        self.assertIn(".mobile-menu-button { grid-area: menu; display: flex; width: 40px; min-width: 40px; height: 40px; min-height: 40px;", normalized)
+        self.assertIn(".sidebar .nav-item { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 12px; min-width: 0; min-height: 54px;", normalized)
         self.assertIn(".flow-step-chip, .segment, .page-arrow, .text-button, .unified-flow-row-button, .contract-link, .pdf-editor-v2 button { min-height: 44px;", normalized)
         self.assertIn(".page-arrow { min-width: 44px;", normalized)
         self.assertIn(".contract-link { display: inline-flex; align-items: center;", normalized)
         self.assertIn(".view button.primary-button, .view button.secondary-button, .view button.icon-button { min-height: 44px;", normalized)
 
-    def test_active_major_navigation_uses_readable_brand_orange(self) -> None:
-        self.assertIn("--accent-readable: #b74f08;", self.css)
+    def test_active_major_navigation_uses_finance_brand_orange(self) -> None:
+        self.assertIn("--accent: #ea880c;", self.css)
+        self.assertIn("--accent-readable: #b45309;", self.css)
         normalized = re.sub(r"\s+", " ", self.css)
-        self.assertIn(".nav-item:hover, .nav-item.active { background: var(--accent-readable); color: #fff;", normalized)
+        self.assertIn(".nav-item:hover, .nav-item.active { background: var(--accent-readable);", normalized)
+
+    def test_shell_uses_finance_tokens_logo_and_desktop_frame(self) -> None:
+        for token in (
+            "--ink: #2f2a26;",
+            "--muted: #6e6259;",
+            "--line: #f1cfa8;",
+            "--soft: #fff4e4;",
+            "--accent: #ea880c;",
+            "--accent-strong: #b45309;",
+            "--cream: #fff9f2;",
+        ):
+            self.assertIn(token, self.css)
+        normalized = re.sub(r"\s+", " ", self.css)
+        self.assertIn(".app { width: 100%; max-width: none; min-height: 100dvh; height: 100dvh;", normalized)
+        self.assertIn(".sidebar { flex: 0 0 300px; width: 300px;", normalized)
+        self.assertIn(".topbar { display: flex; min-height: 82px; height: 82px; max-height: 82px;", normalized)
+        self.assertGreaterEqual(self.html.count('src="assets/suiyue-logo-transparent.png"'), 3)
+        logo = ROOT / "assets" / "suiyue-logo-transparent.png"
+        self.assertTrue(logo.is_file())
+        self.assertEqual(logo.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_mobile_shell_has_four_primary_actions_and_six_item_drawer(self) -> None:
+        nav_start = self.html.index('<nav class="mobile-primary-nav"')
+        nav_end = self.html.index("</nav>", nav_start)
+        mobile_navigation = self.html[nav_start:nav_end]
+        self.assertEqual(
+            re.findall(r'class="mobile-primary-item(?: active)?" data-target="([^"]+)"[^>]+aria-label="([^"]+)"', mobile_navigation),
+            [
+                ("dashboard", "首頁"),
+                ("compose", "撰寫公文"),
+                ("electronicSeal", "電子用印"),
+                ("approvalLog", "簽核紀錄"),
+            ],
+        )
+        for element_id in (
+            "primarySidebar",
+            "mobileMenuButton",
+            "mobileDrawerCloseBtn",
+            "mobileDrawerBackdrop",
+            "mobileDrawerRefreshBtn",
+            "mobileDrawerPortalBtn",
+            "mobileDrawerLogoutBtn",
+        ):
+            self.assertIn(f'id="{element_id}"', self.html)
+        normalized = re.sub(r"\s+", " ", self.css)
+        self.assertIn("--mobile-nav-height: 68px;", self.css)
+        self.assertIn(".topbar { position: sticky; top: 0; z-index: 90; display: grid;", normalized)
+        self.assertIn("min-height: 56px; height: 56px; max-height: 56px;", normalized)
+        self.assertIn(".sidebar { position: fixed; top: 0; bottom: 0; left: 0; z-index: 510;", normalized)
+        for function_name in (
+            "setMobileNavigationOpen",
+            "openMobileNavigation",
+            "closeMobileNavigation",
+            "syncMobileNavigationMode",
+        ):
+            self.assertIn(f"function {function_name}", self.js)
+
+    def test_login_surface_is_finance_handoff_only(self) -> None:
+        login_start = self.html.index('id="loginScreen"')
+        login_end = self.html.index('id="appShell"', login_start)
+        login_surface = self.html[login_start:login_end]
+        self.assertIn("本系統沒有獨立登入頁", login_surface)
+        self.assertIn('id="loginReturnPortalBtn"', login_surface)
+        self.assertNotIn('type="password"', login_surface)
+        self.assertNotIn("使用 Google 帳號快速登入", login_surface)
+        self.assertIn("returnToLoggingPortalModulePicker", self.js)
 
     def test_navigation_uses_exactly_six_major_functions_without_second_row(self) -> None:
         nav_start = self.html.index('<nav class="nav-list"')
@@ -285,10 +364,13 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn('document.querySelector("#dailyActionCenter")', handler)
         self.assertNotIn('setView(isRouteAllowed("notifications")', handler)
 
-    def test_entry_loading_brand_asset_is_packaged_for_vercel(self) -> None:
+    def test_entry_loading_uses_shared_finance_brand_asset(self) -> None:
+        asset = ROOT / "assets" / "suiyue-logo-transparent.png"
         vercel = (ROOT / "vercel.json").read_text(encoding="utf-8")
-        self.assertIn('assets/suiyue-milk-favicon.png', self.html)
-        self.assertIn('"src": "assets/suiyue-milk-favicon.png"', vercel)
+        self.assertIn('assets/suiyue-logo-transparent.png', self.html)
+        self.assertIn('"src": "assets/suiyue-logo-transparent.png"', vercel)
+        self.assertTrue(asset.is_file())
+        self.assertEqual(asset.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
     def test_employee_startup_does_not_request_admin_notification_health(self) -> None:
         start = self.js.index("async function syncNotificationsFromBackend")

@@ -37,6 +37,8 @@
     "20260824124500_finance_login_fast_path.sql",
     "20260825101840_finance_organization_directory_v2.sql",
     "20260825102459_lock_finance_organization_revisions.sql",
-    "20260825143558_backfill_finance_tenant_scope.sql"
+    "20260825143558_backfill_finance_tenant_scope.sql",
+    "20260826033323_inbound_mutation_contract.sql",
+    "20260826120000_finance_login_authorization_binding_v2.sql"
   ]
 }

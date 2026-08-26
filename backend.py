@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import copy
 import csv
 import html
 import io
@@ -87,6 +88,11 @@ EDOC_SEAL_STORAGE_BUCKET = os.getenv("EDOC_SEAL_STORAGE_BUCKET", "edoc-seal-vaul
 # database service key is never sent to another project.
 EDOC_STORAGE_SUPABASE_URL = os.getenv("EDOC_STORAGE_SUPABASE_URL", "").rstrip("/")
 EDOC_STORAGE_SERVICE_ROLE_KEY = os.getenv("EDOC_STORAGE_SERVICE_ROLE_KEY", "")
+# ``auto`` preserves every existing same-project installation.  Operators who
+# provisioned a Storage-only Supabase project must explicitly select
+# ``dedicated-project`` so a copied Storage URL can never silently replace the
+# eDoc database URL during a production cutover.
+EDOC_STORAGE_SUPABASE_MODE = os.getenv("EDOC_STORAGE_SUPABASE_MODE", "auto").strip().lower()
 EDOC_OBJECT_STORAGE_URL = os.getenv(
     "EDOC_OBJECT_STORAGE_URL",
     (
@@ -889,6 +895,7 @@ FINANCE_BRIDGE_ACTOR_ALLOWED_ROLES = {
     "adminDirector": {"admin_director"},
     "generalAffairs": {"ga_chief"},
 }
+FINANCE_LOGIN_EXPECTED_BINDING_KEY = "_edocFinanceLoginExpectedBinding"
 
 
 def strict_finance_role_profile(role: Any) -> Dict[str, str]:
@@ -987,6 +994,9 @@ def normalize_finance_bridge_snapshot(
     required_step_keys: Iterable[str] = (),
 ) -> Dict[str, Any]:
     identity = snapshot.get("identity") or {}
+    company = snapshot.get("company") or {}
+    if not isinstance(identity, dict) or not isinstance(company, dict):
+        raise FinanceBridgeContractError("finance_bridge_identity_invalid")
     applicant_profile = strict_finance_role_profile(identity.get("role"))
     source_revision = identity.get("memberRevision", 0)
     if isinstance(source_revision, bool) or not isinstance(source_revision, int) or source_revision < 0:
@@ -1026,6 +1036,9 @@ def normalize_finance_bridge_snapshot(
     }
     if not all(applicant.get(key) for key in ("tenant_id", "finance_user_id", "name", "email", "entity_id")):
         raise FinanceBridgeContractError("finance_bridge_identity_invalid")
+    company_tenant_id = roster_text(company.get("tenantId"))
+    if not company_tenant_id or company_tenant_id != applicant["tenant_id"]:
+        raise FinanceBridgeContractError("finance_bridge_tenant_scope_invalid")
     required_slots = {
         FINANCE_BRIDGE_ACTOR_SLOTS[key]
         for key in required_step_keys
@@ -1033,6 +1046,19 @@ def normalize_finance_bridge_snapshot(
     }
     normalized_actors: Dict[str, Dict[str, Any]] = {}
     raw_actors = snapshot.get("actors") or {}
+    if not isinstance(raw_actors, dict):
+        raise FinanceBridgeContractError("finance_bridge_actor_invalid")
+    # Tenant scope is an authorization boundary, not optional actor metadata.
+    # Check every non-null actor before route-specific optional-actor handling so
+    # a cross-tenant optional actor can never be silently ignored and later
+    # synchronized by another call path.
+    for raw_actor in raw_actors.values():
+        if raw_actor is None:
+            continue
+        if not isinstance(raw_actor, dict):
+            raise FinanceBridgeContractError("finance_bridge_actor_invalid")
+        if roster_text(raw_actor.get("tenantId")) != applicant["tenant_id"]:
+            raise FinanceBridgeContractError("finance_bridge_actor_tenant_mismatch")
     # Actor validity is route-specific.  Do not let an optional actor that is
     # irrelevant to this applicant/route (for example CEO on A/B, or a skipped
     # lower manager for a 主任 applicant) block login or a lawful submission.
@@ -1066,6 +1092,7 @@ def sqlite_finance_company_by_entity(
     conn: sqlite3.Connection,
     entity_id: str,
     *,
+    finance_tenant_id: str = "",
     require_launch_scope: bool = True,
 ) -> Dict[str, Any]:
     rows = conn.execute(
@@ -1075,6 +1102,14 @@ def sqlite_finance_company_by_entity(
     if len(rows) != 1:
         raise FinanceBridgeDenied("finance_company_unmapped")
     company = row_to_dict(rows[0])
+    expected_tenant_id = roster_text(finance_tenant_id)
+    if (
+        not expected_tenant_id
+        or not roster_text(company.get("finance_tenant_id"))
+        or roster_text(company.get("finance_tenant_id")) != expected_tenant_id
+        or roster_text(company.get("source_system")).lower() != "finance"
+    ):
+        raise FinanceBridgeDenied("finance_company_tenant_scope_invalid")
     if (
         require_launch_scope
         and is_production()
@@ -1130,12 +1165,14 @@ def _sqlite_upsert_finance_snapshot_user(
         "logging_account_id": finance_user_id,
         "logging_role_key": profile["logging_role_key"],
         "finance_employee_id": finance_user_id,
+        "finance_tenant_id": source["tenant_id"],
         "company_id": company["id"],
         "company_name": company["name"],
         "company_address": company.get("address") or "",
         "external_account_payload_json": json.dumps({
             **metadata,
             "financeProfile": {
+                "departmentCode": source.get("department_code") or "",
                 "departmentName": source.get("department_name") or "",
                 "jobTitle": source.get("job_title") or "",
                 "extension": source.get("extension") or "",
@@ -1204,52 +1241,56 @@ def sync_sqlite_finance_snapshot(
         require_workflow=require_workflow,
         required_step_keys=required_step_keys,
     )
-    company_cache: Dict[Tuple[str, bool], Dict[str, Any]] = {}
+    company_cache: Dict[Tuple[str, str, bool], Dict[str, Any]] = {}
 
-    def company_for(entity_id: str, *, require_launch_scope: bool) -> Dict[str, Any]:
-        cache_key = (entity_id, require_launch_scope)
+    def company_for(entity_id: str, tenant_id: str, *, require_launch_scope: bool) -> Dict[str, Any]:
+        cache_key = (entity_id, tenant_id, require_launch_scope)
         if cache_key not in company_cache:
             company_cache[cache_key] = sqlite_finance_company_by_entity(
                 conn,
                 entity_id,
+                finance_tenant_id=tenant_id,
                 require_launch_scope=require_launch_scope,
             )
         return company_cache[cache_key]
 
     applicant = normalized["applicant"]
-    applicant_company = company_for(applicant["entity_id"], require_launch_scope=True)
+    applicant_company = company_for(
+        applicant["entity_id"], applicant["tenant_id"], require_launch_scope=True
+    )
     actor_sources = normalized["actors"]
     # Resolve every company and validate every identity before the first write.
     for actor in actor_sources.values():
-        company_for(actor["entity_id"], require_launch_scope=False)
+        company_for(actor["entity_id"], actor["tenant_id"], require_launch_scope=False)
 
     snapshot_company = snapshot["company"]
     conn.execute(
         """
         UPDATE companies
         SET name = ?, tax_id = ?, address = ?, source_system = 'finance',
-            last_synced_from_finance_at = ?, updated_at = ?
+            finance_tenant_id = ?, last_synced_from_finance_at = ?, updated_at = ?
         WHERE id = ? AND finance_entity_id = ? AND status = 'active'
         """,
         (
             snapshot_company["name"], snapshot_company.get("taxId") or "",
-            snapshot_company.get("address") or "", now(), now(),
+            snapshot_company.get("address") or "", applicant["tenant_id"], now(), now(),
             applicant_company["id"], applicant["entity_id"],
         ),
     )
     applicant_company = sqlite_finance_company_by_entity(
         conn,
         applicant["entity_id"],
+        finance_tenant_id=applicant["tenant_id"],
         require_launch_scope=True,
     )
-    company_cache[(applicant["entity_id"], True)] = applicant_company
-    company_cache[(applicant["entity_id"], False)] = applicant_company
+    company_cache[(applicant["entity_id"], applicant["tenant_id"], True)] = applicant_company
+    company_cache[(applicant["entity_id"], applicant["tenant_id"], False)] = applicant_company
     actor_users: Dict[str, Dict[str, Any]] = {}
     for slot, actor in actor_sources.items():
         actor_users[slot] = _sqlite_upsert_finance_snapshot_user(
             conn,
             actor,
-            company_for(actor["entity_id"], require_launch_scope=False),
+            company_for(actor["entity_id"], actor["tenant_id"], require_launch_scope=False),
             normalized["metadata"],
         )
     user = _sqlite_upsert_finance_snapshot_user(
@@ -1306,6 +1347,7 @@ def upsert_finance_manager_placeholder(
         "logging_account_id": account_id,
         "logging_role_key": profile["logging_role_key"],
         "finance_employee_id": employee_id,
+        "finance_tenant_id": company.get("finance_tenant_id") or "",
         "company_id": company.get("id") or "",
         "company_name": company.get("name") or "",
         "company_address": company.get("address") or "",
@@ -1761,6 +1803,7 @@ CREATE TABLE IF NOT EXISTS companies (
   tax_id TEXT,
   address TEXT,
   finance_entity_id TEXT,
+  finance_tenant_id TEXT,
   source_system TEXT NOT NULL DEFAULT 'finance',
   last_synced_from_finance_at TEXT,
   status TEXT NOT NULL DEFAULT 'active',
@@ -2142,6 +2185,8 @@ CREATE TABLE IF NOT EXISTS official_document_dispatch_events (
 
 CREATE TABLE IF NOT EXISTS inbound_documents (
   id TEXT PRIMARY KEY,
+  company_id TEXT,
+  finance_tenant_id TEXT,
   receive_no TEXT NOT NULL UNIQUE,
   source_type TEXT NOT NULL DEFAULT 'manual',
   external_exchange_id TEXT,
@@ -2165,6 +2210,7 @@ CREATE TABLE IF NOT EXISTS inbound_documents (
   disposition_approved_by TEXT,
   disposition_approved_at TEXT,
   metadata_json TEXT NOT NULL DEFAULT '{}',
+  mutation_version INTEGER NOT NULL DEFAULT 1,
   created_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -2184,6 +2230,19 @@ CREATE TABLE IF NOT EXISTS inbound_document_attachments (
   created_at TEXT NOT NULL,
   FOREIGN KEY(inbound_document_id) REFERENCES inbound_documents(id) ON DELETE CASCADE,
   FOREIGN KEY(file_object_id) REFERENCES file_objects(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS inbound_document_mutations (
+  idempotency_key TEXT PRIMARY KEY,
+  inbound_document_id TEXT NOT NULL,
+  company_id TEXT NOT NULL,
+  finance_tenant_id TEXT NOT NULL,
+  actor_user_id TEXT NOT NULL,
+  mutation_type TEXT NOT NULL,
+  request_sha256 TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(inbound_document_id) REFERENCES inbound_documents(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS internal_dispatches (
@@ -2899,6 +2958,7 @@ CREATE TABLE IF NOT EXISTS users (
   logging_account_id TEXT,
   logging_role_key TEXT,
   finance_employee_id TEXT,
+  finance_tenant_id TEXT,
   company_id TEXT,
   company_name TEXT,
   company_address TEXT,
@@ -3668,6 +3728,34 @@ def storage_uses_database_supabase_project() -> bool:
     return bool(endpoint_origin[0] and endpoint_origin[1] and endpoint_origin == database_origin)
 
 
+def supabase_project_partition_issues() -> List[str]:
+    """Return fail-closed configuration errors for DB/Storage project roles.
+
+    ``auto`` and ``same-project`` remain backward compatible.  The dedicated
+    mode is the guardrail for the production topology used by eDoc: the main
+    ``SUPABASE_URL`` remains the database/Auth project while
+    ``EDOC_STORAGE_SUPABASE_URL`` names a distinct private Storage project.
+    No credential values are ever returned or logged.
+    """
+    mode = str(EDOC_STORAGE_SUPABASE_MODE or "auto").strip().lower()
+    if mode not in {"auto", "same-project", "dedicated-project"}:
+        return ["storage_supabase_mode_invalid"]
+    database_origin = _url_origin(SUPABASE_URL)
+    storage_origin = _url_origin(EDOC_STORAGE_SUPABASE_URL)
+    if mode == "dedicated-project":
+        if not all((database_origin[0], database_origin[1])):
+            return ["edoc_database_supabase_url_required"]
+        if not all((storage_origin[0], storage_origin[1])):
+            return ["dedicated_storage_supabase_url_required"]
+        if database_origin == storage_origin:
+            return ["dedicated_storage_project_must_differ_from_database"]
+        if not str(EDOC_STORAGE_SERVICE_ROLE_KEY or "").strip():
+            return ["dedicated_storage_service_role_key_required"]
+    if mode == "same-project" and storage_origin[0] and storage_origin != database_origin:
+        return ["same_project_storage_url_mismatch"]
+    return []
+
+
 def storage_service_role_key() -> str:
     """Return the server-only Storage credential without crossing projects.
 
@@ -3888,6 +3976,13 @@ def production_readiness() -> Dict[str, Any]:
     if notification_email_provider() == "SMTP" and env_present("SMTP_HOST") and not env_present("SMTP_USERNAME"):
         warnings.append("SMTP_HOST 已設定但 SMTP_USERNAME 未設定，若郵件服務要求驗證將派送失敗。")
     storage_service = storage_service_status()
+    project_partition_issues = supabase_project_partition_issues()
+    if project_partition_issues:
+        blockers.append(
+            "eDoc 資料庫與 private Storage 專案設定衝突："
+            + ", ".join(project_partition_issues)
+            + "。"
+        )
     if storage_service["productionBlocked"]:
         blockers.append(f"production 必須接正式物件儲存與防毒服務；缺少：{', '.join(storage_service['missing'])}。")
     elif not storage_service["ready"]:
@@ -3922,6 +4017,17 @@ def production_readiness() -> Dict[str, Any]:
             "resend": resend_email_configured(),
             "line": env_present("LINE_WEBHOOK_URL"),
             "storage": storage_service,
+            "supabaseProjectPartition": {
+                "ready": not project_partition_issues,
+                "mode": EDOC_STORAGE_SUPABASE_MODE,
+                "separateProject": bool(
+                    EDOC_STORAGE_SUPABASE_URL
+                    and not storage_uses_database_supabase_project()
+                ),
+                "issues": project_partition_issues,
+                "containsEndpoint": False,
+                "containsSecret": False,
+            },
             "encryption": EDOC_FILE_ENCRYPTION_ENABLED and env_present("EDOC_FILE_ENCRYPTION_KEY"),
             "scanner": EDOC_SCAN_ENGINE,
             "publicBaseUrl": EDOC_PUBLIC_BASE_URL,
@@ -4182,6 +4288,13 @@ def internal_readiness() -> Dict[str, Any]:
         and object_storage_endpoint()
         and (EDOC_STORAGE_PROVIDER != "supabase" or storage_service_role_key())
     )
+    project_partition_issues = supabase_project_partition_issues()
+    if project_partition_issues:
+        blockers.append(
+            "eDoc 資料庫與 private Storage 專案設定衝突："
+            + ", ".join(project_partition_issues)
+            + "。"
+        )
     if is_production() and not USE_SUPABASE:
         blockers.append("內部正式上線必須使用 Supabase；Vercel production 不可依賴本機 SQLite。")
     if is_production() and not storage_ready:
@@ -4266,6 +4379,17 @@ def internal_readiness() -> Dict[str, Any]:
                 "containsSecret": False,
             },
             "privateStorage": storage_ready,
+            "supabaseProjectPartition": {
+                "ready": not project_partition_issues,
+                "mode": EDOC_STORAGE_SUPABASE_MODE,
+                "separateProject": bool(
+                    EDOC_STORAGE_SUPABASE_URL
+                    and not storage_uses_database_supabase_project()
+                ),
+                "issues": project_partition_issues,
+                "containsEndpoint": False,
+                "containsSecret": False,
+            },
             "objectStorageEndpointDerived": bool(object_storage_endpoint()) and not env_present("EDOC_OBJECT_STORAGE_URL"),
             "documentBucket": EDOC_STORAGE_BUCKET,
             "sealVaultBucket": EDOC_SEAL_STORAGE_BUCKET,
@@ -10321,85 +10445,102 @@ def roc_date_string(value: Any = None) -> str:
     return f"中華民國{parsed.year - 1911}年{parsed.month}月{parsed.day}日"
 
 
-OFFICIAL_PDF_RENDERER_VERSION = "reportlab-4.4.9-formal-tw-v2"
+OFFICIAL_PDF_RENDERER_VERSION = "reportlab-4.4.9-formal-tw-v3-edukai-5.1"
 OFFICIAL_PDF_CONTENT_LEFT = 70.35
 OFFICIAL_PDF_CONTENT_RIGHT = 520.10
 OFFICIAL_PDF_BODY_INDENT = 119.85
 OFFICIAL_PDF_COPY_INDENT = 106.35
+OFFICIAL_PDF_FONT_FILE = "edukai-5.1_20251208.ttf"
+OFFICIAL_PDF_FONT_SHA256 = "e2b6b1bd1d6303672a68d5057a1f1e4b5361e3d8842373ff3bd1c71fb9ea9b98"
 _OFFICIAL_PDF_FONT_PROFILE: Dict[str, Any] | None = None
+_EDITOR_PDF_FONT_PROFILE: Dict[str, Any] | None = None
 
 
 def official_pdf_font_profile() -> Dict[str, Any]:
-    """Return a registered, PDF-embeddable Traditional Chinese font.
+    """Return the pinned Ministry of Education Kai face for formal documents.
 
-    A deployment may point EDOC_OFFICIAL_PDF_FONT_PATH at its licensed, locked
-    corporate Kai font.  The pinned PyMuPDF package provides the deterministic
-    embedded fallback, so generated PDFs never depend on a viewer-installed CJK
-    font (the former /MKai-Medium CID reference rendered as a blank page in
-    standards-compliant renderers without an Adobe CNS language pack).
+    Formal previews and generated official PDFs must use the same immutable
+    EduKai 5.1 asset. Missing, modified or unreadable font data fails closed so
+    a final document can never be silently produced with a substitute face.
     """
     global _OFFICIAL_PDF_FONT_PROFILE
     if _OFFICIAL_PDF_FONT_PROFILE:
         return _OFFICIAL_PDF_FONT_PROFILE
 
     from reportlab.pdfbase import pdfmetrics  # type: ignore
-    from reportlab.pdfbase.cidfonts import UnicodeCIDFont  # type: ignore
     from reportlab.pdfbase.ttfonts import TTFont  # type: ignore
 
-    configured_path = os.getenv("EDOC_OFFICIAL_PDF_FONT_PATH", "").strip()
-    if configured_path:
-        try:
-            font_name = "EDocOfficialKai"
-            if font_name not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(
-                    TTFont(
-                        font_name,
-                        configured_path,
-                        subfontIndex=max(0, int(os.getenv("EDOC_OFFICIAL_PDF_FONT_SUBFONT", "0") or 0)),
-                    )
-                )
-            _OFFICIAL_PDF_FONT_PROFILE = {
-                "name": font_name,
-                "family": "configured-kai",
-                "embedded": True,
-                "source": "configured_locked_font",
-            }
-            return _OFFICIAL_PDF_FONT_PROFILE
-        except (OSError, TypeError, ValueError):
-            # Continue with the pinned bundled fallback.  The configured path is
-            # intentionally not copied into the PDF metadata or an audit log.
-            pass
+    bundled_kai_path = ROOT / "assets" / "fonts" / OFFICIAL_PDF_FONT_FILE
+    if not bundled_kai_path.is_file():
+        raise RuntimeError("official_pdf_font_unavailable")
+
+    digest = hashlib.sha256()
+    try:
+        with bundled_kai_path.open("rb") as font_stream:
+            for chunk in iter(lambda: font_stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise RuntimeError("official_pdf_font_unavailable") from exc
+    if not hmac.compare_digest(digest.hexdigest(), OFFICIAL_PDF_FONT_SHA256):
+        raise RuntimeError("official_pdf_font_hash_mismatch")
+
+    try:
+        font_name = "EDocOfficialMOEEduKai"
+        if font_name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(font_name, str(bundled_kai_path)))
+    except Exception as exc:
+        raise RuntimeError("official_pdf_font_invalid") from exc
+
+    _OFFICIAL_PDF_FONT_PROFILE = {
+        "name": font_name,
+        "family": "教育部標準楷書",
+        "embedded": True,
+        "source": "repo-bundled-edukai-5.1-20251208",
+        "sha256": OFFICIAL_PDF_FONT_SHA256,
+    }
+    return _OFFICIAL_PDF_FONT_PROFILE
+
+
+def editor_pdf_font_profile() -> Dict[str, Any]:
+    """Return the existing Kai face for uploaded-PDF editor text only."""
+    global _EDITOR_PDF_FONT_PROFILE
+    if _EDITOR_PDF_FONT_PROFILE:
+        return _EDITOR_PDF_FONT_PROFILE
+
+    from reportlab.pdfbase import pdfmetrics  # type: ignore
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont  # type: ignore
+    from reportlab.pdfbase.ttfonts import TTFont  # type: ignore
 
     bundled_kai_path = ROOT / "assets" / "fonts" / "LXGWWenKaiTC-Regular.ttf"
     if bundled_kai_path.is_file():
         try:
-            font_name = "EDocOfficialLXGWWenKaiTC"
+            font_name = "EDocEditorLXGWWenKaiTC"
             if font_name not in pdfmetrics.getRegisteredFontNames():
                 pdfmetrics.registerFont(TTFont(font_name, str(bundled_kai_path)))
-            _OFFICIAL_PDF_FONT_PROFILE = {
+            _EDITOR_PDF_FONT_PROFILE = {
                 "name": font_name,
                 "family": "LXGW WenKai TC",
                 "embedded": True,
                 "source": "repo-bundled-v1.522",
             }
-            return _OFFICIAL_PDF_FONT_PROFILE
+            return _EDITOR_PDF_FONT_PROFILE
         except (OSError, TypeError, ValueError):
             pass
 
     try:
         import fitz  # type: ignore
 
-        font_name = "EDocOfficialCJK"
+        font_name = "EDocEditorCJK"
         if font_name not in pdfmetrics.getRegisteredFontNames():
             bundled_font = fitz.Font(fontname="cjk").buffer
             pdfmetrics.registerFont(TTFont(font_name, io.BytesIO(bundled_font)))
-        _OFFICIAL_PDF_FONT_PROFILE = {
+        _EDITOR_PDF_FONT_PROFILE = {
             "name": font_name,
             "family": "pymupdf-droid-sans-fallback",
             "embedded": True,
             "source": "pymupdf-1.26.5-bundled",
         }
-        return _OFFICIAL_PDF_FONT_PROFILE
+        return _EDITOR_PDF_FONT_PROFILE
     except (ImportError, OSError, TypeError, ValueError):
         # Last-resort compatibility for stripped development environments.  The
         # production requirements include PyMuPDF, so production takes the
@@ -10407,13 +10548,13 @@ def official_pdf_font_profile() -> Dict[str, Any]:
         font_name = "MSung-Light"
         if font_name not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(UnicodeCIDFont(font_name))
-        _OFFICIAL_PDF_FONT_PROFILE = {
+        _EDITOR_PDF_FONT_PROFILE = {
             "name": font_name,
             "family": "msung-cid-fallback",
             "embedded": False,
             "source": "reportlab-cid-fallback",
         }
-        return _OFFICIAL_PDF_FONT_PROFILE
+        return _EDITOR_PDF_FONT_PROFILE
 
 
 def official_pdf_party_items(value: Any) -> List[str]:
@@ -10547,6 +10688,40 @@ def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
         "contact_fax": doc.get("contactFax") or doc.get("contact_fax") or contact.get("fax") or EDOC_DEFAULT_CONTACT_FAX,
         "contact_email": doc.get("contactEmail") or doc.get("contact_email") or contact.get("email") or "",
     }
+
+
+def validate_official_pdf_font_coverage(info: Dict[str, Any]) -> None:
+    """Fail closed when formal text contains a glyph absent from EduKai.
+
+    Browser fallback fonts are acceptable for product UI but not for an
+    auditable formal document that promises one pinned typeface.
+    """
+    from reportlab.pdfbase import pdfmetrics  # type: ignore
+
+    font_profile = official_pdf_font_profile()
+    char_to_glyph = pdfmetrics.getFont(font_profile["name"]).face.charToGlyph
+    missing: set[int] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+            return
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child)
+            return
+        if not isinstance(value, str):
+            return
+        for char in value:
+            if not char.isspace() and ord(char) not in char_to_glyph:
+                missing.add(ord(char))
+
+    visit(info)
+    if missing:
+        # Do not include source text or names in logs/errors. The UI can ask the
+        # applicant to replace unsupported rare characters without exposing PII.
+        raise ValueError("official_pdf_font_missing_glyphs")
 
 
 def content_bottom_for_pdf_stamps(stamps: List[Dict[str, Any]] | None, page_number: int, fallback: float = 788.0) -> float:
@@ -10978,6 +11153,16 @@ def write_official_pdf_document(
     pdf_canvas.setSubject(str(info["subject"]))
     pdf_canvas.setAuthor(str(info["company"]))
     pdf_canvas.setCreator(f"Module_edoc {OFFICIAL_PDF_RENDERER_VERSION}")
+    pdf_canvas.setKeywords(
+        ";".join(
+            (
+                "字型來源=中華民國教育部",
+                "font_license=https://creativecommons.org/licenses/by-nd/3.0/tw/legalcode.zh-hant",
+                f"font_sha256={OFFICIAL_PDF_FONT_SHA256}",
+                f"renderer_version={OFFICIAL_PDF_RENDERER_VERSION}",
+            )
+        )
+    )
     total_pages = len(layout["pages"])
     for page in layout["pages"]:
         draw_official_page(pdf_canvas, info, layout, page, total_pages, stamps)
@@ -10989,6 +11174,7 @@ def write_official_pdf_document(
 def build_official_pdf_package(doc: Dict[str, Any], stamps: List[Dict[str, Any]] | None = None, template: str = "歲悅正式函", min_page_count: int = 1) -> Dict[str, Any]:
     stamps = stamps or []
     info = official_pdf_info(doc, template)
+    validate_official_pdf_font_coverage(info)
     layout = paginate_official_pdf(info, stamps, min_page_count)
     total_pages = len(layout["pages"])
     return {
@@ -11723,6 +11909,7 @@ def migrate() -> None:
         ensure_column(conn, "users", "logging_account_id", "TEXT")
         ensure_column(conn, "users", "logging_role_key", "TEXT")
         ensure_column(conn, "users", "finance_employee_id", "TEXT")
+        ensure_column(conn, "users", "finance_tenant_id", "TEXT")
         ensure_column(conn, "users", "company_id", "TEXT")
         ensure_column(conn, "users", "company_name", "TEXT")
         ensure_column(conn, "users", "company_address", "TEXT")
@@ -11811,6 +11998,11 @@ def migrate() -> None:
         ensure_column(conn, "official_document_stamp_positions", "locked_seal_file_id", "TEXT")
         ensure_column(conn, "official_document_stamp_positions", "locked_seal_sha256", "TEXT")
         ensure_column(conn, "internal_dispatches", "inbound_document_id", "TEXT")
+        ensure_column(conn, "inbound_documents", "mutation_version", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "inbound_documents", "company_id", "TEXT")
+        ensure_column(conn, "inbound_documents", "finance_tenant_id", "TEXT")
+        ensure_column(conn, "inbound_document_mutations", "company_id", "TEXT")
+        ensure_column(conn, "inbound_document_mutations", "finance_tenant_id", "TEXT")
         for table in ("inbound_documents", "internal_dispatches"):
             ensure_column(conn, table, "retention_until", "TEXT")
             ensure_column(conn, table, "retention_policy_version", "TEXT NOT NULL DEFAULT 'EDOC-RETENTION-2026-10Y'")
@@ -11833,6 +12025,7 @@ def migrate() -> None:
         )
         ensure_column(conn, "companies", "address", "TEXT")
         ensure_column(conn, "companies", "finance_entity_id", "TEXT")
+        ensure_column(conn, "companies", "finance_tenant_id", "TEXT")
         ensure_column(conn, "companies", "source_system", "TEXT NOT NULL DEFAULT 'finance'")
         ensure_column(conn, "companies", "last_synced_from_finance_at", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_official_dispatch_records_document ON official_document_dispatch_records(document_id, dispatch_status)")
@@ -11849,6 +12042,7 @@ def migrate() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_official_editor_assets_revision ON official_document_editor_assets(editor_revision_id, asset_kind)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_inbound_documents_status ON inbound_documents(status, due_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_inbound_documents_assignee ON inbound_documents(assignee_user_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_inbound_mutations_document ON inbound_document_mutations(inbound_document_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_inbound_attachments_document ON inbound_document_attachments(inbound_document_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_internal_dispatches_status ON internal_dispatches(status, due_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_internal_dispatches_inbound_document ON internal_dispatches(inbound_document_id, created_at)")
@@ -14130,7 +14324,7 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
         SELECT
           s.id AS session_id, s.expires_at,
           u.id, u.auth_user_id, u.account_source, u.logging_account_id, u.logging_role_key,
-          u.finance_employee_id, u.company_id, u.company_name, u.company_address,
+          u.finance_employee_id, u.finance_tenant_id, u.company_id, u.company_name, u.company_address,
           u.manager_employee_id, u.manager_name, u.manager_email, u.manager_role_key,
           u.approval_manager_employee_id, u.approval_manager_name, u.approval_manager_email, u.approval_manager_role_key,
           u.name, u.email, u.unit, u.title, u.job_level, u.role,
@@ -14152,6 +14346,7 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
                 str(row["account_source"] or "").strip().lower() != "finance"
                 or not str(row["auth_user_id"] or "").strip()
                 or not str(row["company_id"] or "").strip()
+                or not str(row["finance_tenant_id"] or "").strip()
             )
         )
     )
@@ -16898,6 +17093,11 @@ GENERAL_AFFAIRS_INBOUND_SOURCE_TYPES = {
     "manual",
     "jagent_mock",
 }
+CANONICAL_INBOUND_BROWSER_SOURCE_TYPES = {
+    "local_unit_physical",
+    "general_affairs_email",
+    "general_affairs_physical",
+}
 
 
 def official_session_user(session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -16905,6 +17105,68 @@ def official_session_user(session: Dict[str, Any] | None) -> Dict[str, Any]:
     if not user:
         raise PermissionError("authentication_required")
     return user
+
+
+def authoritative_finance_unit(
+    user: Dict[str, Any],
+    payload: Dict[str, Any] | None = None,
+    *,
+    id_keys: Iterable[str] = (),
+    name_keys: Iterable[str] = (),
+) -> Dict[str, str]:
+    """Bind a mutable workflow record to the session's Finance unit.
+
+    Department fields supplied by a browser are assertions, never authority.
+    They may be omitted, or must match the server-side Finance projection.  A
+    missing unit fails closed instead of falling back to a product default such
+    as ``總務``.
+    """
+    external = parse_json_any(user.get("external_account_payload_json"), {}) or {}
+    profile = external.get("financeProfile") if isinstance(external, dict) else {}
+    profile = profile if isinstance(profile, dict) else {}
+    unit_name = roster_text(user.get("unit") or profile.get("departmentName"))
+    unit_code = roster_text(profile.get("departmentCode"))
+    if not unit_name:
+        raise PermissionError("finance_unit_required")
+    payload = payload or {}
+    allowed = {value for value in (unit_name, unit_code) if value}
+    for key in name_keys:
+        requested = roster_text(payload.get(key))
+        if requested and requested not in allowed:
+            raise PermissionError("finance_unit_payload_mismatch")
+    for key in id_keys:
+        requested = roster_text(payload.get(key))
+        if requested and requested not in allowed:
+            raise PermissionError("finance_unit_payload_mismatch")
+    return {"id": unit_code or unit_name, "name": unit_name}
+
+
+def authoritative_applicant_department(
+    user: Dict[str, Any],
+    payload: Dict[str, Any] | None = None,
+) -> Dict[str, str]:
+    return authoritative_finance_unit(
+        user,
+        payload,
+        id_keys=("applicant_department_id", "applicantDepartmentId"),
+        name_keys=(
+            "applicant_department_name",
+            "applicantDepartmentName",
+            "applicant_department",
+        ),
+    )
+
+
+def authoritative_inbound_recipient_unit(
+    user: Dict[str, Any],
+    payload: Dict[str, Any] | None = None,
+) -> Dict[str, str]:
+    return authoritative_finance_unit(
+        user,
+        payload,
+        id_keys=("recipient_department_id", "department_id"),
+        name_keys=("recipient_department_name", "department"),
+    )
 
 
 def can_create_internal_dispatch(session: Dict[str, Any] | None) -> bool:
@@ -17306,6 +17568,88 @@ def require_valid_finance_workflow_step_actor(
     error = "official_seal_route_actor_unresolved" if seal_context else "official_workflow_actor_unresolved"
     step_key = str(normalized_step.get("key") or "unknown")
     raise ValueError(f"{error}:{step_key}:{reason}")
+
+
+def workflow_readiness_summary(
+    user: Dict[str, Any],
+    route_code: str,
+    steps_and_actors: Iterable[Tuple[Dict[str, Any], Dict[str, Any] | None]],
+    *,
+    company_ready: bool,
+) -> Dict[str, Any]:
+    unit_ready = bool(roster_text(user.get("unit")))
+    step_results: List[Dict[str, Any]] = []
+    for step, actor in steps_and_actors:
+        reason = (
+            finance_workflow_step_failure_reason(step, user, actor)
+            if finance_workflow_actor(user)
+            else "" if actor else "actor_not_found"
+        )
+        step_results.append({
+            "stepKey": step.get("key") or "",
+            "stepName": step.get("name") or "",
+            "requiredRole": step.get("role") or "",
+            "ready": not reason,
+            "reason": reason,
+        })
+    blockers: List[str] = []
+    if not company_ready:
+        blockers.append("finance_company_required")
+    if not unit_ready:
+        blockers.append("finance_unit_required")
+    blockers.extend(
+        f"{item['stepKey']}:{item['reason']}"
+        for item in step_results
+        if not item["ready"]
+    )
+    create_draft_allowed = company_ready and unit_ready
+    return {
+        "ok": True,
+        "routeCode": route_code,
+        "createDraftAllowed": create_draft_allowed,
+        "submitAllowed": create_draft_allowed and not blockers,
+        "ready": create_draft_allowed and not blockers,
+        "companyReady": company_ready,
+        "unitReady": unit_ready,
+        "steps": step_results,
+        "missingStepKeys": [item["stepKey"] for item in step_results if not item["ready"]],
+        "blockers": blockers,
+        "sourceOfTruth": "finance",
+    }
+
+
+def official_applicant_workflow_readiness(
+    conn: sqlite3.Connection,
+    session: Dict[str, Any] | None,
+    route_code: str = "A",
+) -> Dict[str, Any]:
+    user = official_session_user(session)
+    route = roster_text(route_code or "A").upper()
+    company_id = roster_text(user.get("company_id"))
+    company: Dict[str, Any] | None = None
+    if company_id:
+        try:
+            company = official_company_row(conn, company_id)
+        except ValueError:
+            company = None
+    steps = (
+        official_workflow_steps_for_finance_applicant(
+            route,
+            user.get("logging_role_key") or user.get("role"),
+        )
+        if finance_workflow_actor(user)
+        else unified_official_workflow_steps(route)
+    )
+    resolved = [
+        (step, resolve_official_step_approver(conn, step, user, company or {}))
+        for step in steps
+    ]
+    return workflow_readiness_summary(
+        user,
+        route,
+        resolved,
+        company_ready=bool(company),
+    )
 
 
 INTERNAL_LAUNCH_WORKFLOW_FAILURE_LABELS = {
@@ -19463,16 +19807,67 @@ def official_pdf_document_payload(conn: sqlite3.Connection, document: Dict[str, 
     }
 
 
+def official_pdf_uses_current_renderer(data: bytes) -> bool:
+    """Return whether a generated formal PDF carries the pinned font audit data."""
+    if not data.startswith(b"%PDF"):
+        return False
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        metadata = PdfReader(io.BytesIO(data)).metadata or {}
+        creator = str(metadata.get("/Creator") or "")
+        keywords = str(metadata.get("/Keywords") or "")
+    except Exception:
+        return False
+    return (
+        creator == f"Module_edoc {OFFICIAL_PDF_RENDERER_VERSION}"
+        and f"font_sha256={OFFICIAL_PDF_FONT_SHA256}" in keywords
+        and f"renderer_version={OFFICIAL_PDF_RENDERER_VERSION}" in keywords
+    )
+
+
+def sqlite_official_generated_pdf_is_current(
+    conn: sqlite3.Connection,
+    file_meta: Dict[str, Any],
+) -> bool:
+    file_object_id = str(file_meta.get("file_object_id") or "")
+    if not file_object_id:
+        return False
+    try:
+        file_object, data = read_file_object_bytes(conn, file_object_id)
+        verify_official_file_bytes(file_meta, file_object, data)
+    except (OSError, ValueError):
+        return False
+    return official_pdf_uses_current_renderer(data)
+
+
 def ensure_official_generated_pdf(conn: sqlite3.Connection, document: Dict[str, Any], actor: str = "PDF Worker") -> Dict[str, Any]:
     row = conn.execute(
         "SELECT * FROM official_document_files WHERE document_id = ? AND file_type = 'generated_pdf' ORDER BY version DESC LIMIT 1",
         (document["id"],),
     ).fetchone()
     if row:
-        return row_to_dict(row)
+        current = row_to_dict(row)
+        # Submitted and completed files are immutable audit evidence. Only an
+        # editable draft/rejected revision may receive a new renderer version.
+        if document.get("current_status") not in {"draft", "rejected"}:
+            return current
+        if sqlite_official_generated_pdf_is_current(conn, current):
+            return current
     package = build_official_pdf_package(official_pdf_document_payload(conn, document), [], "歲悅正式函", 1)
     file_row = store_official_pdf_file(conn, document["id"], "generated_pdf", f"{document['id']}-generated.pdf", package["data"], actor)
-    insert_official_log(conn, document["id"], "generate_pdf", {"id": "system", "name": actor, "role": "system"}, file_row["file_hash"], file_id=file_row["id"])
+    action = "regenerate_pdf_font_revision" if row else "generate_pdf"
+    insert_official_log(
+        conn,
+        document["id"],
+        action,
+        {"id": "system", "name": actor, "role": "system"},
+        (
+            f"sha256={file_row['file_hash']};renderer={OFFICIAL_PDF_RENDERER_VERSION};"
+            f"font_sha256={OFFICIAL_PDF_FONT_SHA256}"
+        ),
+        file_id=file_row["id"],
+    )
     return file_row
 
 
@@ -19908,16 +20303,90 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
     rows = []
     for row in conn.execute(sql, params).fetchall():
         item = row_to_dict(row)
+        all_steps = official_document_steps(conn, item["id"])
+        if all_steps:
+            workflow_generation = max(int(step.get("workflow_generation") or 1) for step in all_steps)
+            current_steps = [
+                step
+                for step in all_steps
+                if int(step.get("workflow_generation") or 1) == workflow_generation
+            ]
+        else:
+            current_steps = []
+        actor_snapshots = official_document_actor_snapshots(conn, item["id"])
+        current_pending = next(
+            (
+                step
+                for step in current_steps
+                if step.get("status") == "pending"
+                and step.get("step_key") == item.get("current_step")
+            ),
+            None,
+        )
+        active_delegation = None
+        if current_pending and current_pending.get("approver_user_id") != user.get("id"):
+            active_delegation = active_official_workflow_delegation(
+                conn,
+                item,
+                current_pending,
+                user,
+            )
         seal_context = official_seal_context_from_document(item)
         item["official_seal"] = seal_context
         item["document_category"] = (seal_context or {}).get("document_category") or ""
         item["approval_route_code"] = (seal_context or {}).get("approval_route_code") or ""
         item["approval_route_name"] = (seal_context or {}).get("approval_route_name") or ""
-        item["approval_steps"] = official_document_steps(conn, item["id"])
+        item["approval_steps"] = current_steps
         raw_stamp_request = official_document_stamp_request(conn, item["id"])
         item["stamp_request"] = official_application_package(item, [], [], [], raw_stamp_request).get("stamp_request")
-        item["dispatch_record"] = official_dispatch_record(conn, item["id"])
-        item["current_step_name"] = next((step["step_name"] for step in official_document_steps(conn, item["id"]) if step.get("step_key") == item.get("current_step")), "")
+        dispatch_record = official_dispatch_record(conn, item["id"])
+        item["dispatch_record"] = dispatch_record
+        item["current_step_name"] = next(
+            (
+                step["step_name"]
+                for step in current_steps
+                if step.get("step_key") == item.get("current_step")
+            ),
+            "",
+        )
+        item["can_download"] = canDownloadOfficialDocument(
+            user,
+            item,
+            all_steps,
+            actor_snapshots,
+        )
+        item["can_manage_dispatch"] = can_manage_official_dispatch(
+            user,
+            item,
+            dispatch_record,
+            session,
+            current_steps,
+        )
+        item["can_retry_stamp"] = bool(
+            official_stamp_recoverable(item, raw_stamp_request)
+            and can_retry_official_stamp(user, current_steps)
+        )
+        item["can_confirm"] = bool(
+            user.get("id") == item.get("applicant_id")
+            and item.get("current_step") == "applicant_confirm"
+            and item.get("current_status")
+            in {"stamped", "dispatched", "sent_by_applicant"}
+        )
+        item["can_act"] = bool(
+            current_pending
+            and (
+                current_pending.get("approver_user_id") == user.get("id")
+                or active_delegation
+            )
+        )
+        item["acting_for_user_id"] = (
+            current_pending.get("approver_user_id")
+            if active_delegation and current_pending
+            else ""
+        )
+        item["delegation_id"] = (
+            active_delegation.get("id") if active_delegation else ""
+        )
         rows.append(item)
     return rows
 
@@ -19972,6 +20441,7 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
     if not launch_company_in_scope(company_id):
         raise PermissionError("company_not_in_launch_scope")
     company = official_company_row(conn, company_id)
+    applicant_department = authoritative_applicant_department(user, payload)
     dispatch_method = official_document_dispatch_method(source_type, payload.get("dispatch_method"))
     document_id = payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     ts = now()
@@ -20039,8 +20509,8 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
         "handler_name": payload.get("handler_name") or user.get("name") or "",
         "applicant_id": user["id"],
         "applicant_name": user.get("name") or user.get("email"),
-        "applicant_department_id": payload.get("applicant_department_id") or user.get("unit") or "",
-        "applicant_department_name": payload.get("applicant_department_name") or user.get("unit") or "",
+        "applicant_department_id": applicant_department["id"],
+        "applicant_department_name": applicant_department["name"],
         "workflow_template_key": workflow_template_key,
         "dispatch_method": dispatch_method,
         "requires_stamp": 1 if requires_stamp else 0,
@@ -21627,7 +22097,6 @@ def reject_official_document(conn: sqlite3.Connection, document_id: str, payload
             principal_actor_id=principal_actor_id,
             document_evidence=document_evidence,
             review_access=review_access,
-            require_client_acknowledgements=False,
             decision_type="reject",
         ),
         **structured_rejection_evidence(payload),
@@ -23081,7 +23550,7 @@ def _editor_centered_rect(rect: Any, width: float, height: float) -> Any:
 
 def _editor_kai_font_name() -> str:
     """Return the locked ReportLab Kai face used for all entered PDF text."""
-    return str(official_pdf_font_profile()["name"])
+    return str(editor_pdf_font_profile()["name"])
 
 
 def _editor_wrap_kai_text(text: str, max_width: float, font_name: str, font_size: float) -> List[str]:
@@ -23622,9 +24091,15 @@ def create_official_editor_draft(conn: sqlite3.Connection, payload: Dict[str, An
         raise PermissionError("pdf_editor_v2_not_enabled_for_company")
     company = official_company_row(conn, company_id)
     require_official_seal_classification(payload)
+    applicant_department = authoritative_applicant_department(user, payload)
+    bound_payload = {
+        **payload,
+        "applicant_department_id": applicant_department["id"],
+        "applicant_department_name": applicant_department["name"],
+    }
     document_id = str(payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}")
     ts = now()
-    metadata, seal_context, workflow_template_key = official_editor_draft_metadata(payload, user, company)
+    metadata, seal_context, workflow_template_key = official_editor_draft_metadata(bound_payload, user, company)
     document = {
         "id": document_id,
         "company_id": company_id,
@@ -23639,8 +24114,8 @@ def create_official_editor_draft(conn: sqlite3.Connection, payload: Dict[str, An
         "handler_name": payload.get("handler_name") or user.get("name") or "",
         "applicant_id": user["id"],
         "applicant_name": user.get("name") or user.get("email") or "",
-        "applicant_department_id": payload.get("applicant_department_id") or user.get("unit") or "",
-        "applicant_department_name": payload.get("applicant_department_name") or user.get("unit") or "",
+        "applicant_department_id": applicant_department["id"],
+        "applicant_department_name": applicant_department["name"],
         "workflow_template_key": workflow_template_key,
         "dispatch_method": official_document_dispatch_method("uploaded_pdf", payload.get("dispatch_method")),
         "requires_stamp": 1,
@@ -24467,6 +24942,19 @@ def can_access_inbound_document(
     user = session.get("user") if session else None
     if not user:
         return False
+    try:
+        scope = local_inbound_finance_user_scope(conn, user)
+    except PermissionError:
+        return False
+    document_company_id = roster_text(document.get("company_id"))
+    document_tenant_id = roster_text(document.get("finance_tenant_id"))
+    if (
+        not document_company_id
+        or not document_tenant_id
+        or document_company_id != scope["company_id"]
+        or document_tenant_id != scope["finance_tenant_id"]
+    ):
+        return False
     if session_has_any_permission(
         session,
         ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"],
@@ -24534,6 +25022,7 @@ def inbound_document_download_attachment(
 
 def list_inbound_documents(conn: sqlite3.Connection, query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = official_session_user(session)
+    scope = local_inbound_finance_user_scope(conn, user)
     where: List[str] = []
     params: List[Any] = []
     query = query or {}
@@ -24543,6 +25032,8 @@ def list_inbound_documents(conn: sqlite3.Connection, query: Dict[str, List[str]]
     if query.get("assignee_user_id"):
         where.append("assignee_user_id = ?")
         params.append(query["assignee_user_id"][0])
+    where.append("company_id = ? AND finance_tenant_id = ?")
+    params.extend([scope["company_id"], scope["finance_tenant_id"]])
     if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"]):
         where.append(
             """
@@ -24567,15 +25058,245 @@ def list_inbound_documents(conn: sqlite3.Connection, query: Dict[str, List[str]]
     return [inbound_document_detail(conn, row["id"]) for row in conn.execute(sql, params).fetchall()]
 
 
+def inbound_idempotency_key(payload: Dict[str, Any]) -> str:
+    key = roster_text(payload.get("idempotency_key") or payload.get("idempotencyKey"))
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", key):
+        raise ValueError("inbound_idempotency_key_required")
+    return key
+
+
+def inbound_expected_version(payload: Dict[str, Any]) -> int:
+    value = payload.get("expected_version", payload.get("expectedVersion"))
+    if isinstance(value, bool):
+        raise ValueError("inbound_expected_version_required")
+    try:
+        version = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("inbound_expected_version_required") from None
+    if version < 1:
+        raise ValueError("inbound_expected_version_required")
+    return version
+
+
+def inbound_mutation_request_sha256(mutation_type: str, payload: Dict[str, Any]) -> str:
+    semantic = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"ip_address", "user_agent", "idempotency_key", "idempotencyKey"}
+    }
+    return hashlib.sha256(
+        json.dumps(
+            {"mutation": mutation_type, "payload": semantic},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def canonical_inbound_mutation_response(
+    mutation_type: str,
+    item: Dict[str, Any],
+    *,
+    replayed: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "mutation": mutation_type,
+        "replayed": replayed,
+        "version": int(item.get("mutation_version") or 1),
+        "item": item,
+    }
+
+
+def local_inbound_mutation_replay(
+    conn: sqlite3.Connection,
+    key: str,
+    mutation_type: str,
+    request_sha256: str,
+    actor_user_id: str,
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM inbound_document_mutations WHERE idempotency_key = ?",
+        (key,),
+    ).fetchone()
+    if not row:
+        return None
+    stored = row_to_dict(row)
+    if (
+        stored.get("mutation_type") != mutation_type
+        or stored.get("request_sha256") != request_sha256
+        or stored.get("actor_user_id") != actor_user_id
+    ):
+        raise ValueError("inbound_idempotency_conflict")
+    response = parse_json_any(stored.get("response_json"), {}) or {}
+    if not isinstance(response, dict) or not isinstance(response.get("item"), dict):
+        raise RuntimeError("inbound_idempotency_response_invalid")
+    ledger_item = response["item"]
+    item_id = roster_text(ledger_item.get("id"))
+    if not item_id:
+        raise RuntimeError("inbound_idempotency_response_invalid")
+    current = inbound_document_detail(conn, item_id, session)
+    ledger_version = int(response.get("version") or ledger_item.get("mutation_version") or 0)
+    current_version = int(current.get("mutation_version") or 0)
+    hash_verified = False
+    if current_version == ledger_version:
+        if stable_json_hash(current) != roster_text(response.get("item_sha256")):
+            raise RuntimeError("inbound_idempotency_item_hash_mismatch")
+        hash_verified = True
+    return {
+        **response,
+        "replayed": True,
+        "version": current_version,
+        "item": current,
+        "ledger_hash_verified": hash_verified,
+    }
+
+
+def record_local_inbound_mutation(
+    conn: sqlite3.Connection,
+    key: str,
+    mutation_type: str,
+    request_sha256: str,
+    actor_user_id: str,
+    response: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    item = response["item"]
+    ledger_response = {
+        "ok": True,
+        "mutation": mutation_type,
+        "replayed": False,
+        "version": int(response.get("version") or item.get("mutation_version") or 1),
+        "item": {
+            "id": item["id"],
+            "company_id": item["company_id"],
+            "finance_tenant_id": item["finance_tenant_id"],
+            "mutation_version": int(item.get("mutation_version") or 1),
+        },
+        "item_sha256": stable_json_hash(item),
+    }
+    try:
+        conn.execute(
+            """
+            INSERT INTO inbound_document_mutations (
+              idempotency_key, inbound_document_id, company_id, finance_tenant_id, actor_user_id,
+              mutation_type, request_sha256, response_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                key,
+                response["item"]["id"],
+                response["item"]["company_id"],
+                response["item"]["finance_tenant_id"],
+                actor_user_id,
+                mutation_type,
+                request_sha256,
+                json.dumps(ledger_response, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                now(),
+            ),
+        )
+        return response
+    except sqlite3.IntegrityError:
+        replay = local_inbound_mutation_replay(
+            conn,
+            key,
+            mutation_type,
+            request_sha256,
+            actor_user_id,
+            session,
+        )
+        if replay is None:
+            raise
+        return replay
+
+
+def bind_local_inbound_payload_to_session_unit(
+    payload: Dict[str, Any],
+    user: Dict[str, Any],
+) -> Dict[str, Any]:
+    source_type = roster_text(payload.get("source_type") or "local_unit_physical")
+    if source_type not in LOCAL_INBOUND_ARCHIVE_SOURCE_TYPES:
+        return {**payload, "source_type": source_type}
+    unit = authoritative_inbound_recipient_unit(user, payload)
+    return {
+        **payload,
+        "source_type": source_type,
+        "recipient_department_id": unit["id"],
+        "recipient_department_name": unit["name"],
+    }
+
+
+def bind_canonical_inbound_payload_to_session_unit(
+    payload: Dict[str, Any],
+    user: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    source_type = roster_text(payload.get("source_type") or "local_unit_physical")
+    if source_type not in CANONICAL_INBOUND_BROWSER_SOURCE_TYPES:
+        raise PermissionError("inbound_source_type_forbidden")
+    if source_type in {"general_affairs_email", "general_affairs_physical"} and not session_has_any_permission(
+        session,
+        ["official_documents.receive", "official_documents.all_todo"],
+    ):
+        raise PermissionError("inbound_source_type_forbidden")
+    unit = authoritative_inbound_recipient_unit(user, payload)
+    return {
+        **payload,
+        "source_type": source_type,
+        "recipient_department_id": unit["id"],
+        "recipient_department_name": unit["name"],
+    }
+
+
+def inbound_finance_user_scope(user: Dict[str, Any]) -> Dict[str, str]:
+    company_id = roster_text(user.get("company_id"))
+    tenant_id = roster_text(user.get("finance_tenant_id"))
+    if (
+        roster_text(user.get("account_source")).lower() != "finance"
+        or roster_text(user.get("status")) != "啟用"
+        or not company_id
+        or not tenant_id
+    ):
+        raise PermissionError("finance_scope_required")
+    return {"company_id": company_id, "finance_tenant_id": tenant_id}
+
+
+def local_inbound_finance_user_scope(
+    conn: sqlite3.Connection,
+    user: Dict[str, Any],
+) -> Dict[str, str]:
+    scope = inbound_finance_user_scope(user)
+    company = conn.execute(
+        "SELECT id, finance_tenant_id, source_system, status FROM companies WHERE id = ?",
+        (scope["company_id"],),
+    ).fetchone()
+    if (
+        not company
+        or roster_text(company["source_system"]).lower() != "finance"
+        or roster_text(company["status"]).lower() != "active"
+        or not roster_text(company["finance_tenant_id"])
+        or roster_text(company["finance_tenant_id"]) != scope["finance_tenant_id"]
+    ):
+        raise PermissionError("finance_company_scope_invalid")
+    return scope
+
+
 def create_inbound_document(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
+    scope = local_inbound_finance_user_scope(conn, user)
     source_type = (payload.get("source_type") or "manual").strip()
     if not can_create_inbound_archive(session, source_type):
         raise PermissionError("inbound_archive_create_forbidden")
+    if source_type in LOCAL_INBOUND_ARCHIVE_SOURCE_TYPES:
+        payload = bind_local_inbound_payload_to_session_unit(payload, user)
     inbound_id = payload.get("id") or f"INB-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     receive_no = payload.get("receive_no") or payload.get("receiveNo") or f"收文字第{datetime.now().strftime('%Y%m%d%H%M%S')}"
     row = {
         "id": inbound_id,
+        "company_id": scope["company_id"],
+        "finance_tenant_id": scope["finance_tenant_id"],
         "receive_no": receive_no,
         "source_type": source_type,
         "external_exchange_id": payload.get("external_exchange_id") or payload.get("exchange_id") or "",
@@ -24592,41 +25313,230 @@ def create_inbound_document(conn: sqlite3.Connection, payload: Dict[str, Any], s
         "security_level": payload.get("security_level") or "普通",
         "status": payload.get("status") or "registered",
         "metadata_json": payload.get("metadata") or {},
+        "mutation_version": 1,
         "created_by": user.get("id") or "",
         "created_at": now(),
         "updated_at": now(),
         "closed_at": "",
     }
     insert_row(conn, "inbound_documents", row)
-    log_audit(conn, official_actor_name(user), "register_inbound_document", "inbound_documents", inbound_id, row["subject"], event_type="submit", module_code="official_documents")
+    is_draft = row["status"] == "draft"
+    log_audit(
+        conn,
+        official_actor_name(user),
+        "save_inbound_draft" if is_draft else "register_inbound_document",
+        "inbound_documents",
+        inbound_id,
+        "version=1",
+        event_type="draft" if is_draft else "submit",
+        module_code="official_documents",
+    )
     if payload.get("content_base64"):
         upload_inbound_attachment(conn, inbound_id, payload, session)
     return inbound_document_detail(conn, inbound_id)
 
 
+def _local_update_inbound_registration(
+    conn: sqlite3.Connection,
+    document: Dict[str, Any],
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+    *,
+    target_status: str,
+) -> Dict[str, Any]:
+    user = official_session_user(session)
+    expected_version = inbound_expected_version(payload)
+    current_version = int(document.get("mutation_version") or 1)
+    if current_version != expected_version:
+        raise ValueError("inbound_version_conflict")
+    if document.get("status") != "draft":
+        raise ValueError("inbound_registration_state_conflict")
+    existing_source = roster_text(document.get("source_type") or "local_unit_physical")
+    requested_source = roster_text(payload.get("source_type") or existing_source)
+    if requested_source != existing_source:
+        raise ValueError("inbound_source_type_immutable")
+    bound = bind_canonical_inbound_payload_to_session_unit(
+        {**payload, "source_type": existing_source},
+        user,
+        session,
+    )
+    current_metadata = parse_json_any(document.get("metadata_json"), {}) or {}
+    incoming_metadata = bound.get("metadata") if isinstance(bound.get("metadata"), dict) else {}
+    updated_at = now()
+
+    def incoming(key: str, fallback: Any) -> Any:
+        return bound[key] if key in bound else fallback
+
+    values = {
+        "receive_no": incoming("receive_no", document.get("receive_no") or ""),
+        "sender_name": incoming("sender_name", incoming("agency_name", document.get("sender_name") or "未指定來文單位")),
+        "sender_contact": incoming("sender_contact", document.get("sender_contact") or ""),
+        "subject": incoming("subject", document.get("subject") or "未命名收文"),
+        "body": incoming("body", incoming("description", document.get("body") or "")),
+        "recipient_department_id": incoming("recipient_department_id", document.get("recipient_department_id") or ""),
+        "recipient_department_name": incoming("recipient_department_name", document.get("recipient_department_name") or ""),
+        "due_at": incoming("due_at", document.get("due_at") or ""),
+        "priority": incoming("priority", document.get("priority") or "普通件"),
+        "security_level": incoming("security_level", document.get("security_level") or "普通"),
+        "status": target_status,
+        "metadata_json": json.dumps({**current_metadata, **incoming_metadata}, ensure_ascii=False),
+        "mutation_version": current_version + 1,
+        "updated_at": updated_at,
+    }
+    cursor = conn.execute(
+        """
+        UPDATE inbound_documents
+        SET receive_no = ?, sender_name = ?, sender_contact = ?, subject = ?, body = ?,
+            recipient_department_id = ?, recipient_department_name = ?, due_at = ?, priority = ?,
+            security_level = ?, status = ?, metadata_json = ?, mutation_version = ?, updated_at = ?
+        WHERE id = ? AND mutation_version = ? AND status = 'draft'
+        """,
+        (
+            values["receive_no"], values["sender_name"], values["sender_contact"],
+            values["subject"], values["body"], values["recipient_department_id"],
+            values["recipient_department_name"], values["due_at"], values["priority"],
+            values["security_level"], values["status"], values["metadata_json"],
+            values["mutation_version"], values["updated_at"], document["id"], current_version,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("inbound_version_conflict")
+    action = "save_inbound_draft" if target_status == "draft" else "register_inbound_document"
+    log_audit(
+        conn,
+        official_actor_name(user),
+        action,
+        "inbound_documents",
+        document["id"],
+        f"version={values['mutation_version']}",
+        event_type="draft" if target_status == "draft" else "submit",
+        module_code="official_documents",
+    )
+    return inbound_document_detail(conn, document["id"], session)
+
+
+def mutate_inbound_draft(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    user = official_session_user(session)
+    key = inbound_idempotency_key(payload)
+    request_sha256 = inbound_mutation_request_sha256("draft", payload)
+    replay = local_inbound_mutation_replay(conn, key, "draft", request_sha256, user.get("id") or "", session)
+    if replay:
+        return replay
+    document_id = roster_text(payload.get("document_id") or payload.get("documentId"))
+    if document_id:
+        current = inbound_document_detail(conn, document_id, session)
+        item = _local_update_inbound_registration(
+            conn,
+            current,
+            payload,
+            session,
+            target_status="draft",
+        )
+    else:
+        bound = bind_canonical_inbound_payload_to_session_unit(
+            {**payload, "source_type": payload.get("source_type") or "local_unit_physical", "status": "draft"},
+            user,
+            session,
+        )
+        item = create_inbound_document(conn, bound, session)
+    response = canonical_inbound_mutation_response("draft", item)
+    return record_local_inbound_mutation(
+        conn, key, "draft", request_sha256, user.get("id") or "", response, session
+    )
+
+
+def mutate_inbound_registration(
+    conn: sqlite3.Connection,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    user = official_session_user(session)
+    key = inbound_idempotency_key(payload)
+    request_sha256 = inbound_mutation_request_sha256("register", payload)
+    replay = local_inbound_mutation_replay(conn, key, "register", request_sha256, user.get("id") or "", session)
+    if replay:
+        return replay
+    document_id = roster_text(payload.get("document_id") or payload.get("documentId"))
+    if document_id:
+        current = inbound_document_detail(conn, document_id, session)
+        item = _local_update_inbound_registration(
+            conn,
+            current,
+            payload,
+            session,
+            target_status="registered",
+        )
+    else:
+        bound = bind_canonical_inbound_payload_to_session_unit(
+            {**payload, "source_type": payload.get("source_type") or "local_unit_physical", "status": "registered"},
+            user,
+            session,
+        )
+        item = create_inbound_document(conn, bound, session)
+    response = canonical_inbound_mutation_response("register", item)
+    return record_local_inbound_mutation(
+        conn, key, "register", request_sha256, user.get("id") or "", response, session
+    )
+
+
 def assign_inbound_document(conn: sqlite3.Connection, inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
-    inbound_document_detail(conn, inbound_id)
+    actor_scope = local_inbound_finance_user_scope(conn, user)
+    if not session_has_any_permission(session, ["official_documents.receive", "official_documents.all_todo"]):
+        raise PermissionError("inbound_assignment_forbidden")
+    document = inbound_document_detail(conn, inbound_id, session)
+    expected_value = payload.get("expected_version", payload.get("expectedVersion"))
+    expected_version = inbound_expected_version(payload) if expected_value is not None else int(document.get("mutation_version") or 1)
+    current_version = int(document.get("mutation_version") or 1)
+    if expected_version != current_version:
+        raise ValueError("inbound_version_conflict")
+    if roster_text(document.get("status")) in {"draft", "closed", "archived", "cancelled"}:
+        raise ValueError("inbound_mutation_state_conflict")
     assignee_id = payload.get("assignee_user_id") or payload.get("user_id") or ""
     assignee = active_user_by_id(conn, assignee_id) if assignee_id else None
+    if not assignee_id:
+        raise ValueError("inbound_assignee_required")
+    if not assignee:
+        raise ValueError("inbound_assignee_not_found")
+    try:
+        assignee_scope = inbound_finance_user_scope(assignee)
+    except PermissionError as exc:
+        raise PermissionError("inbound_assignee_scope_forbidden") from exc
+    if (
+        assignee_scope != actor_scope
+        or not roster_text(assignee.get("unit"))
+    ):
+        raise PermissionError("inbound_assignee_scope_forbidden")
     update = {
-        "recipient_department_id": payload.get("recipient_department_id") or payload.get("department_id") or "",
-        "recipient_department_name": payload.get("recipient_department_name") or payload.get("department") or (assignee.get("unit") if assignee else ""),
+        "recipient_department_id": roster_text(assignee.get("unit")),
+        "recipient_department_name": roster_text(assignee.get("unit")),
         "assignee_user_id": assignee_id,
-        "assignee_name": payload.get("assignee_name") or (assignee.get("name") if assignee else ""),
+        "assignee_name": assignee.get("name") or "",
         "due_at": payload.get("due_at") or "",
-        "status": payload.get("status") or "assigned",
+        "status": "assigned",
+        "mutation_version": current_version + 1,
         "updated_at": now(),
     }
-    conn.execute(
+    cursor = conn.execute(
         """
         UPDATE inbound_documents
         SET recipient_department_id = ?, recipient_department_name = ?, assignee_user_id = ?, assignee_name = ?,
-            due_at = ?, status = ?, updated_at = ?
-        WHERE id = ?
+            due_at = ?, status = ?, mutation_version = ?, updated_at = ?
+        WHERE id = ? AND mutation_version = ?
         """,
-        (update["recipient_department_id"], update["recipient_department_name"], update["assignee_user_id"], update["assignee_name"], update["due_at"], update["status"], update["updated_at"], inbound_id),
+        (
+            update["recipient_department_id"], update["recipient_department_name"],
+            update["assignee_user_id"], update["assignee_name"], update["due_at"],
+            update["status"], update["mutation_version"], update["updated_at"],
+            inbound_id, current_version,
+        ),
     )
+    if cursor.rowcount != 1:
+        raise ValueError("inbound_version_conflict")
     log_audit(conn, official_actor_name(user), "assign_inbound_document", "inbound_documents", inbound_id, json.dumps(update, ensure_ascii=False), event_type="assign", module_code="official_documents")
     if assignee:
         create_and_deliver_notification(conn, {
@@ -24636,24 +25546,139 @@ def assign_inbound_document(conn: sqlite3.Connection, inbound_id: str, payload: 
             "source": inbound_id,
             "body": payload.get("note") or "請於期限內處理收文。",
         })
-    return inbound_document_detail(conn, inbound_id)
+    return inbound_document_detail(conn, inbound_id, session)
+
+
+def mutate_inbound_assignment(
+    conn: sqlite3.Connection,
+    inbound_id: str,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    user = official_session_user(session)
+    key = inbound_idempotency_key(payload)
+    inbound_expected_version(payload)
+    request_sha256 = inbound_mutation_request_sha256("assign", {**payload, "document_id": inbound_id})
+    replay = local_inbound_mutation_replay(conn, key, "assign", request_sha256, user.get("id") or "", session)
+    if replay:
+        return replay
+    item = assign_inbound_document(conn, inbound_id, payload, session)
+    response = canonical_inbound_mutation_response("assign", item)
+    return record_local_inbound_mutation(
+        conn, key, "assign", request_sha256, user.get("id") or "", response, session
+    )
+
+
+def mutate_inbound_exception(
+    conn: sqlite3.Connection,
+    inbound_id: str,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    user = official_session_user(session)
+    local_inbound_finance_user_scope(conn, user)
+    if not session_has_any_permission(session, ["official_documents.receive", "official_documents.all_todo"]):
+        raise PermissionError("inbound_exception_forbidden")
+    key = inbound_idempotency_key(payload)
+    expected_version = inbound_expected_version(payload)
+    request_sha256 = inbound_mutation_request_sha256("exception", {**payload, "document_id": inbound_id})
+    replay = local_inbound_mutation_replay(conn, key, "exception", request_sha256, user.get("id") or "", session)
+    if replay:
+        return replay
+    document = inbound_document_detail(conn, inbound_id, session)
+    current_version = int(document.get("mutation_version") or 1)
+    if current_version != expected_version:
+        raise ValueError("inbound_version_conflict")
+    if roster_text(document.get("status")) in {"draft", "closed", "archived", "cancelled"}:
+        raise ValueError("inbound_mutation_state_conflict")
+    exception_type = roster_text(payload.get("exception_type") or payload.get("exceptionType"))
+    note = roster_text(payload.get("note") or payload.get("comment"))
+    if not exception_type or not note:
+        raise ValueError("inbound_exception_detail_required")
+    metadata = parse_json_any(document.get("metadata_json"), {}) or {}
+    metadata["exception"] = {
+        "type": exception_type[:120],
+        "note": note[:1000],
+        "reported_by": user.get("id") or "",
+        "reported_at": now(),
+    }
+    timestamp = now()
+    cursor = conn.execute(
+        """
+        UPDATE inbound_documents
+        SET status = 'exception', metadata_json = ?, mutation_version = ?, updated_at = ?
+        WHERE id = ? AND mutation_version = ?
+        """,
+        (
+            json.dumps(metadata, ensure_ascii=False),
+            current_version + 1,
+            timestamp,
+            inbound_id,
+            current_version,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("inbound_version_conflict")
+    log_audit(
+        conn,
+        official_actor_name(user),
+        "report_inbound_exception",
+        "inbound_documents",
+        inbound_id,
+        f"type={exception_type[:120]};version={current_version + 1}",
+        event_type="exception",
+        module_code="official_documents",
+    )
+    item = inbound_document_detail(conn, inbound_id, session)
+    response = canonical_inbound_mutation_response("exception", item)
+    return record_local_inbound_mutation(
+        conn, key, "exception", request_sha256, user.get("id") or "", response, session
+    )
+
+
+def validated_inbound_pdf_attachment(payload: Dict[str, Any]) -> Tuple[str, str, bytes]:
+    content = payload.get("content_base64") or payload.get("file_content_base64") or ""
+    if not isinstance(content, str) or not content:
+        raise ValueError("inbound_attachment_required")
+    try:
+        data = base64.b64decode(content, validate=True)
+    except (ValueError, binascii.Error, TypeError) as exc:
+        raise ValueError("inbound_attachment_invalid_base64") from exc
+    if not data:
+        raise ValueError("inbound_attachment_empty")
+    if len(data) > EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise ValueError("inbound_attachment_too_large")
+    file_name = Path(payload.get("file_name") or "inbound-attachment.pdf").name
+    mime_type = roster_text(
+        payload.get("file_mime_type") or payload.get("mime_type") or "application/pdf"
+    ).lower()
+    if Path(file_name).suffix.lower() != ".pdf" or mime_type != "application/pdf":
+        raise ValueError("inbound_attachment_pdf_required")
+    if not data.startswith(b"%PDF"):
+        raise ValueError("inbound_attachment_mime_mismatch")
+    # The company launch rule requires every user-uploaded inbound PDF to be
+    # valid A4 (portrait or landscape); this also performs strict parser and
+    # active-content preflight before the bytes reach private storage.
+    inspect_editor_pdf(data)
+    return file_name, mime_type, data
 
 
 def upload_inbound_attachment(conn: sqlite3.Connection, inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
-    document = inbound_document_detail(conn, inbound_id)
-    if not can_access_inbound_document(conn, document, session):
-        raise PermissionError("inbound_attachment_upload_forbidden")
-    content = payload.get("content_base64") or payload.get("file_content_base64") or ""
-    if not content:
-        raise ValueError("inbound_attachment_required")
-    data = base64.b64decode(content)
-    if len(data) > EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise ValueError("inbound_attachment_too_large")
-    file_name = Path(payload.get("file_name") or "inbound-attachment.pdf").name
-    mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "application/pdf"
+    document = inbound_document_detail(conn, inbound_id, session)
+    if roster_text(document.get("status")) in {"closed", "archived", "cancelled"}:
+        raise ValueError("inbound_attachment_locked")
+    file_name, mime_type, data = validated_inbound_pdf_attachment(payload)
+    scan_status, scan_signature = scan_official_upload_bytes(data, file_name)
     file_row = store_file_object(conn, inbound_id, file_name, data, "inbound-documents", "inbound-attachment", official_actor_name(user))
     conn.execute("UPDATE file_objects SET mime_type = ? WHERE id = ?", (mime_type, file_row["id"]))
+    file_row = persist_file_object_scan_result(
+        conn,
+        file_row["id"],
+        scan_status,
+        scan_signature,
+        official_actor_name(user),
+    )
     row = {
         "id": f"INBATT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
         "inbound_document_id": inbound_id,
@@ -24755,10 +25780,51 @@ def create_inbound_assignment_launch_smoke(
 
 def close_inbound_document(conn: sqlite3.Connection, inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
-    inbound_document_detail(conn, inbound_id)
-    conn.execute("UPDATE inbound_documents SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?", (now(), now(), inbound_id))
-    log_audit(conn, official_actor_name(user), "close_inbound_document", "inbound_documents", inbound_id, payload.get("comment") or "收文結案", event_type="approve", module_code="official_documents")
-    return inbound_document_detail(conn, inbound_id)
+    local_inbound_finance_user_scope(conn, user)
+    if not session_has_any_permission(session, ["official_documents.receive", "official_documents.all_todo"]):
+        raise PermissionError("inbound_close_forbidden")
+    key = inbound_idempotency_key(payload)
+    expected_version = inbound_expected_version(payload)
+    request_sha256 = inbound_mutation_request_sha256(
+        "close", {**payload, "document_id": inbound_id}
+    )
+    replay = local_inbound_mutation_replay(
+        conn, key, "close", request_sha256, user.get("id") or "", session
+    )
+    if replay:
+        return replay
+    document = inbound_document_detail(conn, inbound_id, session)
+    current_version = int(document.get("mutation_version") or 1)
+    if current_version != expected_version:
+        raise ValueError("inbound_version_conflict")
+    if roster_text(document.get("status")) in {"draft", "closed", "archived", "cancelled"}:
+        raise ValueError("inbound_mutation_state_conflict")
+    timestamp = now()
+    cursor = conn.execute(
+        """
+        UPDATE inbound_documents
+        SET status = 'closed', closed_at = ?, mutation_version = ?, updated_at = ?
+        WHERE id = ? AND mutation_version = ?
+        """,
+        (timestamp, current_version + 1, timestamp, inbound_id, current_version),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("inbound_version_conflict")
+    log_audit(
+        conn,
+        official_actor_name(user),
+        "close_inbound_document",
+        "inbound_documents",
+        inbound_id,
+        f"version={current_version + 1}",
+        event_type="approve",
+        module_code="official_documents",
+    )
+    item = inbound_document_detail(conn, inbound_id, session)
+    response = canonical_inbound_mutation_response("close", item)
+    return record_local_inbound_mutation(
+        conn, key, "close", request_sha256, user.get("id") or "", response, session
+    )
 
 
 def internal_dispatch_log(conn: sqlite3.Connection, dispatch_id: str, user: Dict[str, Any] | None, action: str, detail: str = "", payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -25231,7 +26297,7 @@ def write_asset_stamp_overlay_pdf(
         from reportlab.lib.utils import ImageReader  # type: ignore
         from reportlab.pdfgen import canvas  # type: ignore
 
-        kai_font_name = official_pdf_font_profile()["name"]
+        kai_font_name = editor_pdf_font_profile()["name"]
         svg_drawing = None
         image_reader = None
         if mime_type in {"image/svg+xml", "image/svg"}:
@@ -25320,7 +26386,7 @@ def write_kai_text_overlay_pdf(
     output = io.BytesIO()
     first_size = page_sizes[0] if page_sizes else (A4_WIDTH_PT, A4_HEIGHT_PT)
     pdf = canvas.Canvas(output, pagesize=first_size, pageCompression=1)
-    kai_font_name = official_pdf_font_profile()["name"]
+    kai_font_name = editor_pdf_font_profile()["name"]
     for page_index, (page_width, page_height) in enumerate(page_sizes, start=1):
         pdf.setPageSize((page_width, page_height))
         pdf.setFillColorRGB(0, 0, 0)
@@ -30618,6 +31684,34 @@ def supabase_resolve_official_step_approver(step: Dict[str, Any], applicant: Dic
     return supabase_active_workflow_user(key, company)
 
 
+def supabase_official_applicant_workflow_readiness(
+    session: Dict[str, Any] | None,
+    route_code: str = "A",
+) -> Dict[str, Any]:
+    user = supabase_official_session_user(session)
+    route = roster_text(route_code or "A").upper()
+    company_id = roster_text(user.get("company_id"))
+    company = supabase_get("companies", company_id) if company_id else None
+    steps = (
+        official_workflow_steps_for_finance_applicant(
+            route,
+            user.get("logging_role_key") or user.get("role"),
+        )
+        if finance_workflow_actor(user)
+        else unified_official_workflow_steps(route)
+    )
+    resolved = [
+        (step, supabase_resolve_official_step_approver(step, user, company or {}))
+        for step in steps
+    ]
+    return workflow_readiness_summary(
+        user,
+        route,
+        resolved,
+        company_ready=bool(company),
+    )
+
+
 def supabase_internal_launch_user_counts() -> Dict[str, int]:
     roles = list(dict.fromkeys([*INTERNAL_LAUNCH_APPLICANT_ROLES, *INTERNAL_LAUNCH_REQUIRED_ROLES]))
     counts: Dict[str, int] = {}
@@ -31673,13 +32767,45 @@ def supabase_official_pdf_document_payload(document: Dict[str, Any]) -> Dict[str
     }
 
 
+def supabase_official_generated_pdf_is_current(file_meta: Dict[str, Any]) -> bool:
+    file_object_id = str(file_meta.get("file_object_id") or "")
+    if not file_object_id:
+        return False
+    try:
+        file_object = supabase_get("file_objects", file_object_id)
+        if not file_object:
+            return False
+        data = supabase_storage_download(
+            str(file_object.get("storage_key") or ""),
+            file_object.get("bucket") or EDOC_STORAGE_BUCKET,
+        )
+        verify_official_file_bytes(file_meta, file_object, data)
+    except (OSError, ValueError):
+        return False
+    return official_pdf_uses_current_renderer(data)
+
+
 def supabase_ensure_official_generated_pdf(document: Dict[str, Any], actor: str = "PDF Worker") -> Dict[str, Any]:
     rows = supabase_official_raw_document_files(document["id"], "generated_pdf")
     if rows:
-        return rows[0]
+        current = rows[0]
+        if document.get("current_status") not in {"draft", "rejected"}:
+            return current
+        if supabase_official_generated_pdf_is_current(current):
+            return current
     package = build_official_pdf_package(supabase_official_pdf_document_payload(document), [], "歲悅正式函", 1)
     file_row = supabase_store_official_pdf_file(document["id"], "generated_pdf", f"{document['id']}-generated.pdf", package["data"], actor)
-    supabase_insert_official_log(document["id"], "generate_pdf", {"id": "system", "name": actor, "role": "system"}, file_row["file_hash"], file_id=file_row["id"])
+    action = "regenerate_pdf_font_revision" if rows else "generate_pdf"
+    supabase_insert_official_log(
+        document["id"],
+        action,
+        {"id": "system", "name": actor, "role": "system"},
+        (
+            f"sha256={file_row['file_hash']};renderer={OFFICIAL_PDF_RENDERER_VERSION};"
+            f"font_sha256={OFFICIAL_PDF_FONT_SHA256}"
+        ),
+        file_id=file_row["id"],
+    )
     return file_row
 
 
@@ -31932,10 +33058,26 @@ def supabase_list_official_documents(query: Dict[str, List[str]] | None, session
             continue
         if applicant_id and item.get("applicant_id") != applicant_id:
             continue
-        steps = supabase_official_document_steps(item["id"])
+        all_steps = supabase_official_document_steps(item["id"])
+        if all_steps:
+            workflow_generation = max(
+                int(step.get("workflow_generation") or 1) for step in all_steps
+            )
+            steps = [
+                step
+                for step in all_steps
+                if int(step.get("workflow_generation") or 1)
+                == workflow_generation
+            ]
+        else:
+            steps = []
         actor_snapshots = supabase_official_document_actor_snapshots(item["id"])
         is_applicant = item.get("applicant_id") == user.get("id")
-        is_participant = user.get("id") in official_document_participant_ids(item, steps, actor_snapshots)
+        is_participant = user.get("id") in official_document_participant_ids(
+            item,
+            all_steps,
+            actor_snapshots,
+        )
         if user_company_id and str(item.get("company_id") or "") != user_company_id and not is_participant:
             continue
         dispatch_record = supabase_official_dispatch_record(item["id"])
@@ -31966,6 +33108,22 @@ def supabase_list_official_documents(query: Dict[str, List[str]] | None, session
         item["stamp_request"] = official_application_package(item, [], [], [], stamp_request).get("stamp_request")
         item["dispatch_record"] = dispatch_record
         item["current_step_name"] = next((step["step_name"] for step in steps if step.get("step_key") == item.get("current_step")), "")
+        item["can_download"] = is_participant
+        item["can_manage_dispatch"] = can_manage_official_dispatch(
+            user,
+            item,
+            dispatch_record,
+            session,
+            steps,
+        )
+        item["can_retry_stamp"] = bool(is_stamp_retry_todo)
+        item["can_confirm"] = bool(
+            is_applicant
+            and item.get("current_step") == "applicant_confirm"
+            and item.get("current_status")
+            in {"stamped", "dispatched", "sent_by_applicant"}
+        )
+        item["can_act"] = is_current_todo
         item["acting_for_user_id"] = current_pending.get("approver_user_id") if active_delegation and current_pending else ""
         item["delegation_id"] = active_delegation.get("id") if active_delegation else ""
         items.append(item)
@@ -32038,8 +33196,14 @@ def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict
         raise PermissionError("pdf_editor_v2_not_enabled_for_company")
     company = supabase_official_company_row(company_id)
     require_official_seal_classification(payload)
+    applicant_department = authoritative_applicant_department(user, payload)
+    bound_payload = {
+        **payload,
+        "applicant_department_id": applicant_department["id"],
+        "applicant_department_name": applicant_department["name"],
+    }
     document_id = str(payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}")
-    metadata, seal_context, workflow_template_key = official_editor_draft_metadata(payload, user, company)
+    metadata, seal_context, workflow_template_key = official_editor_draft_metadata(bound_payload, user, company)
     ts = now()
     supabase_insert("official_documents", {
         "id": document_id,
@@ -32055,8 +33219,8 @@ def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict
         "handler_name": payload.get("handler_name") or user.get("name") or "",
         "applicant_id": user["id"],
         "applicant_name": user.get("name") or user.get("email") or "",
-        "applicant_department_id": payload.get("applicant_department_id") or user.get("unit") or "",
-        "applicant_department_name": payload.get("applicant_department_name") or user.get("unit") or "",
+        "applicant_department_id": applicant_department["id"],
+        "applicant_department_name": applicant_department["name"],
         "workflow_template_key": workflow_template_key,
         "dispatch_method": official_document_dispatch_method("uploaded_pdf", payload.get("dispatch_method")),
         "requires_stamp": True,
@@ -32080,10 +33244,10 @@ def _supabase_storage_direct_tus_url() -> str:
     hostname = parsed.hostname or ""
     if hostname.endswith(".supabase.co") and not hostname.endswith(".storage.supabase.co"):
         project_ref = hostname.split(".", 1)[0]
-        return f"https://{project_ref}.storage.supabase.co/storage/v1/upload/resumable"
+        return f"https://{project_ref}.storage.supabase.co/storage/v1/upload/resumable/sign"
     if not base:
         raise ValueError("supabase_storage_endpoint_required")
-    return f"{base.rstrip('/')}/upload/resumable"
+    return f"{base.rstrip('/')}/upload/resumable/sign"
 
 
 def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
@@ -32145,6 +33309,14 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
         "upload_url": _supabase_storage_direct_tus_url(),
         "headers": {"x-signature": token, "x-upsert": "false", "Cache-Control": "no-store"},
         "metadata": {"bucketName": EDOC_STORAGE_BUCKET, "objectName": storage_path, "contentType": meta["mime_type"], "cacheControl": "0"},
+        "error_contract": {
+            "create_rejected": "editor_tus_create_failed",
+            "authorization_rejected": "editor_tus_signature_rejected",
+            "signature_expired": "editor_tus_signature_expired",
+            "resume_failed": "editor_tus_resume_failed",
+            "finalize_failed": "editor_tus_finalize_failed",
+            "detail_policy": "masked",
+        },
         "chunk_size": EDOC_EDITOR_TUS_CHUNK_SIZE,
         "expires_at": expires_at,
         "asset": _editor_asset_public(row),
@@ -32744,6 +33916,7 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
     if not launch_company_in_scope(company_id):
         raise PermissionError("company_not_in_launch_scope")
     company = supabase_official_company_row(company_id)
+    applicant_department = authoritative_applicant_department(user, payload)
     dispatch_method = official_document_dispatch_method(source_type, payload.get("dispatch_method"))
     document_id = payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     ts = now()
@@ -32811,8 +33984,8 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
         "handler_name": payload.get("handler_name") or user.get("name") or "",
         "applicant_id": user["id"],
         "applicant_name": user.get("name") or user.get("email"),
-        "applicant_department_id": payload.get("applicant_department_id") or user.get("unit") or "",
-        "applicant_department_name": payload.get("applicant_department_name") or user.get("unit") or "",
+        "applicant_department_id": applicant_department["id"],
+        "applicant_department_name": applicant_department["name"],
         "workflow_template_key": workflow_template_key,
         "dispatch_method": dispatch_method,
         "requires_stamp": requires_stamp,
@@ -33817,7 +34990,6 @@ def supabase_reject_official_document(document_id: str, payload: Dict[str, Any],
             principal_actor_id=principal_actor_id,
             document_evidence=document_evidence,
             review_access=review_access,
-            require_client_acknowledgements=False,
             decision_type="reject",
         ),
         **structured_rejection_evidence(payload),
@@ -34248,6 +35420,19 @@ def supabase_can_access_inbound_document(
     user = session.get("user") if session else None
     if not user:
         return False
+    try:
+        scope = inbound_finance_user_scope(user)
+    except PermissionError:
+        return False
+    document_company_id = roster_text(document.get("company_id"))
+    document_tenant_id = roster_text(document.get("finance_tenant_id"))
+    if (
+        not document_company_id
+        or not document_tenant_id
+        or document_company_id != scope["company_id"]
+        or document_tenant_id != scope["finance_tenant_id"]
+    ):
+        return False
     if session_has_any_permission(
         session,
         ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"],
@@ -34340,7 +35525,16 @@ def supabase_inbound_document_download_attachment(
 
 def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = supabase_official_session_user(session)
-    rows = supabase_filter_rows("inbound_documents", {}, order="created_at.desc", limit=300)
+    scope = inbound_finance_user_scope(user)
+    rows = supabase_filter_rows(
+        "inbound_documents",
+        {
+            "company_id": scope["company_id"],
+            "finance_tenant_id": scope["finance_tenant_id"],
+        },
+        order="created_at.desc",
+        limit=300,
+    )
     status = (query or {}).get("status", [""])[0] if query else ""
     assignee_user_id = (query or {}).get("assignee_user_id", [""])[0] if query else ""
     company_wide = session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"])
@@ -34357,6 +35551,11 @@ def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session:
                 linked_inbound_ids.add(dispatch["inbound_document_id"])
     scoped: List[Dict[str, Any]] = []
     for row in rows:
+        if (
+            roster_text(row.get("company_id")) != scope["company_id"]
+            or roster_text(row.get("finance_tenant_id")) != scope["finance_tenant_id"]
+        ):
+            continue
         if status and row.get("status") != status:
             continue
         if assignee_user_id and row.get("assignee_user_id") != assignee_user_id:
@@ -34370,12 +35569,17 @@ def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session:
 
 def supabase_create_inbound_document(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
+    scope = inbound_finance_user_scope(user)
     source_type = (payload.get("source_type") or "manual").strip()
     if not can_create_inbound_archive(session, source_type):
         raise PermissionError("inbound_archive_create_forbidden")
+    if source_type in LOCAL_INBOUND_ARCHIVE_SOURCE_TYPES:
+        payload = bind_local_inbound_payload_to_session_unit(payload, user)
     inbound_id = payload.get("id") or f"INB-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     row = supabase_insert("inbound_documents", {
         "id": inbound_id,
+        "company_id": scope["company_id"],
+        "finance_tenant_id": scope["finance_tenant_id"],
         "receive_no": payload.get("receive_no") or payload.get("receiveNo") or f"收文字第{datetime.now().strftime('%Y%m%d%H%M%S')}",
         "source_type": source_type,
         "external_exchange_id": payload.get("external_exchange_id") or payload.get("exchange_id") or "",
@@ -34392,6 +35596,7 @@ def supabase_create_inbound_document(payload: Dict[str, Any], session: Dict[str,
         "security_level": payload.get("security_level") or "普通",
         "status": payload.get("status") or "registered",
         "metadata_json": payload.get("metadata") or {},
+        "mutation_version": 1,
         "created_by": user.get("id") or "",
         "created_at": now(),
         "updated_at": now(),
@@ -34403,21 +35608,230 @@ def supabase_create_inbound_document(payload: Dict[str, Any], session: Dict[str,
     return supabase_inbound_document_detail(inbound_id)
 
 
+SUPABASE_INBOUND_RPC_CONFLICT_CODES = {
+    "inbound_idempotency_conflict",
+    "inbound_version_conflict",
+    "inbound_registration_state_conflict",
+    "inbound_mutation_state_conflict",
+}
+SUPABASE_INBOUND_RPC_PERMISSION_CODES = {
+    "authentication_required",
+    "finance_identity_required",
+    "finance_scope_required",
+    "finance_company_scope_invalid",
+    "finance_unit_required",
+    "finance_unit_profile_invalid",
+    "finance_unit_payload_mismatch",
+    "inbound_source_type_forbidden",
+    "inbound_source_type_immutable",
+    "inbound_document_scope_forbidden",
+    "inbound_document_mutation_forbidden",
+    "inbound_assignment_forbidden",
+    "inbound_exception_forbidden",
+    "inbound_close_forbidden",
+    "inbound_assignee_scope_forbidden",
+}
+SUPABASE_INBOUND_RPC_INPUT_CODES = {
+    "inbound_mutation_type_invalid",
+    "inbound_idempotency_key_required",
+    "inbound_request_hash_invalid",
+    "inbound_document_not_found",
+    "inbound_assignee_required",
+    "inbound_exception_detail_required",
+    "inbound_metadata_invalid",
+}
+
+
+def _raise_supabase_inbound_rpc_error(exc: RuntimeError) -> None:
+    """Map the RPC's stable, non-sensitive codes to the HTTP handler contract."""
+    detail = str(exc)
+    for code in SUPABASE_INBOUND_RPC_CONFLICT_CODES:
+        if code in detail:
+            raise ValueError(code) from exc
+    for code in SUPABASE_INBOUND_RPC_PERMISSION_CODES:
+        if code in detail:
+            raise PermissionError(code) from exc
+    for code in SUPABASE_INBOUND_RPC_INPUT_CODES:
+        if code in detail:
+            raise ValueError(code) from exc
+    raise RuntimeError("inbound_mutation_rpc_failed") from exc
+
+
+def supabase_atomic_inbound_mutation(
+    mutation_type: str,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+    *,
+    document_id: str = "",
+) -> Dict[str, Any]:
+    """Execute one Finance-scoped inbound mutation in one database transaction.
+
+    Do not add a read/patch/audit follow-up here: the SQL RPC owns the document
+    CAS, append-only audit row and idempotency ledger as a single commit.
+    """
+    user = supabase_official_session_user(session)
+    actor_id = roster_text(user.get("id"))
+    company_id = roster_text(user.get("company_id"))
+    tenant_id = roster_text(user.get("finance_tenant_id"))
+    if (
+        roster_text(user.get("account_source")).lower() != "finance"
+        or roster_text(user.get("status")) != "啟用"
+        or not actor_id
+        or not company_id
+        or not tenant_id
+    ):
+        raise PermissionError("finance_scope_required")
+    key = inbound_idempotency_key(payload)
+    normalized_mutation = roster_text(mutation_type).lower()
+    if normalized_mutation not in {"draft", "register", "assign", "exception", "close"}:
+        raise ValueError("inbound_mutation_type_invalid")
+    path_document_id = roster_text(document_id)
+    payload_document_id = roster_text(payload.get("document_id") or payload.get("documentId"))
+    if path_document_id and payload_document_id and path_document_id != payload_document_id:
+        raise ValueError("inbound_document_id_mismatch")
+    resolved_document_id = path_document_id or payload_document_id
+
+    if normalized_mutation in {"draft", "register"}:
+        unit = authoritative_inbound_recipient_unit(user, payload)
+        bound = {
+            **payload,
+            "recipient_department_id": unit["id"],
+            "recipient_department_name": unit["name"],
+        }
+        if not resolved_document_id:
+            bound["source_type"] = payload.get("source_type") or "local_unit_physical"
+        expected_version = (
+            inbound_expected_version(bound) if resolved_document_id else None
+        )
+        semantic_payload = bound
+    else:
+        expected_version = inbound_expected_version(payload)
+        semantic_payload = {**payload, "document_id": resolved_document_id}
+        bound = dict(payload)
+    if normalized_mutation == "exception":
+        if not roster_text(payload.get("exception_type") or payload.get("exceptionType")):
+            raise ValueError("inbound_exception_detail_required")
+        if not roster_text(payload.get("note") or payload.get("comment")):
+            raise ValueError("inbound_exception_detail_required")
+    if normalized_mutation == "assign" and not roster_text(
+        payload.get("assignee_user_id") or payload.get("user_id")
+    ):
+        raise ValueError("inbound_assignee_required")
+
+    request_sha256 = inbound_mutation_request_sha256(
+        normalized_mutation,
+        semantic_payload,
+    )
+    # The generated id is intentionally excluded from request_sha256. If a
+    # network retry follows a committed response, the ledger key/hash wins and
+    # the newly generated candidate id is ignored by the RPC.
+    rpc_document_id = resolved_document_id or (
+        f"INB-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}"
+    )
+    try:
+        raw = supabase_request(
+            "POST",
+            "rpc/edoc_mutate_inbound_document_v1",
+            {
+                "p_mutation_type": normalized_mutation,
+                "p_idempotency_key": key,
+                "p_request_sha256": request_sha256,
+                "p_actor_user_id": actor_id,
+                "p_document_id": rpc_document_id,
+                "p_expected_version": expected_version,
+                "p_payload": bound,
+            },
+        )
+    except RuntimeError as exc:
+        _raise_supabase_inbound_rpc_error(exc)
+        raise AssertionError("unreachable") from exc
+    response = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+    if not isinstance(response, dict) or not isinstance(response.get("item"), dict):
+        raise RuntimeError("inbound_mutation_rpc_response_invalid")
+    item = dict(response["item"])
+    if response.get("replayed") and not roster_text(item.get("status")):
+        # The immutable ledger intentionally stores only id/scope/version/hash.
+        # If a later mutation advanced the row, the RPC cannot reproduce the
+        # old sensitive snapshot; rebuild the current scoped DTO without ever
+        # copying document text back into the ledger.
+        item_id = roster_text(item.get("id"))
+        if not item_id:
+            raise RuntimeError("inbound_mutation_rpc_response_invalid")
+        item = supabase_inbound_document_detail(item_id, session)
+        response["version"] = int(item.get("mutation_version") or 1)
+    if (
+        roster_text(item.get("company_id")) != company_id
+        or roster_text(item.get("finance_tenant_id")) != tenant_id
+    ):
+        raise RuntimeError("inbound_mutation_rpc_scope_invalid")
+    item["metadata"] = parse_json_any(item.get("metadata_json"), {}) or {}
+    response = {
+        **response,
+        "ok": True,
+        "mutation": normalized_mutation,
+        "replayed": bool(response.get("replayed")),
+        "version": int(response.get("version") or item.get("mutation_version") or 1),
+        "item": item,
+    }
+    return response
+
+
+def supabase_mutate_inbound_draft(
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    return supabase_atomic_inbound_mutation("draft", payload, session)
+
+
+def supabase_mutate_inbound_registration(
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    return supabase_atomic_inbound_mutation("register", payload, session)
+
+
 def supabase_assign_inbound_document(inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
-    supabase_inbound_document_detail(inbound_id)
+    actor_scope = inbound_finance_user_scope(user)
+    if not session_has_any_permission(session, ["official_documents.receive", "official_documents.all_todo"]):
+        raise PermissionError("inbound_assignment_forbidden")
+    document = supabase_inbound_document_detail(inbound_id, session)
+    expected_value = payload.get("expected_version", payload.get("expectedVersion"))
+    expected_version = inbound_expected_version(payload) if expected_value is not None else int(document.get("mutation_version") or 1)
+    current_version = int(document.get("mutation_version") or 1)
+    if expected_version != current_version:
+        raise ValueError("inbound_version_conflict")
+    if roster_text(document.get("status")) in {"draft", "closed", "archived", "cancelled"}:
+        raise ValueError("inbound_mutation_state_conflict")
     assignee_id = payload.get("assignee_user_id") or payload.get("user_id") or ""
     assignee = supabase_user_by_id(assignee_id) if assignee_id else None
+    if not assignee_id:
+        raise ValueError("inbound_assignee_required")
+    if not assignee:
+        raise ValueError("inbound_assignee_not_found")
+    try:
+        assignee_scope = inbound_finance_user_scope(assignee)
+    except PermissionError as exc:
+        raise PermissionError("inbound_assignee_scope_forbidden") from exc
+    if assignee_scope != actor_scope or not roster_text(assignee.get("unit")):
+        raise PermissionError("inbound_assignee_scope_forbidden")
     update = {
-        "recipient_department_id": payload.get("recipient_department_id") or payload.get("department_id") or "",
-        "recipient_department_name": payload.get("recipient_department_name") or payload.get("department") or (assignee.get("unit") if assignee else ""),
+        "recipient_department_id": roster_text(assignee.get("unit")),
+        "recipient_department_name": roster_text(assignee.get("unit")),
         "assignee_user_id": assignee_id,
-        "assignee_name": payload.get("assignee_name") or (assignee.get("name") if assignee else ""),
+        "assignee_name": assignee.get("name") or "",
         "due_at": payload.get("due_at") or "",
-        "status": payload.get("status") or "assigned",
+        "status": "assigned",
+        "mutation_version": current_version + 1,
         "updated_at": now(),
     }
-    supabase_patch("inbound_documents", inbound_id, update)
+    qs = urllib.parse.urlencode({
+        "id": f"eq.{inbound_id}",
+        "mutation_version": f"eq.{current_version}",
+    })
+    rows = supabase_request("PATCH", f"inbound_documents?{qs}", update)
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise ValueError("inbound_version_conflict")
     supabase_insert("audit_logs", {"id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", "actor": official_actor_name(user), "action": "assign_inbound_document", "target_type": "inbound_documents", "target_id": inbound_id, "detail": json.dumps(update, ensure_ascii=False), "event_type": "assign", "module_code": "official_documents", "result": "success", "severity": "info"})
     if assignee:
         supabase_create_and_deliver_notification({
@@ -34427,22 +35841,35 @@ def supabase_assign_inbound_document(inbound_id: str, payload: Dict[str, Any], s
             "source": inbound_id,
             "body": payload.get("note") or "請於期限內處理收文。",
         })
-    return supabase_inbound_document_detail(inbound_id)
+    return supabase_inbound_document_detail(inbound_id, session)
+
+
+def supabase_mutate_inbound_assignment(
+    inbound_id: str,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    return supabase_atomic_inbound_mutation(
+        "assign", payload, session, document_id=inbound_id
+    )
+
+
+def supabase_mutate_inbound_exception(
+    inbound_id: str,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    return supabase_atomic_inbound_mutation(
+        "exception", payload, session, document_id=inbound_id
+    )
 
 
 def supabase_upload_inbound_attachment(inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
-    document = supabase_inbound_document_detail(inbound_id)
-    if not supabase_can_access_inbound_document(document, session):
-        raise PermissionError("inbound_attachment_upload_forbidden")
-    content = payload.get("content_base64") or payload.get("file_content_base64") or ""
-    if not content:
-        raise ValueError("inbound_attachment_required")
-    data = base64.b64decode(content)
-    if len(data) > EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise ValueError("inbound_attachment_too_large")
-    file_name = Path(payload.get("file_name") or "inbound-attachment.pdf").name
-    mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "application/pdf"
+    document = supabase_inbound_document_detail(inbound_id, session)
+    if roster_text(document.get("status")) in {"closed", "archived", "cancelled"}:
+        raise ValueError("inbound_attachment_locked")
+    file_name, mime_type, data = validated_inbound_pdf_attachment(payload)
     scan_status, scan_signature = scan_official_upload_bytes(data, file_name)
     file_row = supabase_store_file_object(inbound_id, file_name, data, "inbound-documents", "inbound-attachment", official_actor_name(user), mime_type)
     file_row = supabase_persist_file_object_scan_result(
@@ -34546,11 +35973,9 @@ def supabase_create_inbound_assignment_launch_smoke(
 
 
 def supabase_close_inbound_document(inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
-    user = supabase_official_session_user(session)
-    supabase_inbound_document_detail(inbound_id)
-    supabase_patch("inbound_documents", inbound_id, {"status": "closed", "closed_at": now(), "updated_at": now()})
-    supabase_insert("audit_logs", {"id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", "actor": official_actor_name(user), "action": "close_inbound_document", "target_type": "inbound_documents", "target_id": inbound_id, "detail": payload.get("comment") or "收文結案", "event_type": "approve", "module_code": "official_documents", "result": "success", "severity": "info"})
-    return supabase_inbound_document_detail(inbound_id)
+    return supabase_atomic_inbound_mutation(
+        "close", payload, session, document_id=inbound_id
+    )
 
 
 def supabase_internal_dispatch_detail(dispatch_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -34856,80 +36281,161 @@ def supabase_create_finance_login_session(
     user: Dict[str, Any],
     ip: str,
     device: str,
+    *,
+    expected_binding: Dict[str, str],
 ) -> Dict[str, Any]:
-    """Atomically create the session, audit row and exact RBAC payload."""
+    """Atomically verify signed Finance authority and create one session."""
+    if not isinstance(expected_binding, dict):
+        raise FinanceBridgeContractError("finance_login_authorization_binding_invalid")
+    _supabase_require_legacy_finance_user_binding(expected_binding, user)
     ts = now()
     token = secrets.token_urlsafe(36)
     expires = (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     session_id = f"SES-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     login_event_id = f"LOGIN-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    raw = supabase_request("POST", "rpc/edoc_create_finance_login_session_v2", {
+        "p_user_id": user["id"],
+        "p_session_id": session_id,
+        "p_token_hash": hash_token(token),
+        "p_provider": "Finance Google SSO",
+        "p_ip": ip,
+        "p_device": device,
+        "p_expires_at": expires,
+        "p_created_at": ts,
+        "p_login_event_id": login_event_id,
+        "p_expected_tenant_id": expected_binding["tenant_id"],
+        "p_expected_company_id": expected_binding["company_id"],
+        "p_expected_entity_id": expected_binding["entity_id"],
+        "p_expected_finance_user_id": expected_binding["finance_user_id"],
+        "p_expected_email": expected_binding["email"],
+        "p_expected_role": expected_binding["role"],
+        "p_expected_logging_role_key": expected_binding["logging_role_key"],
+        "p_expected_job_level": expected_binding["job_level"],
+        "p_expected_unit": expected_binding["unit"],
+        "p_expected_title": expected_binding["title"],
+        "p_expected_status": expected_binding["status"],
+        "p_expected_projection_state": expected_binding["projection_state"],
+    })
+    bundle = _supabase_login_bundle(raw)
+    if not bundle:
+        raise RuntimeError("finance_login_rpc_response_invalid")
+    if (
+        roster_text(bundle["session"].get("id")) != session_id
+        or roster_text(bundle["session"].get("user_id")) != roster_text(user.get("id"))
+        or roster_text(bundle["user"].get("id")) != roster_text(user.get("id"))
+        or roster_text(bundle["session"].get("expires_at")) != expires
+        or "password_hash" in bundle["user"]
+    ):
+        raise RuntimeError("finance_login_rpc_response_invalid")
+    _supabase_require_legacy_finance_user_binding(expected_binding, bundle["user"])
+    return {
+        "token": token,
+        "expiresAt": expires,
+        "user": bundle["user"],
+        "permissions": bundle["permissions"],
+    }
+
+
+def _supabase_finance_revalidation_error_retryable(error: RuntimeError) -> bool:
+    """Recognize only infrastructure failures that may safely retain a session."""
+    detail = str(error).lower()
+    if _supabase_login_rpc_missing(error):
+        return True
+    return any(marker in detail for marker in (
+        "supabase 500:",
+        "supabase 502:",
+        "supabase 503:",
+        "supabase 504:",
+        '\"code\":\"080',
+        '\"code\":\"40p01\"',
+        '\"code\":\"40001\"',
+        '\"code\":\"53300\"',
+        '\"code\":\"57014\"',
+        '\"code\":\"57p01\"',
+        '\"code\":\"57p02\"',
+        '\"code\":\"57p03\"',
+        "statement timeout",
+        "connection reset",
+        "connection refused",
+    ))
+
+
+def supabase_revalidate_finance_session(
+    session_row: Dict[str, Any],
+    token_hash: str,
+    refreshed_user: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Atomically bind a live Finance snapshot to one existing eDoc session."""
+    expected_binding = refreshed_user.get(FINANCE_LOGIN_EXPECTED_BINDING_KEY)
+    if not isinstance(expected_binding, dict):
+        raise FinanceBridgeContractError("finance_login_authorization_binding_invalid")
+    public_user = {
+        key: value
+        for key, value in refreshed_user.items()
+        if key != FINANCE_LOGIN_EXPECTED_BINDING_KEY
+    }
+    _supabase_require_legacy_finance_user_binding(expected_binding, public_user)
+    if (
+        roster_text(session_row.get("id")) == ""
+        or roster_text(session_row.get("user_id")) != expected_binding["user_id"]
+        or not re.fullmatch(r"[0-9a-f]{64}", token_hash or "")
+    ):
+        raise FinanceBridgeContractError("finance_session_revalidation_input_invalid")
+
+    verified_at = now()
     try:
-        raw = supabase_request("POST", "rpc/edoc_create_finance_login_session_v1", {
-            "p_user_id": user["id"],
-            "p_session_id": session_id,
-            "p_token_hash": hash_token(token),
-            "p_provider": "Finance Google SSO",
-            "p_ip": ip,
-            "p_device": device,
-            "p_expires_at": expires,
-            "p_created_at": ts,
-            "p_login_event_id": login_event_id,
-        })
-        bundle = _supabase_login_bundle(raw)
-        if not bundle:
-            raise RuntimeError("finance_login_rpc_response_invalid")
-        if (
-            roster_text(bundle["session"].get("id")) != session_id
-            or roster_text(bundle["session"].get("user_id")) != roster_text(user.get("id"))
-            or roster_text(bundle["user"].get("id")) != roster_text(user.get("id"))
-            or roster_text(bundle["session"].get("expires_at")) != expires
-            or "password_hash" in bundle["user"]
-        ):
-            raise RuntimeError("finance_login_rpc_response_invalid")
-        return {
-            "token": token,
-            "expiresAt": expires,
-            "user": bundle["user"],
-            "permissions": bundle["permissions"],
-        }
+        raw = supabase_request(
+            "POST",
+            "rpc/edoc_revalidate_finance_session_v2",
+            {
+                "p_session_id": session_row["id"],
+                "p_user_id": expected_binding["user_id"],
+                "p_token_hash": token_hash,
+                "p_verified_at": verified_at,
+                "p_expected_tenant_id": expected_binding["tenant_id"],
+                "p_expected_company_id": expected_binding["company_id"],
+                "p_expected_entity_id": expected_binding["entity_id"],
+                "p_expected_finance_user_id": expected_binding["finance_user_id"],
+                "p_expected_email": expected_binding["email"],
+                "p_expected_role": expected_binding["role"],
+                "p_expected_logging_role_key": expected_binding["logging_role_key"],
+                "p_expected_job_level": expected_binding["job_level"],
+                "p_expected_unit": expected_binding["unit"],
+                "p_expected_title": expected_binding["title"],
+                "p_expected_status": expected_binding["status"],
+                "p_expected_projection_state": expected_binding["projection_state"],
+            },
+        )
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+        raise FinanceBridgeUnavailable("finance_session_revalidation_rpc_unavailable") from error
     except RuntimeError as error:
-        if not _supabase_login_rpc_missing(error):
-            raise
-        # Compatibility is intentionally limited to a missing RPC during a
-        # phased rollback. Validation, authorization and database errors from
-        # an installed RPC remain fail-closed.
-        supabase_insert("auth_sessions", {
-            "id": session_id,
-            "user_id": user["id"],
-            "token_hash": hash_token(token),
-            "provider": "Finance Google SSO",
-            "ip": ip,
-            "device": device,
-            "expires_at": expires,
-            "created_at": ts,
-        })
-        refreshed = supabase_patch("users", user["id"], {
-            "last_login_at": ts,
-            "last_synced_from_logging_at": ts,
-        })
-        supabase_insert("login_events", {
-            "id": login_event_id,
-            "user_id": user["id"],
-            "email": user.get("email") or "",
-            "provider": "Finance Google SSO",
-            "ip": ip,
-            "device": device,
-            "status": "成功",
-            "reason": "沿用已佈建的 Finance Google 帳號進入公文收發電子用印系統",
-            "created_at": ts,
-        })
-        refreshed.pop("password_hash", None)
-        return {
-            "token": token,
-            "expiresAt": expires,
-            "user": refreshed,
-            "permissions": supabase_role_permissions(refreshed.get("role", "")),
-        }
+        detail = str(error)
+        if (
+            "finance_session_authorization_binding_mismatch" in detail
+            or "finance_session_revalidation_input_invalid" in detail
+        ):
+            raise FinanceBridgeDenied("finance_session_authorization_binding_mismatch") from error
+        if _supabase_finance_revalidation_error_retryable(error):
+            raise FinanceBridgeUnavailable("finance_session_revalidation_rpc_unavailable") from error
+        raise FinanceBridgeContractError("finance_session_revalidation_rpc_failed") from error
+
+    try:
+        bundle = _supabase_login_bundle(raw)
+    except RuntimeError as error:
+        raise FinanceBridgeContractError("finance_session_revalidation_response_invalid") from error
+    if not bundle:
+        raise FinanceBridgeContractError("finance_session_revalidation_response_invalid")
+    if (
+        roster_text(bundle["session"].get("id")) != roster_text(session_row.get("id"))
+        or roster_text(bundle["session"].get("user_id")) != expected_binding["user_id"]
+        or roster_text(bundle["session"].get("expires_at")) != roster_text(session_row.get("expires_at"))
+        or roster_text(bundle["user"].get("id")) != expected_binding["user_id"]
+        or roster_text(bundle["user"].get("last_synced_from_logging_at")) != verified_at
+        or "password_hash" in bundle["user"]
+    ):
+        raise FinanceBridgeContractError("finance_session_revalidation_response_invalid")
+    _supabase_require_legacy_finance_user_binding(expected_binding, bundle["user"])
+    return bundle
 
 
 def supabase_authenticate(payload: Dict[str, Any], ip: str, device: str) -> Tuple[Dict[str, Any], int]:
@@ -34988,6 +36494,7 @@ def supabase_upsert_finance_manager_placeholder(
         "logging_account_id": account_id,
         "logging_role_key": profile["logging_role_key"],
         "finance_employee_id": employee_id,
+        "finance_tenant_id": company.get("finance_tenant_id") or "",
         "company_id": company.get("id") or "",
         "company_name": company.get("name") or "",
         "company_address": company.get("address") or "",
@@ -35393,6 +36900,250 @@ def _supabase_finance_snapshot_user_candidate(
     return existing
 
 
+_LEGACY_FINANCE_PROJECTION_BINDINGS_KEY = "_edocLegacyProjectionBindings"
+
+
+def _supabase_exact_legacy_finance_projection_binding(
+    identity: Dict[str, Any],
+) -> Dict[str, str]:
+    """Resolve one v1 identity only from one exact existing eDoc projection.
+
+    The Finance v1 identity endpoint predates tenant ids.  This compatibility
+    path must never infer a tenant from a global/default tenant or create a new
+    projection.  The signed Finance identity, normalized email, canonical eDoc
+    user aliases, company binding and Finance entity id must all agree first.
+    """
+    finance_user_id = roster_text(identity.get("financeUserId"))
+    email = roster_text(identity.get("email")).lower()
+    entity_id = roster_text(identity.get("entityId"))
+    if not finance_user_id or not email or not entity_id:
+        raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+
+    query = urllib.parse.urlencode({
+        "select": (
+            "id,email,account_source,logging_account_id,finance_employee_id,"
+            "company_id,finance_tenant_id"
+        ),
+        "email": f"eq.{email}",
+        "or": (
+            f"(logging_account_id.eq.{finance_user_id},"
+            f"finance_employee_id.eq.{finance_user_id})"
+        ),
+        "limit": "2",
+    })
+    rows = supabase_request("GET", f"users?{query}")
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+    user = rows[0]
+    aliases = {
+        roster_text(user.get("logging_account_id")),
+        roster_text(user.get("finance_employee_id")),
+    }
+    aliases.discard("")
+    if (
+        roster_text(user.get("account_source")).lower() != "finance"
+        or roster_text(user.get("email")).lower() != email
+        or aliases != {finance_user_id}
+    ):
+        raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+
+    company_rows = supabase_filter_rows(
+        "companies",
+        {"finance_entity_id": entity_id},
+        order="id.asc",
+        limit=2,
+    )
+    if (
+        not isinstance(company_rows, list)
+        or len(company_rows) != 1
+        or not isinstance(company_rows[0], dict)
+        or roster_text(company_rows[0].get("finance_entity_id")) != entity_id
+        or roster_text(company_rows[0].get("source_system")).lower() != "finance"
+    ):
+        raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+    company = company_rows[0]
+
+    user_tenant_id = roster_text(user.get("finance_tenant_id"))
+    company_tenant_id = roster_text(company.get("finance_tenant_id"))
+    user_id = roster_text(user.get("id"))
+    company_id = roster_text(company.get("id"))
+    if (
+        not user_id
+        or not company_id
+        or not user_tenant_id
+        or user_tenant_id != company_tenant_id
+        or roster_text(user.get("company_id")) != company_id
+    ):
+        raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+    return {
+        "tenant_id": user_tenant_id,
+        "user_id": user_id,
+        "company_id": company_id,
+        "finance_user_id": finance_user_id,
+        "email": email,
+        "entity_id": entity_id,
+    }
+
+
+def supabase_recover_legacy_finance_snapshot_tenant_scope(
+    snapshot: Dict[str, Any],
+    *,
+    existing_only: bool = False,
+    applicant_only: bool = False,
+) -> Dict[str, Any]:
+    """Hydrate v1 tenant scope; optionally require an existing-only projection.
+
+    Schema v2 and later never use this adapter; their producer contract remains
+    strict.  A returned copy is used so the authenticated upstream response
+    remains immutable.
+    """
+    if snapshot.get("schemaVersion") != 1:
+        return snapshot
+    identity = snapshot.get("identity")
+    company = snapshot.get("company")
+    if not isinstance(identity, dict) or not isinstance(company, dict):
+        raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+
+    actors = snapshot.get("actors") or {}
+    if not isinstance(actors, dict):
+        raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+    for actor in actors.values():
+        if actor is not None and not isinstance(actor, dict):
+            raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+
+    declared_identity_tenant = roster_text(identity.get("tenantId"))
+    declared_company_tenant = roster_text(company.get("tenantId"))
+    if (
+        declared_identity_tenant
+        and declared_company_tenant
+        and declared_identity_tenant != declared_company_tenant
+    ):
+        raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+
+    needs_applicant_recovery = not declared_identity_tenant or not declared_company_tenant
+    applicant_binding: Dict[str, str] | None = None
+    if needs_applicant_recovery or existing_only:
+        applicant_binding = _supabase_exact_legacy_finance_projection_binding(identity)
+        tenant_id = applicant_binding["tenant_id"]
+        if declared_identity_tenant and declared_identity_tenant != tenant_id:
+            raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+        if declared_company_tenant and declared_company_tenant != tenant_id:
+            raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+    else:
+        tenant_id = declared_identity_tenant
+
+    # The existing-only login adapter carries this immutable binding into the
+    # final read so a delete or rebind between the compatibility lookup and the
+    # rest of the login path cannot fall through to JIT creation.
+    hydrated = copy.deepcopy(snapshot)
+    hydrated["identity"]["tenantId"] = tenant_id
+    hydrated["company"]["tenantId"] = tenant_id
+    actor_bindings: Dict[str, Dict[str, str]] = {}
+    for slot, actor in list(hydrated["actors"].items()):
+        if actor is None:
+            continue
+        actor_declared_tenant = roster_text(actor.get("tenantId"))
+        if applicant_only:
+            # Optional workflow actors are not login authorities. A legacy v1
+            # actor without tenant scope is excluded from login normalization;
+            # durable sync/submission uses the strict mode below and must resolve
+            # it from an exact existing projection before any write.
+            if not actor_declared_tenant:
+                hydrated["actors"][slot] = None
+                continue
+            if actor_declared_tenant != tenant_id:
+                raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+            continue
+        actor_binding: Dict[str, str] | None = None
+        if not actor_declared_tenant or existing_only:
+            actor_binding = _supabase_exact_legacy_finance_projection_binding(actor)
+        actor_tenant_id = actor_declared_tenant or (actor_binding or {})["tenant_id"]
+        if (
+            (actor_binding is not None and actor_tenant_id != actor_binding["tenant_id"])
+            or actor_tenant_id != tenant_id
+        ):
+            raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
+        actor["tenantId"] = actor_tenant_id
+        if actor_binding is not None:
+            actor_bindings[slot] = actor_binding
+    if applicant_binding is not None:
+        hydrated[_LEGACY_FINANCE_PROJECTION_BINDINGS_KEY] = {
+            "applicant": applicant_binding,
+            "actors": actor_bindings,
+        }
+    return hydrated
+
+
+def _finance_login_authorization_binding(
+    projection_binding: Dict[str, str],
+    applicant: Dict[str, Any],
+) -> Dict[str, str]:
+    """Bind signed Finance authorization fields to one exact eDoc projection."""
+    profile = applicant.get("profile") or {}
+    binding = {
+        **projection_binding,
+        "role": roster_text(profile.get("role")),
+        "logging_role_key": roster_text(profile.get("logging_role_key")),
+        "job_level": roster_text(profile.get("job_level")),
+        "unit": roster_text(applicant.get("department_name") or applicant.get("department_code")),
+        "title": roster_text(applicant.get("job_title") or applicant.get("role_label")),
+        "status": "啟用" if applicant.get("projection_state") == "active" else "",
+        "projection_state": roster_text(applicant.get("projection_state")),
+    }
+    required = (
+        "tenant_id", "user_id", "company_id", "finance_user_id", "email",
+        "entity_id", "role", "logging_role_key", "job_level", "unit", "title",
+        "status", "projection_state",
+    )
+    if any(not binding.get(key) for key in required):
+        raise FinanceBridgeContractError("finance_login_authorization_binding_invalid")
+    if binding["projection_state"] != "active":
+        raise FinanceBridgeDenied("finance_identity_inactive")
+    return binding
+
+
+def _supabase_require_legacy_finance_user_binding(
+    binding: Dict[str, str],
+    user: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Revalidate the exact v1 user binding without creating or adopting rows."""
+    if not isinstance(user, dict):
+        raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
+    if (
+        roster_text(user.get("id")) != binding["user_id"]
+        or roster_text(user.get("account_source")).lower() != "finance"
+        or roster_text(user.get("email")).lower() != binding["email"]
+        or roster_text(user.get("logging_account_id")) != binding["finance_user_id"]
+        or roster_text(user.get("finance_employee_id")) != binding["finance_user_id"]
+        or roster_text(user.get("company_id")) != binding["company_id"]
+        or roster_text(user.get("finance_tenant_id")) != binding["tenant_id"]
+        or roster_text(user.get("role")) != binding["role"]
+        or roster_text(user.get("logging_role_key")) != binding["logging_role_key"]
+        or roster_text(user.get("job_level")) != binding["job_level"]
+        or roster_text(user.get("unit")) != binding["unit"]
+        or roster_text(user.get("title")) != binding["title"]
+        or roster_text(user.get("status")) != binding["status"]
+        or roster_text(user.get("finance_source_status")) != binding["projection_state"]
+    ):
+        raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
+    return user
+
+
+def _supabase_require_legacy_finance_company_binding(
+    binding: Dict[str, str],
+    company: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Revalidate the exact v1 company binding without a JIT upsert fallback."""
+    if not isinstance(company, dict) or (
+        roster_text(company.get("id")) != binding["company_id"]
+        or roster_text(company.get("finance_entity_id")) != binding["entity_id"]
+        or roster_text(company.get("finance_tenant_id")) != binding["tenant_id"]
+        or roster_text(company.get("source_system")).lower() != "finance"
+    ):
+        raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
+    return company
+
+
 def _supabase_upsert_finance_snapshot_user(
     source: Dict[str, Any],
     company: Dict[str, Any],
@@ -35424,6 +37175,7 @@ def _supabase_upsert_finance_snapshot_user(
         "external_account_payload_json": json.dumps({
             **metadata,
             "financeProfile": {
+                "departmentCode": source.get("department_code") or "",
                 "departmentName": source.get("department_name") or "",
                 "jobTitle": source.get("job_title") or "",
                 "extension": source.get("extension") or "",
@@ -35510,11 +37262,15 @@ def _sync_supabase_finance_snapshot(
     require_launch_scope: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, str]]:
     required_step_keys = tuple(required_step_keys)
+    authenticated_snapshot = snapshot
+    snapshot = supabase_recover_legacy_finance_snapshot_tenant_scope(snapshot)
     normalized = normalize_finance_bridge_snapshot(
         snapshot,
         require_workflow=require_workflow,
         required_step_keys=required_step_keys,
     )
+    if snapshot is not authenticated_snapshot:
+        normalized["metadata"] = finance_bridge_safe_snapshot_metadata(authenticated_snapshot)
     company_cache: Dict[Tuple[str, bool], Dict[str, Any]] = {}
 
     def company_for(entity_id: str, *, require_launch_scope: bool) -> Dict[str, Any]:
@@ -35674,20 +37430,53 @@ def sync_supabase_finance_login_snapshot(
     during an ordinary login added many sequential database round trips while
     providing no extra authority for shell entry.
     """
+    authenticated_snapshot = snapshot
+    snapshot = supabase_recover_legacy_finance_snapshot_tenant_scope(
+        snapshot,
+        existing_only=True,
+        applicant_only=True,
+    )
     normalized = normalize_finance_bridge_snapshot(snapshot)
+    if snapshot is not authenticated_snapshot:
+        normalized["metadata"] = finance_bridge_safe_snapshot_metadata(authenticated_snapshot)
+    legacy_projection_binding: Dict[str, str] | None = None
+    if authenticated_snapshot.get("schemaVersion") == 1:
+        legacy_bindings = snapshot.get(_LEGACY_FINANCE_PROJECTION_BINDINGS_KEY)
+        if not isinstance(legacy_bindings, dict) or not isinstance(legacy_bindings.get("applicant"), dict):
+            raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
+        legacy_projection_binding = legacy_bindings["applicant"]
     applicant = normalized["applicant"]
+    legacy_applicant_binding = (
+        _finance_login_authorization_binding(legacy_projection_binding, applicant)
+        if legacy_projection_binding is not None
+        else None
+    )
     # The common Portal and Finance use separate Supabase Auth namespaces.
     # A signed Portal handoff is the Google authentication evidence for eDoc;
     # an otherwise active Finance employee must not be forced to pre-bind a
     # second Auth UUID before their first eDoc visit.
-    if portal_authenticated and applicant["projection_state"] == "pending":
+    if (
+        legacy_applicant_binding is None
+        and portal_authenticated
+        and applicant["projection_state"] == "pending"
+    ):
         applicant["projection_state"] = "active"
     actor_sources = normalized["actors"]
     existing = _supabase_finance_snapshot_user_candidate(applicant)
-    company, _ = supabase_upsert_finance_company_snapshot(
-        snapshot["company"],
-        update_existing=False,
-    )
+    if legacy_applicant_binding is not None:
+        existing = _supabase_require_legacy_finance_user_binding(
+            legacy_applicant_binding,
+            existing,
+        )
+        company = _supabase_require_legacy_finance_company_binding(
+            legacy_applicant_binding,
+            supabase_get("companies", legacy_applicant_binding["company_id"]),
+        )
+    else:
+        company, _ = supabase_upsert_finance_company_snapshot(
+            snapshot["company"],
+            update_existing=False,
+        )
     if roster_text(company.get("finance_entity_id")) != applicant["entity_id"]:
         raise FinanceBridgeDenied("finance_company_identity_conflict")
     if roster_text(company.get("status")).lower() not in {"active", "啟用"}:
@@ -35700,6 +37489,30 @@ def sync_supabase_finance_login_snapshot(
         raise FinanceBridgeDenied("finance_company_launch_scope_required")
     if not launch_company_in_scope(roster_text(company.get("id"))):
         raise FinanceBridgeDenied("finance_company_outside_launch_scope")
+
+    if legacy_applicant_binding is not None:
+        # v1 is a compatibility read-through for projections already delivered
+        # by Finance. It may neither insert nor adopt an account/company during
+        # login. Re-read both bindings immediately before returning so a row
+        # deleted or rebound after the recovery lookup fails closed.
+        current_user = _supabase_require_legacy_finance_user_binding(
+            legacy_applicant_binding,
+            supabase_get("users", legacy_applicant_binding["user_id"]),
+        )
+        current_company = _supabase_require_legacy_finance_company_binding(
+            legacy_applicant_binding,
+            supabase_get("companies", legacy_applicant_binding["company_id"]),
+        )
+        if (
+            applicant["projection_state"] != "active"
+            or roster_text(current_user.get("status")) != "啟用"
+            or roster_text(current_company.get("status")).lower() not in {"active", "啟用"}
+        ):
+            raise FinanceBridgeDenied("finance_identity_inactive")
+        return {
+            **current_user,
+            FINANCE_LOGIN_EXPECTED_BINDING_KEY: legacy_applicant_binding,
+        }
 
     source_revision = int(applicant.get("source_revision") or 0)
     event_id = roster_text(snapshot.get("eventId"))
@@ -35741,7 +37554,19 @@ def sync_supabase_finance_login_snapshot(
     )
     if company_inactive or applicant["projection_state"] != "active" or user.get("status") != "啟用":
         raise FinanceBridgeDenied("finance_identity_inactive")
-    return user
+    expected_binding = _finance_login_authorization_binding({
+        "tenant_id": applicant["tenant_id"],
+        "user_id": roster_text(user.get("id")),
+        "company_id": roster_text(company.get("id")),
+        "finance_user_id": applicant["finance_user_id"],
+        "email": applicant["email"],
+        "entity_id": applicant["entity_id"],
+    }, applicant)
+    user = _supabase_require_legacy_finance_user_binding(expected_binding, user)
+    return {
+        **user,
+        FINANCE_LOGIN_EXPECTED_BINDING_KEY: expected_binding,
+    }
 
 
 def claim_supabase_finance_member_sync_nonce(verified: Dict[str, Any]) -> bool:
@@ -36410,10 +38235,23 @@ def supabase_authenticate_preprovisioned_logging_bridge(
     )
     if user.get("role") not in ALLOWED_EDOC_ROLES:
         return {"error": "role_forbidden", "detail": "此 Finance 帳號未授權使用公文收發電子用印系統。"}, 403
+    expected_binding = user.get(FINANCE_LOGIN_EXPECTED_BINDING_KEY)
+    if not isinstance(expected_binding, dict):
+        raise FinanceBridgeContractError("finance_login_authorization_binding_invalid")
+    user = {
+        key: value
+        for key, value in user.items()
+        if key != FINANCE_LOGIN_EXPECTED_BINDING_KEY
+    }
     # One service-only RPC creates the session, updates verification time,
     # records the login event and returns exact RBAC permissions atomically.
     # The former four sequential Data API calls dominated cold-login latency.
-    session = supabase_create_finance_login_session(user, ip, device)
+    session = supabase_create_finance_login_session(
+        user,
+        ip,
+        device,
+        expected_binding=expected_binding,
+    )
     public_profile = session["user"]
     return {
         **session,
@@ -36693,7 +38531,6 @@ def supabase_current_session(token: str) -> Dict[str, Any] | None:
         supabase_patch("auth_sessions", session_row["id"], {"revoked_at": now()})
         return None
     if is_production() and finance_session_revalidation_due(user):
-        previous_role = user.get("role")
         try:
             snapshot = current_finance_bridge_snapshot(user.get("email") or "")
             refreshed = sync_supabase_finance_login_snapshot(
@@ -36702,17 +38539,22 @@ def supabase_current_session(token: str) -> Dict[str, Any] | None:
             )
             if refreshed.get("id") != user.get("id"):
                 raise FinanceBridgeDenied("finance_identity_mismatch")
-            verified_at = now()
-            user = supabase_patch("users", user["id"], {
-                "last_synced_from_logging_at": verified_at,
-            })
-            if user.get("role") != previous_role:
-                permissions = supabase_role_permissions(user.get("role", ""))
-        except FinanceBridgeDenied:
+            revalidated = supabase_revalidate_finance_session(
+                session_row,
+                token_hash,
+                refreshed,
+            )
+            session_row = revalidated["session"]
+            user = revalidated["user"]
+            permissions = revalidated["permissions"]
+        except (FinanceBridgeDenied, FinanceBridgeContractError):
             supabase_patch("auth_sessions", session_row["id"], {"revoked_at": now()})
             return None
-        except FinanceBridgeUnavailable:
-            return None
+        except FinanceBridgeUnavailable as error:
+            # A temporary Finance outage is not evidence that this identity was
+            # revoked. Preserve the valid eDoc session and surface a retryable
+            # 503 through the API instead of collapsing it into a false 401.
+            raise FinanceBridgeUnavailable("finance_session_revalidation_unavailable") from error
     user.pop("password_hash", None)
     return {
         "sessionId": session_row["id"],
@@ -39039,6 +40881,32 @@ class Handler(SimpleHTTPRequestHandler):
         return "sso_failed"
 
     @staticmethod
+    def handoff_session_error_retryable(error: BaseException) -> bool:
+        """Classify only explicitly transient session exchange failures.
+
+        Contract/authorization failures are permanent for the current handoff
+        token even though FinanceBridgeContractError inherits the transport-level
+        unavailable class. SQLite OperationalError is broad, so only lock/busy
+        signals retain the cookie.
+        """
+        if isinstance(error, (FinanceBridgeContractError, FinanceBridgeDenied)):
+            return False
+        if isinstance(error, FinanceBridgeUnavailable):
+            return True
+        if isinstance(error, sqlite3.OperationalError):
+            detail = str(error).strip().lower()
+            return any(
+                marker in detail
+                for marker in (
+                    "database is locked",
+                    "database table is locked",
+                    "database is busy",
+                    "database table is busy",
+                )
+            )
+        return False
+
+    @staticmethod
     def handoff_cookie_headers(token: str = "") -> List[Tuple[str, str]]:
         if token:
             return [
@@ -39152,11 +41020,14 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_handoff_redirect(token=token)
 
     def handle_handoff_session_exchange(self) -> None:
-        clear_headers = [
-            *self.handoff_cookie_headers(),
+        no_store_headers = [
             ("Cache-Control", "no-store, max-age=0"),
             ("Pragma", "no-cache"),
             ("Referrer-Policy", "no-referrer"),
+        ]
+        clear_headers = [
+            *self.handoff_cookie_headers(),
+            *no_store_headers,
         ]
         if self.headers.get("X-EDOC-Handoff-Exchange", "") != "1":
             self.send_json({"error": "handoff_exchange_forbidden"}, 403, clear_headers)
@@ -39176,8 +41047,26 @@ class Handler(SimpleHTTPRequestHandler):
                 with connect() as conn:
                     session = current_session(conn, token)
                     conn.commit()
-        except (RuntimeError, sqlite3.Error):
-            self.send_json({"error": "handoff_session_unavailable"}, 503, clear_headers)
+        except (RuntimeError, sqlite3.Error) as error:
+            retryable = self.handoff_session_error_retryable(error)
+            if retryable:
+                # Keep the short-lived HttpOnly token for a same-origin retry.
+                self.log_handoff_failure("handoff_session_unavailable", 503)
+                self.send_json(
+                    {"error": "handoff_session_unavailable", "retryable": True},
+                    503,
+                    no_store_headers,
+                )
+                return
+            # A denied identity, malformed Finance contract, or permanent local
+            # integrity error can never succeed with this handoff token.
+            status = 401 if isinstance(error, FinanceBridgeDenied) else 503
+            self.log_handoff_failure("handoff_session_invalid", status)
+            self.send_json(
+                {"error": "handoff_session_invalid", "retryable": False},
+                status,
+                clear_headers,
+            )
             return
         if not session:
             self.send_json({"error": "handoff_session_invalid"}, 401, clear_headers)
@@ -39960,6 +41849,13 @@ class Handler(SimpleHTTPRequestHandler):
                     scoped_query = {**query, "scope": ["mine"]}
                     self.send_json(supabase_list_official_documents(scoped_query, session))
                     return
+                if method == "GET" and parts == ["official-documents", "workflow-readiness"]:
+                    session = supabase_current_session(self.bearer_token())
+                    route_code = (query.get("route_code") or query.get("routeCode") or ["A"])[0]
+                    self.send_json(
+                        supabase_official_applicant_workflow_readiness(session, route_code)
+                    )
+                    return
                 if method == "POST" and parts == ["official-documents", "editor-drafts"]:
                     session = supabase_current_session(self.bearer_token())
                     self.send_json(supabase_create_official_editor_draft(self.read_json(), session), 201)
@@ -40114,16 +42010,31 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if parts and parts[0] == "inbound-documents":
                     session = supabase_current_session(self.bearer_token())
+                    if method == "POST" and parts == ["inbound-documents", "drafts"]:
+                        payload = self.read_json()
+                        payload["ip_address"] = self.client_ip()
+                        payload["user_agent"] = self.client_device()
+                        self.send_json(supabase_mutate_inbound_draft(payload, session), 201)
+                        return
+                    if method == "POST" and parts == ["inbound-documents", "register"]:
+                        payload = self.read_json()
+                        payload["ip_address"] = self.client_ip()
+                        payload["user_agent"] = self.client_device()
+                        self.send_json(supabase_mutate_inbound_registration(payload, session), 201)
+                        return
                     if method == "GET" and len(parts) == 1:
                         if not self.require_table_access(session, "inbound_documents"):
                             return
                         self.send_json(supabase_list_inbound_documents(query, session))
                         return
                     if method == "POST" and len(parts) == 1:
-                        payload = self.read_json()
-                        payload["ip_address"] = self.client_ip()
-                        payload["user_agent"] = self.client_device()
-                        self.send_json(supabase_create_inbound_document(payload, session), 201)
+                        self.send_json(
+                            {
+                                "error": "method_not_allowed",
+                                "detail": "inbound_canonical_mutation_required",
+                            },
+                            405,
+                        )
                         return
                     if method == "GET" and len(parts) == 5 and parts[2] == "attachments" and parts[4] == "download":
                         self.send_supabase_inbound_attachment_file(parts[1], parts[3])
@@ -40139,7 +42050,13 @@ class Handler(SimpleHTTPRequestHandler):
                         payload = self.read_json()
                         payload["ip_address"] = self.client_ip()
                         payload["user_agent"] = self.client_device()
-                        self.send_json(supabase_assign_inbound_document(parts[1], payload, session))
+                        self.send_json(supabase_mutate_inbound_assignment(parts[1], payload, session))
+                        return
+                    if method == "POST" and len(parts) == 3 and parts[2] == "exceptions":
+                        payload = self.read_json()
+                        payload["ip_address"] = self.client_ip()
+                        payload["user_agent"] = self.client_device()
+                        self.send_json(supabase_mutate_inbound_exception(parts[1], payload, session), 201)
                         return
                     if method == "POST" and len(parts) == 3 and parts[2] == "attachments":
                         payload = self.read_json()
@@ -40929,6 +42846,13 @@ class Handler(SimpleHTTPRequestHandler):
                     scoped_query = {**query, "scope": ["mine"]}
                     self.send_json(list_official_documents(conn, scoped_query, session))
                     return
+                if method == "GET" and parts == ["official-documents", "workflow-readiness"]:
+                    session = current_session(conn, self.bearer_token())
+                    route_code = (query.get("route_code") or query.get("routeCode") or ["A"])[0]
+                    self.send_json(
+                        official_applicant_workflow_readiness(conn, session, route_code)
+                    )
+                    return
                 if method == "POST" and parts == ["official-documents", "editor-drafts"]:
                     session = current_session(conn, self.bearer_token())
                     payload = self.read_json()
@@ -41112,18 +43036,35 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if parts and parts[0] == "inbound-documents":
                     session = current_session(conn, self.bearer_token())
+                    if method == "POST" and parts == ["inbound-documents", "drafts"]:
+                        payload = self.read_json()
+                        payload.setdefault("ip_address", self.client_ip())
+                        payload.setdefault("user_agent", self.client_device())
+                        result = mutate_inbound_draft(conn, payload, session)
+                        conn.commit()
+                        self.send_json(result, 201)
+                        return
+                    if method == "POST" and parts == ["inbound-documents", "register"]:
+                        payload = self.read_json()
+                        payload.setdefault("ip_address", self.client_ip())
+                        payload.setdefault("user_agent", self.client_device())
+                        result = mutate_inbound_registration(conn, payload, session)
+                        conn.commit()
+                        self.send_json(result, 201)
+                        return
                     if method == "GET" and len(parts) == 1:
                         if not self.require_table_access(session, "inbound_documents"):
                             return
                         self.send_json(list_inbound_documents(conn, query, session))
                         return
                     if method == "POST" and len(parts) == 1:
-                        payload = self.read_json()
-                        payload.setdefault("ip_address", self.client_ip())
-                        payload.setdefault("user_agent", self.client_device())
-                        result = create_inbound_document(conn, payload, session)
-                        conn.commit()
-                        self.send_json(result, 201)
+                        self.send_json(
+                            {
+                                "error": "method_not_allowed",
+                                "detail": "inbound_canonical_mutation_required",
+                            },
+                            405,
+                        )
                         return
                     if method == "GET" and len(parts) == 5 and parts[2] == "attachments" and parts[4] == "download":
                         self.send_inbound_attachment_file(conn, parts[1], parts[3])
@@ -41139,9 +43080,17 @@ class Handler(SimpleHTTPRequestHandler):
                         payload = self.read_json()
                         payload.setdefault("ip_address", self.client_ip())
                         payload.setdefault("user_agent", self.client_device())
-                        result = assign_inbound_document(conn, parts[1], payload, session)
+                        result = mutate_inbound_assignment(conn, parts[1], payload, session)
                         conn.commit()
                         self.send_json(result)
+                        return
+                    if method == "POST" and len(parts) == 3 and parts[2] == "exceptions":
+                        payload = self.read_json()
+                        payload.setdefault("ip_address", self.client_ip())
+                        payload.setdefault("user_agent", self.client_device())
+                        result = mutate_inbound_exception(conn, parts[1], payload, session)
+                        conn.commit()
+                        self.send_json(result, 201)
                         return
                     if method == "POST" and len(parts) == 3 and parts[2] == "attachments":
                         payload = self.read_json()
@@ -41334,7 +43283,14 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "not_found", "path": path}, 404)
         except ValueError as exc:
             detail = str(exc)
-            status = 503 if detail.startswith(("formal_signing_service_not_ready", "formal_signature_provider", "formal_tsa", "editor_antivirus_not_ready", "editor_antivirus_scan_failed")) else 409 if detail in {"editor_revision_conflict", "editor_locked_after_submit"} else 422
+            status = 503 if detail.startswith(("formal_signing_service_not_ready", "formal_signature_provider", "formal_tsa", "editor_antivirus_not_ready", "editor_antivirus_scan_failed")) else 409 if detail in {
+                "editor_revision_conflict",
+                "editor_locked_after_submit",
+                "inbound_version_conflict",
+                "inbound_idempotency_conflict",
+                "inbound_registration_state_conflict",
+                "inbound_mutation_state_conflict",
+            } else 422
             log_structured("warning", "api_request_rejected", path=path, method=method, error=detail)
             self.send_json({"error": "request_rejected", "detail": detail}, status)
         except PermissionError as exc:
@@ -41346,7 +43302,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error": "finance_identity_unavailable", "detail": "finance_identity_unavailable"}, 403)
         except FinanceBridgeUnavailable:
             log_structured("error", "finance_bridge_unavailable", path=path, method=method, error="finance_bridge_unavailable")
-            self.send_json({"error": "finance_bridge_unavailable", "detail": "finance_bridge_unavailable"}, 503)
+            self.send_json({
+                "error": "finance_bridge_unavailable",
+                "detail": "finance_bridge_unavailable",
+                "retryable": True,
+            }, 503)
         except SignatureProviderError as exc:
             detail = str(exc)
             log_structured("warning", "signature_provider_failed", path=path, method=method, error=detail)
