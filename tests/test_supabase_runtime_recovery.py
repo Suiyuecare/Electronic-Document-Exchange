@@ -67,15 +67,20 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("fresh_finance_bootstrap_sentinel_has_reference", cleanup)
         self.assertIn("fresh_finance_bootstrap_sentinel_delete_failed", cleanup)
         self.assertIn("delete from public.finance_organization_projection_state", cleanup)
+        self.assertIn("join public.users linked_user", cleanup)
+        self.assertNotIn(
+            "from public.module_account_links\n    where finance_tenant_id",
+            cleanup,
+        )
         for relation in (
             "companies",
             "users",
             "finance_member_sync_receipts",
             "finance_organization_revisions",
             "finance_organization_units",
-            "module_account_links",
         ):
             self.assertIn(f"select 1 from public.{relation}", cleanup)
+        self.assertIn("from public.module_account_links account_link", cleanup)
         if parse_sql is not None:
             parse_sql(sql)
             parse_sql(cleanup)
@@ -542,6 +547,11 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("v_walked <> v_total", sql)
         self.assertIn("edoc_audit_pretransition_version_invalid", sql)
         self.assertIn("edoc_audit_v1_fork_requires_manual_attestation", sql)
+        self.assertIn("join public.users linked_user", sql)
+        self.assertNotIn(
+            "from public.module_account_links\n      where finance_tenant_id",
+            sql,
+        )
         self.assertIn("edoc-audit-v1-set-commitment-v1", sql)
         self.assertIn("sha256-sorted-entry-hash-set-v1-c-collation", sql)
         self.assertIn('entry_hash collate "c"', sql)
@@ -660,6 +670,7 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         # malformed fail-closed guard cannot reach the database reset job.
         for path in (
             AUDIT_HASH_HARDENING,
+            FRESH_FINANCE_SENTINEL_CLEANUP,
             FRESH_BOOTSTRAP_SMOKE,
             AUDIT_CONCURRENCY_CHECKS,
         ):

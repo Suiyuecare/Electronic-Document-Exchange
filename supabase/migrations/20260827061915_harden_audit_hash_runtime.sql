@@ -360,8 +360,11 @@ begin
     end if;
 
     if exists (
-      select 1 from public.module_account_links
-      where finance_tenant_id = '__edoc_fresh_bootstrap_only__'
+      select 1
+      from public.module_account_links account_link
+      join public.users linked_user
+        on linked_user.id = account_link.user_id
+      where linked_user.finance_tenant_id = '__edoc_fresh_bootstrap_only__'
     ) then
       v_exact_fresh_sentinel := false;
     end if;
