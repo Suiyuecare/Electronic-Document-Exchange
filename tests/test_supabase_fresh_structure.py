@@ -248,11 +248,15 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "trigger_row.tgtype = 17",
             "trigger_row.tgtype = 19",
             "trigger_row.tgattr::smallint[]",
-            "pg_catalog.pg_get_expr(trigger_row.tgqual",
+            "pg_catalog.pg_get_triggerdef(trigger_row.oid, false)",
             "trigger_row.tgenabled <> 'd'",
         ):
             self.assertIn(trigger_contract, runtime_smoke)
             self.assertIn(trigger_contract, cutover)
+        self.assertNotIn("pg_catalog.pg_get_expr(trigger_row.tgqual", runtime_smoke)
+        self.assertNotIn("pg_catalog.pg_get_expr(trigger_row.tgqual", cutover)
+        self.assertGreaterEqual(runtime_smoke.count("'executefunction'"), 2)
+        self.assertGreaterEqual(cutover.count("'executefunction'"), 2)
         self.assertIn("v_dispatch_capture_qual", runtime_smoke)
         self.assertIn("v_dispatch_identity_qual", runtime_smoke)
         self.assertIn("expected.capture_qual", cutover)

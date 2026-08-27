@@ -484,13 +484,21 @@ select
           on attribute_row.attrelid = trigger_row.tgrelid
          and attribute_row.attnum = attribute_item.attnum
       ) = array['id', 'document_id', 'created_by', 'created_at']::text[]
-      and pg_catalog.regexp_replace(
-        pg_catalog.lower(
-          pg_catalog.pg_get_expr(trigger_row.tgqual, trigger_row.tgrelid, true)
+      and pg_catalog.split_part(
+        pg_catalog.split_part(
+          pg_catalog.regexp_replace(
+            pg_catalog.lower(
+              pg_catalog.pg_get_triggerdef(trigger_row.oid, false)
+            ),
+            '[[:space:]()]',
+            '',
+            'g'
+          ),
+          'when',
+          2
         ),
-        '[[:space:]()]',
-        '',
-        'g'
+        'executefunction',
+        1
       ) = expected.identity_qual
   )
     and 1 = (
@@ -520,13 +528,21 @@ select
         or (
           trigger_row.tgname = 'trg_official_dispatch_record_capture_update'
           and trigger_row.tgtype = 17
-          and pg_catalog.regexp_replace(
-            pg_catalog.lower(
-              pg_catalog.pg_get_expr(trigger_row.tgqual, trigger_row.tgrelid, true)
+          and pg_catalog.split_part(
+            pg_catalog.split_part(
+              pg_catalog.regexp_replace(
+                pg_catalog.lower(
+                  pg_catalog.pg_get_triggerdef(trigger_row.oid, false)
+                ),
+                '[[:space:]()]',
+                '',
+                'g'
+              ),
+              'when',
+              2
             ),
-            '[[:space:]()]',
-            '',
-            'g'
+            'executefunction',
+            1
           ) = expected.capture_qual
           and (
             select pg_catalog.array_agg(attribute_row.attname::text order by attribute_item.ordinality)
