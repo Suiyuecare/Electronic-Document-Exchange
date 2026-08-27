@@ -20,6 +20,7 @@ declare
   v_count integer;
   v_message text;
   v_transition_commitment text;
+  v_expected_previous_hash text;
   v_first_previous_hash text;
   v_first_hash text;
   v_head_before_replay text;
@@ -726,6 +727,13 @@ begin
 
   -- Prove the v2 trigger links sequential rows and that a duplicate ID with
   -- ON CONFLICT DO NOTHING cannot advance the singleton head.
+  -- Earlier dispatch-contract probes intentionally append their own audit
+  -- rows, so capture the current head instead of assuming it is still the
+  -- original v1 transition commitment.
+  select head_hash into strict v_expected_previous_hash
+  from edoc_private.audit_log_chain_heads
+  where chain_version = 2;
+
   insert into public.audit_logs (
     id, actor, action, target_type, target_id, detail, created_at
   ) values (
@@ -755,7 +763,7 @@ begin
   from edoc_private.audit_log_chain_heads
   where chain_version = 2;
 
-  if v_first_previous_hash is distinct from v_transition_commitment
+  if v_first_previous_hash is distinct from v_expected_previous_hash
      or v_first_hash is null
      or v_head_before_replay is distinct from v_first_hash
      or v_head_after_replay is distinct from v_head_before_replay then

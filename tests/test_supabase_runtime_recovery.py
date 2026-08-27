@@ -749,6 +749,19 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
             "fresh_bootstrap_audit_transition_truncate_accepted",
             fresh,
         )
+        current_head_probe = (
+            "select head_hash into strict v_expected_previous_hash"
+        )
+        first_chain_insert = "'aud-ci-fresh-chain-001'"
+        self.assertIn(current_head_probe, fresh)
+        self.assertIn(
+            "v_first_previous_hash is distinct from v_expected_previous_hash",
+            fresh,
+        )
+        self.assertLess(
+            fresh.index(current_head_probe),
+            fresh.index(first_chain_insert),
+        )
         if parse_sql is not None:
             parse_sql(sql)
 
