@@ -1,134 +1,145 @@
-# 歲悅電子公文交換系統正式部署手冊
+# 歲悅電子公文系統正式部署手冊
 
-本系統正式環境建議採用：
+本文件只涵蓋已核准的內部公文、用印、簽核與收發管理。正式電子公文交換 provider 在取得機關 jAgent/API/SDK/封包規格、完成測試與人工核准前，必須維持 Mock／停用；不得以本手冊連線正式交換環境。
 
-- GitHub：`Suiyuecare/Electronic-Document-Exchange`
-- Vercel：靜態前端 + Python Serverless API
-- Supabase：正式 Postgres 資料庫與後端 REST 資料層
-- Vercel Cron：定期觸發 `/api/cron/run-due` 與 `/api/cron/monitoring`
+## 1. 資料庫與檔案儲存分工
 
-## 1. Supabase
+- 主 eDoc Supabase：Postgres、Auth 對應資料與應用資料。
+- 專用 Storage Supabase：只存放 `edoc-private`、`edoc-seal-vault` 私有 bucket 與物件。
+- Finance／會計系統：人員、公司與組織的唯一主資料來源；eDoc 不手動建立正式人員。
+- 前端不得取得任一 project 的 `service_role`，也不得列舉 bucket 或接受任意 storage path。
 
-1. 建立獨立 Supabase project，不要混用 Finance、Website 或 HR 資料庫。
-2. 依序執行 `supabase/migrations/*.sql`。
-3. 執行 `supabase/seed.sql` 建立初始角色、測試帳號、排程與通知規則。
-4. 確認 Supabase project 使用受支援 Postgres 版本；若仍是 Postgres 14，需在 2026-07-01 前升級。
-5. 正式環境只把 `SUPABASE_SERVICE_ROLE_KEY` 設在 Vercel server-side environment variables，不可放入前端或 `NEXT_PUBLIC_*`。
+正式發布前先在隔離環境完整重建一次；不可直接把未驗證 migration 套到正式資料庫。
 
-## 2. Vercel Environment Variables
+### 主 eDoc Supabase
 
-Production 必填：
+1. 先執行 `supabase unlink` 清除舊連結，再以 `supabase link --project-ref ussnmxdpxeoshlrdchov` 連結主 eDoc project；用 `supabase projects list`／project URL 再確認一次，禁止沿用專用 Storage project 的 link。
+2. 比對 `supabase/verification/migration_manifest.json` 與 `supabase/migrations/*.sql`，再執行 `supabase migration list --linked` 確認遠端與 repository 的 migration 歷程一致。
+3. 若遠端出現 repository 不存在的 migration，或同一版本的套用狀態不一致，立即停止；不得自行執行 `supabase migration repair`、不得略過版本，也不得用 `db pull` 產生未經審查的正式基線。先由資料庫負責人核對遠端 SQL、雜湊與變更單，再以核准的 baseline／forward migration 補齊 repository。
+4. 歷程一致後才執行 migration dry-run，再於隔離環境完整 reset／重建並執行測試。
+5. 取得資料庫備份、指定回復點與人工變更核准後，才依序套用正式 migrations。
+6. 執行 `supabase/verification/production_cutover_checks.sql`；所有 required table/RPC、RLS、grant 與 demo-data 檢查必須通過。
+
+`supabase/recovery/complete_edoc_runtime_recovery_20260827.sql` 是 2026-08-27 的唯讀災難復原快照，不在 `supabase/migrations`、不在 migration manifest，也不得用 `supabase db push` 套到既有正式資料庫。可線性部署的主資料庫變更只有 manifest 內的純 forward migrations；本次相關檔案依序為：
+
+1. `20260827050436_complete_edoc_runtime_schema_parity.sql`：以 idempotent DDL 補齊 fresh bootstrap 與既有環境的 runtime tables、欄位、constraints、RLS、trigger 與 service-only RPC；不啟用正式交換 provider。
+2. `20260827050447_remove_exact_demo_bootstrap_records_forward.sql`：只依已列明的精確 demo identifier 清理舊 bootstrap 資料，不使用模糊名稱、email 或 regex 刪除。
+3. `20260827050450_atomic_official_submission_editor_finalize_forward.sql`：只建立／取代兩支 atomic RPC、收回 browser 執行權、只授權 `service_role`，並通知 PostgREST 重載 schema。
+4. `20260827050452_add_confirmed_edoc_fk_indexes_forward.sql`：只以 `create index if not exists` 補齊 Supabase Performance Advisor 已確認的 eDoc 外鍵索引，不處理 shared CMS，也不刪除 unused index。
+
+這些檔案仍須先在與正式 schema 相同的隔離環境完成 `supabase db reset`、RPC smoke 與安全檢查，並逐檔取得人工核准；拆成 forward migration 不代表可以略過備份、回復點或變更審查。
+
+`supabase/seed.sql` 是刻意無資料的 production-safe seed，不會建立人員、公司、文件、憑證、裝置或通知。正式環境不需要執行 seed；若 CI 的 fresh bootstrap 固定會執行，也只會得到一個無副作用的檢查結果。
+
+### 專用 Storage Supabase
+
+專用 Storage project 不得套用主資料庫的全部 migrations，只執行 `supabase/storage-migrations` 的以下三個純 Storage migration，且順序不可顛倒：
+
+1. `supabase/storage-migrations/20260824034730_dedicated_edoc_private_storage_buckets.sql`
+2. `supabase/storage-migrations/20260827042214_harden_edoc_storage_buckets.sql`
+3. `supabase/storage-migrations/20260827050000_enforce_empty_storage_client_policy_allowlist.sql`
+
+這三個檔案只允許套用到 dedicated Storage project，絕不可套用到主網站／CMS Supabase project；其中 allowlist migration 會移除 dedicated project 的所有 browser client object policies。檔案要作為獨立、經人工核准的 Storage 變更執行；不得在仍連結專用 Storage project 時執行主資料庫的 `supabase db push`。完成後再次 `supabase unlink`，避免下一次誤把主資料庫 migration 推到 Storage project。
+
+主資料庫只執行 `supabase/verification/production_cutover_checks.sql`；專用 Storage project 另執行 `supabase/verification/dedicated_storage_cutover_checks.sql`。不可把兩份檢查互換，因為主資料庫同時承載 CMS storage policies，而專用 Storage project 的 browser policy allowlist 必須為空。
+
+套用後必須確認：
+
+- `edoc-private`、`edoc-seal-vault` 均為 private。
+- `edoc-private` 接受 PDF、核准的辦公文件／圖片及 archive 所需的 `application/zip`。
+- 兩個 bucket 均不接受 `image/svg+xml`。
+- `storage.objects` 的 `PUBLIC`／`anon`／`authenticated` policy allowlist 為空；瀏覽器僅使用後端簽發的短效能力。若其他模組未來需要直接 Storage policy，必須先拆分 bucket／project 或另行安全審查，不可直接加回共用 policy。
+
+## 2. Vercel 正式環境變數
+
+必要的主資料庫與專用 Storage 設定：
 
 ```text
 EDOC_DEPLOYMENT_ENV=production
 EDOC_DB_MODE=supabase
 EDOC_PUBLIC_BASE_URL=https://edoc.suiyuecare.com
-EDOC_MONITORING_EXPECTED_CRON_MINUTES=1440
-SUPABASE_URL=...
-SUPABASE_SERVICE_ROLE_KEY=...
+SUPABASE_URL=https://<main-edoc-project>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<server-only>
+
 EDOC_STORAGE_PROVIDER=supabase
 EDOC_STORAGE_SUPABASE_MODE=dedicated-project
+EDOC_STORAGE_SUPABASE_URL=https://<dedicated-storage-project>.supabase.co
+EDOC_STORAGE_SERVICE_ROLE_KEY=<server-only>
+EDOC_STORAGE_PUBLISHABLE_KEY=<publishable-key>
 EDOC_STORAGE_BUCKET=edoc-private
-EDOC_OBJECT_STORAGE_URL=https://<project-ref>.supabase.co/storage/v1
 EDOC_STORAGE_ACCESS_MODE=server-signed-url
 EDOC_SIGNED_URL_TTL_SECONDS=300
+
 EDOC_FILE_ENCRYPTION_ENABLED=true
-EDOC_FILE_ENCRYPTION_KEY=...
+EDOC_FILE_ENCRYPTION_KEY=<server-only>
 EDOC_SCAN_ENGINE=ClamAV-compatible
-EDOC_AV_PROVIDER=...
-EDOC_AV_ENDPOINT=...
-EDOC_AV_API_KEY=...
+EDOC_AV_PROVIDER=<approved-provider>
+EDOC_AV_ENDPOINT=<approved-private-endpoint>
+EDOC_AV_API_KEY=<server-only>
 EDOC_MAX_FILE_SIZE_MB=100
-EDOC_ALLOWED_MIME_TYPES=application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream
-CRON_SECRET=...
-SMTP_HOST=...
-SMTP_PORT=587
-SMTP_USERNAME=...
-SMTP_PASSWORD=...
-SMTP_FROM=...
-SMTP_USE_TLS=true
-SMTP_PROVIDER=SMTP / Transactional Email
-SMTP_CREDENTIAL_EXPIRES_AT=2026-12-31
-LINE_WEBHOOK_URL=...
-LINE_CHANNEL_SECRET=...
-LINE_CHANNEL_ACCESS_TOKEN=...
-LINE_TARGET_ID=...
-LINE_CREDENTIAL_EXPIRES_AT=2026-12-31
-APP_SECRET=...
-INBOX_SIGNING_KEY_EXPIRES_AT=2026-12-31
-EDOC_SIGNATURE_PROVIDER=...
-EDOC_SIGNATURE_API_URL=...
-EDOC_SIGNATURE_API_KEY=...
-EDOC_SIGNATURE_KEY_ID=...
-EDOC_HSM_PROVIDER=...
-EDOC_CERT_TRUST_STORE=...
-EDOC_TSA_URL=...
-EDOC_TSA_API_KEY=...
-EDOC_TSA_POLICY_OID=1.2.158.歲悅.電子公文.時間戳
-EDOC_OCSP_RESPONDER_URL=...
-EDOC_CRL_DISTRIBUTION_URL=...
-MONITORING_WEBHOOK_URL=...
-SENTRY_DSN=...
+CRON_SECRET=<server-only>
+APP_SECRET=<server-only>
 ```
 
-設定方式：
+`EDOC_STORAGE_PUBLISHABLE_KEY` 只用於專用 Storage 的可公開 client identification；上傳授權仍須由後端核發。`EDOC_STORAGE_SERVICE_ROLE_KEY` 與主資料庫的 `SUPABASE_SERVICE_ROLE_KEY` 必須分開保存、分開輪替，且只存在 server-side environment。
+
+正式通知的最低可上線基準是站內通知。Email 與 LINE 為選配，未提供並驗證下列環境變數時必須保持 disabled/pending，不可放假值或把「待驗證」視為成功：
+
+```text
+# Optional Email channel
+RESEND_API_KEY=<server-only>
+MAIL_FROM=<verified-sender>
+
+# Optional LINE channel
+LINE_WEBHOOK_URL=<server-only>
+# 或 LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID
+LINE_CHANNEL_ACCESS_TOKEN=<server-only>
+LINE_TARGET_ID=<server-only>
+```
+
+簽章、HSM、TSA、OCSP、CRL 與正式交換 provider 的環境變數，只能在該功能另行完成規格驗收與人工核准後加入。本次內部上線不可填入模擬值冒充可用。
+
+使用 Vercel CLI 時，每個命令會再提示輸入實際值；命令尾端的 `production` 是環境名稱，不是變數值：
 
 ```bash
 vercel link --yes --project Electronic-Document-Exchange
 vercel env add EDOC_DEPLOYMENT_ENV production
 vercel env add EDOC_DB_MODE production
 vercel env add EDOC_PUBLIC_BASE_URL production
-vercel env add EDOC_MONITORING_EXPECTED_CRON_MINUTES production
 vercel env add SUPABASE_URL production
 vercel env add SUPABASE_SERVICE_ROLE_KEY production --sensitive
-vercel env add EDOC_STORAGE_PROVIDER production
-vercel env add EDOC_STORAGE_SUPABASE_MODE production
+vercel env add EDOC_STORAGE_SUPABASE_URL production
+vercel env add EDOC_STORAGE_SERVICE_ROLE_KEY production --sensitive
+vercel env add EDOC_STORAGE_PUBLISHABLE_KEY production
 vercel env add EDOC_STORAGE_BUCKET production
-vercel env add EDOC_OBJECT_STORAGE_URL production
-vercel env add EDOC_STORAGE_ACCESS_MODE production
-vercel env add EDOC_SIGNED_URL_TTL_SECONDS production
-vercel env add EDOC_FILE_ENCRYPTION_ENABLED production
 vercel env add EDOC_FILE_ENCRYPTION_KEY production --sensitive
-vercel env add EDOC_SCAN_ENGINE production
-vercel env add EDOC_AV_PROVIDER production
-vercel env add EDOC_AV_ENDPOINT production
 vercel env add EDOC_AV_API_KEY production --sensitive
-vercel env add EDOC_MAX_FILE_SIZE_MB production
-vercel env add EDOC_ALLOWED_MIME_TYPES production
 vercel env add CRON_SECRET production --sensitive
-vercel env add SMTP_HOST production
-vercel env add SMTP_PORT production
-vercel env add SMTP_USERNAME production
-vercel env add SMTP_PASSWORD production --sensitive
-vercel env add SMTP_FROM production
-vercel env add SMTP_USE_TLS production
-vercel env add SMTP_PROVIDER production
-vercel env add SMTP_CREDENTIAL_EXPIRES_AT production
-vercel env add LINE_WEBHOOK_URL production --sensitive
-vercel env add LINE_CHANNEL_SECRET production --sensitive
-vercel env add LINE_CHANNEL_ACCESS_TOKEN production --sensitive
-vercel env add LINE_TARGET_ID production --sensitive
-vercel env add LINE_CREDENTIAL_EXPIRES_AT production
 vercel env add APP_SECRET production --sensitive
-vercel env add INBOX_SIGNING_KEY_EXPIRES_AT production
-vercel env add EDOC_SIGNATURE_PROVIDER production
-vercel env add EDOC_SIGNATURE_API_URL production
-vercel env add EDOC_SIGNATURE_API_KEY production --sensitive
-vercel env add EDOC_SIGNATURE_KEY_ID production
-vercel env add EDOC_HSM_PROVIDER production
-vercel env add EDOC_CERT_TRUST_STORE production --sensitive
-vercel env add EDOC_TSA_URL production
-vercel env add EDOC_TSA_API_KEY production --sensitive
-vercel env add EDOC_TSA_POLICY_OID production
-vercel env add EDOC_OCSP_RESPONDER_URL production
-vercel env add EDOC_CRL_DISTRIBUTION_URL production
-vercel env add MONITORING_WEBHOOK_URL production --sensitive
-vercel env add SENTRY_DSN production --sensitive
 ```
 
-## 3. Vercel Cron
+## 3. 發布前資料與安全閘門
 
-`vercel.json` 已建立：
+在正式部署核准單留下以下證據：
+
+1. migration manifest 與 repository migration 清單一致。
+2. `supabase migration list --linked` 顯示遠端與 repository 歷程一致，沒有使用未核准的 `migration repair` 覆寫歷程。
+3. 隔離環境 fresh bootstrap 成功，且 `supabase/seed.sql` 未建立 demo data。
+4. `production_cutover_checks.sql` 的 demo identifier 計數為 0。
+5. 13 個補齊的 runtime tables、15 個既有 RPC 與 2 個 atomic RPC 全部存在。
+6. atomic RPC 僅 `service_role` 可執行；`PUBLIC`、`anon`、`authenticated` 無權限。
+7. runtime tables 啟用 RLS，敏感表的 browser Data API grant 為 0。
+8. 40 個已確認的 eDoc 外鍵索引全部存在，且未新增 shared CMS index 或刪除 unused index。
+9. Storage bucket private、包含 ZIP、排除 SVG，舊 direct-object policies 不存在。
+10. 站內通知規則 ready；Email／LINE 若未設定應明確顯示 pending，而非阻擋內部上線或假裝成功。
+11. stale editor upload 檢查無超過允許時限的 pending/uploaded 資產。
+12. Finance 人員、公司、部門投影同步檢查通過，沒有手動維護的 demo 帳號。
+
+若任何一項不通過，停止發布；資料庫 migration 不得用 Vercel rollback 反轉，需另寫經審查的 forward-fix migration。
+
+## 4. Vercel Cron
+
+`vercel.json` 目前以兩個每日工作相容 Hobby plan：
 
 ```json
 [
@@ -137,20 +148,9 @@ vercel env add SENTRY_DSN production --sensitive
 ]
 ```
 
-這個預設值相容 Hobby plan 的每日排程限制與 2 個 cron job 限制。若使用 Pro / Enterprise 並需要接近正式 SLA，可改成：
+若未來使用 Pro／Enterprise 且 SLA 需要 15 分鐘頻率，再經容量測試與變更核准調整。設定 `CRON_SECRET` 後，Vercel Cron 會以 `Authorization: Bearer <CRON_SECRET>` 呼叫，系統必須驗證該 header。
 
-```json
-[
-  { "path": "/api/cron/run-due", "schedule": "*/15 * * * *" },
-  { "path": "/api/cron/monitoring", "schedule": "*/15 * * * *" }
-]
-```
-
-若 Vercel 設定 `CRON_SECRET`，Vercel Cron 會以 `Authorization: Bearer <CRON_SECRET>` 呼叫端點，本系統會驗證此 header。
-
-## 4. 部署
-
-手動部署：
+## 5. 部署與上線後檢查
 
 ```bash
 python3 -m py_compile backend.py api/index.py
@@ -160,14 +160,7 @@ vercel build --prod
 vercel deploy --prebuilt --prod
 ```
 
-GitHub Actions 部署：
-
-1. 在 GitHub repository secrets 建立 `VERCEL_TOKEN`、`VERCEL_ORG_ID=team_LGag47eU8tKbsK6ixAmVa5Uq`、`VERCEL_PROJECT_ID=prj_iNAxeAFkzDkrwkDFoeOZvJj78L7K`。
-2. 在 Vercel 專案連結 GitHub repo，或本機先執行 `vercel link` 產生 `.vercel/project.json` 後，把 `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID` 依公司政策放入 CI。
-3. 建立 `EDOC_PRODUCTION_URL=https://edoc.suiyuecare.com` secret，讓 CI 部署後固定檢查正式網址；未設定時會使用 `https://edoc.suiyuecare.com`。
-4. Push 到 `main` 後執行 `.github/workflows/deploy-vercel.yml`。
-
-## 5. 上線後檢查
+部署後：
 
 ```bash
 curl https://edoc.suiyuecare.com/api/healthz
@@ -176,41 +169,23 @@ curl https://edoc.suiyuecare.com/api/production/readiness
 curl https://edoc.suiyuecare.com/api/production/deployment
 curl https://edoc.suiyuecare.com/api/production/monitoring
 curl https://edoc.suiyuecare.com/api/files/storage-health
-curl -X POST https://edoc.suiyuecare.com/api/notifications/test \
-  -H "Content-Type: application/json" \
-  -d '{"channel":"Email + Line + 系統通知","target_email":"records@suiyuecare.com","body":"正式通知通道實測"}'
-curl -X POST https://edoc.suiyuecare.com/api/backup/restore-drill \
-  -H "Content-Type: application/json" \
-  -d '{"scope":"全部資料表","target_env":"測試沙盒","rto_target_minutes":30,"rpo_target_minutes":15}'
-curl -X POST https://edoc.suiyuecare.com/api/compliance/attest \
-  -H "Content-Type: application/json" \
-  -d '{"signer_name":"行政部主任","signer_role":"行政部主任","reviewer_name":"主任","reviewer_role":"主任","period":"2026-Q2"}'
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/run-due
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/monitoring
 ```
 
 判斷標準：
 
-- `/api/healthz` 回傳 `ok: true`。
-- `/api/readyz` 回傳 HTTP 200 與 `ready: true`，代表目前核准的內部 eDoc 模組可服務。
-- 正式電子公文交換尚未核准時，`/api/production/readiness` 回傳 HTTP 503 為預期；取得機關規格、完成測試並人工核准正式 provider 後，才要求回傳 `ready: true`。
-- `/api/production/deployment` 顯示 production、revision、branch、deployment URL、Supabase 與 Storage 設定。
-- `/api/files/storage-health` 顯示 `ready: true`，且 provider、bucket、object endpoint、加密、AV provider、AV endpoint、短效 URL 都已設定。
-- `/api/notifications/test` 回傳 `report.ok: true`，Email 有 Message-ID，LINE 有 request id 或 webhook receipt，站內通知有 inbox id。
-- `/api/backup/restore-drill` 回傳 `ok: true`，筆數、雜湊、RTO / RPO 均通過，且 audit log 留存演練紀錄。
-- `/api/compliance/attest` 回傳簽核紀錄、內控分數、`report_hash` 與不可否認摘要；若為「有條件通過」或「不通過」，需依 blockers 建立缺失追蹤。
-- `/api/production/monitoring` 回傳 `status: healthy` 或只有可接受的 warning；critical 必須先處理。
-- `/api/cron/run-due` 回傳 `count` 與 `results`，且 Supabase `job_runs` 有新增紀錄。
-- `/api/cron/monitoring` 會寫入 audit log；若有 alert 且設定 `MONITORING_WEBHOOK_URL`，會推送外部值班通道。
-- 通知中心測試通道後，`notification_deliveries` 有 Email / LINE / 站內通知的成功或失敗紀錄。
+- `/api/healthz` 回傳 `ok: true`；`/api/readyz` 回傳 HTTP 200 與 `ready: true`。
+- `/api/files/storage-health` 指向專用 Storage project，且 provider、bucket、AV、加密與短效 URL ready。
+- 站內通知實測成功並產生 inbox id。Email／LINE 只有在憑證已正式設定時才測試；未設定時必須回報 disabled/pending，不得產生寄送成功 receipt。
+- 正式電子公文交換尚未核准時，`/api/production/readiness` 對正式交換能力回傳未就緒是預期結果，不可藉此啟用模擬憑證或猜測 provider 格式。
+- cron 執行有 audit/job-run 紀錄，且 log 不包含文件本文、個資、憑證、token 或完整檔案路徑。
 
-## 6. Rollback
+## 6. 回復與事故處理
 
 ```bash
 vercel ls
 vercel rollback <deployment-url-or-id>
 ```
 
-資料庫 migration 已套用後不可用 Vercel rollback 反轉，需另寫 Supabase rollback migration 或資料修復腳本。
-
-正式值班、告警分級與處理步驟請使用 `docs/production-monitoring-runbook.md`。
+Vercel rollback 只能回復應用部署。已套用的資料庫 migration 要用經審查的 forward-fix migration；正式發布前必須先有資料庫備份、回復點與負責人。正式值班、告警分級與處理步驟見 `docs/production-monitoring-runbook.md`。

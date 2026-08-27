@@ -1628,6 +1628,16 @@
                 <span>支援多頁，且每一頁都必須是 A4；上限 50 MB／300 頁。</span>
                 <em id="uploadedPdfA4Status" role="status" aria-live="polite">尚未檢查 PDF 頁面尺寸。</em>
               </div>
+              <div class="pdf-editor-upload-error" id="uploadedEditorUploadError" role="alert" aria-live="assertive" hidden>
+                <div>
+                  <strong>檔案上傳未完成</strong>
+                  <span id="uploadedEditorUploadErrorMessage">請重新上傳；目前草稿與原檔不會被覆蓋。</span>
+                </div>
+                <div class="pdf-editor-upload-error-actions">
+                  <button class="primary-button" id="uploadedEditorRetryUploadBtn" type="button">重新上傳</button>
+                  <button class="text-button" id="uploadedEditorDismissUploadErrorBtn" type="button">關閉</button>
+                </div>
+              </div>
 
               <div class="pdf-editor-toolbar" id="uploadedEditorToolTray" role="toolbar" aria-label="PDF 編輯工具">
                 <div class="pdf-editor-tool-group" role="group" aria-label="物件工具">
@@ -1652,8 +1662,8 @@
                   <button id="uploadedEditorFitBtn" type="button">符合頁面</button>
                 </div>
                 <div class="pdf-editor-mobile-actions mobile-only" role="group" aria-label="行動版面板">
-                  <button id="uploadedEditorThumbnailToggleBtn" type="button" aria-expanded="false">頁面</button>
-                  <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false">屬性</button>
+                  <button id="uploadedEditorThumbnailToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorThumbnailPane" aria-haspopup="dialog">頁面</button>
+                  <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorProperties" aria-haspopup="dialog">屬性</button>
                 </div>
               </div>
 
@@ -1676,6 +1686,7 @@
                   <div class="pdf-editor-pane-heading">
                     <strong>頁面</strong>
                     <span id="uploadedEditorPageCount">0 頁</span>
+                    <button class="pdf-editor-pane-close mobile-only" id="uploadedEditorThumbnailCloseBtn" type="button" aria-label="關閉頁面面板">×</button>
                   </div>
                   <div class="pdf-editor-thumbnail-list" id="uploadedPdfThumbnailList"></div>
                   <div class="pdf-editor-page-import advanced-only">
@@ -1730,6 +1741,7 @@
                   <div class="pdf-editor-pane-heading">
                     <strong>屬性</strong>
                     <span id="uploadedEditorSelectionCount">未選取</span>
+                    <button class="pdf-editor-pane-close mobile-only" id="uploadedEditorPropertiesCloseBtn" type="button" aria-label="關閉屬性面板">×</button>
                   </div>
                   <div class="pdf-editor-property-empty" id="uploadedEditorPropertyEmpty">未選取物件</div>
                   <form class="pdf-editor-property-form" id="uploadedEditorPropertyForm" hidden>
@@ -1763,6 +1775,7 @@
                   <input id="uploadedEditorImageInput" type="file" accept="image/png,image/jpeg" hidden />
                 </aside>
               </div>
+              <button class="pdf-editor-mobile-backdrop" id="uploadedEditorMobileBackdrop" type="button" aria-label="關閉 PDF 編輯面板" hidden></button>
 
               <div class="uploaded-workspace-actions pdf-editor-footer-actions">
                 <span id="uploadedEditorPreflightStatus" class="pdf-editor-preflight-status">尚未產生送簽確認版</span>

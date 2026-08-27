@@ -297,6 +297,93 @@ class FinanceDirectoryBackendContractTest(unittest.TestCase):
                     {"去識別化甲部門", "去識別化乙部門"},
                 )
 
+    def test_renamed_department_uses_current_finance_name_for_workflow_snapshot(self) -> None:
+        user = {
+            "id": "FIN-U100",
+            "finance_tenant_id": TENANT_ID,
+            "unit": "去識別化舊部門名稱",
+            "external_account_payload_json": {
+                "financeProfile": {
+                    "departmentCode": "D100",
+                    "departmentName": "去識別化舊部門名稱",
+                }
+            },
+        }
+        canonical_row = {
+            **self.units[0],
+            "name": "去識別化新部門名稱",
+        }
+        payloads = (
+            {
+                "applicant_department_id": "D100",
+                "applicant_department_name": "去識別化舊部門名稱",
+            },
+            {
+                "applicant_department_id": "D100",
+                "applicant_department_name": "去識別化新部門名稱",
+            },
+        )
+        for payload in payloads:
+            with (
+                self.subTest(payload=payload),
+                patch.object(backend, "is_production", return_value=True),
+                patch.object(backend, "USE_SUPABASE", True),
+                patch.object(backend, "supabase_filter_rows", return_value=[canonical_row]) as lookup,
+            ):
+                resolved = backend.authoritative_applicant_department(user, payload)
+
+            self.assertEqual(
+                resolved,
+                {"id": "D100", "name": "去識別化新部門名稱"},
+            )
+            lookup.assert_called_once_with(
+                "finance_organization_units",
+                {
+                    "finance_tenant_id": TENANT_ID,
+                    "code": "D100",
+                    "status": "active",
+                },
+                order="id.asc",
+                limit=2,
+            )
+
+    def test_department_projection_missing_duplicate_or_cross_tenant_fails_closed(self) -> None:
+        user = {
+            "id": "FIN-U100",
+            "finance_tenant_id": TENANT_ID,
+            "unit": "去識別化舊部門名稱",
+            "external_account_payload_json": {
+                "financeProfile": {
+                    "departmentCode": "D100",
+                    "departmentName": "去識別化舊部門名稱",
+                }
+            },
+        }
+        valid = {**self.units[0], "name": "去識別化新部門名稱"}
+        unsafe_results = (
+            [],
+            [valid, {**valid, "id": "FINORG-DUPLICATE"}],
+            [{**valid, "finance_tenant_id": OTHER_TENANT_ID}],
+        )
+        for rows in unsafe_results:
+            with (
+                self.subTest(rows=rows),
+                patch.object(backend, "is_production", return_value=True),
+                patch.object(backend, "USE_SUPABASE", True),
+                patch.object(backend, "supabase_filter_rows", return_value=rows),
+            ):
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "finance_unit_projection_unavailable",
+                ):
+                    backend.authoritative_applicant_department(
+                        user,
+                        {
+                            "applicant_department_id": "D100",
+                            "applicant_department_name": "去識別化舊部門名稱",
+                        },
+                    )
+
 
 class FinanceOwnedGenericWriteBoundaryTest(unittest.TestCase):
     def test_company_and_department_generic_reads_are_blocked(self) -> None:
@@ -417,6 +504,19 @@ class FinanceDirectoryFrontendContractTest(unittest.TestCase):
         self.assertIn("clearInterval", starter)
         enter_app = javascript_function(self.js, "enterApp")
         self.assertIn("startFinanceDirectoryRefresh()", enter_app)
+
+    def test_account_department_prefers_stable_finance_code_after_rename(self) -> None:
+        resolver = javascript_function(self.js, "preferredFinanceDepartment")
+        self.assertIn("external_account_payload_json", resolver)
+        self.assertIn("financeProfile.departmentCode", resolver)
+        self.assertIn("department.code", resolver)
+        self.assertIn("department.financeUnitId", resolver)
+        self.assertIn("codeMatches.length === 1", resolver)
+        self.assertLess(
+            resolver.index("if (departmentCode)"),
+            resolver.index("department.name === unitName"),
+            "穩定 Finance 部門代碼必須優先於可能過期的名稱。",
+        )
 
 
 if __name__ == "__main__":

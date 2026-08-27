@@ -22,6 +22,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
                 "EDOC_STORAGE_PROVIDER",
                 "EDOC_STORAGE_BUCKET",
                 "EDOC_SEAL_STORAGE_BUCKET",
+                "EDOC_STORAGE_PUBLISHABLE_KEY",
                 "EDOC_OBJECT_STORAGE_URL",
                 "EDOC_STORAGE_ACCESS_MODE",
                 "EDOC_FILE_ENCRYPTION_ENABLED",
@@ -76,6 +77,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
             "EDOC_STORAGE_PROVIDER": "supabase",
             "EDOC_STORAGE_BUCKET": "edoc-private",
             "EDOC_SEAL_STORAGE_BUCKET": "edoc-seal-vault",
+            "EDOC_STORAGE_PUBLISHABLE_KEY": "sb_publishable_test-only-public-key",
             "EDOC_OBJECT_STORAGE_URL": "https://project.supabase.co/storage/v1",
             "EDOC_STORAGE_ACCESS_MODE": "server-signed-url",
             "EDOC_FILE_ENCRYPTION_KEY": "file-key",
@@ -108,6 +110,9 @@ class GoLiveAuditTestCase(unittest.TestCase):
         backend.EDOC_STORAGE_PROVIDER = "supabase"
         backend.EDOC_STORAGE_BUCKET = "edoc-private"
         backend.EDOC_SEAL_STORAGE_BUCKET = "edoc-seal-vault"
+        backend.EDOC_STORAGE_PUBLISHABLE_KEY = values[
+            "EDOC_STORAGE_PUBLISHABLE_KEY"
+        ]
         backend.EDOC_OBJECT_STORAGE_URL = values["EDOC_OBJECT_STORAGE_URL"]
         backend.EDOC_STORAGE_ACCESS_MODE = "server-signed-url"
         backend.EDOC_FILE_ENCRYPTION_ENABLED = True
@@ -191,11 +196,21 @@ class GoLiveAuditTestCase(unittest.TestCase):
         with (
             mock.patch.object(backend, "is_production", return_value=True),
             mock.patch.object(backend, "internal_readiness", return_value={"ready": True}),
+            mock.patch.object(
+                backend,
+                "production_runtime_dependency_readiness",
+                return_value={"ready": True, "errorCodes": []},
+            ),
         ):
             ready_payload, ready_status = backend.public_readiness_response(["readyz"])
         with (
             mock.patch.object(backend, "is_production", return_value=True),
             mock.patch.object(backend, "internal_readiness", return_value={"ready": False}),
+            mock.patch.object(
+                backend,
+                "production_runtime_dependency_readiness",
+                return_value={"ready": True, "errorCodes": []},
+            ),
         ):
             blocked_payload, blocked_status = backend.public_readiness_response(["readyz"])
 
