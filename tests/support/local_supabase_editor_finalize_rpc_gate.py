@@ -1116,6 +1116,12 @@ def main() -> int:
                 "local_editor_finalize_immutable_asset_mutation_accepted",
             )
 
+        require_sql_rejected(
+            "delete from public.official_document_editor_assets where id = "
+            + sql_literal(success_asset_id)
+            + ";",
+            "editor_finalized_asset_immutable",
+        )
         immutable_delete_status, immutable_delete_body = api_call(
             api_url,
             service_key,
@@ -1123,11 +1129,25 @@ def main() -> int:
             f"/rest/v1/official_document_editor_assets?{asset_filter}",
         )
         immutable_delete_error = normalized_rpc_result(immutable_delete_body)
+        immutable_delete_code = str(immutable_delete_error.get("code") or "none")
         require(
             immutable_delete_status >= 400
             and immutable_delete_error.get("message")
             == "editor_finalized_asset_immutable",
-            "local_editor_finalize_immutable_asset_delete_accepted",
+            "local_editor_finalize_immutable_asset_delete_accepted:"
+            f"status_{immutable_delete_status}:code_{immutable_delete_code[:24]}",
+        )
+        require(
+            len(
+                rows(
+                    api_url,
+                    service_key,
+                    "official_document_editor_assets",
+                    {"id": success_asset_id},
+                )
+            )
+            == 1,
+            "local_editor_finalize_immutable_asset_deleted",
         )
 
         direct_asset_id = f"CI-EFIN-DIRECT-{suffix}"
