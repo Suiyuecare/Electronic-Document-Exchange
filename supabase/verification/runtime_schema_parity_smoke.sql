@@ -288,7 +288,7 @@ begin
       and trigger_row.tgname = 'trg_official_dispatch_record_identity_guard'
       and trigger_row.tgtype = 19
       and (
-        select pg_catalog.array_agg(attribute_row.attname order by attribute_item.ordinality)
+        select pg_catalog.array_agg(attribute_row.attname::text order by attribute_item.ordinality)
         from pg_catalog.unnest(trigger_row.tgattr::smallint[])
           with ordinality as attribute_item(attnum, ordinality)
         join pg_catalog.pg_attribute attribute_row
@@ -344,7 +344,7 @@ begin
             'g'
           ) = v_dispatch_capture_qual
           and (
-            select pg_catalog.array_agg(attribute_row.attname order by attribute_item.ordinality)
+            select pg_catalog.array_agg(attribute_row.attname::text order by attribute_item.ordinality)
             from pg_catalog.unnest(trigger_row.tgattr::smallint[])
               with ordinality as attribute_item(attnum, ordinality)
             join pg_catalog.pg_attribute attribute_row

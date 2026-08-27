@@ -266,6 +266,17 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertGreaterEqual(cutover.count("trigger_row.tgfoid"), 2)
         self.assertGreaterEqual(runtime_smoke.count("trigger_row.tgenabled <> 'd'"), 2)
         self.assertGreaterEqual(cutover.count("trigger_row.tgenabled <> 'd'"), 2)
+        for trigger_check in (runtime_smoke, cutover):
+            self.assertGreaterEqual(
+                trigger_check.count(
+                    "pg_catalog.array_agg(attribute_row.attname::text"
+                ),
+                2,
+            )
+            self.assertNotIn(
+                "pg_catalog.array_agg(attribute_row.attname order",
+                trigger_check,
+            )
         for marker in (
             "fresh_bootstrap_dispatch_created_event_invalid",
             "fresh_bootstrap_dispatch_create_replay_duplicated_event",
