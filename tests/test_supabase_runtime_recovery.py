@@ -521,6 +521,8 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         sql = AUDIT_HASH_HARDENING.read_text(encoding="utf-8").lower()
         self.assertIn("create table if not exists edoc_private.audit_log_chain_heads", sql)
         self.assertIn("lock table public.audit_logs in share row exclusive mode", sql)
+        self.assertRegex(sql, r"begin;\s+-- freeze v1 writers")
+        self.assertRegex(sql, r"notify pgrst, 'reload schema';\s+commit;")
         self.assertIn("edoc_audit_v1_chain_invalid", sql)
         self.assertIn("v_walked <> v_total", sql)
         self.assertIn("v_terminals <> 1", sql)

@@ -15,6 +15,8 @@ begin
 end
 $migration$;
 
+begin;
+
 -- Freeze v1 writers for the remainder of this migration. The lock waits for
 -- already-running INSERT transactions and conflicts with every later INSERT,
 -- so no old-trigger row can appear after the transition head is selected.
@@ -341,3 +343,5 @@ comment on function edoc_private.audit_log_hash_payload(
 ) is 'Fixed-search-path SHA-256 payload helper used by the audit trigger and security-invoker verification view.';
 
 notify pgrst, 'reload schema';
+
+commit;
