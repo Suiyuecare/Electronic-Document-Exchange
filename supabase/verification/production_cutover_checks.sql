@@ -499,7 +499,7 @@ select
       where trigger_row.tgrelid =
         'public.official_document_dispatch_records'::pg_catalog.regclass
         and trigger_row.tgfoid = identity_guard.oid
-        and trigger_row.tgenabled = 'O'
+        and trigger_row.tgenabled <> 'D'
         and not trigger_row.tgisinternal
     ) as dispatch_identity_guard_trigger_enabled,
   2 = (
@@ -557,7 +557,7 @@ select
       where trigger_row.tgrelid =
         'public.official_document_dispatch_records'::pg_catalog.regclass
         and trigger_row.tgfoid = capture.oid
-        and trigger_row.tgenabled = 'O'
+        and trigger_row.tgenabled <> 'D'
         and not trigger_row.tgisinternal
     ) as dispatch_capture_triggers_enabled,
   pg_catalog.has_table_privilege(

@@ -303,6 +303,15 @@ begin
         '',
         'g'
       ) = v_dispatch_identity_qual
+  ) or 1 <> (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_dispatch_records'::pg_catalog.regclass
+      and trigger_row.tgfoid =
+        'edoc_private.guard_official_dispatch_identity_v1()'::pg_catalog.regprocedure
+      and trigger_row.tgenabled <> 'D'
+      and not trigger_row.tgisinternal
   ) then
     raise exception 'runtime_schema_dispatch_identity_guard_trigger_invalid';
   end if;
@@ -363,7 +372,7 @@ begin
       'public.official_document_dispatch_records'::pg_catalog.regclass
       and trigger_row.tgfoid =
         'edoc_private.capture_official_dispatch_event_v1()'::pg_catalog.regprocedure
-      and trigger_row.tgenabled = 'O'
+      and trigger_row.tgenabled <> 'D'
       and not trigger_row.tgisinternal
   ) then
     raise exception 'runtime_schema_dispatch_event_capture_trigger_invalid';

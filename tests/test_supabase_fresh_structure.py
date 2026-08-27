@@ -186,6 +186,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                 self.assertIn("edoc:dispatch-event:", sql)
                 self.assertIn("pg_catalog.hashtextextended", sql)
                 self.assertIn("pg_catalog.max(event.event_sequence)", sql)
+                self.assertIn("0::bigint", sql)
                 self.assertIn("'created'", sql)
                 self.assertIn("'metadata_updated'", sql)
                 self.assertIn("'status_transition'", sql)
@@ -246,6 +247,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "trigger_row.tgtype = 19",
             "trigger_row.tgattr::smallint[]",
             "pg_catalog.pg_get_expr(trigger_row.tgqual",
+            "trigger_row.tgenabled <> 'd'",
         ):
             self.assertIn(trigger_contract, runtime_smoke)
             self.assertIn(trigger_contract, cutover)
@@ -258,6 +260,8 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             2,
         )
         self.assertGreaterEqual(cutover.count("trigger_row.tgfoid"), 2)
+        self.assertGreaterEqual(runtime_smoke.count("trigger_row.tgenabled <> 'd'"), 2)
+        self.assertGreaterEqual(cutover.count("trigger_row.tgenabled <> 'd'"), 2)
         for marker in (
             "fresh_bootstrap_dispatch_created_event_invalid",
             "fresh_bootstrap_dispatch_create_replay_duplicated_event",

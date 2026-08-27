@@ -4078,7 +4078,10 @@ begin
     pg_catalog.hashtextextended('edoc:dispatch-event:' || new.id, 0)
   );
 
-  select pg_catalog.coalesce(pg_catalog.max(event.event_sequence), 0) + 1
+  select pg_catalog.coalesce(
+           pg_catalog.max(event.event_sequence),
+           0::bigint
+         ) + 1
     into v_event_sequence
     from public.official_document_dispatch_events as event
    where event.dispatch_record_id = new.id;
