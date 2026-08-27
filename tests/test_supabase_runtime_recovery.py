@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 
 try:
-    from pglast import parse_sql
+    from pglast import parse_plpgsql, parse_sql
 except ImportError:  # pragma: no cover - CI installs the pinned SQL parser.
+    parse_plpgsql = None
     parse_sql = None
 
 
@@ -645,12 +646,25 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
             FRESH_FINANCE_SENTINEL_CLEANUP,
             ROOT / "supabase" / "seed.sql",
             ROOT / "supabase" / "verification" / "production_cutover_checks.sql",
+            FRESH_BOOTSTRAP_SMOKE,
             STORAGE_CUTOVER_CHECKS,
             AUDIT_CONCURRENCY_CHECKS,
         )
         for path in paths:
             with self.subTest(path=path.name):
                 parse_sql(path.read_text(encoding="utf-8"))
+
+        # parse_sql validates the outer DO/CREATE FUNCTION statement, but
+        # PostgreSQL treats its dollar-quoted PL/pgSQL body as a string. Parse
+        # the procedural layer for the audit cutover artifacts as well so a
+        # malformed fail-closed guard cannot reach the database reset job.
+        for path in (
+            AUDIT_HASH_HARDENING,
+            FRESH_BOOTSTRAP_SMOKE,
+            AUDIT_CONCURRENCY_CHECKS,
+        ):
+            with self.subTest(plpgsql_path=path.name):
+                parse_plpgsql(path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -289,8 +289,9 @@ begin
   -- Any fork on a linked or production database remains a fail-closed manual
   -- investigation; a syntactically valid hash alone is not authorization.
   if v_forks > 0 then
-    select (
-      exists (
+    v_exact_fresh_sentinel := true;
+
+    if not exists (
       select 1
       from public.finance_organization_projection_state sentinel
       where sentinel.finance_tenant_id = '__edoc_fresh_bootstrap_only__'
@@ -306,8 +307,11 @@ begin
         and sentinel.last_synced_from_finance_at =
           '1970-01-01 00:00:00+00'::timestamptz
         and sentinel.updated_at = '1970-01-01 00:00:00+00'::timestamptz
-    )
-    and not exists (
+    ) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (
       select 1
       from public.finance_organization_projection_state sentinel
       where sentinel.finance_tenant_id = '__edoc_fresh_bootstrap_only__'
@@ -326,32 +330,61 @@ begin
           and sentinel.updated_at =
             '1970-01-01 00:00:00+00'::timestamptz
         )
-    )
-    and not exists (
-      select 1 from public.users
-    )
-    and not exists (
+    ) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (select 1 from public.users) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (
       select 1 from public.finance_member_sync_receipts
       where finance_tenant_id = '__edoc_fresh_bootstrap_only__'
-    )
-    and not exists (
+    ) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (
       select 1 from public.finance_organization_revisions
       where finance_tenant_id = '__edoc_fresh_bootstrap_only__'
-    )
-    and not exists (
+    ) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (
       select 1 from public.finance_organization_units
       where finance_tenant_id = '__edoc_fresh_bootstrap_only__'
-    )
-    and not exists (
+    ) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (
       select 1 from public.module_account_links
       where finance_tenant_id = '__edoc_fresh_bootstrap_only__'
-    )
-    and not exists (select 1 from auth.users)
-    and not exists (select 1 from public.documents)
-    and not exists (select 1 from public.official_documents)
-    and not exists (select 1 from public.file_objects)
-      and not exists (select 1 from storage.objects)
-    ) into v_exact_fresh_sentinel;
+    ) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (select 1 from auth.users) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (select 1 from public.documents) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (select 1 from public.official_documents) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (select 1 from public.file_objects) then
+      v_exact_fresh_sentinel := false;
+    end if;
+
+    if exists (select 1 from storage.objects) then
+      v_exact_fresh_sentinel := false;
+    end if;
 
     with expected_rows(
       id, actor, action, target_type, target_id, detail
@@ -447,7 +480,7 @@ begin
 
   if v_invalid <> 0
      or v_duplicate_hashes <> 0
-     or v_roots <> case when v_total = 0 then 0 else 1 end
+     or v_roots <> (case when v_total = 0 then 0 else 1 end)
      or v_missing_parents <> 0
      or (
        v_terminals <> 0
