@@ -8,6 +8,8 @@ do $$
 declare
   v_count integer;
   v_message text;
+  v_transition_commitment text;
+  v_first_previous_hash text;
   v_first_hash text;
   v_head_before_replay text;
   v_head_after_replay text;
@@ -96,17 +98,197 @@ begin
   end if;
 
   if pg_catalog.to_regclass('edoc_private.audit_log_chain_heads') is null
+     or pg_catalog.to_regclass('edoc_private.audit_log_chain_transitions') is null
      or not exists (
        select 1
        from pg_catalog.pg_class relation_row
        join pg_catalog.pg_namespace namespace_row
          on namespace_row.oid = relation_row.relnamespace
        where namespace_row.nspname = 'edoc_private'
-         and relation_row.relname = 'audit_log_chain_heads'
+         and relation_row.relname in (
+           'audit_log_chain_heads',
+           'audit_log_chain_transitions'
+         )
          and relation_row.relrowsecurity
          and relation_row.relforcerowsecurity
+       group by namespace_row.nspname
+       having pg_catalog.count(*) = 2
      ) then
     raise exception 'fresh_bootstrap_audit_chain_state_not_forced_rls';
+  end if;
+
+  if 2 <> (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'edoc_private.audit_log_chain_transitions'::pg_catalog.regclass
+      and trigger_row.tgname in (
+        'trg_audit_log_chain_transitions_no_mutation',
+        'trg_audit_log_chain_transitions_no_truncate'
+      )
+      and trigger_row.tgenabled = 'O'
+      and not trigger_row.tgisinternal
+  ) then
+    raise exception 'fresh_bootstrap_audit_transition_not_immutable';
+  end if;
+
+  select transition_row.source_commitment
+    into strict v_transition_commitment
+  from edoc_private.audit_log_chain_transitions transition_row
+  where transition_row.target_chain_version = 2
+    and transition_row.source_chain_version = 1
+    and transition_row.commitment_algorithm =
+      'sha256-sorted-entry-hash-set-v1-c-collation'
+    and transition_row.source_row_count = (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where chain_version = 1
+    )
+    and transition_row.source_row_count = 7
+    and transition_row.source_root_count = 1
+    and transition_row.source_root_count = (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where chain_version = 1
+        and (previous_hash is null or previous_hash = 'GENESIS')
+    )
+    and transition_row.source_terminal_count = (
+      select pg_catalog.count(*)
+      from public.audit_logs terminal
+      where terminal.chain_version = 1
+        and not exists (
+          select 1
+          from public.audit_logs child
+          where child.chain_version = 1
+            and child.previous_hash = terminal.entry_hash
+        )
+    )
+    and transition_row.source_fork_count = (
+      select pg_catalog.count(*)
+      from (
+        select previous_hash
+        from public.audit_logs
+        where chain_version = 1
+          and previous_hash is not null
+          and previous_hash <> 'GENESIS'
+        group by previous_hash
+        having pg_catalog.count(*) > 1
+      ) forked
+    )
+    and transition_row.source_commitment = (
+      select pg_catalog.encode(
+        extensions.digest(
+          pg_catalog.convert_to(
+            pg_catalog.concat_ws(
+              '|',
+              'EDOC-AUDIT-V1-SET-COMMITMENT-V1',
+              pg_catalog.count(*)::text,
+              coalesce(
+                pg_catalog.string_agg(
+                  entry_hash collate "C",
+                  '|' order by entry_hash collate "C"
+                ),
+                ''
+              )
+            ),
+            'UTF8'
+          ),
+          'sha256'
+        ),
+        'hex'
+      )
+      from public.audit_logs
+      where chain_version = 1
+    );
+
+  if exists (
+    select 1
+    from public.audit_logs
+    where chain_version is distinct from 1
+      and chain_version is distinct from 2
+  ) or exists (
+    select 1
+    from public.audit_logs
+    where not immutable
+  ) then
+    raise exception 'fresh_bootstrap_audit_version_or_immutability_invalid';
+  end if;
+
+  if pg_catalog.has_table_privilege(
+       'service_role',
+       'edoc_private.audit_log_chain_transitions',
+       'SELECT'
+     )
+     or pg_catalog.has_table_privilege(
+       'service_role',
+       'edoc_private.audit_log_chain_transitions',
+       'INSERT'
+     )
+     or pg_catalog.has_table_privilege(
+       'service_role',
+       'edoc_private.audit_log_chain_transitions',
+       'UPDATE'
+     )
+     or pg_catalog.has_table_privilege(
+       'service_role',
+       'edoc_private.audit_log_chain_transitions',
+       'DELETE'
+     )
+     or pg_catalog.has_table_privilege(
+       'service_role',
+       'edoc_private.audit_log_chain_transitions',
+       'TRUNCATE'
+     ) then
+    raise exception 'fresh_bootstrap_audit_transition_service_accessible';
+  end if;
+
+  begin
+    update edoc_private.audit_log_chain_transitions
+    set source_row_count = source_row_count
+    where target_chain_version = 2;
+    raise exception 'fresh_bootstrap_audit_transition_update_accepted';
+  exception
+    when sqlstate '55000' then
+      get stacked diagnostics v_message = message_text;
+      if v_message <> 'audit_log_chain_transitions_immutable' then
+        raise exception 'fresh_bootstrap_audit_transition_update_wrong_error:%',
+          v_message;
+      end if;
+  end;
+
+  begin
+    delete from edoc_private.audit_log_chain_transitions
+    where target_chain_version = 2;
+    raise exception 'fresh_bootstrap_audit_transition_delete_accepted';
+  exception
+    when sqlstate '55000' then
+      get stacked diagnostics v_message = message_text;
+      if v_message <> 'audit_log_chain_transitions_immutable' then
+        raise exception 'fresh_bootstrap_audit_transition_delete_wrong_error:%',
+          v_message;
+      end if;
+  end;
+
+  begin
+    truncate table edoc_private.audit_log_chain_transitions;
+    raise exception 'fresh_bootstrap_audit_transition_truncate_accepted';
+  exception
+    when sqlstate '55000' then
+      get stacked diagnostics v_message = message_text;
+      if v_message <> 'audit_log_chain_transitions_immutable' then
+        raise exception 'fresh_bootstrap_audit_transition_truncate_wrong_error:%',
+          v_message;
+      end if;
+  end;
+
+  if not exists (
+    select 1
+    from edoc_private.audit_log_chain_heads chain_head
+    where chain_head.chain_version = 2
+      and chain_head.head_hash = v_transition_commitment
+      and chain_head.last_audit_id is null
+  ) then
+    raise exception 'fresh_bootstrap_audit_transition_head_invalid';
   end if;
 
   if pg_catalog.has_table_privilege('authenticated', 'public.audit_log_chain_check', 'SELECT')
@@ -216,7 +398,8 @@ begin
     '2099-01-01 00:00:00'
   );
 
-  select entry_hash into v_first_hash
+  select previous_hash, entry_hash
+    into v_first_previous_hash, v_first_hash
   from public.audit_logs
   where id = 'AUD-CI-FRESH-CHAIN-001' and chain_version = 2;
 
@@ -236,7 +419,8 @@ begin
   from edoc_private.audit_log_chain_heads
   where chain_version = 2;
 
-  if v_first_hash is null
+  if v_first_previous_hash is distinct from v_transition_commitment
+     or v_first_hash is null
      or v_head_before_replay is distinct from v_first_hash
      or v_head_after_replay is distinct from v_head_before_replay then
     raise exception 'fresh_bootstrap_audit_duplicate_advanced_head';

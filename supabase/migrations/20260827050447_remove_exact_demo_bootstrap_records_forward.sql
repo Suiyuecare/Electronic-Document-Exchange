@@ -155,6 +155,16 @@ begin
     group by namespace_row.nspname, relation_row.relname
     order by namespace_row.nspname, relation_row.relname
   loop
+    -- A plain SELECT would leave a race where a concurrent legacy writer can
+    -- add a denormalized reference after this table was scanned but before the
+    -- fixture user is deleted. Hold a write-conflicting lock through COMMIT;
+    -- lock_timeout makes an active writer fail the cutover closed.
+    execute pg_catalog.format(
+      'lock table %I.%I in share row exclusive mode',
+      v_table.schema_name,
+      v_table.table_name
+    );
+
     execute pg_catalog.format(
       'select exists (select 1 from %I.%I table_row where %s)',
       v_table.schema_name,

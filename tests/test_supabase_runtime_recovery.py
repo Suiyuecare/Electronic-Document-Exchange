@@ -30,6 +30,7 @@ FRESH_FINANCE_SENTINEL_CLEANUP = (
 )
 AUDIT_HASH_HARDENING = MIGRATIONS / "20260827061915_harden_audit_hash_runtime.sql"
 CUTOVER_CHECKS = ROOT / "supabase" / "verification" / "production_cutover_checks.sql"
+FRESH_BOOTSTRAP_SMOKE = ROOT / "supabase" / "verification" / "fresh_bootstrap_smoke.sql"
 STORAGE_CUTOVER_CHECKS = ROOT / "supabase" / "verification" / "dedicated_storage_cutover_checks.sql"
 AUDIT_CONCURRENCY_CHECKS = ROOT / "supabase" / "verification" / "audit_chain_concurrency_check.sql"
 MANIFEST = ROOT / "supabase" / "verification" / "migration_manifest.json"
@@ -391,6 +392,7 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("pg_catalog.right(attribute_row.attname, 3) = '_id'", cleanup)
         self.assertIn("table_row.%i = any($1)", cleanup)
         self.assertIn("group by namespace_row.nspname, relation_row.relname", cleanup)
+        self.assertIn("lock table %i.%i in share row exclusive mode", cleanup)
         self.assertIn("demo_cleanup_has_non_fk_reference", cleanup)
         self.assertIn("set local statement_timeout = '120s'", cleanup)
         self.assertIn("set local lock_timeout = '5s'", cleanup)
@@ -520,12 +522,24 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
     def test_audit_hash_forward_hardening_is_serialized_and_fixed_path(self) -> None:
         sql = AUDIT_HASH_HARDENING.read_text(encoding="utf-8").lower()
         self.assertIn("create table if not exists edoc_private.audit_log_chain_heads", sql)
+        self.assertIn(
+            "create table if not exists edoc_private.audit_log_chain_transitions",
+            sql,
+        )
         self.assertIn("lock table public.audit_logs in share row exclusive mode", sql)
-        self.assertRegex(sql, r"begin;\s+-- freeze v1 writers")
+        self.assertIn("create index if not exists idx_audit_logs_chain_parent", sql)
+        self.assertRegex(sql, r"begin;\s+set local lock_timeout")
+        self.assertIn("set local lock_timeout = '5s'", sql)
+        self.assertIn("set local statement_timeout = '120s'", sql)
         self.assertRegex(sql, r"notify pgrst, 'reload schema';\s+commit;")
         self.assertIn("edoc_audit_v1_chain_invalid", sql)
         self.assertIn("v_walked <> v_total", sql)
-        self.assertIn("v_terminals <> 1", sql)
+        self.assertIn("edoc_audit_pretransition_version_invalid", sql)
+        self.assertIn("edoc_audit_v1_fork_requires_manual_attestation", sql)
+        self.assertIn("edoc-audit-v1-set-commitment-v1", sql)
+        self.assertIn("sha256-sorted-entry-hash-set-v1-c-collation", sql)
+        self.assertIn('entry_hash collate "c"', sql)
+        self.assertIn("v_terminals < 1", sql)
         self.assertIn("enable row level security", sql)
         self.assertIn("force row level security", sql)
         self.assertIn("pg_catalog.pg_advisory_xact_lock", sql)
@@ -552,13 +566,42 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("extensions.gen_random_bytes(integer)", sql)
         self.assertNotIn("update public.audit_logs", sql)
         self.assertIn(
+            "before update or delete on edoc_private.audit_log_chain_transitions",
+            sql,
+        )
+        self.assertIn(
+            "before truncate on edoc_private.audit_log_chain_transitions",
+            sql,
+        )
+        self.assertIn(
             "revoke all on table edoc_private.audit_log_chain_heads\n  from public, anon, authenticated, service_role",
+            sql,
+        )
+        self.assertIn(
+            "revoke all on table edoc_private.audit_log_chain_transitions\n  from public, anon, authenticated, service_role",
             sql,
         )
         cutover = CUTOVER_CHECKS.read_text(encoding="utf-8").lower()
         self.assertIn("chain_continuity_valid", cutover)
         self.assertIn("private_head_matches_terminal", cutover)
+        self.assertIn("source_transition_valid", cutover)
+        self.assertIn("unsupported_version_count", cutover)
+        self.assertIn("v1_fork_count", cutover)
+        self.assertIn("v2_fork_count", cutover)
         self.assertIn("version_order_violation_count", cutover)
+        fresh = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
+        self.assertIn("source_row_count = 7", fresh)
+        self.assertIn("source_root_count = 1", fresh)
+        self.assertIn("source_fork_count = (", fresh)
+        self.assertIn("source_terminal_count = (", fresh)
+        self.assertIn(
+            "fresh_bootstrap_audit_transition_service_accessible",
+            fresh,
+        )
+        self.assertIn(
+            "fresh_bootstrap_audit_transition_truncate_accepted",
+            fresh,
+        )
         if parse_sql is not None:
             parse_sql(sql)
 

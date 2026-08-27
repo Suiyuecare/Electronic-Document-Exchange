@@ -555,8 +555,9 @@ select 'fresh_finance_bootstrap_sentinel', count(*)
 from public.finance_organization_projection_state
 where finance_tenant_id = '__edoc_fresh_bootstrap_only__';
 
--- 8b. Runtime audit-chain hardening. Pass condition: both booleans true,
--- browser_view_access=false, backend_view_access=true and the single private
+-- 8b. Runtime audit-chain hardening. Pass condition: private chain and
+-- transition state are forced-RLS, the transition row is immutable, browser
+-- view access is false, backend view access is true and the single private
 -- helper grant is exact.
 select
   pg_catalog.to_regclass('edoc_private.audit_log_chain_heads') is not null
@@ -569,7 +570,55 @@ select
         and relation_row.relname = 'audit_log_chain_heads'
         and relation_row.relrowsecurity
         and relation_row.relforcerowsecurity
+    )
+    and pg_catalog.to_regclass('edoc_private.audit_log_chain_transitions') is not null
+    and exists (
+      select 1
+      from pg_catalog.pg_class relation_row
+      join pg_catalog.pg_namespace namespace_row
+        on namespace_row.oid = relation_row.relnamespace
+      where namespace_row.nspname = 'edoc_private'
+        and relation_row.relname = 'audit_log_chain_transitions'
+        and relation_row.relrowsecurity
+        and relation_row.relforcerowsecurity
     ) as forced_private_chain_state,
+  2 = (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'edoc_private.audit_log_chain_transitions'::pg_catalog.regclass
+      and trigger_row.tgname in (
+        'trg_audit_log_chain_transitions_no_mutation',
+        'trg_audit_log_chain_transitions_no_truncate'
+      )
+      and trigger_row.tgenabled = 'O'
+      and not trigger_row.tgisinternal
+  )
+    and not pg_catalog.has_table_privilege(
+      'service_role',
+      'edoc_private.audit_log_chain_transitions',
+      'SELECT'
+    )
+    and not pg_catalog.has_table_privilege(
+      'service_role',
+      'edoc_private.audit_log_chain_transitions',
+      'IN' || 'SERT'
+    )
+    and not pg_catalog.has_table_privilege(
+      'service_role',
+      'edoc_private.audit_log_chain_transitions',
+      'UP' || 'DATE'
+    )
+    and not pg_catalog.has_table_privilege(
+      'service_role',
+      'edoc_private.audit_log_chain_transitions',
+      'DE' || 'LETE'
+    )
+    and not pg_catalog.has_table_privilege(
+      'service_role',
+      'edoc_private.audit_log_chain_transitions',
+      'TRUN' || 'CATE'
+    ) as immutable_private_transition_state,
   pg_catalog.to_regprocedure('extensions.digest(bytea,text)') is not null
     and pg_catalog.to_regprocedure('extensions.gen_random_bytes(integer)') is not null
     as pgcrypto_runtime_bound,
@@ -595,46 +644,112 @@ select
   ) as no_unexpected_private_function_access;
 
 -- 8c. End-to-end audit continuity. Pass condition:
--- chain_continuity_valid=true. This checks the historical v1 segment, the v2
--- transition edge and the current private head without changing evidence.
-with recursive walked as (
-  select audit_row.id, audit_row.entry_hash, audit_row.chain_version, 1 as depth
+-- chain_continuity_valid=true. Historical v1 rows may contain immutable forks
+-- from the legacy second-resolution writer. Every v1 payload and parent edge
+-- must still be valid and reachable from one root; a canonical set commitment
+-- seals all branches. The v2 segment must be a single line beginning at that
+-- commitment and ending at the current private head.
+with recursive computed_v1 as (
+  select
+    pg_catalog.count(*)::bigint as source_row_count,
+    pg_catalog.encode(
+      extensions.digest(
+        pg_catalog.convert_to(
+          pg_catalog.concat_ws(
+            '|',
+            'EDOC-AUDIT-V1-SET-COMMITMENT-V1',
+            pg_catalog.count(*)::text,
+            coalesce(
+              pg_catalog.string_agg(
+                entry_hash collate "C",
+                '|' order by entry_hash collate "C"
+              ),
+              ''
+            )
+          ),
+          'UTF8'
+        ),
+        'sha256'
+      ),
+      'hex'
+    ) as source_commitment
+  from public.audit_logs
+  where chain_version = 1
+), transition_state as (
+  select transition_row.*
+  from edoc_private.audit_log_chain_transitions transition_row
+  where transition_row.target_chain_version = 2
+    and transition_row.source_chain_version = 1
+), v1_walked as (
+  select audit_row.id, audit_row.entry_hash, 1 as depth
   from public.audit_logs audit_row
-  where audit_row.previous_hash is null
-     or audit_row.previous_hash = 'GENESIS'
+  where audit_row.chain_version = 1
+    and (
+      audit_row.previous_hash is null
+      or audit_row.previous_hash = 'GENESIS'
+    )
 
   union all
 
-  select child.id, child.entry_hash, child.chain_version, parent.depth + 1
-  from walked parent
+  select child.id, child.entry_hash, parent.depth + 1
+  from v1_walked parent
   join public.audit_logs child
-    on child.previous_hash = parent.entry_hash
-  where parent.depth < (select pg_catalog.count(*) from public.audit_logs)
-), chain_stats as (
+    on child.chain_version = 1
+   and child.previous_hash = parent.entry_hash
+  where parent.depth < (
+    select pg_catalog.count(*) from public.audit_logs where chain_version = 1
+  )
+), v2_walked as (
+  select audit_row.id, audit_row.entry_hash, 1 as depth
+  from transition_state transition_row
+  join public.audit_logs audit_row
+    on audit_row.chain_version = 2
+   and audit_row.previous_hash = transition_row.source_commitment
+
+  union all
+
+  select child.id, child.entry_hash, parent.depth + 1
+  from v2_walked parent
+  join public.audit_logs child
+    on child.chain_version = 2
+   and child.previous_hash = parent.entry_hash
+  where parent.depth < (
+    select pg_catalog.count(*) from public.audit_logs where chain_version = 2
+  )
+), v1_stats as (
   select
-    (select pg_catalog.count(*) from public.audit_logs) as total_rows,
-    (select pg_catalog.count(*) from walked) as walked_rows,
     (
       select pg_catalog.count(*)
       from public.audit_logs
-      where previous_hash is null or previous_hash = 'GENESIS'
+      where chain_version = 1
+    ) as total_rows,
+    (select pg_catalog.count(*) from v1_walked) as walked_rows,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where chain_version = 1
+        and (previous_hash is null or previous_hash = 'GENESIS')
     ) as root_count,
     (
       select pg_catalog.count(*)
       from public.audit_logs terminal
-      where not exists (
-        select 1 from public.audit_logs child
-        where child.previous_hash = terminal.entry_hash
-      )
+      where terminal.chain_version = 1
+        and not exists (
+          select 1 from public.audit_logs child
+          where child.chain_version = 1
+            and child.previous_hash = terminal.entry_hash
+        )
     ) as terminal_count,
     (
       select pg_catalog.count(*)
       from public.audit_logs child
-      where child.previous_hash is not null
+      where child.chain_version = 1
+        and child.previous_hash is not null
         and child.previous_hash <> 'GENESIS'
         and not exists (
           select 1 from public.audit_logs parent
-          where parent.entry_hash = child.previous_hash
+          where parent.chain_version = 1
+            and parent.entry_hash = child.previous_hash
         )
     ) as missing_parent_count,
     (
@@ -642,61 +757,262 @@ with recursive walked as (
       from (
         select previous_hash
         from public.audit_logs
-        where previous_hash is not null and previous_hash <> 'GENESIS'
+        where chain_version = 1
+          and previous_hash is not null
+          and previous_hash <> 'GENESIS'
         group by previous_hash
         having pg_catalog.count(*) > 1
       ) forked
     ) as fork_count,
     (
       select pg_catalog.count(*)
-      from public.audit_log_chain_check
-      where not hash_valid
+      from public.audit_log_chain_check chain_check
+      join public.audit_logs audit_row on audit_row.id = chain_check.id
+      where audit_row.chain_version = 1
+        and not chain_check.hash_valid
     ) as invalid_hash_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where chain_version = 1
+        and not immutable
+    ) as mutable_row_count,
+    (
+      select pg_catalog.count(*)
+      from (
+        select entry_hash
+        from public.audit_logs
+        where chain_version = 1
+        group by entry_hash
+        having pg_catalog.count(*) <> 1
+      ) duplicate_hashes
+    ) as duplicate_hash_count
+), v2_stats as (
+  select
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where chain_version = 2
+    ) as total_rows,
+    (select pg_catalog.count(*) from v2_walked) as walked_rows,
+    (
+      select pg_catalog.count(*)
+      from transition_state transition_row
+      join public.audit_logs audit_row
+        on audit_row.chain_version = 2
+       and audit_row.previous_hash = transition_row.source_commitment
+    ) as root_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs terminal
+      where terminal.chain_version = 2
+        and not exists (
+          select 1 from public.audit_logs child
+          where child.chain_version = 2
+            and child.previous_hash = terminal.entry_hash
+        )
+    ) as terminal_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs child
+      where child.chain_version = 2
+        and not exists (
+          select 1
+          from transition_state transition_row
+          where child.previous_hash = transition_row.source_commitment
+        )
+        and not exists (
+          select 1 from public.audit_logs parent
+          where parent.chain_version = 2
+            and parent.entry_hash = child.previous_hash
+        )
+    ) as missing_parent_count,
+    (
+      select pg_catalog.count(*)
+      from (
+        select previous_hash
+        from public.audit_logs
+        where chain_version = 2
+        group by previous_hash
+        having pg_catalog.count(*) > 1
+      ) forked
+    ) as fork_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_log_chain_check chain_check
+      join public.audit_logs audit_row on audit_row.id = chain_check.id
+      where audit_row.chain_version = 2
+        and not chain_check.hash_valid
+    ) as invalid_hash_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where chain_version = 2
+        and not immutable
+    ) as mutable_row_count,
+    (
+      select pg_catalog.count(*)
+      from (
+        select entry_hash
+        from public.audit_logs
+        where chain_version = 2
+        group by entry_hash
+        having pg_catalog.count(*) <> 1
+      ) duplicate_hashes
+    ) as duplicate_hash_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where chain_version = 2
+        and (previous_hash is null or previous_hash = 'GENESIS')
+    ) as legacy_root_count
+), v2_terminal as (
+  select terminal.id, terminal.entry_hash
+  from public.audit_logs terminal
+  where terminal.chain_version = 2
+    and not exists (
+      select 1 from public.audit_logs child
+      where child.chain_version = 2
+        and child.previous_hash = terminal.entry_hash
+    )
+), version_stats as (
+  select
     (
       select pg_catalog.count(*)
       from public.audit_logs child
       join public.audit_logs parent on parent.entry_hash = child.previous_hash
       where child.chain_version < parent.chain_version
-    ) as version_order_violation_count
-), terminal_head as (
-  select terminal.id, terminal.entry_hash
-  from public.audit_logs terminal
-  where not exists (
-    select 1 from public.audit_logs child
-    where child.previous_hash = terminal.entry_hash
-  )
+    ) as version_order_violation_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where chain_version is distinct from 1
+        and chain_version is distinct from 2
+    ) as unsupported_version_count
 )
 select
-  stats.*,
-  exists (
-    select 1
-    from terminal_head terminal
-    join edoc_private.audit_log_chain_heads chain_head
-      on chain_head.chain_version = 2
-     and chain_head.last_audit_id = terminal.id
-     and chain_head.head_hash = terminal.entry_hash
-  ) as private_head_matches_terminal,
+  v1_stats.total_rows as v1_total_rows,
+  v1_stats.walked_rows as v1_walked_rows,
+  v1_stats.root_count as v1_root_count,
+  v1_stats.terminal_count as v1_terminal_count,
+  v1_stats.missing_parent_count as v1_missing_parent_count,
+  v1_stats.fork_count as v1_fork_count,
+  v1_stats.invalid_hash_count as v1_invalid_hash_count,
+  v1_stats.mutable_row_count as v1_mutable_row_count,
+  v1_stats.duplicate_hash_count as v1_duplicate_hash_count,
+  v2_stats.total_rows as v2_total_rows,
+  v2_stats.walked_rows as v2_walked_rows,
+  v2_stats.root_count as v2_root_count,
+  v2_stats.terminal_count as v2_terminal_count,
+  v2_stats.missing_parent_count as v2_missing_parent_count,
+  v2_stats.fork_count as v2_fork_count,
+  v2_stats.invalid_hash_count as v2_invalid_hash_count,
+  v2_stats.mutable_row_count as v2_mutable_row_count,
+  v2_stats.duplicate_hash_count as v2_duplicate_hash_count,
+  version_stats.version_order_violation_count,
+  version_stats.unsupported_version_count,
   (
-    stats.total_rows = stats.walked_rows
-    and stats.root_count = case when stats.total_rows = 0 then 0 else 1 end
-    and stats.terminal_count = case when stats.total_rows = 0 then 0 else 1 end
-    and stats.missing_parent_count = 0
-    and stats.fork_count = 0
-    and stats.invalid_hash_count = 0
-    and stats.version_order_violation_count = 0
-    and (
-      stats.total_rows = 0
-      or exists (
+    (select pg_catalog.count(*) from transition_state) = 1
+    and exists (
+      select 1
+      from transition_state transition_row
+      cross join computed_v1 commitment
+      where transition_row.source_row_count = commitment.source_row_count
+        and transition_row.commitment_algorithm =
+          'sha256-sorted-entry-hash-set-v1-c-collation'
+        and transition_row.source_commitment = commitment.source_commitment
+        and transition_row.source_root_count = v1_stats.root_count
+        and transition_row.source_terminal_count = v1_stats.terminal_count
+        and transition_row.source_fork_count = v1_stats.fork_count
+    )
+  ) as source_transition_valid,
+  (
+    (
+      v2_stats.total_rows = 0
+      and exists (
         select 1
-        from terminal_head terminal
+        from edoc_private.audit_log_chain_heads chain_head
+        cross join transition_state transition_row
+        where chain_head.chain_version = 2
+          and chain_head.head_hash = transition_row.source_commitment
+          and chain_head.last_audit_id is null
+      )
+    )
+    or (
+      v2_stats.total_rows > 0
+      and exists (
+        select 1
+        from v2_terminal terminal
         join edoc_private.audit_log_chain_heads chain_head
           on chain_head.chain_version = 2
          and chain_head.last_audit_id = terminal.id
          and chain_head.head_hash = terminal.entry_hash
       )
     )
+  ) as private_head_matches_terminal,
+  (
+    v1_stats.total_rows = v1_stats.walked_rows
+    and v1_stats.root_count = case when v1_stats.total_rows = 0 then 0 else 1 end
+    and (
+      (v1_stats.total_rows = 0 and v1_stats.terminal_count = 0)
+      or (v1_stats.total_rows > 0 and v1_stats.terminal_count >= 1)
+    )
+    and v1_stats.missing_parent_count = 0
+    and v1_stats.invalid_hash_count = 0
+    and v1_stats.mutable_row_count = 0
+    and v1_stats.duplicate_hash_count = 0
+    and (select pg_catalog.count(*) from transition_state) = 1
+    and exists (
+      select 1
+      from transition_state transition_row
+      cross join computed_v1 commitment
+      where transition_row.source_row_count = commitment.source_row_count
+        and transition_row.commitment_algorithm =
+          'sha256-sorted-entry-hash-set-v1-c-collation'
+        and transition_row.source_commitment = commitment.source_commitment
+        and transition_row.source_root_count = v1_stats.root_count
+        and transition_row.source_terminal_count = v1_stats.terminal_count
+        and transition_row.source_fork_count = v1_stats.fork_count
+    )
+    and v2_stats.total_rows = v2_stats.walked_rows
+    and v2_stats.root_count = case when v2_stats.total_rows = 0 then 0 else 1 end
+    and v2_stats.terminal_count = case when v2_stats.total_rows = 0 then 0 else 1 end
+    and v2_stats.missing_parent_count = 0
+    and v2_stats.fork_count = 0
+    and v2_stats.invalid_hash_count = 0
+    and v2_stats.mutable_row_count = 0
+    and v2_stats.duplicate_hash_count = 0
+    and v2_stats.legacy_root_count = 0
+    and version_stats.version_order_violation_count = 0
+    and version_stats.unsupported_version_count = 0
+    and (
+      (
+        v2_stats.total_rows = 0
+        and exists (
+          select 1
+          from edoc_private.audit_log_chain_heads chain_head
+          cross join transition_state transition_row
+          where chain_head.chain_version = 2
+            and chain_head.head_hash = transition_row.source_commitment
+            and chain_head.last_audit_id is null
+        )
+      )
+      or (
+        v2_stats.total_rows > 0
+        and exists (
+          select 1
+          from v2_terminal terminal
+          join edoc_private.audit_log_chain_heads chain_head
+            on chain_head.chain_version = 2
+           and chain_head.last_audit_id = terminal.id
+           and chain_head.head_hash = terminal.entry_hash
+        )
+      )
+    )
   ) as chain_continuity_valid
-from chain_stats stats;
+from v1_stats
+cross join v2_stats
+cross join version_stats;
 
 -- 9. Notification readiness. Internal inbox is the launch baseline; external
 -- credentials may legitimately remain pending. No credential values are read.
@@ -732,6 +1048,7 @@ where upload_status in ('pending', 'uploading', 'uploaded')
 -- index_exists=true after the forward migration.
 with required_indexes(index_name) as (
   values
+    ('idx_audit_logs_chain_parent'),
     ('idx_inbound_attachments_file_object'),
     ('idx_internal_dispatches_official_document'),
     ('idx_internal_dispatch_replies_recipient'),
