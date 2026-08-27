@@ -107,6 +107,15 @@ begin
       raise exception 'service_role_table_missing:%', v_row.table_name;
     end if;
 
+    if not exists (
+      select 1
+      from pg_catalog.pg_class relation_row
+      where relation_row.oid = v_table
+        and pg_catalog.pg_get_userbyid(relation_row.relowner) = 'postgres'
+    ) then
+      raise exception 'service_role_table_owner_mismatch:%', v_row.table_name;
+    end if;
+
     v_expected := position('S' in v_row.operations) > 0;
     if pg_catalog.has_table_privilege('service_role', v_table, 'SELECT') is distinct from v_expected then
       raise exception 'service_role_table_grant_mismatch:%:SELECT', v_row.table_name;
@@ -190,15 +199,35 @@ begin
   if exists (
     select 1
     from pg_catalog.pg_default_acl default_acl
+    join pg_catalog.pg_roles owner_role
+      on owner_role.oid = default_acl.defaclrole
     join pg_catalog.pg_namespace namespace_row
       on namespace_row.oid = default_acl.defaclnamespace
     cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege_row
-    where namespace_row.nspname = 'public'
+    where owner_role.rolname = 'postgres'
+      and namespace_row.nspname = 'public'
       and (
         privilege_row.grantee = 0
         or pg_catalog.pg_get_userbyid(privilege_row.grantee)
           in ('anon', 'authenticated', 'service_role')
       )
+  ) or exists (
+    select 1
+    from pg_catalog.aclexplode(
+      coalesce(
+        (
+          select default_acl.defaclacl
+          from pg_catalog.pg_default_acl default_acl
+          where default_acl.defaclrole = 'postgres'::regrole
+            and default_acl.defaclnamespace = 0
+            and default_acl.defaclobjtype = 'f'
+        ),
+        pg_catalog.acldefault('f', 'postgres'::regrole)
+      )
+    ) privilege_row
+    where privilege_row.grantee = 0
+       or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+         in ('anon', 'authenticated', 'service_role')
   ) then
     raise exception 'service_role_unexpected_public_default_acl';
   end if;
@@ -241,6 +270,12 @@ begin
   loop
     v_oid := pg_catalog.to_regprocedure(v_signature);
     if v_oid is null
+       or not exists (
+         select 1
+         from pg_catalog.pg_proc procedure_row
+         where procedure_row.oid = v_oid
+           and pg_catalog.pg_get_userbyid(procedure_row.proowner) = 'postgres'
+       )
        or not pg_catalog.has_function_privilege('service_role', v_oid, 'EXECUTE')
        or pg_catalog.has_function_privilege('anon', v_oid, 'EXECUTE')
        or pg_catalog.has_function_privilege('authenticated', v_oid, 'EXECUTE') then

@@ -4,6 +4,17 @@
 
 begin;
 
+-- Exercise effective privileges, not only catalog rows. PostgreSQL otherwise
+-- gives every future function PUBLIC EXECUTE through its global default ACL.
+-- This probe is transaction-local because the file always rolls back.
+create function public.edoc_ci_default_acl_probe()
+returns integer
+language sql
+stable
+as $default_acl_probe$
+  select 1
+$default_acl_probe$;
+
 do $$
 declare
   v_count integer;
@@ -55,17 +66,55 @@ begin
   ) or exists (
     select 1
     from pg_catalog.pg_default_acl default_acl
+    join pg_catalog.pg_roles owner_role
+      on owner_role.oid = default_acl.defaclrole
     join pg_catalog.pg_namespace namespace_row
       on namespace_row.oid = default_acl.defaclnamespace
     cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege_row
-    where namespace_row.nspname = 'public'
+    where owner_role.rolname = 'postgres'
+      and namespace_row.nspname = 'public'
       and (
         privilege_row.grantee = 0
         or pg_catalog.pg_get_userbyid(privilege_row.grantee)
           in ('anon', 'authenticated', 'service_role')
       )
+  ) or exists (
+    select 1
+    from pg_catalog.aclexplode(
+      coalesce(
+        (
+          select default_acl.defaclacl
+          from pg_catalog.pg_default_acl default_acl
+          where default_acl.defaclrole = 'postgres'::regrole
+            and default_acl.defaclnamespace = 0
+            and default_acl.defaclobjtype = 'f'
+        ),
+        pg_catalog.acldefault('f', 'postgres'::regrole)
+      )
+    ) privilege_row
+    where privilege_row.grantee = 0
+       or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+         in ('anon', 'authenticated', 'service_role')
   ) then
     raise exception 'fresh_bootstrap_browser_data_api_exposed';
+  end if;
+
+  if pg_catalog.has_function_privilege(
+       'anon',
+       'public.edoc_ci_default_acl_probe()',
+       'EXECUTE'
+     )
+     or pg_catalog.has_function_privilege(
+       'authenticated',
+       'public.edoc_ci_default_acl_probe()',
+       'EXECUTE'
+     )
+     or pg_catalog.has_function_privilege(
+       'service_role',
+       'public.edoc_ci_default_acl_probe()',
+       'EXECUTE'
+     ) then
+    raise exception 'fresh_bootstrap_future_function_default_exposed';
   end if;
 
   select count(*) into v_count

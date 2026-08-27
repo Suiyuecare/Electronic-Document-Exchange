@@ -13,6 +13,74 @@ alter default privileges for role postgres in schema public
   revoke all privileges on functions
   from public, anon, authenticated, service_role;
 
+-- PostgreSQL grants EXECUTE on future functions to PUBLIC at the global
+-- default-ACL layer. A per-schema REVOKE cannot cancel that inherited grant,
+-- so close it for the application migration owner explicitly. The reserved
+-- `supabase_admin` defaults are platform-managed and cannot be altered by the
+-- hosted project's non-superuser postgres role; application objects are owned
+-- by postgres and are verified separately below.
+alter default privileges for role postgres
+  revoke execute on functions from public;
+
+do $verify_postgres_api_default_acls$
+declare
+  v_remaining text;
+begin
+  select pg_catalog.string_agg(
+    distinct pg_catalog.format(
+      '%s:%s',
+      default_acl.defaclobjtype,
+      case
+        when privilege_row.grantee = 0 then 'PUBLIC'
+        else pg_catalog.pg_get_userbyid(privilege_row.grantee)
+      end
+    ),
+    ','
+  ) into v_remaining
+  from pg_catalog.pg_default_acl default_acl
+  join pg_catalog.pg_namespace namespace_row
+    on namespace_row.oid = default_acl.defaclnamespace
+  cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege_row
+  where default_acl.defaclrole = 'postgres'::regrole
+    and namespace_row.nspname = 'public'
+    and (
+      privilege_row.grantee = 0
+      or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+        in ('anon', 'authenticated', 'service_role')
+    );
+
+  if v_remaining is not null then
+    raise exception using
+      errcode = '42501',
+      message = 'edoc_postgres_public_default_acl_revoke_failed',
+      detail = v_remaining;
+  end if;
+
+  if exists (
+    select 1
+    from pg_catalog.aclexplode(
+      coalesce(
+        (
+          select default_acl.defaclacl
+          from pg_catalog.pg_default_acl default_acl
+          where default_acl.defaclrole = 'postgres'::regrole
+            and default_acl.defaclnamespace = 0
+            and default_acl.defaclobjtype = 'f'
+        ),
+        pg_catalog.acldefault('f', 'postgres'::regrole)
+      )
+    ) privilege_row
+    where privilege_row.grantee = 0
+       or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+         in ('anon', 'authenticated', 'service_role')
+  ) then
+    raise exception using
+      errcode = '42501',
+      message = 'edoc_postgres_global_function_default_acl_exposed';
+  end if;
+end
+$verify_postgres_api_default_acls$;
+
 -- Revoke every historical browser Data API grant, not only grants on tables
 -- introduced by the V2 recovery migration. The web application talks to
 -- PostgREST exclusively through the authenticated eDoc backend; the only

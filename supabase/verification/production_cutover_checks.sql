@@ -70,12 +70,42 @@ join pg_catalog.pg_namespace namespace_row
   on namespace_row.oid = default_acl.defaclnamespace
 cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege_row
 where namespace_row.nspname = 'public'
+  and owner_role.rolname = 'postgres'
   and (
     privilege_row.grantee = 0
     or pg_catalog.pg_get_userbyid(privilege_row.grantee)
       in ('anon', 'authenticated', 'service_role')
   )
 order by owner_role, object_type, grantee, privilege_row.privilege_type;
+
+-- Application migrations create functions as postgres. PostgreSQL's built-in
+-- global default grants EXECUTE to PUBLIC unless it is explicitly revoked;
+-- pass condition is zero rows. Reserved Supabase platform-role defaults are
+-- managed by Supabase and are not alterable by the hosted postgres role.
+select
+  'postgres' as owner_role,
+  'global-functions' as object_type,
+  case
+    when privilege_row.grantee = 0 then 'PUBLIC'
+    else pg_catalog.pg_get_userbyid(privilege_row.grantee)
+  end as grantee,
+  privilege_row.privilege_type
+from pg_catalog.aclexplode(
+  coalesce(
+    (
+      select default_acl.defaclacl
+      from pg_catalog.pg_default_acl default_acl
+      where default_acl.defaclrole = 'postgres'::regrole
+        and default_acl.defaclnamespace = 0
+        and default_acl.defaclobjtype = 'f'
+    ),
+    pg_catalog.acldefault('f', 'postgres'::regrole)
+  )
+) privilege_row
+where privilege_row.grantee = 0
+   or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+     in ('anon', 'authenticated', 'service_role')
+order by grantee, privilege_row.privilege_type;
 
 select tablename, policyname, roles
 from pg_catalog.pg_policies
@@ -181,6 +211,12 @@ with backend_tables(table_name) as (
 select
   table_name,
   table_oid is not null as table_exists,
+  case when table_oid is null then false else exists (
+    select 1
+    from pg_catalog.pg_class relation_row
+    where relation_row.oid = table_oid
+      and pg_catalog.pg_get_userbyid(relation_row.relowner) = 'postgres'
+  ) end as owner_matches,
   not exists (
     select 1
     from information_schema.table_privileges privilege_row
@@ -234,9 +270,20 @@ with required_rpcs(signature) as (
     ('public.edoc_register_official_archive_export(text,text,text,text,text,integer,bigint,text,text,text)'),
     ('public.edoc_commit_official_document_submission(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
+), resolved as (
+  select signature, pg_catalog.to_regprocedure(signature) as oid
+  from required_rpcs
 )
-select signature, pg_catalog.to_regprocedure(signature) is null as missing
-from required_rpcs
+select
+  signature,
+  oid is null as missing,
+  case when oid is null then false else exists (
+    select 1
+    from pg_catalog.pg_proc procedure_row
+    where procedure_row.oid = resolved.oid
+      and pg_catalog.pg_get_userbyid(procedure_row.proowner) = 'postgres'
+  ) end as owner_matches
+from resolved
 order by signature;
 
 -- 4. Privileged RPC grants. service_role=true and anon/authenticated=false are

@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 
 try:
-    from pglast import parse_sql
+    from pglast import parse_plpgsql, parse_sql
 except ImportError:  # pragma: no cover - CI installs the pinned SQL parser.
+    parse_plpgsql = None
     parse_sql = None
 
 
@@ -157,6 +158,13 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                     sql,
                 )
         self.assertIn("alter default privileges for role postgres in schema public", sql)
+        self.assertIn("alter default privileges for role postgres\n  revoke execute on functions from public", sql)
+        self.assertIn("do $verify_postgres_api_default_acls$", sql)
+        self.assertIn("from pg_catalog.pg_default_acl", sql)
+        self.assertIn("edoc_postgres_public_default_acl_revoke_failed", sql)
+        self.assertIn("edoc_postgres_global_function_default_acl_exposed", sql)
+        self.assertIn("pg_catalog.acldefault('f', 'postgres'::regrole)", sql)
+        self.assertNotIn("foreach v_owner in array v_owners", sql)
         self.assertIn(
             "revoke all privileges on tables",
             sql,
@@ -302,6 +310,12 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertIn("from pg_catalog.pg_default_acl", cutover)
         self.assertIn("from pg_catalog.pg_default_acl", matrix_smoke)
         self.assertIn("from pg_catalog.pg_default_acl", fresh_smoke)
+        self.assertIn("owner_role.rolname = 'postgres'", cutover)
+        self.assertIn("owner_role.rolname = 'postgres'", matrix_smoke)
+        self.assertIn("owner_role.rolname = 'postgres'", fresh_smoke)
+        self.assertIn("pg_catalog.acldefault('f', 'postgres'::regrole)", cutover)
+        self.assertIn("pg_catalog.acldefault('f', 'postgres'::regrole)", matrix_smoke)
+        self.assertIn("pg_catalog.acldefault('f', 'postgres'::regrole)", fresh_smoke)
         self.assertIn(
             "grantee in ('public', 'anon', 'authenticated')",
             cutover,
@@ -404,6 +418,8 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertIn("fresh_bootstrap_demo_account_present", fresh_smoke)
         self.assertIn("fresh_bootstrap_finance_sentinel_present", fresh_smoke)
         self.assertIn("fresh_bootstrap_browser_data_api_exposed", fresh_smoke)
+        self.assertIn("public.edoc_ci_default_acl_probe()", fresh_smoke)
+        self.assertIn("fresh_bootstrap_future_function_default_exposed", fresh_smoke)
         for view in (
             "information_schema.table_privileges",
             "information_schema.usage_privileges",
@@ -451,6 +467,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
     def test_new_verification_and_storage_sql_parse_as_postgresql(self) -> None:
         for path in (
             GRANT_HARDENING,
+            FRESH_BOOTSTRAP_SMOKE,
             RUNTIME_SMOKE,
             SERVICE_ROLE_GRANT_SMOKE,
             STORAGE_BASE,
@@ -461,6 +478,13 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         ):
             with self.subTest(path=path.name):
                 parse_sql(path.read_text(encoding="utf-8"))
+        for path in (
+            GRANT_HARDENING,
+            FRESH_BOOTSTRAP_SMOKE,
+            SERVICE_ROLE_GRANT_SMOKE,
+        ):
+            with self.subTest(plpgsql_path=path.name):
+                parse_plpgsql(path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
