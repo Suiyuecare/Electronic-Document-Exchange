@@ -202,7 +202,7 @@ begin
     select 1
     from pg_catalog.pg_proc procedure_row
     cross join lateral pg_catalog.aclexplode(
-      pg_catalog.coalesce(
+      coalesce(
         procedure_row.proacl,
         pg_catalog.acldefault('f', procedure_row.proowner)
       )
@@ -251,7 +251,7 @@ begin
     select 1
     from pg_catalog.pg_proc procedure_row
     cross join lateral pg_catalog.aclexplode(
-      pg_catalog.coalesce(
+      coalesce(
         procedure_row.proacl,
         pg_catalog.acldefault('f', procedure_row.proowner)
       )

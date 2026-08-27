@@ -31,7 +31,7 @@ begin
     pg_catalog.hashtextextended('edoc:dispatch-event:' || new.id, 0)
   );
 
-  select pg_catalog.coalesce(
+  select coalesce(
            pg_catalog.max(event.event_sequence),
            0::bigint
          ) + 1
@@ -55,7 +55,7 @@ begin
       'completed_at'
     ]::text[];
   else
-    select pg_catalog.coalesce(
+    select coalesce(
              pg_catalog.array_agg(change.field_name order by change.ordinal),
              array[]::text[]
            )
@@ -115,9 +115,9 @@ begin
     'hex'
   );
 
-  v_database_actor := pg_catalog.coalesce(
-    pg_catalog.nullif(pg_catalog.current_setting('request.jwt.claim.sub', true), ''),
-    pg_catalog.nullif(pg_catalog.current_setting('request.jwt.claim.role', true), ''),
+  v_database_actor := coalesce(
+    nullif(pg_catalog.current_setting('request.jwt.claim.sub', true), ''),
+    nullif(pg_catalog.current_setting('request.jwt.claim.role', true), ''),
     session_user::text
   );
 

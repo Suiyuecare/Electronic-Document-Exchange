@@ -187,6 +187,8 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                 self.assertIn("pg_catalog.hashtextextended", sql)
                 self.assertIn("pg_catalog.max(event.event_sequence)", sql)
                 self.assertIn("0::bigint", sql)
+                self.assertNotIn("pg_catalog.coalesce(", sql)
+                self.assertNotIn("pg_catalog.nullif(", sql)
                 self.assertIn("'created'", sql)
                 self.assertIn("'metadata_updated'", sql)
                 self.assertIn("'status_transition'", sql)
@@ -255,6 +257,8 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertIn("v_dispatch_identity_qual", runtime_smoke)
         self.assertIn("expected.capture_qual", cutover)
         self.assertIn("expected.identity_qual", cutover)
+        self.assertNotIn("pg_catalog.coalesce(", runtime_smoke)
+        self.assertNotIn("pg_catalog.coalesce(", cutover)
         self.assertGreaterEqual(
             runtime_smoke.count("trigger_row.tgfoid"),
             2,

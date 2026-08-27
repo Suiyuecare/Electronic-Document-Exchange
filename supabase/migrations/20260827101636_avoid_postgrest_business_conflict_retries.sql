@@ -24,6 +24,8 @@ declare
   v_retry_code constant text := '''40001''';
   v_unique_code constant text := '''23505''';
   v_conflict_code constant text := '''PT409''';
+  v_qualified_coalesce constant text := 'pg_catalog.coalesce(';
+  v_qualified_nullif constant text := 'pg_catalog.nullif(';
 begin
   for v_target in
     select *
@@ -110,6 +112,98 @@ begin
         errcode = '55000',
         message = 'edoc_business_conflict_unique_rewrite_failed:'
           || v_target.signature;
+    end if;
+  end loop;
+
+  -- COALESCE is SQL syntax rather than a schema-qualified function.  Earlier
+  -- generated definitions used pg_catalog.coalesce(...), which parses but
+  -- fails only when the branch executes on PostgreSQL 17.  Accept either the
+  -- exact legacy count or an already-corrected definition, then guarantee the
+  -- effective runtime body is valid.
+  for v_target in
+    select *
+    from (values
+      ('public.edoc_apply_official_document_correction(text,text,text,jsonb,text,jsonb,jsonb,text,jsonb,jsonb,text,text,text,text,text,text,jsonb,text,text)', 15),
+      ('public.edoc_finalize_official_document_resubmit(text,text,text,timestamp with time zone,text,text,text,text,text)', 7),
+      ('edoc_private.capture_official_dispatch_event_v1()', 3)
+    ) as target(signature, expected_occurrences)
+  loop
+    v_oid := pg_catalog.to_regprocedure(v_target.signature);
+    if v_oid is null then
+      raise exception using
+        errcode = '55000',
+        message = 'edoc_business_conflict_rpc_missing:' || v_target.signature;
+    end if;
+
+    v_definition := pg_catalog.pg_get_functiondef(v_oid);
+    v_occurrences := (
+      pg_catalog.length(v_definition)
+      - pg_catalog.length(
+          pg_catalog.replace(v_definition, v_qualified_coalesce, '')
+        )
+    ) / pg_catalog.length(v_qualified_coalesce);
+
+    if v_occurrences not in (0, v_target.expected_occurrences) then
+      raise exception using
+        errcode = '55000',
+        message = 'edoc_runtime_coalesce_definition_drift:'
+          || v_target.signature || ':' || v_occurrences::text;
+    end if;
+
+    if v_occurrences = v_target.expected_occurrences then
+      execute pg_catalog.replace(
+        v_definition,
+        v_qualified_coalesce,
+        'coalesce('
+      );
+    end if;
+
+    v_definition := pg_catalog.pg_get_functiondef(v_oid);
+    if pg_catalog.strpos(v_definition, v_qualified_coalesce) <> 0 then
+      raise exception using
+        errcode = '55000',
+        message = 'edoc_runtime_coalesce_rewrite_failed:' || v_target.signature;
+    end if;
+  end loop;
+
+  for v_target in
+    select *
+    from (values
+      ('public.edoc_apply_official_document_correction(text,text,text,jsonb,text,jsonb,jsonb,text,jsonb,jsonb,text,text,text,text,text,text,jsonb,text,text)', 1),
+      ('edoc_private.capture_official_dispatch_event_v1()', 2)
+    ) as target(signature, expected_occurrences)
+  loop
+    v_oid := pg_catalog.to_regprocedure(v_target.signature);
+    if v_oid is null then
+      raise exception using
+        errcode = '55000',
+        message = 'edoc_business_conflict_rpc_missing:' || v_target.signature;
+    end if;
+
+    v_definition := pg_catalog.pg_get_functiondef(v_oid);
+    v_occurrences := (
+      pg_catalog.length(v_definition)
+      - pg_catalog.length(
+          pg_catalog.replace(v_definition, v_qualified_nullif, '')
+        )
+    ) / pg_catalog.length(v_qualified_nullif);
+
+    if v_occurrences not in (0, v_target.expected_occurrences) then
+      raise exception using
+        errcode = '55000',
+        message = 'edoc_runtime_nullif_definition_drift:'
+          || v_target.signature || ':' || v_occurrences::text;
+    end if;
+
+    if v_occurrences = v_target.expected_occurrences then
+      execute pg_catalog.replace(v_definition, v_qualified_nullif, 'nullif(');
+    end if;
+
+    v_definition := pg_catalog.pg_get_functiondef(v_oid);
+    if pg_catalog.strpos(v_definition, v_qualified_nullif) <> 0 then
+      raise exception using
+        errcode = '55000',
+        message = 'edoc_runtime_nullif_rewrite_failed:' || v_target.signature;
     end if;
   end loop;
 end

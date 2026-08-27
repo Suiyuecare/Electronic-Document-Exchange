@@ -2337,10 +2337,10 @@ begin
         raise exception using errcode = '22023', message = 'invalid_official_stamp_position';
       end if;
     elsif nullif(pg_catalog.btrim(v_position->>'locked_seal_file_id'), '') is null
-       or pg_catalog.coalesce(v_position->>'locked_seal_sha256', '') !~ '^[0-9A-Fa-f]{64}$'
+       or coalesce(v_position->>'locked_seal_sha256', '') !~ '^[0-9A-Fa-f]{64}$'
        or (v_position->>'locked_render_width_pt')::numeric <= 0
        or (v_position->>'locked_render_height_pt')::numeric <= 0
-       or pg_catalog.coalesce(v_position->>'locked_dimension_policy_version', '')
+       or coalesce(v_position->>'locked_dimension_policy_version', '')
             not in ('institution-seal-v1', 'institution-seal-v2-calibrated') then
       raise exception using errcode = '22023', message = 'invalid_official_stamp_position';
     end if;
@@ -2451,15 +2451,15 @@ begin
         v_position->>'seal_id', (v_position->>'page')::integer,
         (v_position->>'x')::numeric, (v_position->>'y')::numeric,
         (v_position->>'width')::numeric, (v_position->>'height')::numeric,
-        pg_catalog.coalesce(v_position->>'page_ref', ''),
-        pg_catalog.coalesce((v_position->>'rotation')::numeric, 0),
-        pg_catalog.coalesce((v_position->>'opacity')::numeric, 1),
-        pg_catalog.coalesce((v_position->>'z_index')::integer, v_position_index::integer),
-        pg_catalog.nullif(pg_catalog.btrim(v_position->>'locked_seal_file_id'), ''),
-        pg_catalog.coalesce(v_position->>'locked_seal_sha256', ''),
+        coalesce(v_position->>'page_ref', ''),
+        coalesce((v_position->>'rotation')::numeric, 0),
+        coalesce((v_position->>'opacity')::numeric, 1),
+        coalesce((v_position->>'z_index')::integer, v_position_index::integer),
+        nullif(pg_catalog.btrim(v_position->>'locked_seal_file_id'), ''),
+        coalesce(v_position->>'locked_seal_sha256', ''),
         (v_position->>'locked_render_width_pt')::numeric,
         (v_position->>'locked_render_height_pt')::numeric,
-        pg_catalog.coalesce(v_position->>'locked_dimension_policy_version', ''),
+        coalesce(v_position->>'locked_dimension_policy_version', ''),
         v_position_index::integer, v_timestamp, v_timestamp
       );
     end loop;
@@ -2480,7 +2480,7 @@ begin
       );
     end loop;
   else
-    v_active_request_id := pg_catalog.coalesce(v_request.id, '');
+    v_active_request_id := coalesce(v_request.id, '');
     if v_request.id is not null then
       delete from public.official_document_stamp_positions where request_id = v_request.id;
       delete from public.official_document_text_overlays where request_id = v_request.id;
@@ -2522,7 +2522,7 @@ begin
        ) then
       raise exception using errcode = '42501', message = 'official_document_correction_file_invalid';
     end if;
-    select pg_catalog.coalesce(pg_catalog.max(file.version), 0) + 1
+    select coalesce(pg_catalog.max(file.version), 0) + 1
       into v_next_version
       from public.official_document_files as file
      where file.document_id = p_document_id
@@ -2562,7 +2562,7 @@ begin
     'stamp_request_id', v_active_request_id,
     'stamp_position_count', pg_catalog.jsonb_array_length(p_stamp_positions),
     'source_file_id', v_active_file_id,
-    'source_sha256', pg_catalog.coalesce(v_file.sha256, '')
+    'source_sha256', coalesce(v_file.sha256, '')
   );
   insert into public.official_document_approval_logs (
     id, document_id, step_id, file_id, actor_id, actor_name,
@@ -2572,8 +2572,8 @@ begin
     p_log_id, p_document_id, null, nullif(v_active_file_id, ''),
     p_applicant_id, p_actor_name, p_applicant_id, 'correct',
     '申請人完成補正並建立可稽核的新版本', v_evidence,
-    pg_catalog.left(pg_catalog.coalesce(p_ip_address, ''), 120),
-    pg_catalog.left(pg_catalog.coalesce(p_user_agent, ''), 180), v_timestamp
+    pg_catalog.left(coalesce(p_ip_address, ''), 120),
+    pg_catalog.left(coalesce(p_user_agent, ''), 180), v_timestamp
   );
   insert into public.audit_logs (
     id, actor, actor_user_id, action, target_type, target_id, detail,
@@ -2590,7 +2590,7 @@ begin
       'status', v_document.current_status,
       'updated_field_count', pg_catalog.jsonb_array_length(p_updated_fields),
       'stamp_position_count', pg_catalog.jsonb_array_length(p_stamp_positions),
-      'source_sha256', pg_catalog.coalesce(v_file.sha256, '')
+      'source_sha256', coalesce(v_file.sha256, '')
     )::text,
     pg_catalog.jsonb_build_object(
       'stamp_request_id', v_active_request_id,
@@ -2603,7 +2603,7 @@ begin
     'document_id', p_document_id,
     'stamp_request_id', v_active_request_id,
     'official_file_id', v_active_file_id,
-    'source_sha256', pg_catalog.coalesce(v_file.sha256, ''),
+    'source_sha256', coalesce(v_file.sha256, ''),
     'updated_fields', p_updated_fields
   );
 end;
@@ -2665,7 +2665,7 @@ begin
   end if;
 
   update public.official_documents
-     set correction_resubmitted_at = pg_catalog.coalesce(correction_resubmitted_at, v_timestamp),
+     set correction_resubmitted_at = coalesce(correction_resubmitted_at, v_timestamp),
          correction_reason_category = null,
          correction_missing_items_json = '[]'::jsonb,
          correction_due_at = null,
@@ -2678,16 +2678,16 @@ begin
     ip_address, user_agent, created_at
   ) values (
     p_log_id, p_document_id, null, null, p_applicant_id,
-    pg_catalog.coalesce(nullif(pg_catalog.btrim(v_actor.name), ''), v_actor.email),
+    coalesce(nullif(pg_catalog.btrim(v_actor.name), ''), v_actor.email),
     p_applicant_id, 'resubmit',
-    pg_catalog.left(pg_catalog.coalesce(nullif(pg_catalog.btrim(p_comment), ''), '補正完成，重新由第一關送簽'), 2000),
+    pg_catalog.left(coalesce(nullif(pg_catalog.btrim(p_comment), ''), '補正完成，重新由第一關送簽'), 2000),
     pg_catalog.jsonb_build_object(
       'correction_requested_at', p_expected_correction_requested_at,
       'workflow_status', v_document.current_status,
       'workflow_step', v_document.current_step
     ),
-    pg_catalog.left(pg_catalog.coalesce(p_ip_address, ''), 120),
-    pg_catalog.left(pg_catalog.coalesce(p_user_agent, ''), 180),
+    pg_catalog.left(coalesce(p_ip_address, ''), 120),
+    pg_catalog.left(coalesce(p_user_agent, ''), 180),
     pg_catalog.to_char(v_timestamp, 'YYYY-MM-DD HH24:MI:SS')
   ) on conflict (id) do nothing;
   if not exists (
@@ -2706,14 +2706,14 @@ begin
     request_id, before_snapshot_json, after_snapshot_json, metadata_json, created_at
   ) values (
     p_audit_id,
-    pg_catalog.coalesce(nullif(pg_catalog.btrim(v_actor.name), ''), v_actor.email),
+    coalesce(nullif(pg_catalog.btrim(v_actor.name), ''), v_actor.email),
     p_applicant_id, 'resubmit', 'official_documents', p_document_id,
     'official_document_correction_resubmitted', 'submit', 'info', 'success',
     'official_documents', 'official_documents', p_document_id,
     'req_' || pg_catalog.substr(pg_catalog.md5(p_log_id), 1, 16),
     pg_catalog.jsonb_build_object('correction_requested_at', p_expected_correction_requested_at)::text,
     pg_catalog.jsonb_build_object(
-      'correction_resubmitted_at', pg_catalog.coalesce(v_document.correction_resubmitted_at, v_timestamp),
+      'correction_resubmitted_at', coalesce(v_document.correction_resubmitted_at, v_timestamp),
       'workflow_status', v_document.current_status,
       'workflow_step', v_document.current_step
     )::text,
@@ -4078,7 +4078,7 @@ begin
     pg_catalog.hashtextextended('edoc:dispatch-event:' || new.id, 0)
   );
 
-  select pg_catalog.coalesce(
+  select coalesce(
            pg_catalog.max(event.event_sequence),
            0::bigint
          ) + 1
@@ -4102,7 +4102,7 @@ begin
       'completed_at'
     ]::text[];
   else
-    select pg_catalog.coalesce(
+    select coalesce(
              pg_catalog.array_agg(change.field_name order by change.ordinal),
              array[]::text[]
            )
@@ -4162,9 +4162,9 @@ begin
     'hex'
   );
 
-  v_database_actor := pg_catalog.coalesce(
-    pg_catalog.nullif(pg_catalog.current_setting('request.jwt.claim.sub', true), ''),
-    pg_catalog.nullif(pg_catalog.current_setting('request.jwt.claim.role', true), ''),
+  v_database_actor := coalesce(
+    nullif(pg_catalog.current_setting('request.jwt.claim.sub', true), ''),
+    nullif(pg_catalog.current_setting('request.jwt.claim.role', true), ''),
     session_user::text
   );
 

@@ -409,7 +409,7 @@ with capture_function as (
     from capture_function capture
     join pg_catalog.pg_proc procedure_row on procedure_row.oid = capture.oid
     cross join lateral pg_catalog.aclexplode(
-      pg_catalog.coalesce(
+      coalesce(
         procedure_row.proacl,
         pg_catalog.acldefault('f', procedure_row.proowner)
       )
@@ -424,7 +424,7 @@ with capture_function as (
     join pg_catalog.pg_proc procedure_row
       on procedure_row.oid = identity_guard.oid
     cross join lateral pg_catalog.aclexplode(
-      pg_catalog.coalesce(
+      coalesce(
         procedure_row.proacl,
         pg_catalog.acldefault('f', procedure_row.proowner)
       )

@@ -318,6 +318,15 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
             "public.edoc_commit_official_document_submission(jsonb)": 2,
             "public.edoc_finalize_editor_asset_v2(jsonb)": 5,
         }
+        expected_qualified_coalesce_rewrites = {
+            "public.edoc_apply_official_document_correction(text,text,text,jsonb,text,jsonb,jsonb,text,jsonb,jsonb,text,text,text,text,text,text,jsonb,text,text)": 15,
+            "public.edoc_finalize_official_document_resubmit(text,text,text,timestamp with time zone,text,text,text,text,text)": 7,
+            "edoc_private.capture_official_dispatch_event_v1()": 3,
+        }
+        expected_qualified_nullif_rewrites = {
+            "public.edoc_apply_official_document_correction(text,text,text,jsonb,text,jsonb,jsonb,text,jsonb,jsonb,text,text,text,text,text,text,jsonb,text,text)": 1,
+            "edoc_private.capture_official_dispatch_event_v1()": 2,
+        }
 
         # Find every public function whose source manually labels a permanent
         # business conflict as PostgreSQL serialization_failure.  A newly
@@ -382,12 +391,26 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("v_retry_code constant text := '''40001'''", hardening)
         self.assertIn("v_unique_code constant text := '''23505'''", hardening)
         self.assertIn("v_conflict_code constant text := '''pt409'''", hardening)
+        self.assertIn(
+            "v_qualified_coalesce constant text := 'pg_catalog.coalesce('",
+            hardening,
+        )
+        self.assertIn(
+            "v_qualified_nullif constant text := 'pg_catalog.nullif('",
+            hardening,
+        )
         self.assertIn("edoc_business_conflict_rpc_definition_drift", hardening)
         self.assertIn("notify pgrst, 'reload schema'", hardening)
         for signature, count in expected.items():
             self.assertIn(f"('{signature}', {count})", hardening)
         for signature, count in expected_unique_business_conflicts.items():
             self.assertIn(f"('{signature}', {count})", hardening)
+        for signature, count in expected_qualified_coalesce_rewrites.items():
+            self.assertIn(f"('{signature}', {count})", hardening)
+        for signature, count in expected_qualified_nullif_rewrites.items():
+            self.assertIn(f"('{signature}', {count})", hardening)
+        self.assertNotIn("pg_catalog.coalesce(", recovery.lower())
+        self.assertNotIn("pg_catalog.nullif(", recovery.lower())
         if parse_sql is not None:
             parse_sql(hardening)
         if parse_plpgsql is not None:
