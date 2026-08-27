@@ -113,10 +113,12 @@ where schemaname = 'public'
   and roles && array['public', 'anon', 'authenticated']::name[]
 order by tablename, policyname;
 
--- 2b. Exact backend grant parity. Pass condition: grant_matches=true for all
--- 87 direct PostgREST tables. The first 81 are backend.TABLES and the final
--- six are dedicated Finance/SSO/rejection workflow tables. Write arrays are
--- the direct backend.py call matrix, not a blanket CRUD grant.
+-- 2b. Exact backend grant parity for all 87 direct PostgREST tables.
+-- Pass condition: table_exists, owner_matches, no_unexpected_table_grants and
+-- grant_matches must all be true for every row, in addition to the zero-row
+-- browser-grant checks in section 2. The first 81 are backend.TABLES and the
+-- final six are dedicated Finance/SSO/rejection workflow tables. Write arrays
+-- are the direct backend.py call matrix, not a blanket CRUD grant.
 with backend_tables(table_name) as (
   select unnest(array[
     'approval_step_actor_snapshots', 'attachment_security', 'attachments',
