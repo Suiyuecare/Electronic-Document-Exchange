@@ -108,8 +108,7 @@ begin
   foreach v_table_name in array array[
     'internal_dispatches',
     'internal_dispatch_recipients',
-    'official_document_editor_assets',
-    'official_workflow_delegations'
+    'official_document_editor_assets'
   ]
   loop
     v_table_oid := pg_catalog.to_regclass(
@@ -128,8 +127,7 @@ begin
     'inbound_document_attachments',
     'internal_dispatch_replies',
     'internal_dispatch_logs',
-    'official_document_editor_revisions',
-    'official_document_dispatch_events'
+    'official_document_editor_revisions'
   ]
   loop
     v_table_oid := pg_catalog.to_regclass(
@@ -142,12 +140,24 @@ begin
     end if;
   end loop;
 
-  v_table_oid := 'public.official_document_archive_exports'::regclass;
-  if pg_catalog.has_table_privilege('service_role', v_table_oid, 'INSERT')
-     or pg_catalog.has_table_privilege('service_role', v_table_oid, 'UPDATE')
-     or pg_catalog.has_table_privilege('service_role', v_table_oid, 'DELETE') then
-    raise exception 'runtime_schema_archive_grant_invalid';
-  end if;
+  -- These records are created or mutated only inside allowlisted
+  -- SECURITY DEFINER RPCs (or are read-only archive evidence). Direct
+  -- PostgREST access is SELECT-only.
+  foreach v_table_name in array array[
+    'official_document_dispatch_events',
+    'official_document_archive_exports',
+    'official_workflow_delegations'
+  ]
+  loop
+    v_table_oid := pg_catalog.to_regclass(
+      pg_catalog.format('%I.%I', 'public', v_table_name)
+    );
+    if pg_catalog.has_table_privilege('service_role', v_table_oid, 'INSERT')
+       or pg_catalog.has_table_privilege('service_role', v_table_oid, 'UPDATE')
+       or pg_catalog.has_table_privilege('service_role', v_table_oid, 'DELETE') then
+      raise exception 'runtime_schema_rpc_owned_grant_invalid:%', v_table_name;
+    end if;
+  end loop;
 
   if exists (
     select required.index_name

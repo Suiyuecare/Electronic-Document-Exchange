@@ -146,6 +146,23 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             self.assertIn(expected, sql)
             self.assertNotIn(overbroad, sql)
 
+    def test_rpc_owned_runtime_tables_are_direct_read_only(self) -> None:
+        schema_sql = SCHEMA_PARITY.read_text(encoding="utf-8").lower()
+        recovery_sql = (
+            SUPABASE / "recovery" / "complete_edoc_runtime_recovery_20260827.sql"
+        ).read_text(encoding="utf-8").lower()
+        for table in (
+            "official_document_dispatch_events",
+            "official_workflow_delegations",
+        ):
+            expected = f"grant select on table public.{table} to service_role"
+            for sql in (schema_sql, recovery_sql):
+                self.assertIn(expected, sql)
+                self.assertNotRegex(
+                    sql,
+                    rf"grant [^;]*(?:insert|update|delete)[^;]* on table public\.{table} to service_role",
+                )
+
     def test_cutover_and_ci_smoke_cover_all_runtime_tables(self) -> None:
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
         smoke = RUNTIME_SMOKE.read_text(encoding="utf-8").lower()
@@ -164,6 +181,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertIn("has_table_privilege", smoke)
         self.assertIn("runtime_schema_required_index_missing", smoke)
         self.assertIn("runtime_schema_text_overlay_grant_invalid", smoke)
+        self.assertIn("runtime_schema_rpc_owned_grant_invalid", smoke)
         self.assertIn(
             "v_table_oid := 'public.official_document_text_overlays'::regclass",
             smoke,
