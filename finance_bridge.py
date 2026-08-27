@@ -64,6 +64,33 @@ class FinanceMemberSyncContractError(FinanceMemberSyncError):
     """The authenticated JSON did not match the pinned member-sync contract."""
 
 
+class _RejectHttpRedirects(urllib.request.HTTPRedirectHandler):
+    """Never forward the Finance bridge secret to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def _urlopen_no_redirect(request: urllib.request.Request, *, timeout: float):
+    return urllib.request.build_opener(_RejectHttpRedirects()).open(
+        request,
+        timeout=timeout,
+    )
+
+
+def _close_http_error(exc: urllib.error.HTTPError) -> None:
+    """Release an upstream error response without exposing its body."""
+    try:
+        exc.read(4096)
+    except Exception:
+        pass
+    finally:
+        try:
+            exc.close()
+        except Exception:
+            pass
+
+
 def compact_finance_bridge_body(email: str, request_id: str) -> bytes:
     """Return the exact bytes covered by the request signature."""
     return json.dumps(
@@ -681,18 +708,22 @@ def fetch_finance_bridge_snapshot(
     raw_body, headers = signed_finance_bridge_request(email, request_id, secret)
     request = urllib.request.Request(endpoint, data=raw_body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _urlopen_no_redirect(request, timeout=timeout) as response:
             raw_response = response.read(FINANCE_BRIDGE_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403, 404, 409, 422}:
-            raise FinanceBridgeDenied("finance_identity_denied") from exc
-        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _close_http_error(exc)
+        if code in {401, 403, 404, 409, 422}:
+            raise FinanceBridgeDenied("finance_identity_denied") from None
+        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from None
+    except Exception:
+        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from None
     if len(raw_response) > FINANCE_BRIDGE_MAX_RESPONSE_BYTES:
         raise FinanceBridgeContractError("finance_bridge_response_too_large")
     try:
         payload = json.loads(raw_response.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise FinanceBridgeContractError("finance_bridge_contract_invalid") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise FinanceBridgeContractError("finance_bridge_contract_invalid") from None
     return validate_finance_bridge_snapshot(payload, email)

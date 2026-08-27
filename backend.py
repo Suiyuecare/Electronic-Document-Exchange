@@ -3768,8 +3768,18 @@ def object_storage_endpoint() -> str:
 
 
 def _url_origin(value: str) -> tuple[str, str, int | None]:
-    parsed = urllib.parse.urlparse(str(value or "").strip())
-    return ((parsed.scheme or "").lower(), (parsed.hostname or "").lower(), parsed.port)
+    try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+        scheme = (parsed.scheme or "").lower()
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ("", "", None)
+    if port is None and scheme == "https":
+        port = 443
+    elif port is None and scheme == "http":
+        port = 80
+    return (scheme, hostname, port)
 
 
 def _supabase_cloud_project_origin(value: str) -> str:
@@ -3779,11 +3789,11 @@ def _supabase_cloud_project_origin(value: str) -> str:
     eDoc currently supports Supabase Cloud projects, whose API origin is one
     direct child of ``supabase.co`` over the default HTTPS port.
     """
-    parsed = urllib.parse.urlparse(str(value or "").strip())
-    hostname = str(parsed.hostname or "").lower()
     try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+        hostname = str(parsed.hostname or "").lower()
         port = parsed.port
-    except ValueError:
+    except (TypeError, ValueError):
         return ""
     if not (
         parsed.scheme.lower() == "https"
@@ -3800,6 +3810,15 @@ def _supabase_cloud_project_origin(value: str) -> str:
     return f"https://{hostname}"
 
 
+def _supabase_database_endpoint_issue() -> str:
+    """Require the production database key to target one Supabase project."""
+    if not is_production():
+        return ""
+    if not _supabase_cloud_project_origin(SUPABASE_URL):
+        return "database_supabase_project_url_invalid"
+    return ""
+
+
 def _supabase_storage_endpoint_issue() -> str:
     """Validate the effective server-side Storage REST endpoint fail-closed."""
     if EDOC_STORAGE_PROVIDER != "supabase":
@@ -3812,10 +3831,10 @@ def _supabase_storage_endpoint_issue() -> str:
     explicit_endpoint = os.getenv("EDOC_OBJECT_STORAGE_URL", "").strip().rstrip("/")
     if not explicit_endpoint:
         return ""
-    parsed = urllib.parse.urlparse(explicit_endpoint)
     try:
+        parsed = urllib.parse.urlparse(explicit_endpoint)
         port = parsed.port
-    except ValueError:
+    except (TypeError, ValueError):
         return "storage_object_endpoint_project_mismatch"
     if not (
         parsed.scheme.lower() == "https"
@@ -3852,6 +3871,9 @@ def supabase_project_partition_issues() -> List[str]:
     if mode not in {"auto", "same-project", "dedicated-project"}:
         return ["storage_supabase_mode_invalid"]
     issues: List[str] = []
+    database_endpoint_issue = _supabase_database_endpoint_issue()
+    if database_endpoint_issue:
+        issues.append(database_endpoint_issue)
     database_origin = _url_origin(SUPABASE_URL)
     storage_origin = _url_origin(EDOC_STORAGE_SUPABASE_URL)
     if mode == "dedicated-project":
@@ -4069,6 +4091,46 @@ def _urlopen_no_redirect(request: urllib.request.Request, *, timeout: float):
     )
 
 
+def _consume_http_error(exc: urllib.error.HTTPError, *, max_bytes: int = 4096) -> bytes:
+    """Read a bounded diagnostic prefix and always release the response.
+
+    Callers must not expose the returned bytes. Upstream bodies can contain
+    document text, email addresses or credentials and therefore never belong
+    in application exceptions or logs.
+    """
+    try:
+        return exc.read(max(0, int(max_bytes)))
+    except Exception:
+        return b""
+    finally:
+        try:
+            exc.close()
+        except Exception:
+            pass
+
+
+def _safe_http_error_marker(exc: urllib.error.HTTPError, prefix: str) -> str:
+    raw = _consume_http_error(exc)
+    provider_code = ""
+    try:
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        candidate = str(payload.get("code") or "") if isinstance(payload, dict) else ""
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", candidate):
+            provider_code = candidate
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        # PostgREST error bodies can be much larger than the diagnostic read
+        # limit. Extract only the bounded machine-code field from the prefix;
+        # never retain or expose message/detail/hint/document content.
+        prefix_text = raw.decode("utf-8", "ignore")
+        match = re.search(
+            r'["\']code["\']\s*:\s*["\']([A-Za-z0-9._-]{1,64})["\']',
+            prefix_text,
+        )
+        provider_code = match.group(1) if match else ""
+    marker = f"{prefix}:{int(getattr(exc, 'code', 0) or 0)}"
+    return f"{marker}:{provider_code}" if provider_code else marker
+
+
 def _readiness_http_json(
     url: str,
     *,
@@ -4084,12 +4146,16 @@ def _readiness_http_json(
         method="GET",
     )
     opener = urllib.request.urlopen if allow_redirects else _urlopen_no_redirect
-    with opener(request, timeout=timeout) as response:
-        response_status = getattr(response, "status", None)
-        status = int(response_status if response_status is not None else response.getcode())
-        if status < 200 or status >= 300:
-            raise RuntimeError("readiness_http_status")
-        raw = response.read(max_bytes + 1)
+    try:
+        with opener(request, timeout=timeout) as response:
+            response_status = getattr(response, "status", None)
+            status = int(response_status if response_status is not None else response.getcode())
+            if status < 200 or status >= 300:
+                raise RuntimeError("readiness_http_status")
+            raw = response.read(max_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        _consume_http_error(exc)
+        raise RuntimeError("readiness_http_error") from None
     if len(raw) > max_bytes:
         raise RuntimeError("readiness_response_too_large")
     return json.loads(raw.decode("utf-8")) if raw else None
@@ -4106,6 +4172,7 @@ def _probe_main_supabase_query(timeout: float) -> Dict[str, Any]:
             headers=supabase_headers({"Accept": "application/json"}),
             timeout=timeout,
             max_bytes=256 * 1024,
+            allow_redirects=False,
         )
         if not isinstance(payload, list):
             raise RuntimeError("database_query_contract_invalid")
@@ -4123,6 +4190,7 @@ def _probe_main_supabase_rpcs(timeout: float) -> Dict[str, Any]:
             f"{SUPABASE_URL.rstrip('/')}/rest/v1/",
             headers=supabase_headers({"Accept": "application/openapi+json"}),
             timeout=timeout,
+            allow_redirects=False,
         )
         paths = payload.get("paths") if isinstance(payload, dict) else None
         if not isinstance(paths, dict):
@@ -4253,6 +4321,7 @@ def _probe_supabase_publishable_key_affinity(timeout: float) -> Dict[str, Any]:
             }
         return {**safe_result, "ready": True, "errorCode": ""}
     except urllib.error.HTTPError as exc:
+        _consume_http_error(exc)
         if int(getattr(exc, "code", 0) or 0) in {401, 403}:
             error_code = "storage_publishable_key_affinity_rejected"
         else:
@@ -4815,7 +4884,7 @@ def internal_readiness() -> Dict[str, Any]:
         and finance_bridge_timeout_ready
     )
     storage_ready = bool(
-        EDOC_STORAGE_PROVIDER in {"supabase", "s3", "r2", "private-object-storage"}
+        EDOC_STORAGE_PROVIDER == "supabase"
         and EDOC_STORAGE_BUCKET
         and EDOC_SEAL_STORAGE_BUCKET
         and object_storage_endpoint()
@@ -6409,8 +6478,9 @@ def production_vercel_env_template_artifact() -> Dict[str, Any]:
         "# EDOC_STORAGE_SUPABASE_URL=<paste-storage-project-url>",
         "# EDOC_STORAGE_SERVICE_ROLE_KEY=<paste-storage-project-server-key-never-public>",
         "# 同專案 Storage 可省略以上兩項；系統會由 SUPABASE_URL 推導 /storage/v1。",
-        "# 若改用 S3/R2/private-object-storage，才需要明確設定：",
-        "# EDOC_OBJECT_STORAGE_URL=<paste-private-storage-endpoint>",
+        "# 目前正式檔案 provider 僅支援 Supabase。通常不需設定下列值；若設定，",
+        "# 必須與 EDOC_STORAGE_SUPABASE_URL 完全同專案且為 /storage/v1：",
+        "# EDOC_OBJECT_STORAGE_URL=<paste-matching-supabase-storage-v1-endpoint>",
         "EDOC_STORAGE_ACCESS_MODE=server-signed-url",
         "EDOC_FILE_ENCRYPTION_ENABLED=true",
         "EDOC_FILE_ENCRYPTION_KEY=<paste-file-encryption-key>",
@@ -10472,7 +10542,7 @@ def storage_service_status() -> Dict[str, Any]:
     av = av_endpoint_configuration()
     browser_upload_key = supabase_storage_browser_upload_key_status()
     services = {
-        "provider": {"configured": EDOC_STORAGE_PROVIDER in {"supabase", "s3", "gcs", "azure"}, "value": EDOC_STORAGE_PROVIDER or "未設定"},
+        "provider": {"configured": EDOC_STORAGE_PROVIDER == "supabase", "value": EDOC_STORAGE_PROVIDER or "未設定"},
         "bucket": {"configured": bool(EDOC_STORAGE_BUCKET), "value": EDOC_STORAGE_BUCKET or "未設定"},
         "sealBucket": {"configured": bool(EDOC_SEAL_STORAGE_BUCKET), "value": EDOC_SEAL_STORAGE_BUCKET or "未設定"},
         "serverCredential": {
@@ -12774,14 +12844,14 @@ def migrate() -> None:
         seed_auth(conn)
         if test_fixture_accounts_enabled():
             ensure_allowed_edoc_users(conn)
+            seed_department_isolation_examples(conn)
+            seed_document_acl_examples(conn)
         else:
             remove_demo_accounts(conn)
         normalize_legacy_document_owners(conn)
         seed_persistent_registries(conn)
         seed_workflow_tasks(conn)
         seed_contracts(conn)
-        seed_department_isolation_examples(conn)
-        seed_document_acl_examples(conn)
         seed_certificate_authorities(conn)
         seed_signing_certificates(conn)
         seed_company_seal_module(conn)
@@ -15504,12 +15574,17 @@ def _https_hmac_scan_bytes(
     )
     timeout = max(2, min(120, EDOC_AV_TIMEOUT_SECONDS))
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _urlopen_no_redirect(request, timeout=timeout) as response:
             raw = response.read(16 * 1024)
             response_timestamp = str(response.headers.get("X-EDOC-AV-Response-Timestamp") or "")
             response_signature = str(response.headers.get("X-EDOC-AV-Response-Signature") or "")
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        raise ValueError("editor_antivirus_scan_failed") from exc
+    except urllib.error.HTTPError as exc:
+        _consume_http_error(exc)
+        raise ValueError("editor_antivirus_scan_failed") from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        raise ValueError("editor_antivirus_scan_failed") from None
+    except Exception:
+        raise ValueError("editor_antivirus_scan_failed") from None
     if (
         not response_timestamp.isdigit()
         or abs(int(time.time()) - int(response_timestamp)) > EDOC_AV_HMAC_MAX_AGE_SECONDS
@@ -15525,8 +15600,8 @@ def _https_hmac_scan_bytes(
         raise ValueError("editor_antivirus_response_invalid")
     try:
         result = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("editor_antivirus_response_invalid") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("editor_antivirus_response_invalid") from None
     if not isinstance(result, dict) or set(result) != {
         "schemaVersion", "status", "engine", "signature", "sha256", "sizeBytes", "scannedAt"
     }:
@@ -15581,8 +15656,8 @@ def editor_scan_bytes_for_threats(
                 timeout_seconds=EDOC_AV_TIMEOUT_SECONDS,
                 max_file_size_bytes=EDOC_MAX_FILE_SIZE_MB * 1024 * 1024,
             )
-        except SandboxAntivirusError as exc:
-            raise ValueError("editor_antivirus_scan_failed") from exc
+        except SandboxAntivirusError:
+            raise ValueError("editor_antivirus_scan_failed") from None
         if result.status == "clean":
             return "已通過", "ClamAV-Clean"
         if result.status == "infected":
@@ -15615,8 +15690,8 @@ def editor_scan_bytes_for_threats(
                 response.extend(block)
                 if b"\0" in block or b"\n" in block:
                     break
-    except (OSError, TimeoutError, ValueError) as exc:
-        raise ValueError("editor_antivirus_scan_failed") from exc
+    except (OSError, TimeoutError, ValueError):
+        raise ValueError("editor_antivirus_scan_failed") from None
     result = bytes(response).split(b"\0", 1)[0].decode("utf-8", "replace").strip()
     if result.endswith(" OK") or result == "OK":
         return "已通過", "ClamAV-Clean"
@@ -28087,7 +28162,7 @@ def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeo
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout or EDOC_SIGNATURE_TIMEOUT_SECONDS) as response:
+            with _urlopen_no_redirect(request, timeout=timeout or EDOC_SIGNATURE_TIMEOUT_SECONDS) as response:
                 raw = response.read().decode("utf-8")
                 data = json.loads(raw) if raw else {}
                 return {
@@ -28106,7 +28181,8 @@ def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeo
                     },
                 }
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")
+            code = int(getattr(exc, "code", 0) or 0)
+            _consume_http_error(exc)
             last_event = {
                 "provider": EDOC_SIGNATURE_PROVIDER,
                 "operation": operation,
@@ -28114,14 +28190,14 @@ def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeo
                 "endpoint": url,
                 "request_digest_sha256": request_digest,
                 "status": "失敗",
-                "http_status": exc.code,
-                "error": detail[:500],
+                "http_status": code,
+                "error": f"provider_http_{code}",
                 "attempt_count": attempt,
                 "duration_ms": int((time.time() - started) * 1000),
             }
-            if exc.code not in {408, 425, 429, 500, 502, 503, 504} or attempt == attempts:
-                raise SignatureProviderError(f"provider_http_{exc.code}:{detail}", last_event) from exc
-        except Exception as exc:
+            if code not in {408, 425, 429, 500, 502, 503, 504} or attempt == attempts:
+                raise SignatureProviderError(f"provider_http_{code}", last_event) from None
+        except Exception:
             last_event = {
                 "provider": EDOC_SIGNATURE_PROVIDER,
                 "operation": operation,
@@ -28129,12 +28205,12 @@ def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeo
                 "endpoint": url,
                 "request_digest_sha256": request_digest,
                 "status": "失敗",
-                "error": str(exc)[:500],
+                "error": "provider_transport_failed",
                 "attempt_count": attempt,
                 "duration_ms": int((time.time() - started) * 1000),
             }
             if attempt == attempts:
-                raise SignatureProviderError(f"provider_request_failed:{exc}", last_event) from exc
+                raise SignatureProviderError("provider_request_failed", last_event) from None
         time.sleep(min(1.5, 0.25 * attempt))
     raise SignatureProviderError("provider_request_failed", last_event)
 
@@ -29280,10 +29356,16 @@ def post_monitoring_webhook(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with _urlopen_no_redirect(request, timeout=8) as response:
             return {"sent": True, "status": response.status}
-    except Exception as exc:
-        return {"sent": False, "error": str(exc)}
+    except urllib.error.HTTPError as exc:
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        return {"sent": False, "error": f"monitoring_webhook_http_{code}"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {"sent": False, "error": "monitoring_webhook_transport_failed"}
+    except Exception:
+        return {"sent": False, "error": "monitoring_webhook_transport_failed"}
 
 
 def run_local_monitoring_check(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -29518,15 +29600,6 @@ def resend_idempotency_key(notification_id: str) -> str:
     return f"edoc-notification/{safe or secrets.token_hex(8)}"[:256]
 
 
-def resend_error_detail(exc: urllib.error.HTTPError) -> str:
-    raw = exc.read().decode("utf-8", "replace")[:1000]
-    try:
-        payload = json.loads(raw)
-        return str(payload.get("message") or payload.get("name") or f"HTTP {exc.code}")[:500]
-    except (TypeError, ValueError):
-        return raw or f"HTTP {exc.code}"
-
-
 def send_resend_email_notification(to_email: str, subject: str, body: str, notification_id: str = "") -> Dict[str, str]:
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     sender = notification_email_sender()
@@ -29557,16 +29630,20 @@ def send_resend_email_notification(to_email: str, subject: str, body: str, notif
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             result = json.loads(response.read().decode("utf-8", "replace") or "{}")
             receipt = str(result.get("id") or response.headers.get("X-Request-Id") or "")
             if not receipt:
                 return {"status": "失敗", "receipt": "", "error": "Resend 未回傳寄送識別碼"}
             return {"status": "成功", "receipt": receipt, "error": ""}
     except urllib.error.HTTPError as exc:
-        return {"status": "失敗", "receipt": "", "error": f"Resend HTTP {exc.code}: {resend_error_detail(exc)}"}
-    except Exception as exc:
-        return {"status": "失敗", "receipt": "", "error": f"Resend 連線失敗：{str(exc)[:500]}"}
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        return {"status": "失敗", "receipt": "", "error": f"Resend HTTP {code}"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return {"status": "失敗", "receipt": "", "error": "Resend 連線失敗"}
+    except Exception:
+        return {"status": "失敗", "receipt": "", "error": "Resend 連線失敗"}
 
 
 def send_smtp_email_notification(to_email: str, subject: str, body: str, notification_id: str = "") -> Dict[str, str]:
@@ -29630,14 +29707,17 @@ def send_line_notification(message: str) -> Dict[str, str]:
     else:
         return {"status": "未設定", "receipt": "", "error": "LINE_WEBHOOK_URL 或 LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID 未設定"}
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             receipt = response.headers.get("X-Line-Request-Id") or response.headers.get("X-Request-Id") or f"LINE-{int(time.time() * 1000)}"
             return {"status": "成功" if 200 <= response.status < 300 else "失敗", "receipt": receipt, "error": ""}
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        return {"status": "失敗", "receipt": "", "error": f"HTTP {exc.code}: {detail}"}
-    except Exception as exc:
-        return {"status": "失敗", "receipt": "", "error": str(exc)}
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        return {"status": "失敗", "receipt": "", "error": f"HTTP {code}"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {"status": "失敗", "receipt": "", "error": "LINE 連線失敗"}
+    except Exception:
+        return {"status": "失敗", "receipt": "", "error": "LINE 連線失敗"}
 
 
 def push_system_notification(conn: sqlite3.Connection, item: Dict[str, Any]) -> Dict[str, str]:
@@ -30029,7 +30109,7 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
         method="POST"
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen_no_redirect(request, timeout=30) as response:
             response_data = json.loads(response.read().decode("utf-8"))
         text = extract_openai_text(response_data)
         parsed = parse_ai_compose_json(text)
@@ -30062,10 +30142,29 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
         }
         record_ai_compose_audit(conn, context["role"], "AI 公文助理產生函稿", OPENAI_MODEL, f"recipient={context['recipient']}")
         return result
-    except Exception as exc:
+    except urllib.error.HTTPError as exc:
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
         result = fallback_ai_compose({**payload, **context})
         result["notice"] = "OpenAI 暫時無法產生，已改用本機公文模板。"
-        record_ai_compose_audit(conn, context["role"], "AI 公文助理備援產生函稿", "local-template", str(exc))
+        record_ai_compose_audit(
+            conn,
+            context["role"],
+            "AI 公文助理備援產生函稿",
+            "local-template",
+            f"openai_http_{code}",
+        )
+        return result
+    except Exception:
+        result = fallback_ai_compose({**payload, **context})
+        result["notice"] = "OpenAI 暫時無法產生，已改用本機公文模板。"
+        record_ai_compose_audit(
+            conn,
+            context["role"],
+            "AI 公文助理備援產生函稿",
+            "local-template",
+            "openai_request_failed",
+        )
         return result
 def sync_notifications_from_business_state(conn: sqlite3.Connection) -> Dict[str, Any]:
     created = 0
@@ -30856,6 +30955,9 @@ def supabase_revoke_official_workflow_delegation(delegation_id: str, session: Di
 
 
 def supabase_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
+    endpoint_issue = _supabase_database_endpoint_issue()
+    if endpoint_issue:
+        raise SupabaseConfigurationError(endpoint_issue)
     headers = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Content-Type": "application/json",
@@ -30872,6 +30974,8 @@ def supabase_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
 
 
 def supabase_storage_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
+    if EDOC_STORAGE_PROVIDER != "supabase":
+        raise SupabaseConfigurationError("supabase_storage_provider_required")
     endpoint_issue = _supabase_storage_endpoint_issue()
     if endpoint_issue:
         raise SupabaseConfigurationError(endpoint_issue)
@@ -30899,12 +31003,14 @@ def supabase_request(method: str, path: str, body: Any = None, prefer: str = "re
     headers = supabase_headers({"Prefer": prefer})
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else []
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8")
-        raise RuntimeError(f"Supabase {exc.code}: {detail}") from exc
+        marker = _safe_http_error_marker(exc, "supabase_request_failed")
+        raise RuntimeError(marker) from None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("supabase_response_invalid") from None
 
 
 def supabase_list(table: str, query: Dict[str, List[str]]) -> List[Dict[str, Any]]:
@@ -31289,8 +31395,9 @@ def supabase_storage_upload(storage_key: str, data: bytes, mime_type: str, bucke
         with _urlopen_no_redirect(request, timeout=30) as response:
             response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "ignore")
-        raise ValueError(f"supabase_storage_upload_failed:{exc.code}:{redact_text(detail)}") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_storage_upload_failed:{code}") from None
 
 
 def supabase_storage_delete(storage_key: str, bucket: str | None = None) -> None:
@@ -31310,8 +31417,9 @@ def supabase_storage_delete(storage_key: str, bucket: str | None = None) -> None
         with _urlopen_no_redirect(request, timeout=30) as response:
             response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "ignore")
-        raise ValueError(f"supabase_storage_delete_failed:{exc.code}:{redact_text(detail)}") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_storage_delete_failed:{code}") from None
 
 
 def supabase_storage_download(storage_key: str, bucket: str | None = None) -> bytes:
@@ -31321,8 +31429,9 @@ def supabase_storage_download(storage_key: str, bucket: str | None = None) -> by
         with _urlopen_no_redirect(request, timeout=30) as response:
             return response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "ignore")
-        raise ValueError(f"supabase_storage_download_failed:{exc.code}:{redact_text(detail)}") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_storage_download_failed:{code}") from None
 
 
 def supabase_storage_create_signed_download_url(
@@ -31370,10 +31479,11 @@ def supabase_storage_create_signed_download_url(
         with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
-        detail = redact_text(exc.read().decode("utf-8", "ignore"))
-        raise ValueError(f"supabase_signed_download_failed:{exc.code}:{detail[:160]}") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ValueError("supabase_signed_download_unavailable") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_signed_download_failed:{code}") from None
+    except (urllib.error.URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("supabase_signed_download_unavailable") from None
     signed_path = str(payload.get("signedURL") or payload.get("signedUrl") or "").strip()
     if not signed_path:
         raise ValueError("supabase_signed_download_url_missing")
@@ -31443,10 +31553,11 @@ def supabase_storage_create_signed_scan_url(
         with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read(4096).decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
-        exc.read(4096)
-        raise ValueError(f"supabase_scan_url_failed:{exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ValueError("supabase_scan_url_unavailable") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_scan_url_failed:{code}") from None
+    except (urllib.error.URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("supabase_scan_url_unavailable") from None
     signed_path = str(payload.get("signedURL") or payload.get("signedUrl") or "").strip()
     if not signed_path:
         raise ValueError("supabase_scan_url_missing")
@@ -34288,6 +34399,8 @@ def _supabase_storage_direct_tus_url() -> str:
     never be paired with the short-lived ``x-signature`` capability returned
     to this editor.
     """
+    if EDOC_STORAGE_PROVIDER != "supabase":
+        raise SupabaseConfigurationError("supabase_storage_provider_required")
     endpoint_issue = _supabase_storage_endpoint_issue()
     if endpoint_issue:
         raise SupabaseConfigurationError(endpoint_issue)
@@ -34330,8 +34443,11 @@ def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
         with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
-        detail = redact_text(exc.read().decode("utf-8", "ignore"))
-        raise ValueError(f"editor_signed_upload_failed:{exc.code}:{detail[:160]}") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"editor_signed_upload_failed:{code}") from None
+    except (urllib.error.URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("editor_signed_upload_unavailable") from None
     token = str(payload.get("token") or "")
     if not token:
         raise ValueError("editor_signed_upload_token_missing")
@@ -41141,13 +41257,25 @@ def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=EDOC_RESTORE_DRILL_TIMEOUT_SECONDS) as response:
+        with _urlopen_no_redirect(request, timeout=EDOC_RESTORE_DRILL_TIMEOUT_SECONDS) as response:
             evidence = json.loads(response.read().decode("utf-8") or "{}")
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+        error_code = type(exc).__name__
+        if isinstance(exc, urllib.error.HTTPError):
+            code = int(getattr(exc, "code", 0) or 0)
+            _consume_http_error(exc)
+            error_code = f"restore_runner_http_{code}"
         return record({
             "id": drill_id, "ok": False, "blocked": True, "result": "blocked",
             "created_at": now(), "scope": scope, "target_env": target_env,
-            "detail": "isolated_restore_runner_failed", "error_code": type(exc).__name__,
+            "detail": "isolated_restore_runner_failed", "error_code": error_code,
+            "checks": {"database_restored": False, "storage_restored": False, "hash_match": False, "target_isolated": False},
+        })
+    except Exception:
+        return record({
+            "id": drill_id, "ok": False, "blocked": True, "result": "blocked",
+            "created_at": now(), "scope": scope, "target_env": target_env,
+            "detail": "isolated_restore_runner_failed", "error_code": "restore_runner_transport_failed",
             "checks": {"database_restored": False, "storage_restored": False, "hash_match": False, "target_isolated": False},
         })
 

@@ -43,6 +43,9 @@
     "20260827050436_complete_edoc_runtime_schema_parity.sql",
     "20260827050447_remove_exact_demo_bootstrap_records_forward.sql",
     "20260827050450_atomic_official_submission_editor_finalize_forward.sql",
-    "20260827050452_add_confirmed_edoc_fk_indexes_forward.sql"
+    "20260827050452_add_confirmed_edoc_fk_indexes_forward.sql",
+    "20260827061915_harden_audit_hash_runtime.sql",
+    "20260827063824_lock_runtime_table_data_api_grants.sql",
+    "20260827064100_remove_fresh_finance_bootstrap_sentinel.sql"
   ]
 }

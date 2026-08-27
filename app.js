@@ -420,7 +420,7 @@ const fileAccessLog = [
   ["11:44", "檔案資安初始化", "已載入附件防毒掃描、大小限制、敏感遮罩、密件隔離、下載浮水印、存取紀錄與備份還原。"]
 ];
 
-let selectedAccountId = "USR-001";
+let selectedAccountId = "";
 let accountFilter = "all";
 let accountSearchTerm = "";
 let accountReadinessPackage = null;
@@ -584,16 +584,10 @@ let selectedComplianceDocId = "DOC-COMP-001";
 let complianceLastReview = "";
 let complianceLastDrill = "";
 
-let selectedNotificationId = "NTF-001";
+let selectedNotificationId = "";
 let notificationFilter = "my_unread_overdue";
 let notificationSearchTerm = "";
-const notificationItems = [
-  { id: "NTF-001", type: "收文", title: "衛福部補件通知待登錄", target: "總務", channel: "系統通知", status: "未讀", priority: "高", source: "IN-1140522-00018", body: "jAgent 已拉取新來文，請完成收文登錄與附件檢核。" },
-  { id: "NTF-002", type: "待清稿", title: "日照中心補正資料待清稿", target: "行政部主任", channel: "Email + 系統通知", status: "未讀", priority: "高", source: "OUT-1140522-007", body: "函稿已建立，請進行清稿檢核與附件封裝。" },
-  { id: "NTF-003", type: "交換失敗", title: "新北市政府衛生局交換失敗", target: "總務", channel: "系統通知", status: "未讀", priority: "高", source: "OUT-1140519-006", body: "jAgent 回覆 failed，請確認機關代碼並重送。" },
-  { id: "NTF-004", type: "Token 到期", title: "jAgent Token 即將到期", target: "行政部主任", channel: "Email + 系統通知", status: "未讀", priority: "中", source: "SEC-TOKEN", body: "Token 剩餘時間不足，請刷新或重新憑證登入。" },
-  { id: "NTF-005", type: "逾期查核", title: "收1140522-00013 分派逾期", target: "行政部主任", channel: "Line 工作群組", status: "未讀", priority: "高", source: "TRK-003", body: "收文尚未完成分派，請啟動逾期查核提醒。" }
-];
+const notificationItems = [];
 
 const notificationAuditLog = [
   ["11:02", "通知中心初始化", "已載入收文、待清稿、交換失敗、Token 到期與逾期查核提醒。"]
@@ -648,7 +642,7 @@ const jobAuditLog = [
 ];
 
 let activeDatabaseTable = "documents";
-let selectedDatabaseId = "DOC-IN-1140522-00018";
+let selectedDatabaseId = "";
 let databaseSearchTerm = "";
 let searchResults = [];
 let selectedSearchId = "";
@@ -837,8 +831,6 @@ const documentAclRules = [
   { id: "ACL-005", docId: "OUT-1140522-007", principalType: "role", principal: "總務", view: true, sign: false, download: true, seal: true, delegate: false, reason: "附件封裝、押章與送交 jAgent。", grantedBy: "system" },
   { id: "ACL-006", docId: "OUT-1140519-006", principalType: "role", principal: "總務", view: true, sign: false, download: true, seal: true, delegate: false, reason: "交換失敗重送作業。", grantedBy: "system" },
   { id: "ACL-007", docId: "OUT-1140519-006", principalType: "role", principal: "行政部主任", view: true, sign: true, download: true, seal: true, delegate: true, reason: "異常重送前複核。", grantedBy: "system" },
-  { id: "ACL-008", docId: "DOC-ADMIN-1140523-001", principalType: "role", principal: "行政部主任", view: true, sign: true, download: true, seal: true, delegate: true, reason: "行政部內部清稿與權限管理。", grantedBy: "system" },
-  { id: "ACL-009", docId: "DOC-ADMIN-1140523-001", principalType: "role", principal: "總務", view: false, sign: false, download: false, seal: false, delegate: false, reason: "明確隔離總務收文區與行政部內部公文。", grantedBy: "system" }
 ];
 
 const documentAclEvents = [
@@ -24679,7 +24671,8 @@ async function editorTusRemoteOffset(uploadUrl, baseHeaders) {
     response = await fetch(uploadUrl, {
       method: "HEAD",
       headers: { ...baseHeaders, "Tus-Resumable": "1.0.0" },
-      cache: "no-store"
+      cache: "no-store",
+      redirect: "error"
     });
   } catch (_error) {
     const error = new Error("網路中斷，暫時無法確認上傳進度。");
@@ -24708,7 +24701,8 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
       method: intent.method || "PUT",
       headers: { ...baseHeaders, "Content-Type": file.type || "application/octet-stream" },
       body: file,
-      cache: "no-store"
+      cache: "no-store",
+      redirect: "error"
     });
     if (!response.ok) throw await editorTusResponseError(response, "本機直傳驗收");
     onProgress(1);
@@ -24740,7 +24734,12 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
   };
   let createResponse;
   try {
-    createResponse = await fetch(endpoint, { method: "POST", headers: createHeaders, cache: "no-store" });
+    createResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: createHeaders,
+      cache: "no-store",
+      redirect: "error"
+    });
   } catch (_error) {
     const error = new Error("網路中斷，尚未建立上傳；請重新上傳。");
     error.code = "editor_tus_network_error";
@@ -24789,7 +24788,8 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
           "Content-Type": "application/offset+octet-stream"
         },
         body: chunk,
-        cache: "no-store"
+        cache: "no-store",
+        redirect: "error"
       });
       if (!response.ok) failure = await editorTusResponseError(response, "續傳");
     } catch (_error) {

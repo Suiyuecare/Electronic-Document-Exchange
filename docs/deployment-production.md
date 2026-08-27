@@ -12,22 +12,28 @@
 正式發布前先在隔離環境完整重建一次；不可直接把未驗證 migration 套到正式資料庫。
 
 新環境執行 `supabase db reset` 時，CLI 會先載入
-`supabase/roles.sql`。該檔只補齊歷史 migration 在外鍵指派前漏建的 9 個
-legacy permission reference rows，以及早期 migration 所需的 pgcrypto `digest()`
-相容 overload 與空的後端專用 `private` schema；相容函式與 schema
-均已撤銷前台角色權限，只允許資料庫擁有者與 `service_role` 使用，且不含
-帳號、密碼、公司、文件或正式資料，
-也不改寫任何已套用的 migration。既有正式資料庫不得為此重跑舊 migration，
-仍只依核准的 forward migration 與變更單發布。
+`supabase/roles.sql`。該檔補齊歷史 migration 在外鍵指派前漏建的 9 個
+legacy permission reference rows、早期 migration 所需的 pgcrypto `digest()`
+相容 overload、空的後端專用 `private` schema，以及只供全新 reset 通過既有
+Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司或組織資料，
+且會由 `20260827064100_remove_fresh_finance_bootstrap_sentinel.sql` 核對完整簽章、
+確認零引用後於同一次 migration replay 中刪除。相容函式與 schema 均已撤銷
+前台角色權限，只允許資料庫擁有者與 `service_role` 使用；此做法不改寫任何
+已套用的 migration。既有正式資料庫不得為此重跑舊 migration，仍只依核准的
+forward migration 與變更單發布。
 
 ### 主 eDoc Supabase
 
-1. 先執行 `supabase unlink` 清除舊連結，再以 `supabase link --project-ref ussnmxdpxeoshlrdchov` 連結主 eDoc project；用 `supabase projects list`／project URL 再確認一次，禁止沿用專用 Storage project 的 link。
+1. 先執行 `supabase unlink` 清除舊連結，再以 `supabase link --project-ref <main-edoc-project-ref>` 連結主 eDoc project；用 `supabase projects list`／project URL 再確認一次，禁止沿用專用 Storage project 的 link。repository 不再硬編碼舊 project ref，避免誤推到已退役或 Storage 專案。
 2. 比對 `supabase/verification/migration_manifest.json` 與 `supabase/migrations/*.sql`，再執行 `supabase migration list --linked` 確認遠端與 repository 的 migration 歷程一致。
 3. 若遠端出現 repository 不存在的 migration，或同一版本的套用狀態不一致，立即停止；不得自行執行 `supabase migration repair`、不得略過版本，也不得用 `db pull` 產生未經審查的正式基線。先由資料庫負責人核對遠端 SQL、雜湊與變更單，再以核准的 baseline／forward migration 補齊 repository。
-4. 歷程一致後才執行 migration dry-run，再於隔離環境完整 reset／重建並執行測試。
-5. 取得資料庫備份、指定回復點與人工變更核准後，才依序套用正式 migrations。
-6. 執行 `supabase/verification/production_cutover_checks.sql`；所有 required table/RPC、RLS、grant 與 demo-data 檢查必須通過。
+4. 先判定 linked project 是「全新空白」或「已有 migration 歷程」，兩條路徑不可混用：
+   - **全新空白 project**：`roles.sql` 必須先於歷史 migration chain 載入。先執行 `python3 tools/supabase_main_migration_push.py fresh-empty --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才在同一命令加 `--apply`。wrapper 只有在遠端 migration 歷程為空時才會加入 `supabase db push --include-roles`，否則拒絕。
+   - **既有 project**：執行 `python3 tools/supabase_main_migration_push.py existing --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才加 `--apply`。此路徑永不加入 `--include-roles`，也不得手動重跑 `roles.sql`，避免在移除 migration 已通過後重新插入 fresh-only sentinel。
+   - wrapper 只接受 Supabase CLI `2.105.0`，並用唯讀 `db query` JSON 介面驗證 migration table 與版本。`fresh-empty` 還要求 public 非 extension 物件、Auth 使用者、Storage buckets/objects 全部為 0；CLI 版本、查詢格式、linked ref 或遠端狀態無法確認時一律停止，不猜測 fresh／existing。
+5. 歷程一致後，先於隔離環境完整 reset／重建並執行 `fresh_bootstrap_smoke.sql`、`runtime_schema_parity_smoke.sql`、`service_role_data_api_grant_smoke.sql` 及五帳號驗收。
+6. 取得資料庫備份、指定回復點與人工變更核准後，才依核准路徑套用正式 migrations。
+7. 執行 `supabase/verification/production_cutover_checks.sql`；所有 required table/RPC、RLS、grant 與 demo-data 檢查必須通過，且 `fresh_finance_bootstrap_sentinel` 必須為 0。
 
 `supabase/recovery/complete_edoc_runtime_recovery_20260827.sql` 是 2026-08-27 的唯讀災難復原快照，不在 `supabase/migrations`、不在 migration manifest，也不得用 `supabase db push` 套到既有正式資料庫。可線性部署的主資料庫變更只有 manifest 內的純 forward migrations；本次相關檔案依序為：
 
@@ -35,6 +41,9 @@ legacy permission reference rows，以及早期 migration 所需的 pgcrypto `di
 2. `20260827050447_remove_exact_demo_bootstrap_records_forward.sql`：只依已列明的精確 demo identifier 清理舊 bootstrap 資料，不使用模糊名稱、email 或 regex 刪除。
 3. `20260827050450_atomic_official_submission_editor_finalize_forward.sql`：只建立／取代兩支 atomic RPC、收回 browser 執行權、只授權 `service_role`，並通知 PostgREST 重載 schema。
 4. `20260827050452_add_confirmed_edoc_fk_indexes_forward.sql`：只以 `create index if not exists` 補齊 Supabase Performance Advisor 已確認的 eDoc 外鍵索引，不處理 shared CMS，也不刪除 unused index。
+5. `20260827061915_harden_audit_hash_runtime.sql`：將新稽核紀錄切換至序列化雜湊鏈，並把鏈頭資料與驗證權限鎖在後端。
+6. `20260827063824_lock_runtime_table_data_api_grants.sql`：回溯移除 public schema 所有 `PUBLIC`／`anon`／`authenticated` table、sequence、function Data API grant 與 browser policy，再按後端實際操作授予 `service_role` 最小權限。
+7. `20260827064100_remove_fresh_finance_bootstrap_sentinel.sql`：只在全新 reset 存在完整結構性 sentinel 且沒有任何引用時移除；既有環境沒有該列時為精確 no-op。
 
 這些檔案仍須先在與正式 schema 相同的隔離環境完成 `supabase db reset`、RPC smoke 與安全檢查，並逐檔取得人工核准；拆成 forward migration 不代表可以略過備份、回復點或變更審查。
 
@@ -43,6 +52,9 @@ legacy permission reference rows，以及早期 migration 所需的 pgcrypto `di
 ### 專用 Storage Supabase
 
 專用 Storage project 不得套用主資料庫的全部 migrations，只執行 `supabase/storage-migrations` 的以下三個純 Storage migration，且順序不可顛倒：
+
+執行前先比對 `supabase/verification/storage_migration_manifest.json` 與
+`supabase/storage-migrations/*.sql`；清單或順序不一致時立即停止。
 
 1. `supabase/storage-migrations/20260824034730_dedicated_edoc_private_storage_buckets.sql`
 2. `supabase/storage-migrations/20260827042214_harden_edoc_storage_buckets.sql`
@@ -135,14 +147,15 @@ vercel env add APP_SECRET production --sensitive
 2. `supabase migration list --linked` 顯示遠端與 repository 歷程一致，沒有使用未核准的 `migration repair` 覆寫歷程。
 3. 隔離環境 fresh bootstrap 成功，且 `supabase/seed.sql` 未建立 demo data。
 4. `production_cutover_checks.sql` 的 demo identifier 計數為 0。
-5. 13 個補齊的 runtime tables、15 個既有 RPC 與 2 個 atomic RPC 全部存在。
-6. atomic RPC 僅 `service_role` 可執行；`PUBLIC`、`anon`、`authenticated` 無權限。
-7. runtime tables 啟用 RLS，敏感表的 browser Data API grant 為 0。
+5. 87 張後端直連表的 service-role 最小權限矩陣逐項相符，且 23 個直接 RPC 全部存在。
+6. 23 個直接 RPC 僅 `service_role` 可執行；`PUBLIC`、`anon`、`authenticated` 無權限，且沒有未列入 allowlist 的 legacy RPC。
+7. runtime tables 啟用 RLS，browser Data API grant 為 0；`login_events` 可由後端新增／讀取但不可更新或刪除。
 8. 40 個已確認的 eDoc 外鍵索引全部存在，且未新增 shared CMS index 或刪除 unused index。
 9. Storage bucket private、包含 ZIP、排除 SVG，舊 direct-object policies 不存在。
 10. 站內通知規則 ready；Email／LINE 若未設定應明確顯示 pending，而非阻擋內部上線或假裝成功。
 11. stale editor upload 檢查無超過允許時限的 pending/uploaded 資產。
 12. Finance 人員、公司、部門投影同步檢查通過，沒有手動維護的 demo 帳號。
+13. fresh-only Finance sentinel 計數為 0；既有 project 的發布紀錄中沒有 `--include-roles` 或重跑 `roles.sql`。
 
 若任何一項不通過，停止發布；資料庫 migration 不得用 Vercel rollback 反轉，需另寫經審查的 forward-fix migration。
 

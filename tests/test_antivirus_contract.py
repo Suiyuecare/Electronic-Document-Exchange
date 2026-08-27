@@ -215,7 +215,7 @@ class ProductionAntivirusContractTestCase(unittest.TestCase):
             mock.patch.object(backend, "EDOC_AV_ENDPOINT", "https://scanner.example.test"),
             mock.patch.object(backend, "EDOC_AV_PROVIDER", "edoc-clamav-https-v1"),
             mock.patch.dict(os.environ, {"EDOC_AV_API_KEY": secret}),
-            mock.patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            mock.patch.object(backend, "_urlopen_no_redirect", side_effect=fake_urlopen),
         ):
             self.assertEqual(
                 backend.editor_scan_bytes_for_threats(data, "private-name.pdf"),
@@ -245,7 +245,7 @@ class ProductionAntivirusContractTestCase(unittest.TestCase):
             mock.patch.object(backend, "EDOC_AV_ENDPOINT", "https://scanner.example.test/v1/scan"),
             mock.patch.object(backend, "EDOC_AV_PROVIDER", "edoc-clamav-https-v1"),
             mock.patch.dict(os.environ, {"EDOC_AV_API_KEY": secret}),
-            mock.patch("urllib.request.urlopen", return_value=Response()),
+            mock.patch.object(backend, "_urlopen_no_redirect", return_value=Response()),
         ):
             with self.assertRaisesRegex(ValueError, "editor_antivirus_response_invalid"):
                 backend.editor_scan_bytes_for_threats(b"%PDF", "document.pdf")
@@ -269,7 +269,7 @@ class ProductionAntivirusContractTestCase(unittest.TestCase):
             mock.patch.object(backend, "EDOC_AV_ENDPOINT", "https://scanner.example.test"),
             mock.patch.object(backend, "EDOC_AV_PROVIDER", "edoc-clamav-https-v1"),
             mock.patch.dict(os.environ, {"EDOC_AV_API_KEY": secret}),
-            mock.patch("urllib.request.urlopen", side_effect=TimeoutError()),
+            mock.patch.object(backend, "_urlopen_no_redirect", side_effect=TimeoutError()),
         ):
             with self.assertRaisesRegex(ValueError, "editor_antivirus_scan_failed"):
                 backend.editor_scan_bytes_for_threats(b"%PDF", "document.pdf")
@@ -288,6 +288,9 @@ class ProductionAntivirusContractTestCase(unittest.TestCase):
                 }).encode()
 
         with (
+            mock.patch.dict(os.environ, {"EDOC_OBJECT_STORAGE_URL": ""}, clear=False),
+            mock.patch.object(backend, "EDOC_STORAGE_PROVIDER", "supabase"),
+            mock.patch.object(backend, "EDOC_STORAGE_SUPABASE_URL", "https://project-ref.supabase.co"),
             mock.patch.object(backend, "EDOC_OBJECT_STORAGE_URL", "https://project-ref.supabase.co/storage/v1"),
             mock.patch.object(backend, "EDOC_STORAGE_SERVICE_ROLE_KEY", "sb_secret_test_storage"),
             mock.patch.object(backend, "EDOC_STORAGE_BUCKET", "edoc-private"),

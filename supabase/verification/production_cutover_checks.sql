@@ -34,33 +34,168 @@ left join pg_catalog.pg_class c
  and c.relnamespace = 'public'::pg_catalog.regnamespace
 order by r.table_name;
 
--- 2. Browser Data API access to sensitive runtime tables: pass condition is
--- zero rows. All application access is mediated by the eDoc backend.
+-- 2. Browser Data API access to public relations: pass condition is zero rows
+-- for every query in this section. All database and RPC access is mediated by
+-- the eDoc backend; browsers receive only path-scoped Storage TUS credentials.
 select table_name, grantee, privilege_type
-from information_schema.role_table_grants
+from information_schema.table_privileges
 where table_schema = 'public'
-  and table_name in (
-    'audit_logs', 'auth_sessions', 'company_seal_files', 'file_download_tokens',
-    'file_objects', 'finance_member_sync_nonces', 'finance_member_sync_receipts',
-    'inbound_document_attachments', 'internal_dispatch_logs',
-    'internal_dispatch_recipients', 'internal_dispatch_replies',
-    'internal_dispatches', 'notification_channel_credentials',
-    'notification_deliveries', 'notifications', 'official_document_approval_logs',
-    'official_document_approval_steps', 'official_document_archive_exports',
-    'official_document_dispatch_events', 'official_document_editor_assets',
-    'official_document_editor_revisions', 'official_document_files',
-    'official_document_rejection_jobs',
-    'official_document_stamp_positions', 'official_document_stamp_requests',
-    'official_document_text_overlays', 'official_workflow_delegations',
-    'system_inbox'
-  )
   and grantee in ('PUBLIC', 'anon', 'authenticated')
 order by table_name, grantee, privilege_type;
+
+select object_name as sequence_name, grantee, privilege_type
+from information_schema.usage_privileges
+where object_schema = 'public'
+  and object_type = 'SEQUENCE'
+  and grantee in ('PUBLIC', 'anon', 'authenticated')
+order by object_name, grantee, privilege_type;
+
+select routine_name, grantee, privilege_type
+from information_schema.routine_privileges
+where routine_schema = 'public'
+  and grantee in ('PUBLIC', 'anon', 'authenticated')
+order by routine_name, grantee, privilege_type;
+
+select tablename, policyname, roles
+from pg_catalog.pg_policies
+where schemaname = 'public'
+  and roles && array['public', 'anon', 'authenticated']::name[]
+order by tablename, policyname;
+
+-- 2b. Exact backend grant parity. Pass condition: grant_matches=true for all
+-- 87 direct PostgREST tables. The first 81 are backend.TABLES and the final
+-- six are dedicated Finance/SSO/rejection workflow tables. Write arrays are
+-- the direct backend.py call matrix, not a blanket CRUD grant.
+with backend_tables(table_name) as (
+  select unnest(array[
+    'approval_step_actor_snapshots', 'attachment_security', 'attachments',
+    'audit_logs', 'auth_sessions', 'background_jobs',
+    'certificate_authorities', 'certificate_validation_events', 'companies',
+    'company_registry', 'company_seal_files', 'company_seals',
+    'compliance_attestations', 'contract_approvals', 'contract_parties',
+    'contracts', 'department_registry', 'document_acl', 'document_acl_events',
+    'documents', 'electronic_signatures', 'exchange_attachment',
+    'exchange_events', 'exchange_inbox', 'exchange_log', 'exchange_outbox',
+    'exchange_status_history', 'exchange_tasks', 'file_access_logs',
+    'file_download_tokens', 'file_objects', 'inbound_document_attachments',
+    'inbound_documents', 'internal_dispatch_logs',
+    'internal_dispatch_recipients', 'internal_dispatch_replies',
+    'internal_dispatches', 'ip_allowlist', 'job_runs', 'login_events',
+    'module_account_links', 'notification_channel_credentials',
+    'notification_deliveries', 'notification_rules', 'notifications',
+    'official_document_approval_logs', 'official_document_approval_steps',
+    'official_document_archive_exports', 'official_document_dispatch_events',
+    'official_document_dispatch_records', 'official_document_editor_assets',
+    'official_document_editor_revisions', 'official_document_files',
+    'official_document_stamp_positions', 'official_document_stamp_requests',
+    'official_document_text_overlays', 'official_documents',
+    'official_workflow_delegations', 'pdf_versions', 'permissions',
+    'recipients', 'role_permissions', 'roles', 'seal_applications',
+    'seal_assets', 'seal_permissions', 'seal_reference_options',
+    'seal_type_registry', 'seal_usage_approvals', 'seal_usage_logs',
+    'seal_usage_requests', 'settings', 'signature_provider_events',
+    'signing_certificates', 'sso_providers', 'system_inbox',
+    'trusted_devices', 'tsa_timestamp_tokens', 'users', 'virus_scan_jobs',
+    'workflow_tasks', 'finance_member_sync_nonces',
+    'finance_member_sync_receipts', 'finance_organization_projection_state',
+    'finance_organization_units', 'official_document_rejection_jobs',
+    'portal_handoff_nonces'
+  ]::text[])
+), insert_tables(table_name) as (
+  select unnest(array[
+    'approval_step_actor_snapshots', 'audit_logs', 'auth_sessions',
+    'certificate_validation_events', 'companies', 'company_registry',
+    'company_seals', 'compliance_attestations', 'documents', 'exchange_events',
+    'exchange_inbox', 'exchange_log', 'exchange_outbox',
+    'exchange_status_history', 'file_access_logs', 'file_objects',
+    'inbound_document_attachments', 'inbound_documents',
+    'internal_dispatch_logs', 'internal_dispatch_recipients',
+    'internal_dispatch_replies', 'internal_dispatches', 'job_runs',
+    'login_events', 'module_account_links', 'notification_deliveries',
+    'notifications', 'official_document_approval_logs',
+    'official_document_approval_steps', 'official_document_editor_assets',
+    'official_document_editor_revisions', 'official_document_files',
+    'official_document_stamp_positions', 'official_document_stamp_requests',
+    'official_document_text_overlays', 'official_documents', 'pdf_versions',
+    'seal_permissions', 'seal_usage_approvals', 'seal_usage_logs',
+    'seal_usage_requests', 'settings', 'system_inbox', 'users',
+    'virus_scan_jobs', 'finance_member_sync_nonces',
+    'finance_member_sync_receipts', 'portal_handoff_nonces'
+  ]::text[])
+), update_tables(table_name) as (
+  select unnest(array[
+    'auth_sessions', 'background_jobs', 'companies', 'company_registry',
+    'company_seals', 'documents', 'exchange_inbox', 'exchange_outbox',
+    'exchange_tasks', 'file_objects', 'inbound_documents',
+    'internal_dispatch_recipients', 'internal_dispatches',
+    'module_account_links', 'notification_channel_credentials',
+    'notifications', 'official_document_approval_steps',
+    'official_document_dispatch_records', 'official_document_editor_assets',
+    'official_document_stamp_positions', 'official_document_stamp_requests',
+    'official_documents', 'seal_usage_approvals', 'seal_usage_requests',
+    'settings', 'system_inbox', 'users', 'finance_member_sync_receipts',
+    'official_document_rejection_jobs'
+  ]::text[])
+), delete_tables(table_name) as (
+  select unnest(array[
+    'file_objects', 'finance_member_sync_nonces',
+    'official_document_stamp_positions', 'official_document_text_overlays'
+  ]::text[])
+), expected_grants as (
+  select
+    backend.table_name,
+    true as can_select,
+    exists (select 1 from insert_tables item where item.table_name = backend.table_name) as can_insert,
+    exists (select 1 from update_tables item where item.table_name = backend.table_name) as can_update,
+    exists (select 1 from delete_tables item where item.table_name = backend.table_name) as can_delete
+  from backend_tables backend
+), actual_grants as (
+  select
+    expected.*,
+    pg_catalog.to_regclass(
+      pg_catalog.format('%I.%I', 'public', expected.table_name)
+    ) as table_oid
+  from expected_grants expected
+)
+select
+  table_name,
+  table_oid is not null as table_exists,
+  not exists (
+    select 1
+    from information_schema.table_privileges privilege_row
+    where privilege_row.table_schema = 'public'
+      and privilege_row.grantee = 'service_role'
+      and not exists (
+        select 1 from backend_tables allowed
+        where allowed.table_name = privilege_row.table_name
+      )
+      and not (
+        privilege_row.table_name = 'audit_log_chain_check'
+        and privilege_row.privilege_type = 'SELECT'
+      )
+  ) as no_unexpected_table_grants,
+  case when table_oid is null then false else
+    pg_catalog.has_table_privilege('service_role', table_oid, 'SELECT') = can_select
+    and pg_catalog.has_table_privilege('service_role', table_oid, 'IN' || 'SERT') = can_insert
+    and pg_catalog.has_table_privilege('service_role', table_oid, 'UP' || 'DATE') = can_update
+    and pg_catalog.has_table_privilege('service_role', table_oid, 'DE' || 'LETE') = can_delete
+    and not pg_catalog.has_table_privilege('service_role', table_oid, 'TRUN' || 'CATE')
+    and not pg_catalog.has_table_privilege('service_role', table_oid, 'REFERENCES')
+    and not pg_catalog.has_table_privilege('service_role', table_oid, 'TRIGGER')
+  end as grant_matches
+from actual_grants
+order by table_name;
 
 -- 3. Required backend RPC inventory. Pass condition: missing=false for every
 -- row. Signatures are intentionally checked to detect incompatible overloads.
 with required_rpcs(signature) as (
   values
+    ('public.edoc_apply_finance_organization_projection_v2(text,text,bigint,text,text,jsonb)'),
+    ('public.edoc_claim_official_document_stamp(text,text,text,text,integer)'),
+    ('public.edoc_create_finance_login_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
+    ('public.edoc_mutate_inbound_document_v1(text,text,text,text,text,bigint,jsonb)'),
+    ('public.edoc_resolve_finance_session_v1(text)'),
+    ('public.edoc_revalidate_finance_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_create_official_workflow_delegation(text,text,text,text,timestamp with time zone,timestamp with time zone,text,text)'),
     ('public.edoc_revoke_official_workflow_delegation(text,text)'),
     ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)'),
@@ -87,6 +222,12 @@ order by signature;
 -- required for each row. PUBLIC execution is separately detected from ACL.
 with required_rpcs(signature) as (
   values
+    ('public.edoc_apply_finance_organization_projection_v2(text,text,bigint,text,text,jsonb)'),
+    ('public.edoc_claim_official_document_stamp(text,text,text,text,integer)'),
+    ('public.edoc_create_finance_login_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
+    ('public.edoc_mutate_inbound_document_v1(text,text,text,text,text,bigint,jsonb)'),
+    ('public.edoc_resolve_finance_session_v1(text)'),
+    ('public.edoc_revalidate_finance_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_create_official_workflow_delegation(text,text,text,text,timestamp with time zone,timestamp with time zone,text,text)'),
     ('public.edoc_revoke_official_workflow_delegation(text,text)'),
     ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)'),
@@ -121,6 +262,46 @@ select
   ) end as public_execute
 from resolved
 order by signature;
+
+-- 4b. No other public function may be executable by service_role. The only
+-- non-RPC exception is the pure immutable seal-dimension validator required
+-- by a draft-position trigger. Pass condition: zero rows.
+with allowed(signature) as (
+  values
+    ('public.edoc_apply_finance_organization_projection_v2(text,text,bigint,text,text,jsonb)'),
+    ('public.edoc_apply_official_document_correction(text,text,text,jsonb,text,jsonb,jsonb,text,jsonb,jsonb,text,text,text,text,text,text,jsonb,text,text)'),
+    ('public.edoc_cancel_official_document(text,text)'),
+    ('public.edoc_claim_official_document_approval_v3(text,text,text,text,text,jsonb)'),
+    ('public.edoc_claim_official_document_rejection_v3(text,text,text,text,text,jsonb)'),
+    ('public.edoc_claim_official_document_stamp(text,text,text,text,integer)'),
+    ('public.edoc_commit_official_document_submission(jsonb)'),
+    ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),
+    ('public.edoc_complete_official_document_stamp(text,text,text,text)'),
+    ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)'),
+    ('public.edoc_create_finance_login_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
+    ('public.edoc_create_official_document_dispatch_record(text,text)'),
+    ('public.edoc_create_official_workflow_delegation(text,text,text,text,timestamp with time zone,timestamp with time zone,text,text)'),
+    ('public.edoc_fail_official_document_stamp(text,text,text,text)'),
+    ('public.edoc_finalize_editor_asset_v2(jsonb)'),
+    ('public.edoc_finalize_official_document_resubmit(text,text,text,timestamp with time zone,text,text,text,text,text)'),
+    ('public.edoc_mutate_inbound_document_v1(text,text,text,text,text,bigint,jsonb)'),
+    ('public.edoc_register_official_archive_export(text,text,text,text,text,integer,bigint,text,text,text)'),
+    ('public.edoc_resolve_finance_session_v1(text)'),
+    ('public.edoc_resolve_portal_finance_user(uuid,text)'),
+    ('public.edoc_revalidate_finance_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
+    ('public.edoc_revoke_official_workflow_delegation(text,text)'),
+    ('public.edoc_set_current_company_seal_file(text,text,text,text)'),
+    ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)')
+), allowed_oids as (
+  select pg_catalog.to_regprocedure(signature) as oid from allowed
+)
+select p.oid::pg_catalog.regprocedure::text as unexpected_service_role_function
+from pg_catalog.pg_proc p
+join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public'
+  and pg_catalog.has_function_privilege('service_role', p.oid, 'EXECUTE')
+  and p.oid not in (select oid from allowed_oids where oid is not null)
+order by 1;
 
 -- 5. Runtime column parity. Pass condition: column_matches=true for every row.
 -- This inventory deliberately includes the fields that used to exist only in
@@ -203,7 +384,72 @@ with required_constraints(table_name, constraint_name) as (
     ('official_document_stamp_requests', 'official_document_stamp_requests_locked_editor_revision_id_fkey'),
     ('official_document_stamp_requests', 'official_document_stamp_requests_prepared_file_id_fkey'),
     ('official_document_stamp_requests', 'official_document_stamp_requests_claim_attempt_count_check'),
-    ('official_document_dispatch_records', 'official_document_dispatch_records_document_key')
+    ('official_document_dispatch_records', 'official_document_dispatch_records_document_key'),
+    ('inbound_document_attachments', 'inbound_document_attachments_pkey'),
+    ('inbound_document_attachments', 'inbound_document_attachments_inbound_document_id_fkey'),
+    ('inbound_document_attachments', 'inbound_document_attachments_file_object_id_fkey'),
+    ('internal_dispatches', 'internal_dispatches_pkey'),
+    ('internal_dispatches', 'internal_dispatches_inbound_document_id_fkey'),
+    ('internal_dispatches', 'internal_dispatches_official_document_id_fkey'),
+    ('internal_dispatches', 'internal_dispatches_disposition_status_check'),
+    ('internal_dispatch_recipients', 'internal_dispatch_recipients_pkey'),
+    ('internal_dispatch_recipients', 'internal_dispatch_recipients_dispatch_id_fkey'),
+    ('internal_dispatch_replies', 'internal_dispatch_replies_pkey'),
+    ('internal_dispatch_replies', 'internal_dispatch_replies_dispatch_id_fkey'),
+    ('internal_dispatch_replies', 'internal_dispatch_replies_recipient_id_fkey'),
+    ('internal_dispatch_replies', 'internal_dispatch_replies_attachment_file_id_fkey'),
+    ('internal_dispatch_logs', 'internal_dispatch_logs_pkey'),
+    ('internal_dispatch_logs', 'internal_dispatch_logs_dispatch_id_fkey'),
+    ('official_workflow_delegations', 'official_workflow_delegations_pkey'),
+    ('official_workflow_delegations', 'official_workflow_delegations_company_id_fkey'),
+    ('official_workflow_delegations', 'official_workflow_delegations_principal_user_id_fkey'),
+    ('official_workflow_delegations', 'official_workflow_delegations_delegate_user_id_fkey'),
+    ('official_workflow_delegations', 'official_workflow_delegations_created_by_fkey'),
+    ('official_workflow_delegations', 'official_workflow_delegations_revoked_by_fkey'),
+    ('official_workflow_delegations', 'official_workflow_delegations_distinct_users'),
+    ('official_workflow_delegations', 'official_workflow_delegations_status'),
+    ('official_workflow_delegations', 'official_workflow_delegations_valid_period'),
+    ('official_document_stamp_positions', 'official_document_stamp_positions_pkey'),
+    ('official_document_stamp_positions', 'official_document_stamp_positions_request_id_fkey'),
+    ('official_document_stamp_positions', 'official_document_stamp_positions_seal_id_fkey'),
+    ('official_document_stamp_positions', 'official_document_stamp_positions_locked_seal_file_id_fkey'),
+    ('official_document_text_overlays', 'official_document_text_overlays_pkey'),
+    ('official_document_text_overlays', 'official_document_text_overlays_request_id_fkey'),
+    ('official_document_text_overlays', 'official_document_text_overlays_font_family_check'),
+    ('official_document_text_overlays', 'official_document_text_overlays_font_size_check'),
+    ('official_document_text_overlays', 'official_document_text_overlays_page_check'),
+    ('official_document_text_overlays', 'official_document_text_overlays_text_content_check'),
+    ('official_document_text_overlays', 'official_document_text_overlays_x_check'),
+    ('official_document_text_overlays', 'official_document_text_overlays_y_check'),
+    ('official_document_editor_revisions', 'official_document_editor_revisions_pkey'),
+    ('official_document_editor_revisions', 'official_document_editor_revisions_document_id_fkey'),
+    ('official_document_editor_revisions', 'official_document_editor_revisions_parent_revision_id_fkey'),
+    ('official_document_editor_revisions', 'official_editor_document_revision_unique'),
+    ('official_document_editor_revisions', 'official_editor_manifest_sha256_check'),
+    ('official_document_editor_revisions', 'official_editor_revision_no_check'),
+    ('official_document_editor_revisions', 'official_editor_schema_version_check'),
+    ('official_document_editor_assets', 'official_document_editor_assets_pkey'),
+    ('official_document_editor_assets', 'official_document_editor_assets_document_id_fkey'),
+    ('official_document_editor_assets', 'official_document_editor_assets_editor_revision_id_fkey'),
+    ('official_document_editor_assets', 'official_document_editor_assets_file_object_id_fkey'),
+    ('official_document_editor_assets', 'official_document_editor_assets_official_file_id_fkey'),
+    ('official_document_editor_assets', 'official_editor_asset_expected_sha256_check'),
+    ('official_document_editor_assets', 'official_editor_asset_kind_check'),
+    ('official_document_editor_assets', 'official_editor_asset_page_count_check'),
+    ('official_document_editor_assets', 'official_editor_asset_preflight_status_check'),
+    ('official_document_editor_assets', 'official_editor_asset_scan_status_check'),
+    ('official_document_editor_assets', 'official_editor_asset_sha256_check'),
+    ('official_document_editor_assets', 'official_editor_asset_size_check'),
+    ('official_document_editor_assets', 'official_editor_asset_upload_status_check'),
+    ('official_document_dispatch_events', 'official_document_dispatch_events_pkey'),
+    ('official_document_dispatch_events', 'official_document_dispatch_events_dispatch_record_id_fkey'),
+    ('official_document_dispatch_events', 'official_document_dispatch_events_document_id_fkey'),
+    ('official_document_dispatch_events', 'official_document_dispatch_ev_dispatch_record_id_event_sequ_key'),
+    ('official_document_dispatch_events', 'official_document_dispatch_events_event_sequence_check'),
+    ('official_document_dispatch_events', 'official_document_dispatch_events_record_snapshot_sha256_check'),
+    ('official_document_archive_exports', 'official_document_archive_exports_pkey'),
+    ('official_document_archive_exports', 'official_document_archive_exports_document_id_fkey'),
+    ('official_document_archive_exports', 'official_document_archive_exports_requested_by_fkey')
 )
 select
   r.table_name,
@@ -246,7 +492,10 @@ select 'users' as object_type, count(*) as demo_identifier_count
 from public.users where id in ('USR-001','USR-002','USR-003','USR-004','USR-005','USR-006','USR-007')
 union all
 select 'documents', count(*) from public.documents
-where id in ('DOC-IN-1140522-00018','DOC-OUT-1140522-007','DOC-OUT-1140519-006')
+where id in (
+  'DOC-IN-1140522-00018','DOC-OUT-1140522-007','DOC-OUT-1140519-006',
+  'DOC-ADMIN-1140523-001'
+)
 union all
 select 'trusted_devices', count(*) from public.trusted_devices
 where id in ('ACC-DEV-001','ACC-DEV-002','ACC-DEV-003','ACC-DEV-004','ACC-DEV-005','ACC-DEV-006','ACC-DEV-007')
@@ -255,7 +504,178 @@ select 'signing_certificates', count(*) from public.signing_certificates
 where id in ('CERT-SEAL-001','CERT-SEAL-002','CERT-TSA-001')
 union all
 select 'notifications', count(*) from public.notifications
-where id in ('NTF-001','NTF-002','NTF-003','NTF-004','NTF-005');
+where id in ('NTF-001','NTF-002','NTF-003','NTF-004','NTF-005')
+union all
+select 'attachments', count(*) from public.attachments
+where id in ('ATT-001','ATT-002','ATT-003')
+union all
+select 'attachment_security', count(*) from public.attachment_security
+where id in ('ASEC-ATT-001','ASEC-ATT-002','ASEC-ATT-003')
+union all
+select 'exchange_tasks', count(*) from public.exchange_tasks
+where id in ('TASK-001','TASK-002')
+union all
+select 'document_acl', count(*) from public.document_acl
+where id in ('ACL-001','ACL-002','ACL-003','ACL-004','ACL-005','ACL-006','ACL-007')
+union all
+select 'document_acl_events', count(*) from public.document_acl_events
+where id in ('ACLEVT-001','ACLEVT-002','ACLEVT-003')
+union all
+select 'seal_applications', count(*) from public.seal_applications
+where id = 'USEAL-SEED-001'
+union all
+select 'recipients', count(*) from public.recipients
+where id in ('REC-001','REC-002','REC-003','REC-004')
+union all
+select 'notification_rules', count(*) from public.notification_rules
+where id in ('NRULE-001','NRULE-002','NRULE-003','NRULE-004','NRULE-005')
+union all
+select 'fresh_finance_bootstrap_sentinel', count(*)
+from public.finance_organization_projection_state
+where finance_tenant_id = '__edoc_fresh_bootstrap_only__';
+
+-- 8b. Runtime audit-chain hardening. Pass condition: both booleans true,
+-- browser_view_access=false, backend_view_access=true and the single private
+-- helper grant is exact.
+select
+  pg_catalog.to_regclass('edoc_private.audit_log_chain_heads') is not null
+    and exists (
+      select 1
+      from pg_catalog.pg_class relation_row
+      join pg_catalog.pg_namespace namespace_row
+        on namespace_row.oid = relation_row.relnamespace
+      where namespace_row.nspname = 'edoc_private'
+        and relation_row.relname = 'audit_log_chain_heads'
+        and relation_row.relrowsecurity
+        and relation_row.relforcerowsecurity
+    ) as forced_private_chain_state,
+  pg_catalog.to_regprocedure('extensions.digest(bytea,text)') is not null
+    and pg_catalog.to_regprocedure('extensions.gen_random_bytes(integer)') is not null
+    as pgcrypto_runtime_bound,
+  pg_catalog.has_table_privilege('authenticated', 'public.audit_log_chain_check', 'SELECT')
+    as browser_view_access,
+  pg_catalog.has_table_privilege('service_role', 'public.audit_log_chain_check', 'SELECT')
+    as backend_view_access,
+  pg_catalog.has_schema_privilege('service_role', 'edoc_private', 'USAGE')
+    and pg_catalog.has_function_privilege(
+      'service_role',
+      'edoc_private.audit_log_hash_payload(text,text,text,text,text,text,text,text,text,text)',
+      'EXECUTE'
+    ) as backend_private_hash_helper_access,
+  not exists (
+    select 1
+    from pg_catalog.pg_proc procedure_row
+    join pg_catalog.pg_namespace namespace_row
+      on namespace_row.oid = procedure_row.pronamespace
+    where namespace_row.nspname = 'edoc_private'
+      and pg_catalog.has_function_privilege('service_role', procedure_row.oid, 'EXECUTE')
+      and procedure_row.oid <>
+        'edoc_private.audit_log_hash_payload(text,text,text,text,text,text,text,text,text,text)'::pg_catalog.regprocedure
+  ) as no_unexpected_private_function_access;
+
+-- 8c. End-to-end audit continuity. Pass condition:
+-- chain_continuity_valid=true. This checks the historical v1 segment, the v2
+-- transition edge and the current private head without changing evidence.
+with recursive walked as (
+  select audit_row.id, audit_row.entry_hash, audit_row.chain_version, 1 as depth
+  from public.audit_logs audit_row
+  where audit_row.previous_hash is null
+     or audit_row.previous_hash = 'GENESIS'
+
+  union all
+
+  select child.id, child.entry_hash, child.chain_version, parent.depth + 1
+  from walked parent
+  join public.audit_logs child
+    on child.previous_hash = parent.entry_hash
+  where parent.depth < (select pg_catalog.count(*) from public.audit_logs)
+), chain_stats as (
+  select
+    (select pg_catalog.count(*) from public.audit_logs) as total_rows,
+    (select pg_catalog.count(*) from walked) as walked_rows,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs
+      where previous_hash is null or previous_hash = 'GENESIS'
+    ) as root_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs terminal
+      where not exists (
+        select 1 from public.audit_logs child
+        where child.previous_hash = terminal.entry_hash
+      )
+    ) as terminal_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs child
+      where child.previous_hash is not null
+        and child.previous_hash <> 'GENESIS'
+        and not exists (
+          select 1 from public.audit_logs parent
+          where parent.entry_hash = child.previous_hash
+        )
+    ) as missing_parent_count,
+    (
+      select pg_catalog.count(*)
+      from (
+        select previous_hash
+        from public.audit_logs
+        where previous_hash is not null and previous_hash <> 'GENESIS'
+        group by previous_hash
+        having pg_catalog.count(*) > 1
+      ) forked
+    ) as fork_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_log_chain_check
+      where not hash_valid
+    ) as invalid_hash_count,
+    (
+      select pg_catalog.count(*)
+      from public.audit_logs child
+      join public.audit_logs parent on parent.entry_hash = child.previous_hash
+      where child.chain_version < parent.chain_version
+    ) as version_order_violation_count
+), terminal_head as (
+  select terminal.id, terminal.entry_hash
+  from public.audit_logs terminal
+  where not exists (
+    select 1 from public.audit_logs child
+    where child.previous_hash = terminal.entry_hash
+  )
+)
+select
+  stats.*,
+  exists (
+    select 1
+    from terminal_head terminal
+    join edoc_private.audit_log_chain_heads chain_head
+      on chain_head.chain_version = 2
+     and chain_head.last_audit_id = terminal.id
+     and chain_head.head_hash = terminal.entry_hash
+  ) as private_head_matches_terminal,
+  (
+    stats.total_rows = stats.walked_rows
+    and stats.root_count = case when stats.total_rows = 0 then 0 else 1 end
+    and stats.terminal_count = case when stats.total_rows = 0 then 0 else 1 end
+    and stats.missing_parent_count = 0
+    and stats.fork_count = 0
+    and stats.invalid_hash_count = 0
+    and stats.version_order_violation_count = 0
+    and (
+      stats.total_rows = 0
+      or exists (
+        select 1
+        from terminal_head terminal
+        join edoc_private.audit_log_chain_heads chain_head
+          on chain_head.chain_version = 2
+         and chain_head.last_audit_id = terminal.id
+         and chain_head.head_hash = terminal.entry_hash
+      )
+    )
+  ) as chain_continuity_valid
+from chain_stats stats;
 
 -- 9. Notification readiness. Internal inbox is the launch baseline; external
 -- credentials may legitimately remain pending. No credential values are read.

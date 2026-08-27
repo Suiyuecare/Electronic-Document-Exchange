@@ -320,6 +320,7 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         upload = self.js[upload_start:upload_end]
         headers = javascript_function(self.js, "editorTusIntentHeaders")
         endpoint = javascript_function(self.js, "validateEditorTusEndpoint")
+        offset_probe = javascript_function(self.js, "editorTusRemoteOffset")
 
         self.assertIn("validateEditorTusEndpoint(intent)", upload)
         self.assertIn("editorTusIntentHeaders(intent)", upload)
@@ -341,6 +342,8 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         self.assertIn('uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/sign/")', upload)
         self.assertIn("editorTusRemoteOffset(uploadUrl, baseHeaders)", upload)
         self.assertIn("onProgress(Math.min(1, offset / Math.max(1, file.size)))", upload)
+        self.assertGreaterEqual(upload.count('redirect: "error"'), 3)
+        self.assertIn('redirect: "error"', offset_probe)
 
     def test_upload_failure_is_visible_retryable_and_closes_pending_intent(self) -> None:
         editor = html_element(self.page, "uploadedPdfEditor")

@@ -31,12 +31,42 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes postgresql-client
 
+      - name: Set up Python for isolated Storage acceptance
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned application dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
       - name: Reset fresh local database and exercise RPC contracts
         run: |
           set -euo pipefail
-          supabase db start
+          # Real signed TUS needs Kong + Storage, not only the Postgres service.
+          # Suppress the normal local credential summary; tests consume the
+          # ephemeral values through command substitution below, never logs.
+          supabase start >/dev/null
           trap 'supabase stop --no-backup' EXIT
           supabase db reset --local
+
+          for migration in supabase/storage-migrations/*.sql; do
+            PGPASSWORD=postgres psql \
+              --host 127.0.0.1 \
+              --port 54322 \
+              --username postgres \
+              --dbname postgres \
+              --set ON_ERROR_STOP=1 \
+              --file "$migration"
+          done
+
+          PGPASSWORD=postgres psql \
+            --host 127.0.0.1 \
+            --port 54322 \
+            --username postgres \
+            --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --file supabase/verification/local_storage_tus_gate.sql
+
           PGPASSWORD=postgres psql \
             --host 127.0.0.1 \
             --port 54322 \
@@ -44,7 +74,76 @@ jobs:
             --dbname postgres \
             --set ON_ERROR_STOP=1 \
             --file supabase/verification/fresh_bootstrap_smoke.sql
+          PGPASSWORD=postgres psql \
+            --host 127.0.0.1 \
+            --port 54322 \
+            --username postgres \
+            --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --file supabase/verification/runtime_schema_parity_smoke.sql
+          PGPASSWORD=postgres psql \
+            --host 127.0.0.1 \
+            --port 54322 \
+            --username postgres \
+            --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --file supabase/verification/service_role_data_api_grant_smoke.sql
+
+          pids=()
+          for index in $(seq -w 1 20); do
+            PGPASSWORD=postgres psql \
+              --host 127.0.0.1 \
+              --port 54322 \
+              --username postgres \
+              --dbname postgres \
+              --set ON_ERROR_STOP=1 \
+              --command "insert into public.audit_logs (id, actor, action, target_type, target_id, detail, created_at) values ('AUD-CI-CONCURRENT-${index}', 'ci', 'concurrent chain smoke', 'verification', 'fresh-bootstrap', 'deidentified smoke row', '2099-01-01 00:00:00');" &
+            pids+=("$!")
+          done
+          for pid in "${pids[@]}"; do
+            wait "$pid"
+          done
+
+          PGPASSWORD=postgres psql \
+            --host 127.0.0.1 \
+            --port 54322 \
+            --username postgres \
+            --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --file supabase/verification/audit_chain_concurrency_check.sql
+
+          eval "$(supabase status -o env)"
+          test -n "${API_URL:-}"
+          test -n "${ANON_KEY:-}"
+          test -n "${SERVICE_ROLE_KEY:-}"
+          EDOC_LOCAL_SUPABASE_URL="$API_URL" \
+          EDOC_LOCAL_SUPABASE_ANON_KEY="$ANON_KEY" \
+          EDOC_LOCAL_SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+            python tests/support/local_supabase_editor_finalize_rpc_gate.py
+
+          EDOC_ACCEPTANCE_UPLOAD_PROTOCOL=local_supabase_tus \
+          EDOC_LOCAL_SUPABASE_URL="$API_URL" \
+          EDOC_LOCAL_SUPABASE_ANON_KEY="$ANON_KEY" \
+          EDOC_LOCAL_SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+            python -m unittest -v tests.test_five_account_http_acceptance
+
+          PGPASSWORD=postgres psql \
+            --host 127.0.0.1 \
+            --port 54322 \
+            --username postgres \
+            --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --file supabase/verification/local_storage_tus_gate.sql
           supabase db lint --local --schema public --level error --fail-on error
+
+      - name: Preserve isolated TUS acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-supabase-tus-five-account-${{ github.run_id }}
+          path: tests/.artifacts/five-account-acceptance/
+          if-no-files-found: warn
+          retention-days: 14
 
   validate:
     name: Validate backend and frontend
@@ -74,8 +173,22 @@ jobs:
       - name: Check frontend JavaScript
         run: node --check app.js
 
+      - name: Replay five-account acceptance with alternate seed
+        env:
+          EDOC_ACCEPTANCE_SEED: "90210"
+        run: python -m unittest -v tests.test_five_account_http_acceptance
+
       - name: Run backend and frontend contract tests
         run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Preserve deidentified five-account acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: five-account-acceptance-${{ github.run_id }}
+          path: tests/.artifacts/five-account-acceptance/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Initialize SQLite schema
         run: python backend.py --init-only

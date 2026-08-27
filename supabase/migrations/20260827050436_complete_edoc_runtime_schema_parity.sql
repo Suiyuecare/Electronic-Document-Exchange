@@ -59,6 +59,14 @@ alter table public.official_document_stamp_requests
   add column if not exists claim_expires_at timestamptz,
   add column if not exists claim_attempt_count integer not null default 0;
 
+-- Notification workflow functions below target one exact Finance user and
+-- company and return an in-app action URL. These columns existed in the live
+-- catalog but were absent from the historical migration chain.
+alter table public.notifications
+  add column if not exists target_user_id text,
+  add column if not exists target_company_id text,
+  add column if not exists action_url text;
+
 -- Keep accepted values aligned with the current backend contract.  Replacing
 -- these CHECK constraints is deliberate: ADD CONSTRAINT has no IF NOT EXISTS,
 -- and the earlier file/file-status lists did not include Editor V2 output.

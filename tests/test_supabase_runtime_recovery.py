@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unittest
@@ -23,14 +24,61 @@ NOTIFICATIONS = MIGRATIONS / "20260827042306_safe_notification_bootstrap.sql"
 CLEANUP = MIGRATIONS / "20260827050447_remove_exact_demo_bootstrap_records_forward.sql"
 ATOMIC_FORWARD = MIGRATIONS / "20260827050450_atomic_official_submission_editor_finalize_forward.sql"
 FK_INDEX_FORWARD = MIGRATIONS / "20260827050452_add_confirmed_edoc_fk_indexes_forward.sql"
+FINANCE_TENANT_BACKFILL = MIGRATIONS / "20260825143558_backfill_finance_tenant_scope.sql"
+FRESH_FINANCE_SENTINEL_CLEANUP = (
+    MIGRATIONS / "20260827064100_remove_fresh_finance_bootstrap_sentinel.sql"
+)
+AUDIT_HASH_HARDENING = MIGRATIONS / "20260827061915_harden_audit_hash_runtime.sql"
 CUTOVER_CHECKS = ROOT / "supabase" / "verification" / "production_cutover_checks.sql"
 STORAGE_CUTOVER_CHECKS = ROOT / "supabase" / "verification" / "dedicated_storage_cutover_checks.sql"
+AUDIT_CONCURRENCY_CHECKS = ROOT / "supabase" / "verification" / "audit_chain_concurrency_check.sql"
 MANIFEST = ROOT / "supabase" / "verification" / "migration_manifest.json"
 ROLES_BOOTSTRAP = ROOT / "supabase" / "roles.sql"
 
 
 class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
-    def test_roles_bootstrap_only_supplies_legacy_permission_fk_prerequisites(self) -> None:
+    def test_applied_finance_backfill_is_immutable_and_fresh_reset_uses_forward_sentinel(self) -> None:
+        raw = FINANCE_TENANT_BACKFILL.read_bytes()
+        sql = raw.decode("utf-8").lower()
+        roles = ROLES_BOOTSTRAP.read_text(encoding="utf-8").lower()
+        cleanup = FRESH_FINANCE_SENTINEL_CLEANUP.read_text(encoding="utf-8").lower()
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+        # This migration predates the current hardening branch and may already
+        # be recorded remotely. Its repository checksum is a provenance gate.
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(),
+            "78730e2bb61da03b8826940a4ca8f316c8c8877404b608219ac0e69281e968f1",
+        )
+        self.assertNotIn("if v_tenant_count = 0 then", sql)
+        self.assertEqual(
+            sql.count("finance_tenant_backfill_requires_exactly_one_projection_tenant"),
+            1,
+        )
+
+        # roles.sql is fresh-reset-only. The sentinel lets the immutable
+        # migration run, then a later exact forward migration removes it.
+        self.assertIn("create table if not exists public.finance_organization_projection_state", roles)
+        self.assertIn("'__edoc_fresh_bootstrap_only__'", roles)
+        self.assertIn(FRESH_FINANCE_SENTINEL_CLEANUP.name, manifest["migrations"])
+        self.assertIn("fresh_finance_bootstrap_sentinel_signature_mismatch", cleanup)
+        self.assertIn("fresh_finance_bootstrap_sentinel_has_reference", cleanup)
+        self.assertIn("fresh_finance_bootstrap_sentinel_delete_failed", cleanup)
+        self.assertIn("delete from public.finance_organization_projection_state", cleanup)
+        for relation in (
+            "companies",
+            "users",
+            "finance_member_sync_receipts",
+            "finance_organization_revisions",
+            "finance_organization_units",
+            "module_account_links",
+        ):
+            self.assertIn(f"select 1 from public.{relation}", cleanup)
+        if parse_sql is not None:
+            parse_sql(sql)
+            parse_sql(cleanup)
+
+    def test_roles_bootstrap_supplies_only_structural_fresh_reset_prerequisites(self) -> None:
         sql = ROLES_BOOTSTRAP.read_text(encoding="utf-8").lower()
         expected = {
             "perm-inbound",
@@ -48,6 +96,8 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertNotRegex(sql, r"insert\s+into\s+public\.(users|companies|documents)\b")
         self.assertNotIn("password", sql)
         self.assertIn("create extension if not exists pgcrypto with schema extensions", sql)
+        self.assertIn("edoc_pgcrypto_extensions_schema_required", sql)
+        self.assertIn("pg_catalog.to_regprocedure('extensions.digest(bytea,text)')", sql)
         self.assertIn("function public.digest(data text, digest_type text)", sql)
         self.assertIn("function public.digest(data bytea, digest_type text)", sql)
         self.assertGreaterEqual(sql.count("set search_path = ''"), 2)
@@ -67,6 +117,8 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
             sql,
         )
         self.assertIn("grant usage on schema private to service_role", sql)
+        self.assertIn("'__edoc_fresh_bootstrap_only__'", sql)
+        self.assertIn("'edoc-fresh-bootstrap-compat-v1'", sql)
         if parse_sql is not None:
             self.assertGreaterEqual(len(parse_sql(sql)), 2)
 
@@ -293,8 +345,220 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertNotRegex(seed, r"\b(USR-|DOC-|NTF-|CERT-|ACC-DEV-)\w+")
         self.assertNotRegex(seed.lower(), r"\binsert\s+into\s+public\.")
         self.assertNotRegex(cleanup.lower(), r"\b(like|similar to|regexp|~\*?)\b")
-        for exact_id in ("USR-001", "DOC-IN-1140522-00018", "NTF-001", "CERT-SEAL-001"):
+        for exact_id in (
+            "USR-001",
+            "DOC-IN-1140522-00018",
+            "DOC-ADMIN-1140523-001",
+            "NTF-001",
+            "CERT-SEAL-001",
+        ):
             self.assertIn(exact_id, cleanup)
+        self.assertIn("retention_until = current_date", cleanup.lower())
+        self.assertIn("工作區範例", cleanup)
+        self.assertIn("admin_demo_document_signature_mismatch", cleanup)
+        self.assertIn("admin_demo_document_has_reference", cleanup)
+        self.assertIn("pg_catalog.pg_constraint", cleanup)
+        cutover = CUTOVER_CHECKS.read_text(encoding="utf-8")
+        self.assertIn("DOC-ADMIN-1140523-001", cutover)
+        for object_type in (
+            "attachments",
+            "attachment_security",
+            "exchange_tasks",
+            "document_acl",
+            "document_acl_events",
+            "seal_applications",
+            "recipients",
+        ):
+            self.assertIn(f"select '{object_type}', count(*)", cutover)
+        self.assertIn("forced_private_chain_state", cutover)
+
+    def test_demo_cleanup_fails_closed_on_fixture_drift_and_all_references(self) -> None:
+        cleanup = CLEANUP.read_text(encoding="utf-8").lower()
+
+        # Catalog-driven guards cover composite/alternate-key FKs. After all
+        # signed fixture deletes, one bounded public-schema pass checks every
+        # retired ID against denormalized scalar history references.
+        self.assertIn("pg_temp.edoc_demo_assert_no_fk_references", cleanup)
+        self.assertIn("constraint_row.confrelid = p_parent_relation", cleanup)
+        self.assertIn("pg_catalog.string_agg", cleanup)
+        self.assertIn("pg_temp.edoc_demo_assert_no_exact_scalar_references", cleanup)
+        self.assertIn("p_fixture_ids text[]", cleanup)
+        self.assertIn("namespace_row.nspname = 'public'", cleanup)
+        self.assertIn(
+            "attribute_row.atttypid = 'pg_catalog.text'::pg_catalog.regtype",
+            cleanup,
+        )
+        self.assertIn("pg_catalog.right(attribute_row.attname, 3) = '_id'", cleanup)
+        self.assertIn("table_row.%i = any($1)", cleanup)
+        self.assertIn("group by namespace_row.nspname, relation_row.relname", cleanup)
+        self.assertIn("demo_cleanup_has_non_fk_reference", cleanup)
+        self.assertIn("set local statement_timeout = '120s'", cleanup)
+        self.assertIn("set local lock_timeout = '5s'", cleanup)
+        self.assertTrue(cleanup.startswith("-- remove only"))
+        self.assertRegex(cleanup, r"(?s)begin;.*commit;\s*$")
+        self.assertEqual(
+            cleanup.count(
+                "perform pg_temp.edoc_demo_assert_no_exact_scalar_references("
+            ),
+            1,
+        )
+
+        # Historical seed departments must match the seed, not a later UI
+        # normalization migration.
+        self.assertGreaterEqual(cleanup.count("department = '總管理處'"), 2)
+        self.assertIn("department = '居家照顧課'", cleanup)
+
+        # Every deterministic document/attachment default introduced after the
+        # seed is part of the immutable cleanup signature.
+        for fragment in (
+            "retention_policy_code = 'edoc-std-07y'",
+            "retention_years = 7",
+            "retention_until is null",
+            "retention_policy_code = 'edoc-seal-15y'",
+            "retention_years = 15",
+            "pg_catalog.make_interval(years => retention_years)",
+            "disposition_status = '保存中'",
+            "disposed_at is null",
+            "confidentiality_scope = '一般'",
+            "company_name = '歲悅長照股份有限公司'",
+            "seal_plan_json = '{}'",
+            "metadata_json = '{}'",
+            "scan_status = '雜湊通過'",
+            "sensitive_hits_json = '[\"身分證\",\"電話\"]'::jsonb",
+            "last_accessed_by is null",
+            "last_accessed_at is null",
+            "retry_count = 1",
+            "next_check_at = '2026-05-23 09:00'",
+            "expires_at is null",
+        ):
+            self.assertIn(fragment, cleanup)
+
+        for object_name in (
+            "attachment_security",
+            "attachment",
+            "exchange_task",
+            "acl_event",
+            "acl",
+            "seal_application",
+            "document",
+        ):
+            self.assertIn(f"legacy_demo_{object_name}_has_fk_reference", cleanup)
+            self.assertIn(f"legacy_demo_{object_name}_delete_failed", cleanup)
+
+        # The seed seal row must remain untouched if any workflow snapshot has
+        # recorded it, even though that historical table has no FK constraint.
+        self.assertIn("approval_step_actor_snapshots", cleanup)
+        self.assertIn("seal_application_id = 'useal-seed-001'", cleanup)
+        self.assertIn("source_id = 'useal-seed-001'", cleanup)
+        self.assertIn("legacy_demo_seal_application_has_actor_snapshot", cleanup)
+        for fragment in (
+            "stamp_no is null",
+            "pdf_before_version_id is null",
+            "pdf_after_version_id is null",
+            "approved_at is null",
+            "signature_id is null",
+            "provider_status is null",
+            "failure_reason is null",
+            "evidence_json is null",
+            "updated_at is null",
+            "application_type = 'official_document'",
+            "company_name = '歲悅股份有限公司'",
+            "stamp_positions_json = '[]'::jsonb",
+            "approval_snapshot_json = '{}'::jsonb",
+            "current_step_no = 1",
+            "notification_id is null",
+        ):
+            self.assertIn(fragment, cleanup)
+
+        # Notification rules are signatures first, catalog guards second, and
+        # an asserted delete last; they are never removed by identifier alone.
+        self.assertIn("do $cleanup_demo_notification_rules$", cleanup)
+        self.assertIn("demo_notification_rule_signature_mismatch", cleanup)
+        self.assertIn("demo_notification_rule_has_fk_reference", cleanup)
+        self.assertIn("demo_notification_rule_delete_failed", cleanup)
+        self.assertRegex(cleanup, r"nrule-001[^\n]+status = '啟用'")
+        for rule_id in range(2, 6):
+            self.assertRegex(cleanup, rf"nrule-00{rule_id}[^\n]+status = '停用'")
+        for rule_id in range(1, 6):
+            self.assertIn(f"nrule-00{rule_id}", cleanup)
+
+        # Account/device fixtures also fail closed when their activity state or
+        # a catalog/non-FK reference differs from the retired seed.
+        self.assertIn("last_seen_at = created_at", cleanup)
+        self.assertIn("last_login_at is not null", cleanup)
+        self.assertIn("finance_source_revision is distinct from 0", cleanup)
+        self.assertIn("demo_trusted_device_delete_failed", cleanup)
+        self.assertIn("demo_account_has_fk_reference", cleanup)
+
+    def test_demo_document_cleanup_matches_predecessor_retention_trigger(self) -> None:
+        cleanup = CLEANUP.read_text(encoding="utf-8").lower()
+        predecessor = (
+            MIGRATIONS / "202605230010_formal_database_security_policy.sql"
+        ).read_text(encoding="utf-8").lower()
+
+        self.assertIn("create trigger trg_documents_set_retention", predecessor)
+        self.assertIn("before insert or update of security_level, status, direction, created_at, retention_until", predecessor)
+        self.assertIn("or new.direction = '發文'", predecessor)
+        self.assertIn("update public.documents\nset retention_until = null", predecessor)
+
+        # The trigger runs before cleanup: the inbound fixture is seven-year
+        # standard retention, while all three outbound fixtures are 15-year
+        # seal retention, computed from each row's generated created_at date.
+        self.assertEqual(cleanup.count("retention_policy_code = 'edoc-std-07y'"), 1)
+        self.assertEqual(cleanup.count("retention_policy_code = 'edoc-seal-15y'"), 3)
+        self.assertEqual(cleanup.count("retention_years = 7"), 1)
+        self.assertEqual(cleanup.count("retention_years = 15"), 3)
+        self.assertEqual(cleanup.count("updated_at = created_at"), 4)
+        self.assertEqual(
+            cleanup.count(
+                "retention_until = (pg_catalog.left(created_at, 10)::date + "
+                "pg_catalog.make_interval(years => retention_years))::date"
+            ),
+            4,
+        )
+
+    def test_audit_hash_forward_hardening_is_serialized_and_fixed_path(self) -> None:
+        sql = AUDIT_HASH_HARDENING.read_text(encoding="utf-8").lower()
+        self.assertIn("create table if not exists edoc_private.audit_log_chain_heads", sql)
+        self.assertIn("lock table public.audit_logs in share row exclusive mode", sql)
+        self.assertIn("edoc_audit_v1_chain_invalid", sql)
+        self.assertIn("v_walked <> v_total", sql)
+        self.assertIn("v_terminals <> 1", sql)
+        self.assertIn("enable row level security", sql)
+        self.assertIn("force row level security", sql)
+        self.assertIn("pg_catalog.pg_advisory_xact_lock", sql)
+        self.assertIn("for update", sql)
+        self.assertIn("where audit_row.id = new.id", sql)
+        self.assertIn("new.chain_version := 2", sql)
+        self.assertIn("new.previous_hash := coalesce(v_previous_hash, 'genesis')", sql)
+        self.assertIn("extensions.digest(", sql)
+        self.assertGreaterEqual(sql.count("set search_path = ''"), 2)
+        self.assertIn("security definer", sql)
+        self.assertIn(
+            "revoke all on public.audit_log_chain_check from public, anon, authenticated",
+            sql,
+        )
+        self.assertIn("grant select on public.audit_log_chain_check to service_role", sql)
+        self.assertIn(
+            "set search_path = pg_catalog, extensions",
+            sql,
+        )
+        self.assertIn(
+            "alter function public.edoc_mutate_inbound_document_v1",
+            sql,
+        )
+        self.assertIn("extensions.gen_random_bytes(integer)", sql)
+        self.assertNotIn("update public.audit_logs", sql)
+        self.assertIn(
+            "revoke all on table edoc_private.audit_log_chain_heads\n  from public, anon, authenticated, service_role",
+            sql,
+        )
+        cutover = CUTOVER_CHECKS.read_text(encoding="utf-8").lower()
+        self.assertIn("chain_continuity_valid", cutover)
+        self.assertIn("private_head_matches_terminal", cutover)
+        self.assertIn("version_order_violation_count", cutover)
+        if parse_sql is not None:
+            parse_sql(sql)
 
     def test_sql_files_have_balanced_dollar_quotes(self) -> None:
         for path in sorted(MIGRATIONS.glob("*.sql")) + sorted(STORAGE_MIGRATIONS.glob("*.sql")) + [RECOVERY]:
@@ -318,9 +582,12 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
             CLEANUP,
             ATOMIC_FORWARD,
             FK_INDEX_FORWARD,
+            AUDIT_HASH_HARDENING,
+            FRESH_FINANCE_SENTINEL_CLEANUP,
             ROOT / "supabase" / "seed.sql",
             ROOT / "supabase" / "verification" / "production_cutover_checks.sql",
             STORAGE_CUTOVER_CHECKS,
+            AUDIT_CONCURRENCY_CHECKS,
         )
         for path in paths:
             with self.subTest(path=path.name):

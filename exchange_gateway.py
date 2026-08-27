@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -30,7 +31,27 @@ SENSITIVE_KEYWORDS = {
     "private_key",
     "secret",
     "token",
+    "x-api-key",
+    "x-signature",
 }
+
+_SENSITIVE_TEXT_KEY_PATTERN = "|".join(
+    re.escape(keyword)
+    for keyword in sorted(SENSITIVE_KEYWORDS, key=len, reverse=True)
+)
+_SENSITIVE_TEXT_ASSIGNMENT_RE = re.compile(
+    r'''(?P<prefix>(?<![A-Za-z0-9_])["']?(?:'''
+    + _SENSITIVE_TEXT_KEY_PATTERN
+    + r''')["']?\s*[:=]\s*)(?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,;&}\]]+)''',
+    re.IGNORECASE,
+)
+_BEARER_TOKEN_RE = re.compile(
+    r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+",
+)
+_STRUCTURED_SECRET_TOKEN_RE = re.compile(
+    r"(?i)\b(?:sb_secret_[A-Za-z0-9._-]+|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b",
+)
 
 OUTBOX_PENDING = "待發文"
 OUTBOX_SENT = "已送出"
@@ -62,18 +83,26 @@ def redact_sensitive(value: Any) -> Any:
         return redacted
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return _redact_unstructured_text(value)
     return value
+
+
+def _redact_unstructured_text(value: str) -> str:
+    text = _SENSITIVE_TEXT_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group('prefix')}[REDACTED]",
+        str(value),
+    )
+    text = _BEARER_TOKEN_RE.sub("Bearer [REDACTED]", text)
+    return _STRUCTURED_SECRET_TOKEN_RE.sub("[REDACTED]", text)
 
 
 def redact_text(value: str) -> str:
     try:
-        return json.dumps(redact_sensitive(json.loads(value)), ensure_ascii=False)
+        parsed = json.loads(value)
     except (TypeError, json.JSONDecodeError):
-        text = value
-        for keyword in SENSITIVE_KEYWORDS:
-            text = text.replace(f"{keyword}=", f"{keyword}=[REDACTED]")
-            text = text.replace(f"{keyword}:", f"{keyword}:[REDACTED]")
-        return text
+        return _redact_unstructured_text(str(value))
+    return json.dumps(redact_sensitive(parsed), ensure_ascii=False)
 
 
 def safe_json(value: Any) -> str:

@@ -1,11 +1,50 @@
 import os
+import threading
 import unittest
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 import backend
 
 
 class SeparateSupabaseStorageTests(unittest.TestCase):
+    def test_privileged_transport_never_follows_http_redirect(self):
+        hits = []
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler contract
+                hits.append(self.path)
+                if self.path == "/first":
+                    self.send_response(302)
+                    self.send_header("Location", "/second")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/first",
+                headers={"apikey": "must-not-reach-second-hop"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                backend._urlopen_no_redirect(request, timeout=1)
+            self.assertEqual(raised.exception.code, 302)
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+
+        self.assertEqual(hits, ["/first"])
+
     def storage_config(
         self,
         *,
@@ -105,6 +144,7 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
             "https://storage-project.supabase.co.attacker.example",
             "https://attacker.storage-project.supabase.co",
             "https://storage-project.supabase.co:444",
+            "https://storage-project.supabase.co：443",
             "https://user@storage-project.supabase.co",
             "https://storage-project.supabase.co/rest/v1",
             "http://storage-project.supabase.co",
@@ -146,6 +186,80 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
                     "storage_supabase_project_url_invalid",
                 )
                 fetch.assert_not_called()
+
+    def test_malformed_port_is_a_readiness_issue_not_an_exception(self):
+        with mock.patch.dict(
+            os.environ,
+            {"EDOC_OBJECT_STORAGE_URL": ""},
+            clear=False,
+        ), self.storage_config(
+            storage_url="https://storage-project.supabase.co:bad",
+            storage_key="sb_secret_storage",
+        ), mock.patch.object(
+            backend,
+            "EDOC_STORAGE_SUPABASE_MODE",
+            "dedicated-project",
+        ):
+            issues = backend.supabase_project_partition_issues()
+
+        self.assertIn("dedicated_storage_supabase_url_required", issues)
+        self.assertIn("storage_supabase_project_url_invalid", issues)
+
+    def test_default_https_port_cannot_bypass_dedicated_project_isolation(self):
+        with mock.patch.dict(
+            os.environ,
+            {"EDOC_OBJECT_STORAGE_URL": ""},
+            clear=False,
+        ), self.storage_config(
+            storage_url="https://database-project.supabase.co:443",
+            storage_key="sb_secret_storage",
+        ), mock.patch.object(
+            backend,
+            "EDOC_STORAGE_SUPABASE_MODE",
+            "dedicated-project",
+        ):
+            self.assertTrue(backend.storage_uses_database_supabase_project())
+            self.assertIn(
+                "dedicated_storage_project_must_differ_from_database",
+                backend.supabase_project_partition_issues(),
+            )
+
+    def test_supabase_helpers_reject_non_supabase_provider_before_network(self):
+        with mock.patch.dict(
+            os.environ,
+            {"EDOC_OBJECT_STORAGE_URL": "https://attacker.example/storage/v1"},
+            clear=False,
+        ), self.storage_config(
+            storage_url="https://storage-project.supabase.co",
+            storage_key="sb_secret_storage",
+        ), mock.patch.object(
+            backend,
+            "EDOC_STORAGE_PROVIDER",
+            "s3",
+        ), mock.patch.object(
+            backend,
+            "_urlopen_no_redirect",
+        ) as network:
+            with self.assertRaisesRegex(
+                backend.SupabaseConfigurationError,
+                "supabase_storage_provider_required",
+            ):
+                backend.supabase_storage_headers()
+            with self.assertRaisesRegex(
+                backend.SupabaseConfigurationError,
+                "supabase_storage_provider_required",
+            ):
+                backend._supabase_storage_direct_tus_url()
+            with self.assertRaisesRegex(
+                backend.SupabaseConfigurationError,
+                "supabase_storage_provider_required",
+            ):
+                backend.supabase_storage_download("private/test.pdf")
+            status = backend.storage_service_status()
+
+        self.assertFalse(status["services"]["provider"]["configured"])
+        self.assertFalse(status["ready"])
+        network.assert_not_called()
 
     def test_private_bucket_probe_disables_redirects(self):
         buckets = [

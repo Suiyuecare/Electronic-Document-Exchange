@@ -38,6 +38,62 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
         urlopen.assert_not_called()
         create_connection.assert_not_called()
 
+    def test_main_supabase_probes_never_follow_redirects(self):
+        rpc_paths = {
+            f"/rpc/{name}": {"post": {}}
+            for name in backend.EDOC_READINESS_REQUIRED_RPC_NAMES
+        }
+        with self.production_runtime_config(), mock.patch.object(
+            backend,
+            "_readiness_http_json",
+            side_effect=[[], {"paths": rpc_paths}],
+        ) as fetch:
+            query = backend._probe_main_supabase_query(0.25)
+            rpcs = backend._probe_main_supabase_rpcs(0.25)
+
+        self.assertTrue(query["ready"])
+        self.assertTrue(rpcs["ready"])
+        self.assertEqual(fetch.call_count, 2)
+        for call in fetch.call_args_list:
+            self.assertFalse(call.kwargs["allow_redirects"])
+
+    def test_production_database_key_rejects_non_project_origin_before_network(self):
+        invalid_urls = (
+            "https://project.supabase.co.attacker.example",
+            "https://attacker.project.supabase.co",
+            "https://project.supabase.co:bad",
+            "https://user@project.supabase.co",
+            "http://project.supabase.co",
+        )
+        for invalid_url in invalid_urls:
+            with self.subTest(invalid_url=invalid_url), self.production_runtime_config(), mock.patch.object(
+                backend,
+                "SUPABASE_URL",
+                invalid_url,
+            ), mock.patch.object(
+                backend,
+                "is_production",
+                return_value=True,
+            ), mock.patch.object(
+                backend,
+                "_urlopen_no_redirect",
+            ) as network:
+                self.assertEqual(
+                    backend._supabase_database_endpoint_issue(),
+                    "database_supabase_project_url_invalid",
+                )
+                with self.assertRaisesRegex(
+                    backend.SupabaseConfigurationError,
+                    "database_supabase_project_url_invalid",
+                ):
+                    backend.supabase_headers()
+                with self.assertRaisesRegex(
+                    backend.SupabaseConfigurationError,
+                    "database_supabase_project_url_invalid",
+                ):
+                    backend.supabase_request("GET", "official_documents?limit=1")
+                network.assert_not_called()
+
     def test_format_correct_but_unreachable_supabase_returns_public_503(self):
         configured = {"ready": True, "internalGo": True, "checks": {}, "blockers": []}
         with (
