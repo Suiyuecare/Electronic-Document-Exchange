@@ -1614,11 +1614,17 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
             token=applicant_token,
             json_body={"sha256": digest},
         )
-        finalized_error = finalized.json().get("error")
-        if finalized.status != 422 or finalized_error != "editor_asset_quarantined":
+        finalized_payload = finalized.json()
+        finalized_error = finalized_payload.get("error")
+        finalized_detail = finalized_payload.get("detail")
+        if not (
+            finalized.status == 422
+            and finalized_error == "request_rejected"
+            and finalized_detail == "editor_asset_quarantined"
+        ):
             raise AssertionError(
                 f"local_supabase_eicar_not_rejected:{finalized.status}:"
-                f"{_machine_error(RuntimeError(str(finalized_error)))}"
+                f"{_machine_error(RuntimeError(str(finalized_detail or finalized_error)))}"
             )
         with backend.connect() as conn:
             asset = conn.execute(
@@ -1635,11 +1641,17 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
             token=applicant_token,
             json_body={"sha256": digest},
         )
-        replay_error = replay.json().get("error")
-        if replay.status != 409 or replay_error != "editor_upload_new_intent_required":
+        replay_payload = replay.json()
+        replay_error = replay_payload.get("error")
+        replay_detail = replay_payload.get("detail")
+        if not (
+            replay.status == 409
+            and replay_error == "request_rejected"
+            and replay_detail == "editor_upload_new_intent_required"
+        ):
             raise AssertionError(
                 f"local_supabase_failed_intent_replay_not_rejected:{replay.status}:"
-                f"{_machine_error(RuntimeError(str(replay_error)))}"
+                f"{_machine_error(RuntimeError(str(replay_detail or replay_error)))}"
             )
         with self.assertRaisesRegex(ValueError, "supabase_storage_download_failed"):
             backend.supabase_storage_download(intent["path"], intent["bucket"])
