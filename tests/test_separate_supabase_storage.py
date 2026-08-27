@@ -67,7 +67,7 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     backend._supabase_storage_direct_tus_url(),
-                    "https://storage-project.storage.supabase.co/storage/v1/upload/resumable",
+                    "https://storage-project.storage.supabase.co/storage/v1/upload/resumable/sign",
                 )
 
     def test_signed_tus_route_contract_never_returns_server_credential(self):
@@ -99,8 +99,7 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
                     {"user": {"id": "FIN-U1"}},
                 )
 
-        self.assertTrue(intent["upload_url"].endswith("/storage/v1/upload/resumable"))
-        self.assertNotIn("/sign", intent["upload_url"])
+        self.assertTrue(intent["upload_url"].endswith("/storage/v1/upload/resumable/sign"))
         self.assertEqual(intent["storage_publishable_key"], "sb_publishable_browser_safe")
         self.assertEqual(intent["upload_token"], "short-lived-object-signature")
         self.assertEqual(intent["headers"]["x-signature"], "short-lived-object-signature")

@@ -4119,6 +4119,84 @@ def _probe_supabase_private_buckets(timeout: float) -> Dict[str, Any]:
         }
 
 
+def _probe_supabase_publishable_key_affinity(timeout: float) -> Dict[str, Any]:
+    """Confirm the browser upload key belongs to the configured Storage project.
+
+    Supabase documents ``GET /auth/v1/settings`` as a public, read-only check
+    made with the project's public ``apikey``.  A publishable key from another
+    project is rejected by the API gateway, so this proves URL/key affinity
+    without listing or mutating user data.  The result intentionally contains
+    neither the endpoint nor the credential.
+    """
+    safe_result = {
+        "checked": True,
+        "containsEndpoint": False,
+        "containsKey": False,
+    }
+    try:
+        if EDOC_STORAGE_PROVIDER != "supabase":
+            raise RuntimeError("storage_runtime_config_missing")
+        project_url = str(EDOC_STORAGE_SUPABASE_URL or "").strip().rstrip("/")
+        if not project_url and storage_uses_database_supabase_project():
+            project_url = str(SUPABASE_URL or "").strip().rstrip("/")
+        parsed = urllib.parse.urlparse(project_url)
+        hostname = str(parsed.hostname or "").lower()
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise RuntimeError(
+                "storage_publishable_key_affinity_config_invalid"
+            ) from exc
+        supabase_cloud_host = bool(
+            hostname.endswith(".supabase.co")
+            and hostname != "supabase.co"
+        )
+        if not (
+            parsed.scheme == "https"
+            and supabase_cloud_host
+            and port in {None, 443}
+            and not parsed.username
+            and not parsed.password
+            and parsed.path in {"", "/"}
+            and not parsed.query
+            and not parsed.fragment
+        ):
+            raise RuntimeError("storage_publishable_key_affinity_config_invalid")
+        publishable_key = str(EDOC_STORAGE_PUBLISHABLE_KEY or "").strip()
+        if not _browser_safe_supabase_public_key(publishable_key):
+            raise RuntimeError("storage_publishable_key_affinity_config_invalid")
+        payload = _readiness_http_json(
+            f"{project_url}/auth/v1/settings",
+            headers={"Accept": "application/json", "apikey": publishable_key},
+            timeout=timeout,
+            max_bytes=256 * 1024,
+        )
+        if not isinstance(payload, dict):
+            return {
+                **safe_result,
+                "ready": False,
+                "errorCode": "storage_publishable_key_affinity_contract_invalid",
+            }
+        return {**safe_result, "ready": True, "errorCode": ""}
+    except urllib.error.HTTPError as exc:
+        if int(getattr(exc, "code", 0) or 0) in {401, 403}:
+            error_code = "storage_publishable_key_affinity_rejected"
+        else:
+            error_code = "storage_publishable_key_affinity_unavailable"
+        return {**safe_result, "ready": False, "errorCode": error_code}
+    except RuntimeError as exc:
+        error_code = str(exc)
+        if error_code != "storage_publishable_key_affinity_config_invalid":
+            error_code = "storage_publishable_key_affinity_unavailable"
+        return {**safe_result, "ready": False, "errorCode": error_code}
+    except Exception:
+        return {
+            **safe_result,
+            "ready": False,
+            "errorCode": "storage_publishable_key_affinity_unavailable",
+        }
+
+
 def _probe_antivirus_runtime(timeout: float) -> Dict[str, Any]:
     """Probe an AV health protocol only when the selected provider exposes one."""
     av = av_endpoint_configuration()
@@ -4212,6 +4290,7 @@ def production_runtime_dependency_readiness() -> Dict[str, Any]:
         "databaseQuery": lambda: _probe_main_supabase_query(timeout),
         "databaseRpcs": lambda: _probe_main_supabase_rpcs(timeout),
         "privateStorage": lambda: _probe_supabase_private_buckets(timeout),
+        "storagePublicKeyAffinity": lambda: _probe_supabase_publishable_key_affinity(timeout),
         "antivirus": lambda: _probe_antivirus_runtime(timeout),
     }
     results: Dict[str, Dict[str, Any]] = {}
@@ -34125,15 +34204,22 @@ def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict
 
 
 def _supabase_storage_direct_tus_url() -> str:
+    """Return Supabase's signed resumable-upload endpoint.
+
+    Object-scoped upload tokens are accepted only by the ``/sign`` TUS route.
+    The unsuffixed route requires a user Authorization bearer token and must
+    never be paired with the short-lived ``x-signature`` capability returned
+    to this editor.
+    """
     base = object_storage_endpoint()
     parsed = urllib.parse.urlparse(EDOC_STORAGE_SUPABASE_URL or base)
     hostname = parsed.hostname or ""
     if hostname.endswith(".supabase.co") and not hostname.endswith(".storage.supabase.co"):
         project_ref = hostname.split(".", 1)[0]
-        return f"https://{project_ref}.storage.supabase.co/storage/v1/upload/resumable"
+        return f"https://{project_ref}.storage.supabase.co/storage/v1/upload/resumable/sign"
     if not base:
         raise ValueError("supabase_storage_endpoint_required")
-    return f"{base.rstrip('/')}/upload/resumable"
+    return f"{base.rstrip('/')}/upload/resumable/sign"
 
 
 def _supabase_storage_public_upload_key() -> str:

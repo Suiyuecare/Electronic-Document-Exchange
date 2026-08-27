@@ -11,6 +11,12 @@
 
 正式發布前先在隔離環境完整重建一次；不可直接把未驗證 migration 套到正式資料庫。
 
+新環境執行 `supabase db reset` 時，CLI 會先載入
+`supabase/roles.sql`。該檔只補齊歷史 migration 在外鍵指派前漏建的 9 個
+legacy permission reference rows；不含帳號、密碼、公司、文件、grant 或正式資料，
+也不改寫任何已套用的 migration。既有正式資料庫不得為此重跑舊 migration，
+仍只依核准的 forward migration 與變更單發布。
+
 ### 主 eDoc Supabase
 
 1. 先執行 `supabase unlink` 清除舊連結，再以 `supabase link --project-ref ussnmxdpxeoshlrdchov` 連結主 eDoc project；用 `supabase projects list`／project URL 再確認一次，禁止沿用專用 Storage project 的 link。

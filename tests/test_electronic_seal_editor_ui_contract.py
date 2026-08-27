@@ -330,7 +330,7 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         self.assertNotIn("...intent.headers", upload)
         self.assertNotIn("Authorization", headers)
         self.assertIn('url.hostname.endsWith(".storage.supabase.co")', endpoint)
-        self.assertIn('=== "/storage/v1/upload/resumable"', endpoint)
+        self.assertIn('=== "/storage/v1/upload/resumable/sign"', endpoint)
 
         for metadata_key in ("bucketName", "objectName", "contentType", "cacheControl"):
             self.assertIn(f"`{metadata_key} ${{tusMetadataValue(", upload)
@@ -338,7 +338,7 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         self.assertNotIn("`filetype ${tusMetadataValue", upload)
         self.assertIn("const chunkSize = 6 * 1024 * 1024", upload)
         self.assertIn("uploadLocation.origin !== endpointUrl.origin", upload)
-        self.assertIn('uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/")', upload)
+        self.assertIn('uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/sign/")', upload)
         self.assertIn("editorTusRemoteOffset(uploadUrl, baseHeaders)", upload)
         self.assertIn("onProgress(Math.min(1, offset / Math.max(1, file.size)))", upload)
 

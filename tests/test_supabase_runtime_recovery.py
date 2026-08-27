@@ -26,9 +26,31 @@ FK_INDEX_FORWARD = MIGRATIONS / "20260827050452_add_confirmed_edoc_fk_indexes_fo
 CUTOVER_CHECKS = ROOT / "supabase" / "verification" / "production_cutover_checks.sql"
 STORAGE_CUTOVER_CHECKS = ROOT / "supabase" / "verification" / "dedicated_storage_cutover_checks.sql"
 MANIFEST = ROOT / "supabase" / "verification" / "migration_manifest.json"
+ROLES_BOOTSTRAP = ROOT / "supabase" / "roles.sql"
 
 
 class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
+    def test_roles_bootstrap_only_supplies_legacy_permission_fk_prerequisites(self) -> None:
+        sql = ROLES_BOOTSTRAP.read_text(encoding="utf-8").lower()
+        expected = {
+            "perm-inbound",
+            "perm-dispatch",
+            "perm-jagent",
+            "perm-workflow",
+            "perm-seal",
+            "perm-audit",
+            "perm-security",
+            "perm-report",
+            "perm-settings",
+        }
+        for permission_id in expected:
+            self.assertIn(f"'{permission_id}'", sql)
+        self.assertNotRegex(sql, r"insert\s+into\s+public\.(users|companies|documents)\b")
+        self.assertNotIn("password", sql)
+        self.assertNotRegex(sql, r"\bgrant\b")
+        if parse_sql is not None:
+            self.assertGreaterEqual(len(parse_sql(sql)), 2)
+
     def test_recovery_snapshot_and_storage_sql_are_outside_main_migration_chain(self) -> None:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         names = set(manifest["migrations"])

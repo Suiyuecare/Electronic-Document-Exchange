@@ -24606,7 +24606,7 @@ function validateEditorTusEndpoint(intent = {}) {
   const valid = url
     && url.protocol === "https:"
     && url.hostname.endsWith(".storage.supabase.co")
-    && url.pathname.replace(/\/+$/, "") === "/storage/v1/upload/resumable";
+    && url.pathname.replace(/\/+$/, "") === "/storage/v1/upload/resumable/sign";
   if (!valid) {
     const error = new Error("後端提供的 TUS 上傳位置無效，請重新取得上傳授權。");
     error.code = "editor_tus_endpoint_invalid";
@@ -24759,7 +24759,7 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
   const uploadLocation = new URL(location, endpoint);
   if (
     uploadLocation.origin !== endpointUrl.origin
-    || !uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/")
+    || !uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/sign/")
   ) {
     const error = new Error("Storage 回傳了不安全的續傳位置，已停止上傳。");
     error.code = "editor_tus_location_invalid";
