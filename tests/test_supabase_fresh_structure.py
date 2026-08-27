@@ -795,6 +795,11 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertIn("/rest/v1/rpc/edoc_finalize_editor_asset_v2", gate)
         self.assertIn('"Authorization": f"Bearer {api_key}"', gate)
         self.assertIn("local_editor_finalize_requires_loopback_supabase", gate)
+        self.assertIn("local_editor_finalize_backend_storage_origin_invalid", gate)
+        self.assertLess(
+            gate.index("local_editor_finalize_backend_storage_origin_invalid"),
+            gate.index("_supabase_storage_endpoint_issue = lambda"),
+        )
         self.assertIn("local_editor_finalize_anon_rpc_exposed", gate)
         self.assertIn("official_editor_write_forbidden", gate)
         self.assertIn("editor_finalize_invalid_payload", gate)

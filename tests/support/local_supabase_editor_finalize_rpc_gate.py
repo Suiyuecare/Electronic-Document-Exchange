@@ -437,6 +437,18 @@ def main() -> int:
     )
     import backend as backend_runtime
 
+    expected_storage_endpoint = f"{api_url.rstrip('/')}/storage/v1"
+    require(
+        backend_runtime.object_storage_endpoint() == expected_storage_endpoint,
+        "local_editor_finalize_backend_storage_origin_invalid",
+    )
+    # Production deliberately accepts only an exact Supabase Cloud project
+    # origin before attaching a service credential.  This standalone gate has
+    # already proved the configured origin is the isolated loopback stack and
+    # exact Storage endpoint above, so bypass only that cloud-hostname policy
+    # inside this short-lived CI process. Redirect following remains disabled.
+    backend_runtime._supabase_storage_endpoint_issue = lambda: ""
+
     exercise_service_role_data_api(api_url, service_key, anon_key)
 
     suffix = uuid.uuid4().hex[:12].upper()
