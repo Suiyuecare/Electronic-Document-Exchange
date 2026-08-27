@@ -61,6 +61,12 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
                 f"grant execute on function {signature} to postgres, service_role",
                 sql,
             )
+        self.assertIn("create schema if not exists private authorization postgres", sql)
+        self.assertIn(
+            "revoke all on schema private from public, anon, authenticated",
+            sql,
+        )
+        self.assertIn("grant usage on schema private to service_role", sql)
         if parse_sql is not None:
             self.assertGreaterEqual(len(parse_sql(sql)), 2)
 

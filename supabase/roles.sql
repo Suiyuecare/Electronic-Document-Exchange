@@ -46,6 +46,13 @@ revoke all on function public.digest(bytea, text) from public, anon, authenticat
 grant execute on function public.digest(text, text) to postgres, service_role;
 grant execute on function public.digest(bytea, text) to postgres, service_role;
 
+-- One later historical migration stores trigger-only seal provisioning helpers
+-- in ``private`` and intentionally refuses to create that schema itself.  Keep
+-- the schema backend-only so a fresh replay matches the production topology.
+create schema if not exists private authorization postgres;
+revoke all on schema private from public, anon, authenticated;
+grant usage on schema private to service_role;
+
 create table if not exists public.permissions (
   id text primary key,
   code text not null unique,
