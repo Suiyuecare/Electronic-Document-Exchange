@@ -80,28 +80,29 @@ begin
     end if;
   end loop;
 
-  -- Records that are intentionally replaced in place need all three write
-  -- operations through PostgREST.
-  foreach v_table_name in array array[
-    'official_document_stamp_positions',
-    'official_document_text_overlays'
-  ]
+  -- Legacy seal locking updates existing placements before submission, while
+  -- draft replacement deletes and recreates the placement set.
+  v_table_oid := 'public.official_document_stamp_positions'::regclass;
+  foreach v_privilege_name in array array['INSERT', 'UPDATE', 'DELETE']
   loop
-    v_table_oid := pg_catalog.to_regclass(
-      pg_catalog.format('%I.%I', 'public', v_table_name)
-    );
-    foreach v_privilege_name in array array['INSERT', 'UPDATE', 'DELETE']
-    loop
-      if not pg_catalog.has_table_privilege(
-        'service_role',
-        v_table_oid,
-        v_privilege_name
-      ) then
-        raise exception 'runtime_schema_service_write_missing:%:%',
-          v_table_name, v_privilege_name;
-      end if;
-    end loop;
+    if not pg_catalog.has_table_privilege(
+      'service_role',
+      v_table_oid,
+      v_privilege_name
+    ) then
+      raise exception 'runtime_schema_service_write_missing:%:%',
+        'official_document_stamp_positions', v_privilege_name;
+    end if;
   end loop;
+
+  -- Text overlays are replace-all records. The backend reads, deletes and
+  -- recreates them; direct UPDATE is intentionally absent by least privilege.
+  v_table_oid := 'public.official_document_text_overlays'::regclass;
+  if not pg_catalog.has_table_privilege('service_role', v_table_oid, 'INSERT')
+     or pg_catalog.has_table_privilege('service_role', v_table_oid, 'UPDATE')
+     or not pg_catalog.has_table_privilege('service_role', v_table_oid, 'DELETE') then
+    raise exception 'runtime_schema_text_overlay_grant_invalid';
+  end if;
 
   -- Mutable headers and asset state are never directly deleted.
   foreach v_table_name in array array[

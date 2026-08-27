@@ -623,7 +623,7 @@ grant select, insert, update, delete on table public.internal_dispatch_recipient
 grant select, insert, update, delete on table public.internal_dispatch_replies to service_role;
 grant select, insert, update, delete on table public.internal_dispatch_logs to service_role;
 grant select, insert, update, delete on table public.official_document_stamp_positions to service_role;
-grant select, insert, update, delete on table public.official_document_text_overlays to service_role;
+grant select, insert, delete on table public.official_document_text_overlays to service_role;
 grant select, insert, update, delete on table public.official_document_editor_assets to service_role;
 grant select, insert, update, delete on table public.official_document_rejection_jobs to service_role;
 grant select, insert on table public.official_document_editor_revisions to service_role;

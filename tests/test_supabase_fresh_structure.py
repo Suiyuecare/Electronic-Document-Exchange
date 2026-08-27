@@ -129,6 +129,23 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         ):
             self.assertRegex(sql, rf"create (?:unique )?index if not exists {expected}\b")
 
+    def test_text_overlay_grants_are_replace_only(self) -> None:
+        schema_sql = SCHEMA_PARITY.read_text(encoding="utf-8").lower()
+        recovery_sql = (
+            SUPABASE / "recovery" / "complete_edoc_runtime_recovery_20260827.sql"
+        ).read_text(encoding="utf-8").lower()
+        expected = (
+            "grant select, insert, delete on table "
+            "public.official_document_text_overlays to service_role"
+        )
+        overbroad = (
+            "grant select, insert, update, delete on table "
+            "public.official_document_text_overlays to service_role"
+        )
+        for sql in (schema_sql, recovery_sql):
+            self.assertIn(expected, sql)
+            self.assertNotIn(overbroad, sql)
+
     def test_cutover_and_ci_smoke_cover_all_runtime_tables(self) -> None:
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
         smoke = RUNTIME_SMOKE.read_text(encoding="utf-8").lower()
@@ -146,6 +163,15 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertIn("relrowsecurity", smoke)
         self.assertIn("has_table_privilege", smoke)
         self.assertIn("runtime_schema_required_index_missing", smoke)
+        self.assertIn("runtime_schema_text_overlay_grant_invalid", smoke)
+        self.assertIn(
+            "v_table_oid := 'public.official_document_text_overlays'::regclass",
+            smoke,
+        )
+        self.assertRegex(
+            smoke,
+            r"(?s)official_document_text_overlays'::regclass;.*?has_table_privilege\('service_role', v_table_oid, 'insert'\).*?has_table_privilege\('service_role', v_table_oid, 'update'\).*?has_table_privilege\('service_role', v_table_oid, 'delete'\)",
+        )
 
     def test_forward_grant_hardening_removes_legacy_auto_exposure(self) -> None:
         sql = GRANT_HARDENING.read_text(encoding="utf-8").lower()
