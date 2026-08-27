@@ -20,6 +20,7 @@ import hashlib
 import io
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -37,6 +38,13 @@ DB_HOST = "127.0.0.1"
 DB_PORT = "54322"
 DB_NAME = "postgres"
 DB_USER = "postgres"
+
+# ``python tests/support/<script>.py`` places only ``tests/support`` on
+# ``sys.path``.  Add the repository root explicitly so this standalone CI gate
+# imports the same backend module regardless of the runner working directory.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 
 class GateFailure(RuntimeError):
