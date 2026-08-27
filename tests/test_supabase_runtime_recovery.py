@@ -528,6 +528,11 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         )
         self.assertIn("lock table public.audit_logs in share row exclusive mode", sql)
         self.assertIn("create index if not exists idx_audit_logs_chain_parent", sql)
+        self.assertIn("edoc_audit_chain_parent_index_invalid", sql)
+        self.assertIn("index_row.indisvalid", sql)
+        self.assertIn("index_row.indisready", sql)
+        self.assertIn("index_row.indkey[0]", sql)
+        self.assertIn("index_row.indkey[1]", sql)
         self.assertRegex(sql, r"begin;\s+set local lock_timeout")
         self.assertIn("set local lock_timeout = '5s'", sql)
         self.assertIn("set local statement_timeout = '120s'", sql)
@@ -540,6 +545,7 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("sha256-sorted-entry-hash-set-v1-c-collation", sql)
         self.assertIn('entry_hash collate "c"', sql)
         self.assertIn("v_terminals < 1", sql)
+        self.assertIn("audit_row.immutable is distinct from true", sql)
         self.assertIn("enable row level security", sql)
         self.assertIn("force row level security", sql)
         self.assertIn("pg_catalog.pg_advisory_xact_lock", sql)
@@ -586,6 +592,14 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("private_head_matches_terminal", cutover)
         self.assertIn("source_transition_valid", cutover)
         self.assertIn("unsupported_version_count", cutover)
+        self.assertGreaterEqual(
+            cutover.count("chain_check.hash_valid is distinct from true"),
+            2,
+        )
+        self.assertGreaterEqual(
+            cutover.count("immutable is distinct from true"),
+            2,
+        )
         self.assertIn("v1_fork_count", cutover)
         self.assertIn("v2_fork_count", cutover)
         self.assertIn("version_order_violation_count", cutover)

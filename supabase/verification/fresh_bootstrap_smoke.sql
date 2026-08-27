@@ -209,7 +209,7 @@ begin
   ) or exists (
     select 1
     from public.audit_logs
-    where not immutable
+    where immutable is distinct from true
   ) then
     raise exception 'fresh_bootstrap_audit_version_or_immutability_invalid';
   end if;

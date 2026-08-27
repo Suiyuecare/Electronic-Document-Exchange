@@ -33,6 +33,43 @@ lock table public.audit_logs in share row exclusive mode;
 create index if not exists idx_audit_logs_chain_parent
   on public.audit_logs (chain_version, previous_hash);
 
+do $audit_chain_parent_index_guard$
+begin
+  if not exists (
+    select 1
+    from pg_catalog.pg_index index_row
+    where index_row.indexrelid =
+      pg_catalog.to_regclass('public.idx_audit_logs_chain_parent')
+      and index_row.indrelid = 'public.audit_logs'::pg_catalog.regclass
+      and index_row.indisvalid
+      and index_row.indisready
+      and not index_row.indisunique
+      and index_row.indpred is null
+      and index_row.indexprs is null
+      and index_row.indnkeyatts = 2
+      and index_row.indnatts = 2
+      and index_row.indkey[0] = (
+        select attribute_row.attnum
+        from pg_catalog.pg_attribute attribute_row
+        where attribute_row.attrelid = 'public.audit_logs'::pg_catalog.regclass
+          and attribute_row.attname = 'chain_version'
+          and not attribute_row.attisdropped
+      )
+      and index_row.indkey[1] = (
+        select attribute_row.attnum
+        from pg_catalog.pg_attribute attribute_row
+        where attribute_row.attrelid = 'public.audit_logs'::pg_catalog.regclass
+          and attribute_row.attname = 'previous_hash'
+          and not attribute_row.attisdropped
+      )
+  ) then
+    raise exception using
+      errcode = '55000',
+      message = 'edoc_audit_chain_parent_index_invalid';
+  end if;
+end
+$audit_chain_parent_index_guard$;
+
 create table if not exists edoc_private.audit_log_chain_heads (
   chain_version integer primary key,
   head_hash text,
@@ -154,7 +191,7 @@ begin
   from public.audit_logs audit_row
   where audit_row.chain_version = 1
     and (
-      not audit_row.immutable
+      audit_row.immutable is distinct from true
       or audit_row.entry_hash is null
       or audit_row.entry_hash !~ '^[0-9a-f]{64}$'
       or audit_row.entry_hash is distinct from pg_catalog.encode(
@@ -252,7 +289,8 @@ begin
   -- Any fork on a linked or production database remains a fail-closed manual
   -- investigation; a syntactically valid hash alone is not authorization.
   if v_forks > 0 then
-    select exists (
+    select (
+      exists (
       select 1
       from public.finance_organization_projection_state sentinel
       where sentinel.finance_tenant_id = '__edoc_fresh_bootstrap_only__'
@@ -312,8 +350,8 @@ begin
     and not exists (select 1 from public.documents)
     and not exists (select 1 from public.official_documents)
     and not exists (select 1 from public.file_objects)
-    and not exists (select 1 from storage.objects)
-      into v_exact_fresh_sentinel;
+      and not exists (select 1 from storage.objects)
+    ) into v_exact_fresh_sentinel;
 
     with expected_rows(
       id, actor, action, target_type, target_id, detail

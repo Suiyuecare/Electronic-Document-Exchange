@@ -769,13 +769,13 @@ with recursive computed_v1 as (
       from public.audit_log_chain_check chain_check
       join public.audit_logs audit_row on audit_row.id = chain_check.id
       where audit_row.chain_version = 1
-        and not chain_check.hash_valid
+        and chain_check.hash_valid is distinct from true
     ) as invalid_hash_count,
     (
       select pg_catalog.count(*)
       from public.audit_logs
       where chain_version = 1
-        and not immutable
+        and immutable is distinct from true
     ) as mutable_row_count,
     (
       select pg_catalog.count(*)
@@ -842,13 +842,13 @@ with recursive computed_v1 as (
       from public.audit_log_chain_check chain_check
       join public.audit_logs audit_row on audit_row.id = chain_check.id
       where audit_row.chain_version = 2
-        and not chain_check.hash_valid
+        and chain_check.hash_valid is distinct from true
     ) as invalid_hash_count,
     (
       select pg_catalog.count(*)
       from public.audit_logs
       where chain_version = 2
-        and not immutable
+        and immutable is distinct from true
     ) as mutable_row_count,
     (
       select pg_catalog.count(*)
@@ -1046,6 +1046,35 @@ where upload_status in ('pending', 'uploading', 'uploaded')
 
 -- 11. Confirmed eDoc foreign-key indexes. Every row must report
 -- index_exists=true after the forward migration.
+select exists (
+  select 1
+  from pg_catalog.pg_index index_row
+  where index_row.indexrelid =
+    pg_catalog.to_regclass('public.idx_audit_logs_chain_parent')
+    and index_row.indrelid = 'public.audit_logs'::pg_catalog.regclass
+    and index_row.indisvalid
+    and index_row.indisready
+    and not index_row.indisunique
+    and index_row.indpred is null
+    and index_row.indexprs is null
+    and index_row.indnkeyatts = 2
+    and index_row.indnatts = 2
+    and index_row.indkey[0] = (
+      select attribute_row.attnum
+      from pg_catalog.pg_attribute attribute_row
+      where attribute_row.attrelid = 'public.audit_logs'::pg_catalog.regclass
+        and attribute_row.attname = 'chain_version'
+        and not attribute_row.attisdropped
+    )
+    and index_row.indkey[1] = (
+      select attribute_row.attnum
+      from pg_catalog.pg_attribute attribute_row
+      where attribute_row.attrelid = 'public.audit_logs'::pg_catalog.regclass
+        and attribute_row.attname = 'previous_hash'
+        and not attribute_row.attisdropped
+    )
+) as audit_chain_parent_index_valid;
+
 with required_indexes(index_name) as (
   values
     ('idx_audit_logs_chain_parent'),

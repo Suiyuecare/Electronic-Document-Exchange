@@ -73,7 +73,7 @@ begin
   select count(*) into v_count
   from public.audit_log_chain_check chain_check
   where chain_check.id like 'AUD-CI-CONCURRENT-%'
-    and not chain_check.hash_valid;
+    and chain_check.hash_valid is distinct from true;
 
   if v_count <> 0 then
     raise exception 'audit_concurrency_hash_invalid:%', v_count;
