@@ -46,6 +46,48 @@ class _Response:
 
 
 class SensitiveTransportHardeningTests(unittest.TestCase):
+    POSTGREST_PT409_CONFLICTS = {
+        "finance_member_sync_event_id_conflict",
+        "finance_organization_revision_conflict",
+        "editor_upload_new_intent_required",
+        "editor_revision_conflict",
+        "editor_finalize_operation_conflict",
+        "editor_file_object_conflict",
+        "editor_official_file_conflict",
+        "official_document_submit_stale",
+        "official_submission_operation_conflict",
+        "official_workflow_existing_steps_invalid",
+        "official_document_resubmit_generation_conflict",
+        "official_document_resubmit_idempotency_conflict",
+        "official_document_resubmit_audit_idempotency_conflict",
+        "official_document_approval_claim_conflict",
+        "official_document_approval_evidence_conflict",
+        "official_document_next_step_activation_conflict",
+        "official_document_rejection_claim_conflict",
+        "official_document_rejection_evidence_conflict",
+        "official_document_rejection_correction_conflict",
+        "official_dispatch_route_conflict",
+        "official_dispatch_completion_conflict",
+        "official_workflow_delegation_revoke_conflict",
+        "inbound_idempotency_conflict",
+        "inbound_version_conflict",
+        "inbound_registration_state_conflict",
+        "inbound_mutation_state_conflict",
+    }
+    POSTGREST_23505_CONFLICTS = {
+        "finance_member_sync_event_id_conflict",
+        "finance_organization_revision_conflict",
+        "editor_revision_conflict",
+        "editor_finalize_operation_conflict",
+        "editor_file_object_conflict",
+        "editor_official_file_conflict",
+        "official_submission_operation_conflict",
+        "official_workflow_existing_steps_invalid",
+        "official_document_resubmit_idempotency_conflict",
+        "official_document_resubmit_audit_idempotency_conflict",
+        "official_dispatch_route_conflict",
+    }
+
     def test_backend_and_finance_transports_reject_every_redirect_without_second_hop(self):
         hits = []
 
@@ -125,6 +167,198 @@ class SensitiveTransportHardeningTests(unittest.TestCase):
         self.assertNotIn(SECRET_TEXT, str(raised.exception))
         self.assertIsNone(raised.exception.__cause__)
         self.assertTrue(stream.closed)
+
+    def test_allowlisted_postgrest_pt409_conflicts_reach_application_as_409(self):
+        self.assertEqual(
+            set(backend.POSTGREST_PT409_BUSINESS_CONFLICT_CODES),
+            self.POSTGREST_PT409_CONFLICTS,
+        )
+        for conflict in sorted(self.POSTGREST_PT409_CONFLICTS):
+            with self.subTest(conflict=conflict):
+                body = json.dumps(
+                    {
+                        "code": "PT409",
+                        "message": conflict,
+                        "details": SECRET_TEXT,
+                        "hint": "private document data must stay upstream",
+                    }
+                ).encode("utf-8")
+                error, stream = tracking_http_error(409, body)
+                with (
+                    mock.patch.object(backend, "SUPABASE_URL", "https://project-ref.supabase.co"),
+                    mock.patch.object(backend, "SUPABASE_SERVICE_ROLE_KEY", "sb_secret_" + "s" * 40),
+                    mock.patch.object(backend, "_urlopen_no_redirect", side_effect=error),
+                ):
+                    with self.assertRaises(ValueError) as raised:
+                        backend.supabase_request("POST", "rpc/private", {"document": SECRET_TEXT})
+
+                self.assertEqual(str(raised.exception), conflict)
+                self.assertEqual(backend.api_value_error_status(str(raised.exception)), 409)
+                self.assertNotIn(SECRET_TEXT, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(stream.closed)
+
+    def test_postgrest_pt409_unknown_or_spoofed_message_stays_opaque(self):
+        cases = (
+            (409, "PT409", f"unknown_conflict:{SECRET_TEXT}"),
+            (409, "PGRST116", "editor_revision_conflict"),
+            (400, "PT409", "editor_revision_conflict"),
+            (409, "23505", f"unknown_constraint:{SECRET_TEXT}"),
+            (400, "23505", "editor_finalize_operation_conflict"),
+        )
+        for http_status, provider_code, message in cases:
+            with self.subTest(
+                http_status=http_status,
+                provider_code=provider_code,
+                message=message,
+            ):
+                body = json.dumps(
+                    {
+                        "code": provider_code,
+                        "message": message,
+                        "details": SECRET_TEXT,
+                    }
+                ).encode("utf-8")
+                error, stream = tracking_http_error(http_status, body)
+                with (
+                    mock.patch.object(backend, "SUPABASE_URL", "https://project-ref.supabase.co"),
+                    mock.patch.object(backend, "SUPABASE_SERVICE_ROLE_KEY", "sb_secret_" + "s" * 40),
+                    mock.patch.object(backend, "_urlopen_no_redirect", side_effect=error),
+                ):
+                    with self.assertRaises(RuntimeError) as raised:
+                        backend.supabase_request("POST", "rpc/private", {"document": SECRET_TEXT})
+
+                self.assertEqual(
+                    str(raised.exception),
+                    f"supabase_request_failed:{http_status}:{provider_code}",
+                )
+                self.assertNotIn(message, str(raised.exception))
+                self.assertNotIn(SECRET_TEXT, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(stream.closed)
+
+        self.assertEqual(backend.api_value_error_status("unknown_conflict"), 422)
+
+    def test_allowlisted_legacy_23505_business_conflicts_reach_application_as_409(self):
+        self.assertEqual(
+            set(backend.POSTGREST_23505_BUSINESS_CONFLICT_CODES),
+            self.POSTGREST_23505_CONFLICTS,
+        )
+        for conflict in sorted(self.POSTGREST_23505_CONFLICTS):
+            with self.subTest(conflict=conflict):
+                body = json.dumps(
+                    {
+                        "code": "23505",
+                        "message": conflict,
+                        "details": SECRET_TEXT,
+                        "hint": "native constraint details must stay upstream",
+                    }
+                ).encode("utf-8")
+                error, stream = tracking_http_error(409, body)
+                with (
+                    mock.patch.object(backend, "SUPABASE_URL", "https://project-ref.supabase.co"),
+                    mock.patch.object(backend, "SUPABASE_SERVICE_ROLE_KEY", "sb_secret_" + "s" * 40),
+                    mock.patch.object(backend, "_urlopen_no_redirect", side_effect=error),
+                ):
+                    with self.assertRaises(ValueError) as raised:
+                        backend.supabase_request("POST", "rpc/private", {"document": SECRET_TEXT})
+
+                self.assertEqual(str(raised.exception), conflict)
+                self.assertEqual(backend.api_value_error_status(str(raised.exception)), 409)
+                self.assertNotIn(SECRET_TEXT, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(stream.closed)
+
+    def test_api_handler_returns_409_and_logs_only_stable_conflict_code(self):
+        handler = object.__new__(backend.Handler)
+        responses = []
+        handler.bearer_token = lambda: "t" * 48
+        handler.read_json = lambda: {"sha256": "A" * 64}
+        handler.send_json = lambda payload, status=200, *_headers: responses.append(
+            (payload, status)
+        )
+        session = {"user": {"id": "USER-DEIDENTIFIED"}, "permissions": []}
+        with (
+            mock.patch.object(backend, "USE_SUPABASE", True),
+            mock.patch.object(backend, "supabase_current_session", return_value=session),
+            mock.patch.object(
+                backend,
+                "supabase_finalize_official_editor_upload",
+                side_effect=ValueError("editor_upload_new_intent_required"),
+            ),
+            mock.patch.object(backend, "log_structured") as log,
+        ):
+            handler.handle_api(
+                "POST",
+                "/api/official-documents/OD-DEIDENTIFIED/editor-uploads/UP-DEIDENTIFIED/finalize",
+                {},
+            )
+
+        self.assertEqual(
+            responses,
+            [
+                (
+                    {
+                        "error": "request_rejected",
+                        "detail": "editor_upload_new_intent_required",
+                    },
+                    409,
+                )
+            ],
+        )
+        log.assert_called_once_with(
+            "warning",
+            "api_request_rejected",
+            path="/api/official-documents/OD-DEIDENTIFIED/editor-uploads/UP-DEIDENTIFIED/finalize",
+            method="POST",
+            error="editor_upload_new_intent_required",
+        )
+        self.assertNotIn(SECRET_TEXT, repr(log.call_args))
+
+    def test_api_handler_keeps_unknown_pt409_opaque_and_returns_500(self):
+        handler = object.__new__(backend.Handler)
+        responses = []
+        handler.bearer_token = lambda: "t" * 48
+        handler.read_json = lambda: {"sha256": "A" * 64}
+        handler.send_json = lambda payload, status=200, *_headers: responses.append(
+            (payload, status)
+        )
+        session = {"user": {"id": "USER-DEIDENTIFIED"}, "permissions": []}
+        opaque_marker = "supabase_request_failed:409:PT409"
+        with (
+            mock.patch.object(backend, "USE_SUPABASE", True),
+            mock.patch.object(backend, "is_production", return_value=True),
+            mock.patch.object(backend, "supabase_current_session", return_value=session),
+            mock.patch.object(
+                backend,
+                "supabase_finalize_official_editor_upload",
+                side_effect=RuntimeError(opaque_marker),
+            ),
+            mock.patch.object(backend, "log_structured") as log,
+        ):
+            handler.handle_api(
+                "POST",
+                "/api/official-documents/OD-DEIDENTIFIED/editor-uploads/UP-DEIDENTIFIED/finalize",
+                {},
+            )
+
+        self.assertEqual(
+            responses,
+            [
+                (
+                    {"error": "server_error", "detail": "internal_server_error"},
+                    500,
+                )
+            ],
+        )
+        log.assert_called_once_with(
+            "error",
+            "api_request_failed",
+            path="/api/official-documents/OD-DEIDENTIFIED/editor-uploads/UP-DEIDENTIFIED/finalize",
+            method="POST",
+            error=opaque_marker,
+        )
+        self.assertNotIn(SECRET_TEXT, repr(log.call_args))
 
     def test_large_storage_error_is_closed_without_body_or_cause(self):
         error, stream = tracking_http_error(413)

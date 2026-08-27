@@ -24,7 +24,10 @@ jobs:
       - name: Install pinned Supabase CLI
         uses: supabase/setup-cli@v1
         with:
-          version: 2.105.0
+          # 2.116.0 fixes stale local DB connections, loopback proxy routing,
+          # Kong DNS caching and service-start reliability. Keep this pinned so
+          # the isolated PostgREST/TUS gate is reproducible.
+          version: 2.116.0
 
       - name: Install PostgreSQL client
         run: |

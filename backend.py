@@ -197,6 +197,61 @@ EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
     "editor_upload_network_failed",
     "editor_upload_expired",
 })
+# PostgREST ``PT409`` messages are upstream-controlled text.  Only these
+# immutable, non-sensitive business codes may cross the transport boundary as
+# application errors.  Everything else remains an opaque machine-code marker.
+POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
+    "finance_member_sync_event_id_conflict",
+    "finance_organization_revision_conflict",
+    "editor_upload_new_intent_required",
+    "editor_revision_conflict",
+    "editor_finalize_operation_conflict",
+    "editor_file_object_conflict",
+    "editor_official_file_conflict",
+    "official_document_submit_stale",
+    "official_submission_operation_conflict",
+    "official_workflow_existing_steps_invalid",
+    "official_document_resubmit_generation_conflict",
+    "official_document_resubmit_idempotency_conflict",
+    "official_document_resubmit_audit_idempotency_conflict",
+    "official_document_approval_claim_conflict",
+    "official_document_approval_evidence_conflict",
+    "official_document_next_step_activation_conflict",
+    "official_document_rejection_claim_conflict",
+    "official_document_rejection_evidence_conflict",
+    "official_document_rejection_correction_conflict",
+    "official_dispatch_route_conflict",
+    "official_dispatch_completion_conflict",
+    "official_workflow_delegation_revoke_conflict",
+    "inbound_idempotency_conflict",
+    "inbound_version_conflict",
+    "inbound_registration_state_conflict",
+    "inbound_mutation_state_conflict",
+})
+# Compatibility contract for projects where the forward migration that
+# normalizes caller-generated 23505 conflicts to PT409 has not been applied
+# yet.  Native constraint violations use free-form PostgreSQL messages and are
+# intentionally excluded.
+POSTGREST_23505_BUSINESS_CONFLICT_CODES = frozenset({
+    "finance_member_sync_event_id_conflict",
+    "finance_organization_revision_conflict",
+    "editor_revision_conflict",
+    "editor_finalize_operation_conflict",
+    "editor_file_object_conflict",
+    "editor_official_file_conflict",
+    "official_submission_operation_conflict",
+    "official_workflow_existing_steps_invalid",
+    "official_document_resubmit_idempotency_conflict",
+    "official_document_resubmit_audit_idempotency_conflict",
+    "official_dispatch_route_conflict",
+})
+POSTGREST_BUSINESS_CONFLICT_CODES = (
+    POSTGREST_PT409_BUSINESS_CONFLICT_CODES
+    | POSTGREST_23505_BUSINESS_CONFLICT_CODES
+)
+API_CONFLICT_ERROR_CODES = POSTGREST_BUSINESS_CONFLICT_CODES | frozenset({
+    "editor_locked_after_submit",
+})
 EDOC_EDITOR_ALLOWED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg"}
 EDOC_PUBLIC_BASE_URL = os.getenv("EDOC_PUBLIC_BASE_URL", os.getenv("PRODUCTION_BASE_URL", "")).rstrip("/")
 MONITORING_WEBHOOK_URL = os.getenv("MONITORING_WEBHOOK_URL", "")
@@ -497,6 +552,19 @@ EDOC_ROLE_PERMISSION_GRANTS = {
 
 def roster_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def api_value_error_status(detail: str) -> int:
+    """Map stable application error codes without inspecting free-form text."""
+    if detail.startswith((
+        "formal_signing_service_not_ready",
+        "formal_signature_provider",
+        "formal_tsa",
+        "editor_antivirus_not_ready",
+        "editor_antivirus_scan_failed",
+    )):
+        return 503
+    return 409 if detail in API_CONFLICT_ERROR_CODES else 422
 
 
 def normalize_edoc_job_level(job_level: Any) -> str:
@@ -4109,14 +4177,36 @@ def _consume_http_error(exc: urllib.error.HTTPError, *, max_bytes: int = 4096) -
             pass
 
 
-def _safe_http_error_marker(exc: urllib.error.HTTPError, prefix: str) -> str:
+def _safe_http_error_contract(
+    exc: urllib.error.HTTPError,
+    prefix: str,
+) -> Tuple[str, str]:
+    """Return an opaque marker plus an allowlisted business-conflict code.
+
+    PostgREST forwards PostgreSQL ``message``, ``detail`` and ``hint`` fields.
+    Those fields may contain document text or personal data, so callers may
+    only receive a message when the HTTP status, provider code and exact
+    immutable business code all match this service's PT409/legacy-23505
+    conflict contract.
+    """
     raw = _consume_http_error(exc)
     provider_code = ""
+    business_conflict = ""
     try:
         payload = json.loads(raw.decode("utf-8")) if raw else {}
         candidate = str(payload.get("code") or "") if isinstance(payload, dict) else ""
         if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", candidate):
             provider_code = candidate
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if int(getattr(exc, "code", 0) or 0) == 409 and isinstance(message, str):
+            if (
+                provider_code == "PT409"
+                and message in POSTGREST_PT409_BUSINESS_CONFLICT_CODES
+            ) or (
+                provider_code == "23505"
+                and message in POSTGREST_23505_BUSINESS_CONFLICT_CODES
+            ):
+                business_conflict = message
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
         # PostgREST error bodies can be much larger than the diagnostic read
         # limit. Extract only the bounded machine-code field from the prefix;
@@ -4128,7 +4218,13 @@ def _safe_http_error_marker(exc: urllib.error.HTTPError, prefix: str) -> str:
         )
         provider_code = match.group(1) if match else ""
     marker = f"{prefix}:{int(getattr(exc, 'code', 0) or 0)}"
-    return f"{marker}:{provider_code}" if provider_code else marker
+    marker = f"{marker}:{provider_code}" if provider_code else marker
+    return marker, business_conflict
+
+
+def _safe_http_error_marker(exc: urllib.error.HTTPError, prefix: str) -> str:
+    marker, _business_conflict = _safe_http_error_contract(exc, prefix)
+    return marker
 
 
 def _readiness_http_json(
@@ -31007,7 +31103,12 @@ def supabase_request(method: str, path: str, body: Any = None, prefer: str = "re
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else []
     except urllib.error.HTTPError as exc:
-        marker = _safe_http_error_marker(exc, "supabase_request_failed")
+        marker, business_conflict = _safe_http_error_contract(
+            exc,
+            "supabase_request_failed",
+        )
+        if business_conflict:
+            raise ValueError(business_conflict) from None
         raise RuntimeError(marker) from None
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise RuntimeError("supabase_response_invalid") from None
@@ -39719,9 +39820,12 @@ def supabase_apply_finance_organization_sync_event(
                 "p_organization": organization,
             },
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         error_text = str(exc)
-        if "finance_organization_revision_conflict" in error_text or "finance_member_sync_event_id_conflict" in error_text:
+        if error_text in {
+            "finance_organization_revision_conflict",
+            "finance_member_sync_event_id_conflict",
+        }:
             raise FinanceBridgeDenied("finance_organization_revision_conflict") from exc
         raise
     if isinstance(raw, list):
@@ -45241,14 +45345,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "not_found", "path": path}, 404)
         except ValueError as exc:
             detail = str(exc)
-            status = 503 if detail.startswith(("formal_signing_service_not_ready", "formal_signature_provider", "formal_tsa", "editor_antivirus_not_ready", "editor_antivirus_scan_failed")) else 409 if detail in {
-                "editor_revision_conflict",
-                "editor_locked_after_submit",
-                "inbound_version_conflict",
-                "inbound_idempotency_conflict",
-                "inbound_registration_state_conflict",
-                "inbound_mutation_state_conflict",
-            } else 422
+            status = api_value_error_status(detail)
             log_structured("warning", "api_request_rejected", path=path, method=method, error=detail)
             self.send_json({"error": "request_rejected", "detail": detail}, status)
         except PermissionError as exc:

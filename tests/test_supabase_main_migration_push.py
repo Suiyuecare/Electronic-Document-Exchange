@@ -38,7 +38,7 @@ with log_path.open("a", encoding="utf-8") as log_file:
     log_file.write(json.dumps(args) + "\n")
 
 if args == ["--version"]:
-    print(os.environ.get("FAKE_SUPABASE_VERSION", "2.105.0"))
+    print(os.environ.get("FAKE_SUPABASE_VERSION", "2.116.0"))
     raise SystemExit(0)
 
 if args[:2] == ["db", "query"]:
@@ -176,7 +176,7 @@ class SupabaseMainMigrationPushTestCase(unittest.TestCase):
     def test_unpinned_cli_fails_closed_before_query_or_push(self) -> None:
         self.state_path.write_text("empty", encoding="utf-8")
         with mock.patch.dict(
-            os.environ, {"FAKE_SUPABASE_VERSION": "2.106.0"}, clear=False
+            os.environ, {"FAKE_SUPABASE_VERSION": "2.115.0"}, clear=False
         ):
             with self.assertRaisesRegex(
                 self.tool.CutoverError, "supabase_cli_version_mismatch"

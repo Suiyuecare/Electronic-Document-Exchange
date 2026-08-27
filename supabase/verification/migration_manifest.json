@@ -46,6 +46,8 @@
     "20260827050452_add_confirmed_edoc_fk_indexes_forward.sql",
     "20260827061915_harden_audit_hash_runtime.sql",
     "20260827063824_lock_runtime_table_data_api_grants.sql",
-    "20260827064100_remove_fresh_finance_bootstrap_sentinel.sql"
+    "20260827064100_remove_fresh_finance_bootstrap_sentinel.sql",
+    "20260827101441_capture_official_dispatch_events.sql",
+    "20260827101636_avoid_postgrest_business_conflict_retries.sql"
   ]
 }

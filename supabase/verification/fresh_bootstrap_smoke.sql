@@ -27,6 +27,12 @@ declare
   v_second_previous_hash text;
   v_second_hash text;
   v_rpc_search_path text;
+  v_dispatch_result jsonb;
+  v_dispatch_replay jsonb;
+  v_dispatch_record_id text;
+  v_event_sequences bigint[];
+  v_event_types text[];
+  v_changed_fields text[];
 begin
   if pg_catalog.to_regclass('public.official_document_editor_revisions') is null
      or pg_catalog.to_regclass('public.official_document_editor_assets') is null
@@ -434,6 +440,287 @@ begin
       get stacked diagnostics v_message = message_text;
       if v_message <> 'editor_finalize_invalid_payload' then
         raise exception 'fresh_bootstrap_editor_rpc_wrong_error:%', v_message;
+      end if;
+  end;
+
+  -- Exercise database-owned dispatch evidence through the same RPCs used by
+  -- the backend.  Every synthetic row is rolled back with this transaction.
+  insert into public.companies (id, name, status)
+  values (
+    '__edoc_dispatch_event_smoke_company__',
+    'Deidentified dispatch event smoke company',
+    'inactive'
+  );
+
+  insert into public.users (
+    id, name, email, role, status, company_id
+  ) values (
+    '__edoc_dispatch_event_smoke_user__',
+    'Dispatch event smoke user',
+    'dispatch-event-smoke@example.invalid',
+    'employee',
+    '啟用',
+    '__edoc_dispatch_event_smoke_company__'
+  );
+
+  insert into public.official_documents (
+    id,
+    company_id,
+    document_type,
+    source_type,
+    title,
+    recipient,
+    applicant_id,
+    applicant_name,
+    current_status,
+    current_step,
+    dispatch_method
+  ) values (
+    '__edoc_dispatch_event_smoke_document__',
+    '__edoc_dispatch_event_smoke_company__',
+    'official_document',
+    'blank_editor',
+    'Deidentified dispatch event smoke document',
+    'Deidentified recipient',
+    '__edoc_dispatch_event_smoke_user__',
+    'Dispatch event smoke user',
+    'returned_to_applicant_for_send',
+    'applicant_dispatch',
+    'return_to_applicant_for_manual_send'
+  );
+
+  v_dispatch_result := public.edoc_create_official_document_dispatch_record(
+    '__edoc_dispatch_event_smoke_document__',
+    '__edoc_dispatch_event_smoke_user__'
+  );
+  v_dispatch_record_id := v_dispatch_result->>'dispatch_record_id';
+
+  if v_dispatch_result->>'created' <> 'true'
+     or nullif(v_dispatch_record_id, '') is null
+     or 1 <> (
+       select pg_catalog.count(*)
+       from public.official_document_dispatch_events as event
+       where event.dispatch_record_id = v_dispatch_record_id
+     )
+     or not exists (
+       select 1
+       from public.official_document_dispatch_events as event
+       where event.dispatch_record_id = v_dispatch_record_id
+         and event.event_sequence = 1
+         and event.event_type = 'created'
+         and event.from_status is null
+         and event.to_status = 'pending'
+         and event.changed_fields @> array['dispatch_status']::text[]
+         and event.record_snapshot_sha256 ~ '^[0-9a-f]{64}$'
+         and nullif(event.database_actor, '') is not null
+     ) then
+    raise exception 'fresh_bootstrap_dispatch_created_event_invalid';
+  end if;
+
+  v_dispatch_replay := public.edoc_create_official_document_dispatch_record(
+    '__edoc_dispatch_event_smoke_document__',
+    '__edoc_dispatch_event_smoke_user__'
+  );
+  if v_dispatch_replay->>'created' <> 'false'
+     or 1 <> (
+       select pg_catalog.count(*)
+       from public.official_document_dispatch_events as event
+       where event.dispatch_record_id = v_dispatch_record_id
+     ) then
+    raise exception 'fresh_bootstrap_dispatch_create_replay_duplicated_event';
+  end if;
+
+  begin
+    update public.official_document_dispatch_records
+       set created_by = '__edoc_dispatch_identity_tamper__'
+     where id = v_dispatch_record_id;
+    raise exception 'fresh_bootstrap_dispatch_identity_mutation_accepted';
+  exception
+    when sqlstate '42501' then
+      get stacked diagnostics v_message = message_text;
+      if v_message <> 'official_dispatch_identity_immutable' then
+        raise exception 'fresh_bootstrap_dispatch_identity_mutation_wrong_error:%',
+          v_message;
+      end if;
+  end;
+
+  if 1 <> (
+    select pg_catalog.count(*)
+    from public.official_document_dispatch_events as event
+    where event.dispatch_record_id = v_dispatch_record_id
+  ) or not exists (
+    select 1
+    from public.official_document_dispatch_records as record
+    where record.id = v_dispatch_record_id
+      and record.created_by = '__edoc_dispatch_event_smoke_user__'
+  ) then
+    raise exception 'fresh_bootstrap_dispatch_identity_mutation_left_state';
+  end if;
+
+  insert into public.file_objects (
+    id,
+    document_id,
+    file_name,
+    storage_key,
+    mime_type,
+    size_bytes,
+    sha256,
+    version_label,
+    purpose,
+    created_by,
+    scan_status
+  ) values (
+    '__edoc_dispatch_event_smoke_file__',
+    '__edoc_dispatch_event_smoke_document__',
+    'dispatch-proof.pdf',
+    'verification/dispatch-event-smoke/dispatch-proof.pdf',
+    'application/pdf',
+    1,
+    pg_catalog.repeat('a', 64),
+    'verification',
+    'dispatch-proof',
+    '__edoc_dispatch_event_smoke_user__',
+    'passed'
+  );
+
+  insert into public.official_document_files (
+    id,
+    document_id,
+    file_object_id,
+    file_type,
+    file_name,
+    file_storage_key,
+    file_mime_type,
+    file_size,
+    file_hash,
+    uploaded_by
+  ) values (
+    '__edoc_dispatch_event_smoke_official_file__',
+    '__edoc_dispatch_event_smoke_document__',
+    '__edoc_dispatch_event_smoke_file__',
+    'dispatch_proof',
+    'dispatch-proof.pdf',
+    'verification/dispatch-event-smoke/dispatch-proof.pdf',
+    'application/pdf',
+    1,
+    pg_catalog.repeat('a', 64),
+    '__edoc_dispatch_event_smoke_user__'
+  );
+
+  update public.official_document_dispatch_records
+     set proof_file_id = '__edoc_dispatch_event_smoke_official_file__',
+         recipient = 'Deidentified updated recipient',
+         updated_at = '2099-01-01 00:00:01'
+   where id = v_dispatch_record_id;
+
+  select event.changed_fields
+    into v_changed_fields
+    from public.official_document_dispatch_events as event
+   where event.dispatch_record_id = v_dispatch_record_id
+     and event.event_sequence = 2;
+  if v_changed_fields is distinct from array['recipient', 'proof_file_id']::text[]
+     or not exists (
+       select 1
+       from public.official_document_dispatch_events as event
+       where event.dispatch_record_id = v_dispatch_record_id
+         and event.event_sequence = 2
+         and event.event_type = 'metadata_updated'
+         and event.from_status = 'pending'
+         and event.to_status = 'pending'
+     ) then
+    raise exception 'fresh_bootstrap_dispatch_metadata_event_invalid:%',
+      v_changed_fields;
+  end if;
+
+  v_dispatch_result := public.edoc_complete_official_document_dispatch(
+    '__edoc_dispatch_event_smoke_document__',
+    v_dispatch_record_id,
+    '__edoc_dispatch_event_smoke_user__',
+    null,
+    '2099-01-02',
+    null,
+    'dispatch-event-smoke@example.invalid',
+    'Deidentified dispatch event verification',
+    '127.0.0.1',
+    'fresh-bootstrap-smoke'
+  );
+
+  if v_dispatch_result->>'completed' <> 'true'
+     or not exists (
+       select 1
+       from public.official_document_dispatch_events as event
+       where event.dispatch_record_id = v_dispatch_record_id
+         and event.event_sequence = 3
+         and event.event_type = 'status_transition'
+         and event.from_status = 'pending'
+         and event.to_status = 'sent_by_applicant'
+         and event.changed_fields @> array[
+           'dispatch_status', 'dispatch_date', 'completed_at'
+         ]::text[]
+     ) then
+    raise exception 'fresh_bootstrap_dispatch_completion_event_invalid';
+  end if;
+
+  v_dispatch_replay := public.edoc_complete_official_document_dispatch(
+    '__edoc_dispatch_event_smoke_document__',
+    v_dispatch_record_id,
+    '__edoc_dispatch_event_smoke_user__',
+    null,
+    '2099-01-02',
+    null,
+    'dispatch-event-smoke@example.invalid',
+    'Deidentified dispatch event verification',
+    '127.0.0.1',
+    'fresh-bootstrap-smoke'
+  );
+
+  update public.official_document_dispatch_records
+     set updated_at = updated_at
+   where id = v_dispatch_record_id;
+
+  select
+    pg_catalog.array_agg(event.event_sequence order by event.event_sequence),
+    pg_catalog.array_agg(event.event_type order by event.event_sequence)
+    into v_event_sequences, v_event_types
+    from public.official_document_dispatch_events as event
+   where event.dispatch_record_id = v_dispatch_record_id;
+
+  if v_dispatch_replay->>'completed' <> 'false'
+     or v_dispatch_replay->>'reason' <> 'official_dispatch_already_completed'
+     or v_event_sequences is distinct from array[1, 2, 3]::bigint[]
+     or v_event_types is distinct from array[
+       'created', 'metadata_updated', 'status_transition'
+     ]::text[] then
+    raise exception 'fresh_bootstrap_dispatch_replay_or_sequence_invalid:%:%',
+      v_event_sequences, v_event_types;
+  end if;
+
+  begin
+    update public.official_document_dispatch_events
+       set event_type = event_type
+     where dispatch_record_id = v_dispatch_record_id
+       and event_sequence = 1;
+    raise exception 'fresh_bootstrap_dispatch_event_update_accepted';
+  exception
+    when sqlstate '42501' then
+      get stacked diagnostics v_message = message_text;
+      if v_message <> 'immutable_record_log' then
+        raise exception 'fresh_bootstrap_dispatch_event_update_wrong_error:%',
+          v_message;
+      end if;
+  end;
+
+  begin
+    delete from public.official_document_dispatch_events
+     where dispatch_record_id = v_dispatch_record_id
+       and event_sequence = 1;
+    raise exception 'fresh_bootstrap_dispatch_event_delete_accepted';
+  exception
+    when sqlstate '42501' then
+      get stacked diagnostics v_message = message_text;
+      if v_message <> 'immutable_record_log' then
+        raise exception 'fresh_bootstrap_dispatch_event_delete_wrong_error:%',
+          v_message;
       end if;
   end;
 

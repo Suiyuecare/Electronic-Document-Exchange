@@ -20,6 +20,9 @@ STORAGE_MIGRATIONS = SUPABASE / "storage-migrations"
 VERIFICATION = SUPABASE / "verification"
 SCHEMA_PARITY = MIGRATIONS / "20260827050436_complete_edoc_runtime_schema_parity.sql"
 GRANT_HARDENING = MIGRATIONS / "20260827063824_lock_runtime_table_data_api_grants.sql"
+DISPATCH_EVENT_CAPTURE = (
+    MIGRATIONS / "20260827101441_capture_official_dispatch_events.sql"
+)
 RUNTIME_SMOKE = VERIFICATION / "runtime_schema_parity_smoke.sql"
 FRESH_BOOTSTRAP_SMOKE = VERIFICATION / "fresh_bootstrap_smoke.sql"
 SERVICE_ROLE_GRANT_SMOKE = VERIFICATION / "service_role_data_api_grant_smoke.sql"
@@ -162,6 +165,134 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                     sql,
                     rf"grant [^;]*(?:insert|update|delete)[^;]* on table public\.{table} to service_role",
                 )
+
+    def test_dispatch_event_capture_is_private_sequential_and_recoverable(self) -> None:
+        migration_sql = DISPATCH_EVENT_CAPTURE.read_text(encoding="utf-8").lower()
+        recovery_sql = (
+            SUPABASE / "recovery" / "complete_edoc_runtime_recovery_20260827.sql"
+        ).read_text(encoding="utf-8").lower()
+        runtime_smoke = RUNTIME_SMOKE.read_text(encoding="utf-8").lower()
+        fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
+        cutover = CUTOVER.read_text(encoding="utf-8").lower()
+
+        for sql in (migration_sql, recovery_sql):
+            with self.subTest(contract="migration_or_recovery"):
+                self.assertIn(
+                    "edoc_private.capture_official_dispatch_event_v1()",
+                    sql,
+                )
+                self.assertIn("security definer", sql)
+                self.assertIn("set search_path to ''", sql)
+                self.assertIn("edoc:dispatch-event:", sql)
+                self.assertIn("pg_catalog.hashtextextended", sql)
+                self.assertIn("pg_catalog.max(event.event_sequence)", sql)
+                self.assertIn("'created'", sql)
+                self.assertIn("'metadata_updated'", sql)
+                self.assertIn("'status_transition'", sql)
+                self.assertIn("'baseline_snapshot'", sql)
+                self.assertIn("extensions.digest", sql)
+                self.assertIn("'sha256'", sql)
+                self.assertIn("trg_official_dispatch_record_capture_insert", sql)
+                self.assertIn("trg_official_dispatch_record_capture_update", sql)
+                self.assertIn(
+                    "lock table public.official_document_dispatch_records in share row exclusive mode",
+                    sql,
+                )
+                self.assertIn(
+                    "revoke all on function edoc_private.capture_official_dispatch_event_v1()",
+                    sql,
+                )
+                self.assertIn(
+                    "edoc_private.guard_official_dispatch_identity_v1()",
+                    sql,
+                )
+                self.assertIn("official_dispatch_identity_immutable", sql)
+                self.assertIn("trg_official_dispatch_record_identity_guard", sql)
+                self.assertIn(
+                    "before update of id, document_id, created_by, created_at",
+                    sql,
+                )
+                self.assertIn(
+                    "revoke all on function edoc_private.guard_official_dispatch_identity_v1()",
+                    sql,
+                )
+                self.assertIn(
+                    "revoke insert, update, delete\n  on table public.official_document_dispatch_events\n  from service_role",
+                    sql,
+                )
+                self.assertNotRegex(
+                    sql,
+                    r"grant [^;]*(?:insert|update|delete)[^;]* on table public\.official_document_dispatch_events to service_role",
+                )
+
+        self.assertNotIn("on conflict do nothing", migration_sql)
+
+        self.assertIn(
+            "runtime_schema_dispatch_event_capture_function_missing",
+            runtime_smoke,
+        )
+        self.assertIn(
+            "runtime_schema_dispatch_event_capture_execute_exposed",
+            runtime_smoke,
+        )
+        self.assertIn(
+            "runtime_schema_dispatch_event_capture_trigger_invalid",
+            runtime_smoke,
+        )
+        for trigger_contract in (
+            "trigger_row.tgfoid",
+            "trigger_row.tgtype = 5",
+            "trigger_row.tgtype = 17",
+            "trigger_row.tgtype = 19",
+            "trigger_row.tgattr::smallint[]",
+            "pg_catalog.pg_get_expr(trigger_row.tgqual",
+        ):
+            self.assertIn(trigger_contract, runtime_smoke)
+            self.assertIn(trigger_contract, cutover)
+        self.assertIn("v_dispatch_capture_qual", runtime_smoke)
+        self.assertIn("v_dispatch_identity_qual", runtime_smoke)
+        self.assertIn("expected.capture_qual", cutover)
+        self.assertIn("expected.identity_qual", cutover)
+        self.assertGreaterEqual(
+            runtime_smoke.count("trigger_row.tgfoid"),
+            2,
+        )
+        self.assertGreaterEqual(cutover.count("trigger_row.tgfoid"), 2)
+        for marker in (
+            "fresh_bootstrap_dispatch_created_event_invalid",
+            "fresh_bootstrap_dispatch_create_replay_duplicated_event",
+            "fresh_bootstrap_dispatch_identity_mutation_accepted",
+            "fresh_bootstrap_dispatch_identity_mutation_wrong_error",
+            "fresh_bootstrap_dispatch_identity_mutation_left_state",
+            "fresh_bootstrap_dispatch_metadata_event_invalid",
+            "fresh_bootstrap_dispatch_completion_event_invalid",
+            "fresh_bootstrap_dispatch_replay_or_sequence_invalid",
+            "fresh_bootstrap_dispatch_event_update_accepted",
+            "fresh_bootstrap_dispatch_event_delete_accepted",
+        ):
+            self.assertIn(marker, fresh_smoke)
+        self.assertIn(
+            "public.edoc_create_official_document_dispatch_record(",
+            fresh_smoke,
+        )
+        self.assertIn(
+            "public.edoc_complete_official_document_dispatch(",
+            fresh_smoke,
+        )
+        for marker in (
+            "dispatch_capture_function_exists",
+            "dispatch_capture_function_hardened",
+            "dispatch_capture_function_private",
+            "dispatch_capture_triggers_enabled",
+            "dispatch_identity_guard_function_exists",
+            "dispatch_identity_guard_function_hardened",
+            "dispatch_identity_guard_function_private",
+            "dispatch_identity_guard_trigger_enabled",
+            "dispatch_events_api_read_only",
+            "every_dispatch_record_has_evidence",
+            "dispatch_event_sequences_contiguous",
+        ):
+            self.assertIn(marker, cutover)
 
     def test_cutover_and_ci_smoke_cover_all_runtime_tables(self) -> None:
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
@@ -495,7 +626,17 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertIn("local_editor_finalize_anon_rpc_exposed", gate)
         self.assertIn("official_editor_write_forbidden", gate)
         self.assertIn("editor_finalize_invalid_payload", gate)
+        self.assertIn("editor_upload_new_intent_required", gate)
         self.assertIn("editor_revision_conflict", gate)
+        self.assertIn("stale_intent_status == 409", gate)
+        self.assertIn("stale_status == 409", gate)
+        self.assertIn('get("code") == "PT409"', gate)
+        self.assertIn("stale_intent_elapsed < 5.0", gate)
+        self.assertIn("stale_revision_elapsed < 5.0", gate)
+        self.assertIn("local_editor_finalize_stale_intent_left_rows", gate)
+        self.assertIn("local_editor_finalize_stale_revision_left_rows", gate)
+        self.assertIn('"businessConflictHttp409": True', gate)
+        self.assertIn('"businessConflictUnderFiveSeconds": True', gate)
         self.assertIn("local_editor_finalize_partial_row", gate)
         self.assertIn("local_editor_finalize_replay_not_idempotent", gate)
         self.assertIn("editor_finalize_operation_conflict", gate)
@@ -511,6 +652,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
     def test_new_verification_and_storage_sql_parse_as_postgresql(self) -> None:
         for path in (
             GRANT_HARDENING,
+            DISPATCH_EVENT_CAPTURE,
             FRESH_BOOTSTRAP_SMOKE,
             RUNTIME_SMOKE,
             SERVICE_ROLE_GRANT_SMOKE,
@@ -524,6 +666,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                 parse_sql(path.read_text(encoding="utf-8"))
         for path in (
             GRANT_HARDENING,
+            DISPATCH_EVENT_CAPTURE,
             FRESH_BOOTSTRAP_SMOKE,
             SERVICE_ROLE_GRANT_SMOKE,
         ):

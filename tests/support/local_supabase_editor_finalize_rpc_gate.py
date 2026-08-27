@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from typing import Any
 from urllib import error, parse, request
@@ -98,6 +99,8 @@ def api_call(
         with request.urlopen(outbound, timeout=15) as response:
             raw = response.read(512 * 1024)
             return response.status, json.loads(raw.decode("utf-8")) if raw else None
+    except TimeoutError:
+        raise GateFailure(f"local_editor_finalize_api_timeout:{path}") from None
     except error.HTTPError as exc:
         try:
             raw = exc.read(64 * 1024)
@@ -492,6 +495,30 @@ def main() -> int:
         revision_id=ids["rollback_revision"],
     )
 
+    def require_rollback_attempt_pristine(marker: str) -> None:
+        asset_rows = rows(
+            api_url,
+            service_key,
+            "official_document_editor_assets",
+            {"id": rollback_asset_id},
+        )
+        require(
+            len(asset_rows) == 1
+            and asset_rows[0]["upload_status"] == "uploaded"
+            and asset_rows[0].get("file_object_id") is None
+            and asset_rows[0].get("official_file_id") is None
+            and asset_rows[0].get("editor_revision_id") is None,
+            f"{marker}:asset",
+        )
+        for table, row_id in (
+            ("file_objects", ids["rollback_file"]),
+            ("official_document_files", ids["rollback_official_file"]),
+            ("official_document_editor_revisions", ids["rollback_revision"]),
+            ("official_document_approval_logs", ids["rollback_operation"]),
+            ("audit_logs", ids["rollback_audit"]),
+        ):
+            require(not rows(api_url, service_key, table, {"id": row_id}), f"{marker}:{table}")
+
     try:
         # The anonymous browser role must not be able to discover or execute
         # this SECURITY DEFINER function, even with a structurally valid request.
@@ -513,20 +540,38 @@ def main() -> int:
             "local_editor_finalize_cross_company_mutated_asset",
         )
 
+        # A stale upload intent is a terminal conflict for this payload.  It
+        # must be a prompt HTTP 409, not SQLSTATE 40001: older PostgREST builds
+        # automatically retry serialization_failure and can hang indefinitely.
+        stale_intent = copy.deepcopy(rollback_request)
+        stale_intent["expected_asset_status"] = "pending"
+        stale_intent_started = time.monotonic()
+        stale_intent_status, stale_intent_body = rpc(api_url, service_key, stale_intent)
+        stale_intent_elapsed = time.monotonic() - stale_intent_started
+        stale_intent_error = normalized_rpc_result(stale_intent_body)
+        require(stale_intent_status == 409, "local_editor_finalize_stale_intent_http_status")
+        require(
+            stale_intent_error.get("code") == "PT409"
+            and stale_intent_error.get("message") == "editor_upload_new_intent_required",
+            "local_editor_finalize_stale_intent_wrong_error",
+        )
+        require(stale_intent_elapsed < 5.0, "local_editor_finalize_stale_intent_slow")
+        require_rollback_attempt_pristine("local_editor_finalize_stale_intent_left_rows")
+
         stale_revision = copy.deepcopy(rollback_request)
         stale_revision["expected_base_revision_no"] = 999
+        stale_revision_started = time.monotonic()
         stale_status, stale_body = rpc(api_url, service_key, stale_revision)
+        stale_revision_elapsed = time.monotonic() - stale_revision_started
         stale = normalized_rpc_result(stale_body)
-        require(stale_status >= 400, "local_editor_finalize_stale_revision_accepted")
+        require(stale_status == 409, "local_editor_finalize_stale_revision_http_status")
         require(
-            stale.get("message") == "editor_revision_conflict",
+            stale.get("code") == "PT409"
+            and stale.get("message") == "editor_revision_conflict",
             "local_editor_finalize_stale_revision_wrong_error",
         )
-        require(
-            not rows(api_url, service_key, "file_objects", {"id": ids["rollback_file"]})
-            and not rows(api_url, service_key, "official_document_editor_revisions", {"id": ids["rollback_revision"]}),
-            "local_editor_finalize_stale_revision_left_rows",
-        )
+        require(stale_revision_elapsed < 5.0, "local_editor_finalize_stale_revision_slow")
+        require_rollback_attempt_pristine("local_editor_finalize_stale_revision_left_rows")
 
         # Force a late not-null failure.  The RPC attempts file and official
         # file inserts before inserting this revision, so absence of all rows
@@ -686,6 +731,8 @@ def main() -> int:
                 "idempotentReplay": True,
                 "conflictRejected": True,
                 "revisionConflictRejected": True,
+                "businessConflictHttp409": True,
+                "businessConflictUnderFiveSeconds": True,
                 "crossCompanyRejected": True,
                 "lateFailureRolledBack": True,
                 "anonRoleDenied": True,

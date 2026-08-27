@@ -9,6 +9,23 @@ declare
   v_table_oid regclass;
   v_role_name text;
   v_privilege_name text;
+  v_dispatch_capture_qual text :=
+    'old.dispatch_methodisdistinctfromnew.dispatch_methodor'
+    || 'old.dispatch_owner_typeisdistinctfromnew.dispatch_owner_typeor'
+    || 'old.dispatch_owner_user_idisdistinctfromnew.dispatch_owner_user_idor'
+    || 'old.dispatch_statusisdistinctfromnew.dispatch_statusor'
+    || 'old.external_official_document_numberisdistinctfromnew.external_official_document_numberor'
+    || 'old.dispatch_dateisdistinctfromnew.dispatch_dateor'
+    || 'old.recipientisdistinctfromnew.recipientor'
+    || 'old.recipient_contactisdistinctfromnew.recipient_contactor'
+    || 'old.dispatch_noteisdistinctfromnew.dispatch_noteor'
+    || 'old.proof_file_idisdistinctfromnew.proof_file_idor'
+    || 'old.completed_atisdistinctfromnew.completed_at';
+  v_dispatch_identity_qual text :=
+    'old.idisdistinctfromnew.idor'
+    || 'old.document_idisdistinctfromnew.document_idor'
+    || 'old.created_byisdistinctfromnew.created_byor'
+    || 'old.created_atisdistinctfromnew.created_at';
 begin
   foreach v_table_name in array array[
     'inbound_document_attachments',
@@ -158,6 +175,199 @@ begin
       raise exception 'runtime_schema_rpc_owned_grant_invalid:%', v_table_name;
     end if;
   end loop;
+
+  -- Dispatch event evidence is populated only by a private database trigger.
+  -- The trigger function must not become a callable Data API surface.
+  if pg_catalog.to_regprocedure(
+       'edoc_private.capture_official_dispatch_event_v1()'
+     ) is null then
+    raise exception 'runtime_schema_dispatch_event_capture_function_missing';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_proc procedure_row
+    join pg_catalog.pg_roles owner_role
+      on owner_role.oid = procedure_row.proowner
+    where procedure_row.oid =
+      'edoc_private.capture_official_dispatch_event_v1()'::pg_catalog.regprocedure
+      and owner_role.rolname = 'postgres'
+      and procedure_row.prosecdef
+      and procedure_row.proconfig @> array['search_path=""']::text[]
+  ) then
+    raise exception 'runtime_schema_dispatch_event_capture_function_invalid';
+  end if;
+
+  if exists (
+    select 1
+    from pg_catalog.pg_proc procedure_row
+    cross join lateral pg_catalog.aclexplode(
+      pg_catalog.coalesce(
+        procedure_row.proacl,
+        pg_catalog.acldefault('f', procedure_row.proowner)
+      )
+    ) privilege_row
+    where procedure_row.oid =
+      'edoc_private.capture_official_dispatch_event_v1()'::pg_catalog.regprocedure
+      and privilege_row.grantee = 0
+      and privilege_row.privilege_type = 'EXECUTE'
+  ) then
+    raise exception 'runtime_schema_dispatch_event_capture_execute_exposed:PUBLIC';
+  end if;
+
+  foreach v_role_name in array array['anon', 'authenticated', 'service_role']
+  loop
+    if pg_catalog.has_function_privilege(
+      v_role_name,
+      'edoc_private.capture_official_dispatch_event_v1()'::pg_catalog.regprocedure,
+      'EXECUTE'
+    ) then
+      raise exception 'runtime_schema_dispatch_event_capture_execute_exposed:%',
+        v_role_name;
+    end if;
+  end loop;
+
+  if pg_catalog.to_regprocedure(
+       'edoc_private.guard_official_dispatch_identity_v1()'
+     ) is null then
+    raise exception 'runtime_schema_dispatch_identity_guard_function_missing';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_proc procedure_row
+    join pg_catalog.pg_roles owner_role
+      on owner_role.oid = procedure_row.proowner
+    where procedure_row.oid =
+      'edoc_private.guard_official_dispatch_identity_v1()'::pg_catalog.regprocedure
+      and owner_role.rolname = 'postgres'
+      and procedure_row.prosecdef
+      and procedure_row.proconfig @> array['search_path=""']::text[]
+  ) then
+    raise exception 'runtime_schema_dispatch_identity_guard_function_invalid';
+  end if;
+
+  if exists (
+    select 1
+    from pg_catalog.pg_proc procedure_row
+    cross join lateral pg_catalog.aclexplode(
+      pg_catalog.coalesce(
+        procedure_row.proacl,
+        pg_catalog.acldefault('f', procedure_row.proowner)
+      )
+    ) privilege_row
+    where procedure_row.oid =
+      'edoc_private.guard_official_dispatch_identity_v1()'::pg_catalog.regprocedure
+      and privilege_row.grantee = 0
+      and privilege_row.privilege_type = 'EXECUTE'
+  ) then
+    raise exception 'runtime_schema_dispatch_identity_guard_execute_exposed:PUBLIC';
+  end if;
+
+  foreach v_role_name in array array['anon', 'authenticated', 'service_role']
+  loop
+    if pg_catalog.has_function_privilege(
+      v_role_name,
+      'edoc_private.guard_official_dispatch_identity_v1()'::pg_catalog.regprocedure,
+      'EXECUTE'
+    ) then
+      raise exception 'runtime_schema_dispatch_identity_guard_execute_exposed:%',
+        v_role_name;
+    end if;
+  end loop;
+
+  if 1 <> (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_dispatch_records'::pg_catalog.regclass
+      and trigger_row.tgfoid =
+        'edoc_private.guard_official_dispatch_identity_v1()'::pg_catalog.regprocedure
+      and trigger_row.tgenabled = 'O'
+      and not trigger_row.tgisinternal
+      and trigger_row.tgname = 'trg_official_dispatch_record_identity_guard'
+      and trigger_row.tgtype = 19
+      and (
+        select pg_catalog.array_agg(attribute_row.attname order by attribute_item.ordinality)
+        from pg_catalog.unnest(trigger_row.tgattr::smallint[])
+          with ordinality as attribute_item(attnum, ordinality)
+        join pg_catalog.pg_attribute attribute_row
+          on attribute_row.attrelid = trigger_row.tgrelid
+         and attribute_row.attnum = attribute_item.attnum
+      ) = array['id', 'document_id', 'created_by', 'created_at']::text[]
+      and pg_catalog.regexp_replace(
+        pg_catalog.lower(
+          pg_catalog.pg_get_expr(trigger_row.tgqual, trigger_row.tgrelid, true)
+        ),
+        '[[:space:]()]',
+        '',
+        'g'
+      ) = v_dispatch_identity_qual
+  ) then
+    raise exception 'runtime_schema_dispatch_identity_guard_trigger_invalid';
+  end if;
+
+  if 2 <> (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_dispatch_records'::pg_catalog.regclass
+      and trigger_row.tgfoid =
+        'edoc_private.capture_official_dispatch_event_v1()'::pg_catalog.regprocedure
+      and trigger_row.tgenabled = 'O'
+      and not trigger_row.tgisinternal
+      and (
+        (
+          trigger_row.tgname = 'trg_official_dispatch_record_capture_insert'
+          and trigger_row.tgtype = 5
+          and trigger_row.tgqual is null
+          and pg_catalog.cardinality(trigger_row.tgattr::smallint[]) = 0
+        )
+        or (
+          trigger_row.tgname = 'trg_official_dispatch_record_capture_update'
+          and trigger_row.tgtype = 17
+          and pg_catalog.regexp_replace(
+            pg_catalog.lower(
+              pg_catalog.pg_get_expr(trigger_row.tgqual, trigger_row.tgrelid, true)
+            ),
+            '[[:space:]()]',
+            '',
+            'g'
+          ) = v_dispatch_capture_qual
+          and (
+            select pg_catalog.array_agg(attribute_row.attname order by attribute_item.ordinality)
+            from pg_catalog.unnest(trigger_row.tgattr::smallint[])
+              with ordinality as attribute_item(attnum, ordinality)
+            join pg_catalog.pg_attribute attribute_row
+              on attribute_row.attrelid = trigger_row.tgrelid
+             and attribute_row.attnum = attribute_item.attnum
+          ) = array[
+            'dispatch_method',
+            'dispatch_owner_type',
+            'dispatch_owner_user_id',
+            'dispatch_status',
+            'external_official_document_number',
+            'dispatch_date',
+            'recipient',
+            'recipient_contact',
+            'dispatch_note',
+            'proof_file_id',
+            'completed_at'
+          ]::text[]
+        )
+      )
+  ) or 2 <> (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_dispatch_records'::pg_catalog.regclass
+      and trigger_row.tgfoid =
+        'edoc_private.capture_official_dispatch_event_v1()'::pg_catalog.regprocedure
+      and trigger_row.tgenabled = 'O'
+      and not trigger_row.tgisinternal
+  ) then
+    raise exception 'runtime_schema_dispatch_event_capture_trigger_invalid';
+  end if;
 
   if exists (
     select required.index_name

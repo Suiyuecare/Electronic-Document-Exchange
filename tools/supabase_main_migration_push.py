@@ -20,7 +20,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 LINKED_REF_PATH = ROOT / "supabase" / ".temp" / "project-ref"
-PINNED_CLI_VERSION = "2.105.0"
+PINNED_CLI_VERSION = "2.116.0"
 
 
 class CutoverError(RuntimeError):

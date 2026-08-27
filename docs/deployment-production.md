@@ -31,7 +31,7 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
 4. 先判定 linked project 是「全新空白」或「已有 migration 歷程」，兩條路徑不可混用：
    - **全新空白 project**：`roles.sql` 必須先於歷史 migration chain 載入。先執行 `python3 tools/supabase_main_migration_push.py fresh-empty --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才在同一命令加 `--apply`。wrapper 只有在遠端 migration 歷程為空時才會加入 `supabase db push --include-roles`，否則拒絕。
    - **既有 project**：執行 `python3 tools/supabase_main_migration_push.py existing --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才加 `--apply`。此路徑永不加入 `--include-roles`，也不得手動重跑 `roles.sql`，避免在移除 migration 已通過後重新插入 fresh-only sentinel。
-   - wrapper 只接受 Supabase CLI `2.105.0`，並用唯讀 `db query` JSON 介面驗證 migration table 與版本。`fresh-empty` 還要求 public 非 extension 物件、Auth 使用者、Storage buckets/objects 全部為 0；CLI 版本、查詢格式、linked ref 或遠端狀態無法確認時一律停止，不猜測 fresh／existing。
+   - wrapper 只接受 Supabase CLI `2.116.0`，並用唯讀 `db query` JSON 介面驗證 migration table 與版本。`fresh-empty` 還要求 public 非 extension 物件、Auth 使用者、Storage buckets/objects 全部為 0；CLI 版本、查詢格式、linked ref 或遠端狀態無法確認時一律停止，不猜測 fresh／existing。
 5. 歷程一致後，先於隔離環境完整 reset／重建並執行 `fresh_bootstrap_smoke.sql`、`runtime_schema_parity_smoke.sql`、`service_role_data_api_grant_smoke.sql` 及五帳號驗收。
 6. 取得資料庫備份、指定回復點與人工變更核准後，才依核准路徑套用正式 migrations。
 7. 執行 `supabase/verification/production_cutover_checks.sql`；所有 required table/RPC、RLS、grant 與 demo-data 檢查必須通過，且 `fresh_finance_bootstrap_sentinel` 必須為 0。
@@ -45,6 +45,8 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
 5. `20260827061915_harden_audit_hash_runtime.sql`：將新稽核紀錄切換至序列化雜湊鏈，並把鏈頭資料與驗證權限鎖在後端。
 6. `20260827063824_lock_runtime_table_data_api_grants.sql`：回溯移除 public schema 所有 `PUBLIC`／`anon`／`authenticated` table、sequence、function Data API grant 與 browser policy，再按後端實際操作授予 `service_role` 最小權限。
 7. `20260827064100_remove_fresh_finance_bootstrap_sentinel.sql`：只在全新 reset 存在完整結構性 sentinel 且沒有任何引用時移除；既有環境沒有該列時為精確 no-op。
+8. `20260827101441_capture_official_dispatch_events.sql`：以後端私有 trigger 將寄送紀錄建立、欄位異動與狀態轉換寫入不可變事件；既有寄送紀錄只建立 baseline snapshot，不臆造歷史事件，並禁止改掛公文、改寫建立者或建立時間。
+9. `20260827101636_avoid_postgrest_business_conflict_retries.sql`：把公開 RPC 人工拋出的業務／樂觀鎖衝突改為 `PT409`，避免舊版 PostgREST 將 `40001` 當成可重試序列化失敗而使請求逾時，也讓人工 `23505` 與真正 constraint violation 分流；資料庫真正產生的序列化失敗與唯一鍵衝突仍維持原本行為。
 
 這些檔案仍須先在與正式 schema 相同的隔離環境完成 `supabase db reset`、RPC smoke 與安全檢查，並逐檔取得人工核准；拆成 forward migration 不代表可以略過備份、回復點或變更審查。
 

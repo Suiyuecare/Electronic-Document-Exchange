@@ -373,6 +373,228 @@ where n.nspname = 'public'
   and p.oid not in (select oid from allowed_oids where oid is not null)
 order by 1;
 
+-- 4c. Database-owned dispatch evidence. Every boolean must be true. This only
+-- inspects metadata and aggregate existence/sequence properties; it does not
+-- select recipient, contact, note, document text, or attachment information.
+with capture_function as (
+  select pg_catalog.to_regprocedure(
+    'edoc_private.capture_official_dispatch_event_v1()'
+  ) as oid
+), identity_function as (
+  select pg_catalog.to_regprocedure(
+    'edoc_private.guard_official_dispatch_identity_v1()'
+  ) as oid
+), expected_quals as (
+  select
+    'old.dispatch_methodisdistinctfromnew.dispatch_methodor'
+      || 'old.dispatch_owner_typeisdistinctfromnew.dispatch_owner_typeor'
+      || 'old.dispatch_owner_user_idisdistinctfromnew.dispatch_owner_user_idor'
+      || 'old.dispatch_statusisdistinctfromnew.dispatch_statusor'
+      || 'old.external_official_document_numberisdistinctfromnew.external_official_document_numberor'
+      || 'old.dispatch_dateisdistinctfromnew.dispatch_dateor'
+      || 'old.recipientisdistinctfromnew.recipientor'
+      || 'old.recipient_contactisdistinctfromnew.recipient_contactor'
+      || 'old.dispatch_noteisdistinctfromnew.dispatch_noteor'
+      || 'old.proof_file_idisdistinctfromnew.proof_file_idor'
+      || 'old.completed_atisdistinctfromnew.completed_at'
+      as capture_qual,
+    'old.idisdistinctfromnew.idor'
+      || 'old.document_idisdistinctfromnew.document_idor'
+      || 'old.created_byisdistinctfromnew.created_byor'
+      || 'old.created_atisdistinctfromnew.created_at'
+      as identity_qual
+), public_execute as (
+  select exists (
+    select 1
+    from capture_function capture
+    join pg_catalog.pg_proc procedure_row on procedure_row.oid = capture.oid
+    cross join lateral pg_catalog.aclexplode(
+      pg_catalog.coalesce(
+        procedure_row.proacl,
+        pg_catalog.acldefault('f', procedure_row.proowner)
+      )
+    ) privilege_row
+    where privilege_row.grantee = 0
+      and privilege_row.privilege_type = 'EXECUTE'
+  ) as exposed
+), identity_public_execute as (
+  select exists (
+    select 1
+    from identity_function identity_guard
+    join pg_catalog.pg_proc procedure_row
+      on procedure_row.oid = identity_guard.oid
+    cross join lateral pg_catalog.aclexplode(
+      pg_catalog.coalesce(
+        procedure_row.proacl,
+        pg_catalog.acldefault('f', procedure_row.proowner)
+      )
+    ) privilege_row
+    where privilege_row.grantee = 0
+      and privilege_row.privilege_type = 'EXECUTE'
+  ) as exposed
+)
+select
+  capture.oid is not null as dispatch_capture_function_exists,
+  coalesce((
+    select owner_role.rolname = 'postgres'
+      and procedure_row.prosecdef
+      and procedure_row.proconfig @> array['search_path=""']::text[]
+    from pg_catalog.pg_proc procedure_row
+    join pg_catalog.pg_roles owner_role
+      on owner_role.oid = procedure_row.proowner
+    where procedure_row.oid = capture.oid
+  ), false) as dispatch_capture_function_hardened,
+  not public_execute.exposed
+    and case when capture.oid is null then false else
+      not pg_catalog.has_function_privilege('anon', capture.oid, 'EXECUTE')
+      and not pg_catalog.has_function_privilege('authenticated', capture.oid, 'EXECUTE')
+      and not pg_catalog.has_function_privilege('service_role', capture.oid, 'EXECUTE')
+    end as dispatch_capture_function_private,
+  identity_guard.oid is not null as dispatch_identity_guard_function_exists,
+  coalesce((
+    select owner_role.rolname = 'postgres'
+      and procedure_row.prosecdef
+      and procedure_row.proconfig @> array['search_path=""']::text[]
+    from pg_catalog.pg_proc procedure_row
+    join pg_catalog.pg_roles owner_role
+      on owner_role.oid = procedure_row.proowner
+    where procedure_row.oid = identity_guard.oid
+  ), false) as dispatch_identity_guard_function_hardened,
+  not identity_public_execute.exposed
+    and case when identity_guard.oid is null then false else
+      not pg_catalog.has_function_privilege('anon', identity_guard.oid, 'EXECUTE')
+      and not pg_catalog.has_function_privilege('authenticated', identity_guard.oid, 'EXECUTE')
+      and not pg_catalog.has_function_privilege('service_role', identity_guard.oid, 'EXECUTE')
+    end as dispatch_identity_guard_function_private,
+  1 = (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_dispatch_records'::pg_catalog.regclass
+      and trigger_row.tgfoid = identity_guard.oid
+      and trigger_row.tgenabled = 'O'
+      and not trigger_row.tgisinternal
+      and trigger_row.tgname = 'trg_official_dispatch_record_identity_guard'
+      and trigger_row.tgtype = 19
+      and (
+        select pg_catalog.array_agg(attribute_row.attname order by attribute_item.ordinality)
+        from pg_catalog.unnest(trigger_row.tgattr::smallint[])
+          with ordinality as attribute_item(attnum, ordinality)
+        join pg_catalog.pg_attribute attribute_row
+          on attribute_row.attrelid = trigger_row.tgrelid
+         and attribute_row.attnum = attribute_item.attnum
+      ) = array['id', 'document_id', 'created_by', 'created_at']::text[]
+      and pg_catalog.regexp_replace(
+        pg_catalog.lower(
+          pg_catalog.pg_get_expr(trigger_row.tgqual, trigger_row.tgrelid, true)
+        ),
+        '[[:space:]()]',
+        '',
+        'g'
+      ) = expected.identity_qual
+  )
+    and 1 = (
+      select pg_catalog.count(*)
+      from pg_catalog.pg_trigger trigger_row
+      where trigger_row.tgrelid =
+        'public.official_document_dispatch_records'::pg_catalog.regclass
+        and trigger_row.tgfoid = identity_guard.oid
+        and trigger_row.tgenabled = 'O'
+        and not trigger_row.tgisinternal
+    ) as dispatch_identity_guard_trigger_enabled,
+  2 = (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_dispatch_records'::pg_catalog.regclass
+      and trigger_row.tgfoid = capture.oid
+      and trigger_row.tgenabled = 'O'
+      and not trigger_row.tgisinternal
+      and (
+        (
+          trigger_row.tgname = 'trg_official_dispatch_record_capture_insert'
+          and trigger_row.tgtype = 5
+          and trigger_row.tgqual is null
+          and pg_catalog.cardinality(trigger_row.tgattr::smallint[]) = 0
+        )
+        or (
+          trigger_row.tgname = 'trg_official_dispatch_record_capture_update'
+          and trigger_row.tgtype = 17
+          and pg_catalog.regexp_replace(
+            pg_catalog.lower(
+              pg_catalog.pg_get_expr(trigger_row.tgqual, trigger_row.tgrelid, true)
+            ),
+            '[[:space:]()]',
+            '',
+            'g'
+          ) = expected.capture_qual
+          and (
+            select pg_catalog.array_agg(attribute_row.attname order by attribute_item.ordinality)
+            from pg_catalog.unnest(trigger_row.tgattr::smallint[])
+              with ordinality as attribute_item(attnum, ordinality)
+            join pg_catalog.pg_attribute attribute_row
+              on attribute_row.attrelid = trigger_row.tgrelid
+             and attribute_row.attnum = attribute_item.attnum
+          ) = array[
+            'dispatch_method',
+            'dispatch_owner_type',
+            'dispatch_owner_user_id',
+            'dispatch_status',
+            'external_official_document_number',
+            'dispatch_date',
+            'recipient',
+            'recipient_contact',
+            'dispatch_note',
+            'proof_file_id',
+            'completed_at'
+          ]::text[]
+        )
+      )
+  )
+    and 2 = (
+      select pg_catalog.count(*)
+      from pg_catalog.pg_trigger trigger_row
+      where trigger_row.tgrelid =
+        'public.official_document_dispatch_records'::pg_catalog.regclass
+        and trigger_row.tgfoid = capture.oid
+        and trigger_row.tgenabled = 'O'
+        and not trigger_row.tgisinternal
+    ) as dispatch_capture_triggers_enabled,
+  pg_catalog.has_table_privilege(
+    'service_role', 'public.official_document_dispatch_events', 'SELECT'
+  )
+    and not pg_catalog.has_table_privilege(
+      'service_role', 'public.official_document_dispatch_events', 'IN' || 'SERT'
+    )
+    and not pg_catalog.has_table_privilege(
+      'service_role', 'public.official_document_dispatch_events', 'UP' || 'DATE'
+    )
+    and not pg_catalog.has_table_privilege(
+      'service_role', 'public.official_document_dispatch_events', 'DE' || 'LETE'
+    ) as dispatch_events_api_read_only,
+  not exists (
+    select 1
+    from public.official_document_dispatch_records record
+    where not exists (
+      select 1
+      from public.official_document_dispatch_events event
+      where event.dispatch_record_id = record.id
+    )
+  ) as every_dispatch_record_has_evidence,
+  not exists (
+    select event.dispatch_record_id
+    from public.official_document_dispatch_events event
+    group by event.dispatch_record_id
+    having pg_catalog.min(event.event_sequence) <> 1
+       or pg_catalog.max(event.event_sequence) <> pg_catalog.count(*)
+       or pg_catalog.count(*) <> pg_catalog.count(distinct event.event_sequence)
+  ) as dispatch_event_sequences_contiguous
+from capture_function capture
+cross join public_execute
+cross join identity_function identity_guard
+cross join identity_public_execute
+cross join expected_quals expected;
+
 -- 5. Runtime column parity. Pass condition: column_matches=true for every row.
 -- This inventory deliberately includes the fields that used to exist only in
 -- the live catalog and are now restored by the forward schema-parity migration.

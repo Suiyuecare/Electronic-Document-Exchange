@@ -25,6 +25,9 @@ NOTIFICATIONS = MIGRATIONS / "20260827042306_safe_notification_bootstrap.sql"
 CLEANUP = MIGRATIONS / "20260827050447_remove_exact_demo_bootstrap_records_forward.sql"
 ATOMIC_FORWARD = MIGRATIONS / "20260827050450_atomic_official_submission_editor_finalize_forward.sql"
 FK_INDEX_FORWARD = MIGRATIONS / "20260827050452_add_confirmed_edoc_fk_indexes_forward.sql"
+BUSINESS_CONFLICT_FORWARD = (
+    MIGRATIONS / "20260827101636_avoid_postgrest_business_conflict_retries.sql"
+)
 FINANCE_TENANT_BACKFILL = MIGRATIONS / "20260825143558_backfill_finance_tenant_scope.sql"
 FRESH_FINANCE_SENTINEL_CLEANUP = (
     MIGRATIONS / "20260827064100_remove_fresh_finance_bootstrap_sentinel.sql"
@@ -293,6 +296,102 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
                     "NotifyStmt",
                 ],
             )
+
+    def test_exposed_rpcs_do_not_leave_manual_serialization_failures_retryable(self) -> None:
+        hardening = BUSINESS_CONFLICT_FORWARD.read_text(encoding="utf-8").lower()
+        expected = {
+            "public.edoc_mutate_inbound_document_v1(text,text,text,text,text,bigint,jsonb)": 7,
+            "public.edoc_claim_official_document_approval(text,text,text,text)": 1,
+            "public.edoc_claim_official_document_rejection(text,text,text,text)": 1,
+            "public.edoc_claim_official_document_approval_v2(text,text,text,text,text,jsonb)": 1,
+            "public.edoc_claim_official_document_rejection_v2(text,text,text,text,text,jsonb)": 2,
+            "public.edoc_revoke_official_workflow_delegation(text,text)": 1,
+            "public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)": 2,
+            "public.edoc_claim_official_document_approval_v3(text,text,text,text,text,jsonb)": 1,
+            "public.edoc_commit_official_document_submission(jsonb)": 2,
+            "public.edoc_finalize_editor_asset_v2(jsonb)": 3,
+        }
+        expected_unique_business_conflicts = {
+            "public.edoc_apply_finance_organization_projection_v2(text,text,bigint,text,text,jsonb)": 2,
+            "public.edoc_create_official_document_dispatch_record(text,text)": 1,
+            "public.edoc_finalize_official_document_resubmit(text,text,text,timestamp with time zone,text,text,text,text,text)": 2,
+            "public.edoc_commit_official_document_submission(jsonb)": 2,
+            "public.edoc_finalize_editor_asset_v2(jsonb)": 5,
+        }
+
+        # Find every public function whose source manually labels a permanent
+        # business conflict as PostgreSQL serialization_failure.  A newly
+        # introduced offender must be explicitly reviewed and added to the
+        # fail-closed forward migration instead of silently reaching PostgREST.
+        offenders = set()
+        function_pattern = re.compile(
+            r"create\s+(?:or\s+replace\s+)?function\s+public\.([a-z0-9_]+)\s*"
+            r"\(([^)]*)\).*?\bas\s+(\$[a-z0-9_]*\$)(.*?)\3\s*;",
+            re.IGNORECASE | re.DOTALL,
+        )
+        manual_retry = re.compile(
+            r"(?:errcode\s*=\s*|sqlstate\s+)['\"]40001['\"]",
+            re.IGNORECASE,
+        )
+        manual_unique_business_conflict = re.compile(
+            r"(?:errcode\s*=\s*|sqlstate\s+)['\"]23505['\"]",
+            re.IGNORECASE,
+        )
+        recovery = RECOVERY.read_text(encoding="utf-8")
+        unique_business_offenders = set()
+        for migration in sorted(MIGRATIONS.glob("*.sql")):
+            if migration == BUSINESS_CONFLICT_FORWARD:
+                continue
+            source = migration.read_text(encoding="utf-8")
+            for match in function_pattern.finditer(source):
+                body = match.group(4)
+                if not manual_retry.search(body) and not manual_unique_business_conflict.search(body):
+                    continue
+                argument_types = []
+                for argument in match.group(2).split(","):
+                    without_default = re.split(
+                        r"\s+default\s+|\s+=\s+",
+                        argument.strip(),
+                        maxsplit=1,
+                        flags=re.IGNORECASE,
+                    )[0]
+                    tokens = without_default.split()
+                    if tokens and tokens[0].lower() in {"in", "out", "inout", "variadic"}:
+                        tokens = tokens[1:]
+                    if len(tokens) < 2:
+                        self.fail(f"manual_conflict_signature_unparseable:{match.group(1)}")
+                    argument_types.append(" ".join(tokens[1:]).lower())
+                signature = (
+                    f"public.{match.group(1).lower()}({','.join(argument_types)})"
+                )
+                if manual_retry.search(body):
+                    offenders.add(signature)
+                if manual_unique_business_conflict.search(body):
+                    unique_business_offenders.add(signature)
+
+        self.assertEqual(offenders, set(expected))
+        self.assertEqual(
+            unique_business_offenders,
+            set(expected_unique_business_conflicts),
+        )
+        self.assertNotRegex(recovery, manual_retry)
+        self.assertNotRegex(recovery, manual_unique_business_conflict)
+        self.assertIn("errcode = 'PT409'", recovery)
+        self.assertNotRegex(hardening, r"\b(create|alter|drop)\s+table\b")
+        self.assertIn("pg_catalog.pg_get_functiondef", hardening)
+        self.assertIn("v_retry_code constant text := '''40001'''", hardening)
+        self.assertIn("v_unique_code constant text := '''23505'''", hardening)
+        self.assertIn("v_conflict_code constant text := '''pt409'''", hardening)
+        self.assertIn("edoc_business_conflict_rpc_definition_drift", hardening)
+        self.assertIn("notify pgrst, 'reload schema'", hardening)
+        for signature, count in expected.items():
+            self.assertIn(f"('{signature}', {count})", hardening)
+        for signature, count in expected_unique_business_conflicts.items():
+            self.assertIn(f"('{signature}', {count})", hardening)
+        if parse_sql is not None:
+            parse_sql(hardening)
+        if parse_plpgsql is not None:
+            parse_plpgsql(hardening)
 
     def test_fk_forward_migration_matches_confirmed_edoc_advisor_set(self) -> None:
         sql = FK_INDEX_FORWARD.read_text(encoding="utf-8").lower()
