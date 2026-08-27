@@ -13,7 +13,9 @@
 
 新環境執行 `supabase db reset` 時，CLI 會先載入
 `supabase/roles.sql`。該檔只補齊歷史 migration 在外鍵指派前漏建的 9 個
-legacy permission reference rows；不含帳號、密碼、公司、文件、grant 或正式資料，
+legacy permission reference rows，以及早期 migration 所需的 pgcrypto `digest()`
+相容 overload；相容函式已撤銷前台角色權限，只允許資料庫擁有者與
+`service_role` 執行，且不含帳號、密碼、公司、文件或正式資料，
 也不改寫任何已套用的 migration。既有正式資料庫不得為此重跑舊 migration，
 仍只依核准的 forward migration 與變更單發布。
 

@@ -40,6 +40,159 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
                 self.assertEqual(headers["apikey"], "sb_secret_storage")
                 self.assertNotIn("Authorization", headers)
 
+    def test_explicit_object_endpoint_matching_storage_project_is_allowed(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "EDOC_OBJECT_STORAGE_URL": (
+                    "https://storage-project.supabase.co/storage/v1"
+                )
+            },
+            clear=False,
+        ):
+            with self.storage_config(
+                storage_url="https://storage-project.supabase.co",
+                storage_key="sb_secret_storage",
+            ), mock.patch.object(
+                backend,
+                "EDOC_STORAGE_SUPABASE_MODE",
+                "dedicated-project",
+            ):
+                self.assertEqual(backend.supabase_project_partition_issues(), [])
+                self.assertEqual(
+                    backend.supabase_storage_headers()["apikey"],
+                    "sb_secret_storage",
+                )
+
+    def test_explicit_object_endpoint_a_b_split_fails_closed_before_probe(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "EDOC_OBJECT_STORAGE_URL": (
+                    "https://storage-project-b.supabase.co/storage/v1"
+                )
+            },
+            clear=False,
+        ):
+            with self.storage_config(
+                storage_url="https://storage-project-a.supabase.co",
+                storage_key="sb_secret_storage_a",
+            ), mock.patch.object(
+                backend,
+                "EDOC_STORAGE_SUPABASE_MODE",
+                "dedicated-project",
+            ), mock.patch.object(backend, "_readiness_http_json") as fetch:
+                issues = backend.supabase_project_partition_issues()
+                probe = backend._probe_supabase_private_buckets(0.25)
+                with self.assertRaisesRegex(
+                    backend.SupabaseConfigurationError,
+                    "storage_object_endpoint_project_mismatch",
+                ):
+                    backend.supabase_storage_headers()
+
+        self.assertEqual(issues, ["storage_object_endpoint_project_mismatch"])
+        self.assertFalse(probe["ready"])
+        self.assertEqual(
+            probe["errorCode"],
+            "storage_object_endpoint_project_mismatch",
+        )
+        fetch.assert_not_called()
+        self.assertNotIn("storage-project-a", repr(probe))
+        self.assertNotIn("storage-project-b", repr(probe))
+
+    def test_storage_project_url_must_be_one_direct_supabase_cloud_origin(self):
+        invalid_urls = (
+            "https://storage-project.supabase.co.attacker.example",
+            "https://attacker.storage-project.supabase.co",
+            "https://storage-project.supabase.co:444",
+            "https://user@storage-project.supabase.co",
+            "https://storage-project.supabase.co/rest/v1",
+            "http://storage-project.supabase.co",
+        )
+        for invalid_url in invalid_urls:
+            with self.subTest(invalid_url=invalid_url), mock.patch.dict(
+                os.environ,
+                {
+                    "EDOC_OBJECT_STORAGE_URL": (
+                        f"{invalid_url.rstrip('/')}/storage/v1"
+                    )
+                },
+                clear=False,
+            ), self.storage_config(
+                storage_url=invalid_url,
+                storage_key="sb_secret_storage",
+            ), mock.patch.object(
+                backend,
+                "_readiness_http_json",
+            ) as fetch:
+                self.assertEqual(
+                    backend._supabase_storage_endpoint_issue(),
+                    "storage_supabase_project_url_invalid",
+                )
+                with self.assertRaisesRegex(
+                    backend.SupabaseConfigurationError,
+                    "storage_supabase_project_url_invalid",
+                ):
+                    backend.supabase_storage_headers()
+                with self.assertRaisesRegex(
+                    backend.SupabaseConfigurationError,
+                    "storage_supabase_project_url_invalid",
+                ):
+                    backend._supabase_storage_direct_tus_url()
+                probe = backend._probe_supabase_private_buckets(0.25)
+                self.assertFalse(probe["ready"])
+                self.assertEqual(
+                    probe["errorCode"],
+                    "storage_supabase_project_url_invalid",
+                )
+                fetch.assert_not_called()
+
+    def test_private_bucket_probe_disables_redirects(self):
+        buckets = [
+            {"id": backend.EDOC_STORAGE_BUCKET, "public": False},
+            {"id": backend.EDOC_SEAL_STORAGE_BUCKET, "public": False},
+        ]
+        with mock.patch.dict(
+            os.environ,
+            {"EDOC_OBJECT_STORAGE_URL": ""},
+            clear=False,
+        ), self.storage_config(
+            storage_url="https://storage-project.supabase.co",
+            storage_key="sb_secret_storage",
+        ), mock.patch.object(
+            backend,
+            "_readiness_http_json",
+            return_value=buckets,
+        ) as fetch:
+            probe = backend._probe_supabase_private_buckets(0.25)
+
+        self.assertTrue(probe["ready"])
+        self.assertFalse(fetch.call_args.kwargs["allow_redirects"])
+
+    def test_storage_download_uses_no_redirect_transport(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"private-pdf"
+        with mock.patch.dict(
+            os.environ,
+            {"EDOC_OBJECT_STORAGE_URL": ""},
+            clear=False,
+        ), self.storage_config(
+            storage_url="https://storage-project.supabase.co",
+            storage_key="sb_secret_storage",
+        ), mock.patch.object(
+            backend,
+            "_urlopen_no_redirect",
+            return_value=response,
+        ) as open_no_redirect, mock.patch.object(
+            backend.urllib.request,
+            "urlopen",
+        ) as default_open:
+            data = backend.supabase_storage_download("private/test.pdf")
+
+        self.assertEqual(data, b"private-pdf")
+        open_no_redirect.assert_called_once()
+        default_open.assert_not_called()
+
     def test_cross_project_storage_fails_closed_without_server_key(self):
         with mock.patch.dict(os.environ, {"EDOC_OBJECT_STORAGE_URL": ""}, clear=False):
             with self.storage_config(storage_url="https://storage-project.supabase.co"):

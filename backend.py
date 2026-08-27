@@ -3772,6 +3772,67 @@ def _url_origin(value: str) -> tuple[str, str, int | None]:
     return ((parsed.scheme or "").lower(), (parsed.hostname or "").lower(), parsed.port)
 
 
+def _supabase_cloud_project_origin(value: str) -> str:
+    """Return one canonical Supabase Cloud project origin or an empty string.
+
+    Storage service credentials must never be sent to a custom/unknown host.
+    eDoc currently supports Supabase Cloud projects, whose API origin is one
+    direct child of ``supabase.co`` over the default HTTPS port.
+    """
+    parsed = urllib.parse.urlparse(str(value or "").strip())
+    hostname = str(parsed.hostname or "").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if not (
+        parsed.scheme.lower() == "https"
+        and re.fullmatch(r"[a-z0-9-]+\.supabase\.co", hostname)
+        and port in {None, 443}
+        and not parsed.username
+        and not parsed.password
+        and parsed.path in {"", "/"}
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    ):
+        return ""
+    return f"https://{hostname}"
+
+
+def _supabase_storage_endpoint_issue() -> str:
+    """Validate the effective server-side Storage REST endpoint fail-closed."""
+    if EDOC_STORAGE_PROVIDER != "supabase":
+        return ""
+    project_url = str(EDOC_STORAGE_SUPABASE_URL or SUPABASE_URL or "").strip()
+    project_origin = _supabase_cloud_project_origin(project_url)
+    if not project_origin:
+        return "storage_supabase_project_url_invalid"
+    expected_endpoint = f"{project_origin}/storage/v1"
+    explicit_endpoint = os.getenv("EDOC_OBJECT_STORAGE_URL", "").strip().rstrip("/")
+    if not explicit_endpoint:
+        return ""
+    parsed = urllib.parse.urlparse(explicit_endpoint)
+    try:
+        port = parsed.port
+    except ValueError:
+        return "storage_object_endpoint_project_mismatch"
+    if not (
+        parsed.scheme.lower() == "https"
+        and str(parsed.hostname or "").lower() == urllib.parse.urlparse(project_origin).hostname
+        and port in {None, 443}
+        and not parsed.username
+        and not parsed.password
+        and parsed.path == "/storage/v1"
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and explicit_endpoint == expected_endpoint
+    ):
+        return "storage_object_endpoint_project_mismatch"
+    return ""
+
+
 def storage_uses_database_supabase_project() -> bool:
     endpoint_origin = _url_origin(object_storage_endpoint())
     database_origin = _url_origin(SUPABASE_URL)
@@ -3790,20 +3851,25 @@ def supabase_project_partition_issues() -> List[str]:
     mode = str(EDOC_STORAGE_SUPABASE_MODE or "auto").strip().lower()
     if mode not in {"auto", "same-project", "dedicated-project"}:
         return ["storage_supabase_mode_invalid"]
+    issues: List[str] = []
     database_origin = _url_origin(SUPABASE_URL)
     storage_origin = _url_origin(EDOC_STORAGE_SUPABASE_URL)
     if mode == "dedicated-project":
         if not all((database_origin[0], database_origin[1])):
-            return ["edoc_database_supabase_url_required"]
+            issues.append("edoc_database_supabase_url_required")
         if not all((storage_origin[0], storage_origin[1])):
-            return ["dedicated_storage_supabase_url_required"]
-        if database_origin == storage_origin:
-            return ["dedicated_storage_project_must_differ_from_database"]
+            issues.append("dedicated_storage_supabase_url_required")
+        if all((database_origin[0], database_origin[1], storage_origin[0], storage_origin[1])) and database_origin == storage_origin:
+            issues.append("dedicated_storage_project_must_differ_from_database")
         if not str(EDOC_STORAGE_SERVICE_ROLE_KEY or "").strip():
-            return ["dedicated_storage_service_role_key_required"]
+            issues.append("dedicated_storage_service_role_key_required")
     if mode == "same-project" and storage_origin[0] and storage_origin != database_origin:
-        return ["same_project_storage_url_mismatch"]
-    return []
+        issues.append("same_project_storage_url_mismatch")
+
+    endpoint_issue = _supabase_storage_endpoint_issue()
+    if endpoint_issue:
+        issues.append(endpoint_issue)
+    return issues
 
 
 def storage_service_role_key() -> str:
@@ -3989,12 +4055,27 @@ def _runtime_readiness_probe_timeout_seconds() -> float:
     return max(0.25, min(5.0, configured))
 
 
+class _RejectHttpRedirects(urllib.request.HTTPRedirectHandler):
+    """Keep privileged server credentials on their pre-validated origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def _urlopen_no_redirect(request: urllib.request.Request, *, timeout: float):
+    return urllib.request.build_opener(_RejectHttpRedirects()).open(
+        request,
+        timeout=timeout,
+    )
+
+
 def _readiness_http_json(
     url: str,
     *,
     headers: Dict[str, str] | None = None,
     timeout: float,
     max_bytes: int = 8 * 1024 * 1024,
+    allow_redirects: bool = True,
 ) -> Any:
     """Fetch a small readiness response without returning transport details."""
     request = urllib.request.Request(
@@ -4002,7 +4083,8 @@ def _readiness_http_json(
         headers=headers or {"Accept": "application/json"},
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    opener = urllib.request.urlopen if allow_redirects else _urlopen_no_redirect
+    with opener(request, timeout=timeout) as response:
         response_status = getattr(response, "status", None)
         status = int(response_status if response_status is not None else response.getcode())
         if status < 200 or status >= 300:
@@ -4070,6 +4152,16 @@ def _probe_main_supabase_rpcs(timeout: float) -> Dict[str, Any]:
 def _probe_supabase_private_buckets(timeout: float) -> Dict[str, Any]:
     """Verify both dedicated eDoc buckets exist and cannot be served publicly."""
     try:
+        endpoint_issue = _supabase_storage_endpoint_issue()
+        if endpoint_issue:
+            return {
+                "ready": False,
+                "documentBucket": {"exists": False, "private": False},
+                "sealVaultBucket": {"exists": False, "private": False},
+                "missingBucketCount": None,
+                "publicBucketCount": None,
+                "errorCode": endpoint_issue,
+            }
         endpoint = object_storage_endpoint()
         if EDOC_STORAGE_PROVIDER != "supabase" or not endpoint:
             raise RuntimeError("storage_runtime_config_missing")
@@ -4078,6 +4170,7 @@ def _probe_supabase_private_buckets(timeout: float) -> Dict[str, Any]:
             headers=supabase_storage_headers({"Accept": "application/json"}),
             timeout=timeout,
             max_bytes=1024 * 1024,
+            allow_redirects=False,
         )
         rows = payload.get("buckets") if isinstance(payload, dict) else payload
         if not isinstance(rows, list):
@@ -4136,31 +4229,11 @@ def _probe_supabase_publishable_key_affinity(timeout: float) -> Dict[str, Any]:
     try:
         if EDOC_STORAGE_PROVIDER != "supabase":
             raise RuntimeError("storage_runtime_config_missing")
-        project_url = str(EDOC_STORAGE_SUPABASE_URL or "").strip().rstrip("/")
-        if not project_url and storage_uses_database_supabase_project():
-            project_url = str(SUPABASE_URL or "").strip().rstrip("/")
-        parsed = urllib.parse.urlparse(project_url)
-        hostname = str(parsed.hostname or "").lower()
-        try:
-            port = parsed.port
-        except ValueError as exc:
-            raise RuntimeError(
-                "storage_publishable_key_affinity_config_invalid"
-            ) from exc
-        supabase_cloud_host = bool(
-            hostname.endswith(".supabase.co")
-            and hostname != "supabase.co"
-        )
-        if not (
-            parsed.scheme == "https"
-            and supabase_cloud_host
-            and port in {None, 443}
-            and not parsed.username
-            and not parsed.password
-            and parsed.path in {"", "/"}
-            and not parsed.query
-            and not parsed.fragment
-        ):
+        configured_project_url = str(
+            EDOC_STORAGE_SUPABASE_URL or SUPABASE_URL or ""
+        ).strip()
+        project_url = _supabase_cloud_project_origin(configured_project_url)
+        if not project_url:
             raise RuntimeError("storage_publishable_key_affinity_config_invalid")
         publishable_key = str(EDOC_STORAGE_PUBLISHABLE_KEY or "").strip()
         if not _browser_safe_supabase_public_key(publishable_key):
@@ -4170,6 +4243,7 @@ def _probe_supabase_publishable_key_affinity(timeout: float) -> Dict[str, Any]:
             headers={"Accept": "application/json", "apikey": publishable_key},
             timeout=timeout,
             max_bytes=256 * 1024,
+            allow_redirects=False,
         )
         if not isinstance(payload, dict):
             return {
@@ -30798,6 +30872,9 @@ def supabase_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
 
 
 def supabase_storage_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
+    endpoint_issue = _supabase_storage_endpoint_issue()
+    if endpoint_issue:
+        raise SupabaseConfigurationError(endpoint_issue)
     key = storage_service_role_key()
     if not key:
         raise SupabaseConfigurationError("supabase_storage_server_credential_missing")
@@ -31209,7 +31286,7 @@ def supabase_storage_upload(storage_key: str, data: bytes, mime_type: str, bucke
     headers = supabase_storage_headers({"Content-Type": mime_type, "x-upsert": "false"})
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen_no_redirect(request, timeout=30) as response:
             response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
@@ -31230,7 +31307,7 @@ def supabase_storage_delete(storage_key: str, bucket: str | None = None) -> None
         method="DELETE",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen_no_redirect(request, timeout=30) as response:
             response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
@@ -31241,7 +31318,7 @@ def supabase_storage_download(storage_key: str, bucket: str | None = None) -> by
     url = supabase_storage_object_url(storage_key, bucket)
     request = urllib.request.Request(url, headers=supabase_storage_headers(), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen_no_redirect(request, timeout=30) as response:
             return response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
@@ -31290,7 +31367,7 @@ def supabase_storage_create_signed_download_url(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
         detail = redact_text(exc.read().decode("utf-8", "ignore"))
@@ -31363,7 +31440,7 @@ def supabase_storage_create_signed_scan_url(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read(4096).decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
         exc.read(4096)
@@ -34211,10 +34288,15 @@ def _supabase_storage_direct_tus_url() -> str:
     never be paired with the short-lived ``x-signature`` capability returned
     to this editor.
     """
+    endpoint_issue = _supabase_storage_endpoint_issue()
+    if endpoint_issue:
+        raise SupabaseConfigurationError(endpoint_issue)
     base = object_storage_endpoint()
-    parsed = urllib.parse.urlparse(EDOC_STORAGE_SUPABASE_URL or base)
-    hostname = parsed.hostname or ""
-    if hostname.endswith(".supabase.co") and not hostname.endswith(".storage.supabase.co"):
+    project_origin = _supabase_cloud_project_origin(
+        EDOC_STORAGE_SUPABASE_URL or SUPABASE_URL
+    )
+    if project_origin:
+        hostname = urllib.parse.urlparse(project_origin).hostname or ""
         project_ref = hostname.split(".", 1)[0]
         return f"https://{project_ref}.storage.supabase.co/storage/v1/upload/resumable/sign"
     if not base:
@@ -34245,7 +34327,7 @@ def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
     url = f"{base.rstrip('/')}/object/upload/sign/{urllib.parse.quote(bucket, safe='')}/{urllib.parse.quote(storage_path, safe='/')}"
     request = urllib.request.Request(url, data=json.dumps({"allowOverwrite": False}).encode("utf-8"), headers=supabase_storage_headers({"Content-Type": "application/json"}), method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
         detail = redact_text(exc.read().decode("utf-8", "ignore"))

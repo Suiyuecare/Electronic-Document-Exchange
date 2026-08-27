@@ -292,7 +292,7 @@ class ProductionAntivirusContractTestCase(unittest.TestCase):
             mock.patch.object(backend, "EDOC_STORAGE_SERVICE_ROLE_KEY", "sb_secret_test_storage"),
             mock.patch.object(backend, "EDOC_STORAGE_BUCKET", "edoc-private"),
             mock.patch.object(backend, "EDOC_SEAL_STORAGE_BUCKET", "edoc-seal-vault"),
-            mock.patch("urllib.request.urlopen", return_value=Response()),
+            mock.patch.object(backend, "_urlopen_no_redirect", return_value=Response()),
         ):
             signed = backend.supabase_storage_create_signed_scan_url(
                 "private/path.pdf", "edoc-private", ttl_seconds=60

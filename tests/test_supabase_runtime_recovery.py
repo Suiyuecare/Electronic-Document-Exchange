@@ -47,7 +47,20 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
             self.assertIn(f"'{permission_id}'", sql)
         self.assertNotRegex(sql, r"insert\s+into\s+public\.(users|companies|documents)\b")
         self.assertNotIn("password", sql)
-        self.assertNotRegex(sql, r"\bgrant\b")
+        self.assertIn("create extension if not exists pgcrypto with schema extensions", sql)
+        self.assertIn("function public.digest(data text, digest_type text)", sql)
+        self.assertIn("function public.digest(data bytea, digest_type text)", sql)
+        self.assertGreaterEqual(sql.count("set search_path = ''"), 2)
+        self.assertIn("extensions.digest(pg_catalog.convert_to(data, 'utf8'), digest_type)", sql)
+        for signature in ("public.digest(text, text)", "public.digest(bytea, text)"):
+            self.assertIn(
+                f"revoke all on function {signature} from public, anon, authenticated",
+                sql,
+            )
+            self.assertIn(
+                f"grant execute on function {signature} to postgres, service_role",
+                sql,
+            )
         if parse_sql is not None:
             self.assertGreaterEqual(len(parse_sql(sql)), 2)
 

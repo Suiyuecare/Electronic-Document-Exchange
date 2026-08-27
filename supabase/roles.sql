@@ -6,9 +6,45 @@
 -- table/rows here so a new or disaster-recovery database can replay the
 -- immutable applied migrations without rewriting their history.
 --
--- This file contains no accounts, credentials, documents, company data or
--- privilege statements. Later migrations keep ownership, RLS and current module-scoped
--- permissions authoritative.
+-- Supabase installs pgcrypto in the extensions schema, while an early applied
+-- migration called digest() from a function whose search_path is only public.
+-- The narrow compatibility overloads below preserve that historical function
+-- body during a fresh replay.  They expose only pgcrypto's one-way digest
+-- primitive and use an empty search_path with fully-qualified dependencies.
+--
+-- This file contains no accounts, credentials, documents or company data.
+-- The only privilege statements scope these compatibility overloads to
+-- postgres/service_role; later migrations keep RLS and module permissions
+-- authoritative.
+
+create extension if not exists pgcrypto with schema extensions;
+
+create or replace function public.digest(data text, digest_type text)
+returns bytea
+language sql
+immutable
+strict
+parallel safe
+set search_path = ''
+as $$
+  select extensions.digest(pg_catalog.convert_to(data, 'UTF8'), digest_type)
+$$;
+
+create or replace function public.digest(data bytea, digest_type text)
+returns bytea
+language sql
+immutable
+strict
+parallel safe
+set search_path = ''
+as $$
+  select extensions.digest(data, digest_type)
+$$;
+
+revoke all on function public.digest(text, text) from public, anon, authenticated;
+revoke all on function public.digest(bytea, text) from public, anon, authenticated;
+grant execute on function public.digest(text, text) to postgres, service_role;
+grant execute on function public.digest(bytea, text) to postgres, service_role;
 
 create table if not exists public.permissions (
   id text primary key,

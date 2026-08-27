@@ -57,13 +57,18 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
                 "urlopen",
                 side_effect=urllib.error.URLError("name resolution failed"),
             ) as urlopen,
+            mock.patch.object(
+                backend,
+                "_urlopen_no_redirect",
+                side_effect=urllib.error.URLError("name resolution failed"),
+            ) as no_redirect_open,
         ):
             payload, status = backend.public_readiness_response(["readyz"])
 
         self.assertEqual(status, 503)
         self.assertEqual(payload["status"], "not_ready")
         self.assertFalse(payload["ready"])
-        self.assertGreaterEqual(urlopen.call_count, 3)
+        self.assertGreaterEqual(urlopen.call_count + no_redirect_open.call_count, 3)
         serialized = json.dumps(payload, ensure_ascii=False)
         self.assertNotIn("missing-main-project", serialized)
         self.assertNotIn("missing-storage-project", serialized)
@@ -174,12 +179,16 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
         )
         self.assertEqual(fetch.call_args.kwargs["headers"]["apikey"], publishable_key)
         self.assertNotIn("Authorization", fetch.call_args.kwargs["headers"])
+        self.assertFalse(fetch.call_args.kwargs["allow_redirects"])
 
     def test_storage_publishable_key_affinity_rejects_non_supabase_hosts_and_ports(self):
         unsafe_urls = (
             "https://attacker.example.test",
             "https://project.supabase.co.attacker.example.test",
+            "https://attacker.project.supabase.co",
             "https://project.supabase.co:8443",
+            "https://user@project.supabase.co",
+            "https://project.supabase.co/rest/v1",
         )
         for project_url in unsafe_urls:
             with self.subTest(project_url=project_url):
