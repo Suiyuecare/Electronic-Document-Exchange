@@ -14,6 +14,10 @@ output supplied by CI; it is never printed.
 from __future__ import annotations
 
 import copy
+import base64
+import concurrent.futures
+import hashlib
+import io
 import json
 import os
 import subprocess
@@ -22,6 +26,9 @@ import time
 import uuid
 from typing import Any
 from urllib import error, parse, request
+
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost"}
@@ -79,6 +86,43 @@ def run_sql(sql: str, *, tuples_only: bool = False) -> str:
     return completed.stdout.strip()
 
 
+def require_sql_rejected(sql: str, expected_error: str) -> None:
+    """Require a real PostgreSQL trigger/constraint rejection.
+
+    The SQL fixtures and expected errors are synthetic.  Output is never
+    printed, which keeps database diagnostics and object identifiers out of CI
+    logs while still proving the exact fail-closed machine error.
+    """
+    command = [
+        "psql",
+        "--host",
+        DB_HOST,
+        "--port",
+        DB_PORT,
+        "--username",
+        DB_USER,
+        "--dbname",
+        DB_NAME,
+        "--set",
+        "ON_ERROR_STOP=1",
+        "--no-psqlrc",
+    ]
+    completed = subprocess.run(
+        command,
+        input=sql,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PGPASSWORD": "postgres"},
+        check=False,
+    )
+    require(completed.returncode != 0, f"{expected_error}:accepted")
+    require(
+        expected_error in completed.stderr,
+        f"{expected_error}:wrong_error",
+    )
+
+
 def api_call(
     api_url: str,
     api_key: str,
@@ -111,6 +155,126 @@ def api_call(
         except (UnicodeDecodeError, json.JSONDecodeError):
             decoded = {"code": "non_json_error"}
         return exc.code, decoded
+
+
+def storage_call(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: bytes | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    """Call only the isolated loopback Storage origin used by this gate."""
+    parsed = parse.urlparse(url)
+    require(
+        parsed.scheme == "http" and parsed.hostname in LOCAL_HOSTS,
+        "local_editor_finalize_storage_origin_invalid",
+    )
+    outbound = request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with request.urlopen(outbound, timeout=30) as response:
+            return (
+                int(response.status),
+                {key.lower(): value for key, value in response.headers.items()},
+                response.read(64 * 1024),
+            )
+    except error.HTTPError as exc:
+        try:
+            raw = exc.read(64 * 1024)
+            response_headers = {
+                key.lower(): value for key, value in exc.headers.items()
+            }
+        finally:
+            exc.close()
+        return int(exc.code), response_headers, raw
+
+
+def signed_tus_upload(
+    api_url: str,
+    service_key: str,
+    anon_key: str,
+    *,
+    bucket: str,
+    storage_path: str,
+    mime_type: str,
+    data: bytes,
+) -> str:
+    """Create an object-scoped capability and exercise real resumable upload."""
+    signed_path = (
+        "/storage/v1/object/upload/sign/"
+        + parse.quote(bucket, safe="")
+        + "/"
+        + parse.quote(storage_path, safe="/")
+    )
+    status, payload = api_call(api_url, service_key, "POST", signed_path, {})
+    token = str(payload.get("token") or "") if isinstance(payload, dict) else ""
+    require(status == 200 and token, f"local_editor_finalize_tus_sign_failed:{status}")
+
+    metadata = {
+        "bucketName": bucket,
+        "objectName": storage_path,
+        "contentType": mime_type,
+        "cacheControl": "0",
+    }
+    upload_metadata = ",".join(
+        f"{key} {base64.b64encode(value.encode('utf-8')).decode('ascii')}"
+        for key, value in metadata.items()
+    )
+    endpoint = f"{api_url.rstrip('/')}/storage/v1/upload/resumable/sign"
+    base_headers = {
+        "apikey": anon_key,
+        "x-signature": token,
+        "Tus-Resumable": "1.0.0",
+    }
+    create_status, create_headers, _ = storage_call(
+        "POST",
+        endpoint,
+        headers={
+            **base_headers,
+            "Upload-Length": str(len(data)),
+            "Upload-Metadata": upload_metadata,
+        },
+    )
+    require(
+        create_status == 201,
+        f"local_editor_finalize_tus_create_failed:{create_status}",
+    )
+    location = str(create_headers.get("location") or "")
+    require(bool(location), "local_editor_finalize_tus_location_missing")
+    upload_url = parse.urljoin(endpoint, location)
+    split_at = max(1, len(data) // 2)
+    offset = 0
+    for chunk in (data[:split_at], data[split_at:]):
+        patch_status, patch_headers, _ = storage_call(
+            "PATCH",
+            upload_url,
+            headers={
+                **base_headers,
+                "Upload-Offset": str(offset),
+                "Content-Type": "application/offset+octet-stream",
+            },
+            body=chunk,
+        )
+        offset += len(chunk)
+        require(
+            patch_status == 204,
+            f"local_editor_finalize_tus_patch_failed:{patch_status}",
+        )
+        require(
+            int(patch_headers.get("upload-offset") or -1) == offset,
+            "local_editor_finalize_tus_offset_invalid",
+        )
+    return upload_url
+
+
+def deidentified_a4_pdf() -> bytes:
+    stream = io.BytesIO()
+    pdf = canvas.Canvas(stream, pagesize=A4, invariant=1)
+    pdf.setTitle("CI deidentified A4 editor storage gate")
+    pdf.drawString(72, A4[1] - 72, "CI isolated A4 editor storage gate")
+    pdf.showPage()
+    pdf.save()
+    return stream.getvalue()
 
 
 def rows(api_url: str, service_key: str, table: str, filters: dict[str, str]) -> list[dict[str, Any]]:
@@ -248,6 +412,23 @@ def main() -> int:
     )
     require(bool(service_key and anon_key), "local_editor_finalize_local_credentials_missing")
 
+    # Import the real backend only after binding it to the isolated loopback
+    # database and Storage service. No hosted project can pass the origin gate
+    # above, and no credential value is emitted.
+    os.environ.update(
+        {
+            "EDOC_DB_MODE": "supabase",
+            "SUPABASE_URL": api_url,
+            "SUPABASE_SERVICE_ROLE_KEY": service_key,
+            "SUPABASE_ANON_KEY": anon_key,
+            "EDOC_STORAGE_PROVIDER": "supabase",
+            "EDOC_STORAGE_BUCKET": "edoc-private",
+            "EDOC_OBJECT_STORAGE_URL": f"{api_url.rstrip('/')}/storage/v1",
+            "EDOC_STORAGE_PUBLISHABLE_KEY": anon_key,
+        }
+    )
+    import backend as backend_runtime
+
     exercise_service_role_data_api(api_url, service_key, anon_key)
 
     suffix = uuid.uuid4().hex[:12].upper()
@@ -260,10 +441,23 @@ def main() -> int:
     rollback_asset_id = f"CI-EFIN-ASSET-RB-{suffix}"
     success_base_id = f"CI-EFIN-BASE-OK-{suffix}"
     rollback_base_id = f"CI-EFIN-BASE-RB-{suffix}"
-    digest = "a" * 64
+    success_file_name = "ci-deidentified.pdf"
+    rollback_file_name = "ci-deidentified-rollback.pdf"
+    pdf_data = deidentified_a4_pdf()
+    digest = hashlib.sha256(pdf_data).hexdigest()
     manifest = "b" * 64
-    file_size = 2048
+    file_size = len(pdf_data)
     created_at = "2099-01-01 00:00:00"
+    success_staging_path = f"editor/{success_document_id}/{success_asset_id}-{success_file_name}"
+    rollback_staging_path = f"editor/{rollback_document_id}/{rollback_asset_id}-{rollback_file_name}"
+    success_final_path = (
+        f"editor-final/{success_document_id}/{success_asset_id}/"
+        f"{digest.upper()}-{success_file_name}"
+    )
+    rollback_final_path = (
+        f"editor-final/{rollback_document_id}/{rollback_asset_id}/"
+        f"{digest.upper()}-{rollback_file_name}"
+    )
 
     ids = {
         "operation": f"CI-EFIN-OP-{suffix}",
@@ -276,6 +470,8 @@ def main() -> int:
         "rollback_file": f"CI-EFIN-RBFILE-{suffix}",
         "rollback_official_file": f"CI-EFIN-RBODFILE-{suffix}",
         "rollback_revision": f"CI-EFIN-RBREV-{suffix}",
+        "storage_job": f"CI-EFIN-JOB-OK-{suffix}",
+        "rollback_storage_job": f"CI-EFIN-JOB-RB-{suffix}",
     }
 
     head_snapshot = run_sql(
@@ -322,18 +518,122 @@ def main() -> int:
         created_by, created_at
       ) values
         ({sql_literal(success_asset_id)}, {sql_literal(success_document_id)}, null, 'source_pdf',
-         'ci-deidentified.pdf', 'application/pdf', {file_size}, '', {sql_literal(digest)},
-         'edoc-private', {sql_literal('editor/' + success_document_id + '/source.pdf')},
+         {sql_literal(success_file_name)}, 'application/pdf', {file_size}, '', {sql_literal(digest)},
+         'edoc-private', {sql_literal(success_staging_path)},
          'uploaded', 'pending', 'pending', 0, '{{"base_revision_no":1}}',
          {sql_literal(applicant_id)}, {sql_literal(created_at)}),
         ({sql_literal(rollback_asset_id)}, {sql_literal(rollback_document_id)}, null, 'source_pdf',
-         'ci-deidentified-rollback.pdf', 'application/pdf', {file_size}, '', {sql_literal(digest)},
-         'edoc-private', {sql_literal('editor/' + rollback_document_id + '/source.pdf')},
+         {sql_literal(rollback_file_name)}, 'application/pdf', {file_size}, '', {sql_literal(digest)},
+         'edoc-private', {sql_literal(rollback_staging_path)},
          'uploaded', 'pending', 'pending', 0, '{{"base_revision_no":1}}',
          {sql_literal(applicant_id)}, {sql_literal(created_at)});
+
+      insert into public.official_document_editor_storage_jobs (
+        id, asset_id, document_id, staging_bucket, staging_path,
+        final_bucket, final_path, expected_sha256, expected_size_bytes,
+        token_expires_at, status, final_file_object_id, attempt_count,
+        last_error_code, created_at, updated_at, cleaned_at
+      ) values
+        ({sql_literal(ids['storage_job'])}, {sql_literal(success_asset_id)},
+         {sql_literal(success_document_id)}, 'edoc-private', {sql_literal(success_staging_path)},
+         'edoc-private', {sql_literal(success_final_path)}, {sql_literal(digest)}, {file_size},
+         '2099-01-01T00:10:00', 'pending', null, 0, '',
+         {sql_literal(created_at)}, {sql_literal(created_at)}, null),
+        ({sql_literal(ids['rollback_storage_job'])}, {sql_literal(rollback_asset_id)},
+         {sql_literal(rollback_document_id)}, 'edoc-private', {sql_literal(rollback_staging_path)},
+         'edoc-private', {sql_literal(rollback_final_path)}, {sql_literal(digest)}, {file_size},
+         '2099-01-01T00:10:00', 'pending', null, 0, '',
+         {sql_literal(created_at)}, {sql_literal(created_at)}, null);
       commit;
     """
     run_sql(setup_sql)
+
+    # Exercise the storage-job guard on real PostgreSQL before the success RPC.
+    # Each rejected psql connection rolls its transaction back, so the rollback
+    # fixture remains pending for the later atomicity cases.
+    rollback_job_literal = sql_literal(ids["rollback_storage_job"])
+    require_sql_rejected(
+        "update public.official_document_editor_storage_jobs "
+        f"set staging_bucket = 'wrong-bucket' where id = {rollback_job_literal};",
+        "editor_storage_job_binding_immutable",
+    )
+    require_sql_rejected(
+        "update public.official_document_editor_storage_jobs "
+        f"set final_path = final_path || '.changed' where id = {rollback_job_literal};",
+        "editor_storage_job_binding_immutable",
+    )
+    require_sql_rejected(
+        "update public.official_document_editor_storage_jobs set "
+        "status = 'promoting', lease_token = repeat('A', 32), "
+        "lease_expires_at = 'not-a-timestamp', attempt_count = 1 "
+        f"where id = {rollback_job_literal};",
+        "editor_storage_job_lease_invalid",
+    )
+    require_sql_rejected(
+        "begin; update public.official_document_editor_storage_jobs set "
+        "status = 'promoting', lease_token = repeat('A', 32), "
+        "lease_expires_at = '2099-01-01T00:05:00', attempt_count = 1 "
+        f"where id = {rollback_job_literal}; "
+        "update public.official_document_editor_storage_jobs set "
+        "status = 'cleaning', lease_token = repeat('B', 32), "
+        "lease_expires_at = '2099-01-01T00:06:00', attempt_count = 2 "
+        f"where id = {rollback_job_literal};",
+        "editor_storage_job_lease_active",
+    )
+    require_sql_rejected(
+        "begin; update public.official_document_editor_storage_jobs set "
+        "status = 'promoting', lease_token = repeat('A', 32), "
+        "lease_expires_at = '2099-01-01T00:05:00', attempt_count = 1 "
+        f"where id = {rollback_job_literal}; "
+        "update public.official_document_editor_storage_jobs set attempt_count = 0 "
+        f"where id = {rollback_job_literal};",
+        "editor_storage_job_binding_immutable",
+    )
+    require_sql_rejected(
+        "update public.official_document_editor_storage_jobs set "
+        "status = 'cleaned', cleaned_at = '2099-01-01 00:01:00' "
+        f"where id = {rollback_job_literal};",
+        "editor_storage_job_transition_invalid",
+    )
+    require_sql_rejected(
+        "update public.official_document_editor_storage_jobs set status = 'committed' "
+        f"where id = {rollback_job_literal};",
+        "editor_storage_job_commit_forbidden",
+    )
+    require_sql_rejected(
+        "begin; update public.official_document_editor_storage_jobs set "
+        "status = 'cleaning', lease_token = repeat('C', 32), "
+        "lease_expires_at = '2099-01-01T00:05:00', attempt_count = 1 "
+        f"where id = {rollback_job_literal}; "
+        "update public.official_document_editor_storage_jobs set "
+        "status = 'cleaned', lease_token = '', lease_expires_at = '', "
+        "cleaned_at = '2099-01-01 00:01:00' "
+        f"where id = {rollback_job_literal}; "
+        "update public.official_document_editor_storage_jobs set "
+        "last_error_code = 'must_not_change' "
+        f"where id = {rollback_job_literal};",
+        "editor_storage_job_cleaned_immutable",
+    )
+    rollback_asset_filter = parse.urlencode({"id": f"eq.{rollback_asset_id}"})
+    pending_delete_status, _pending_delete_body = api_call(
+        api_url,
+        service_key,
+        "DELETE",
+        f"/rest/v1/official_document_editor_assets?{rollback_asset_filter}",
+    )
+    require(
+        pending_delete_status >= 400
+        and len(
+            rows(
+                api_url,
+                service_key,
+                "official_document_editor_assets",
+                {"id": rollback_asset_id},
+            )
+        )
+        == 1,
+        "local_editor_storage_pending_asset_delete_accepted",
+    )
 
     def payload_for(
         *,
@@ -345,8 +645,9 @@ def main() -> int:
         file_id: str,
         official_file_id: str,
         revision_id: str,
+        file_name: str,
+        storage_path: str,
     ) -> dict[str, Any]:
-        storage_path = f"editor/{document_id}/source.pdf"
         return {
             "operation_id": operation_id,
             "document_id": document_id,
@@ -361,7 +662,7 @@ def main() -> int:
             "file_object": {
                 "id": file_id,
                 "document_id": document_id,
-                "file_name": "ci-deidentified.pdf",
+                "file_name": file_name,
                 "storage_key": storage_path,
                 "mime_type": "application/pdf",
                 "size_bytes": file_size,
@@ -388,7 +689,7 @@ def main() -> int:
                 "document_id": document_id,
                 "file_object_id": file_id,
                 "file_type": "original_pdf",
-                "file_name": "ci-deidentified.pdf",
+                "file_name": file_name,
                 "file_storage_key": storage_path,
                 "file_mime_type": "application/pdf",
                 "file_size": file_size,
@@ -405,6 +706,8 @@ def main() -> int:
                 "scan_status": "passed",
                 "preflight_status": "passed",
                 "page_count": 1,
+                "storage_bucket": "edoc-private",
+                "storage_path": storage_path,
                 "metadata_json": "{\"base_revision_no\":1,\"renderer_version\":\"ci-gate\"}",
                 "finalized_at": created_at,
                 "editor_revision_id": revision_id,
@@ -483,6 +786,8 @@ def main() -> int:
         file_id=ids["file"],
         official_file_id=ids["official_file"],
         revision_id=ids["revision"],
+        file_name=success_file_name,
+        storage_path=success_final_path,
     )
     rollback_request = payload_for(
         document_id=rollback_document_id,
@@ -493,6 +798,8 @@ def main() -> int:
         file_id=ids["rollback_file"],
         official_file_id=ids["rollback_official_file"],
         revision_id=ids["rollback_revision"],
+        file_name=rollback_file_name,
+        storage_path=rollback_final_path,
     )
 
     def require_rollback_attempt_pristine(marker: str) -> None:
@@ -510,6 +817,18 @@ def main() -> int:
             and asset_rows[0].get("editor_revision_id") is None,
             f"{marker}:asset",
         )
+        job_rows = rows(
+            api_url,
+            service_key,
+            "official_document_editor_storage_jobs",
+            {"id": ids["rollback_storage_job"]},
+        )
+        require(
+            len(job_rows) == 1
+            and job_rows[0].get("status") == "pending"
+            and job_rows[0].get("final_file_object_id") is None,
+            f"{marker}:storage_job",
+        )
         for table, row_id in (
             ("file_objects", ids["rollback_file"]),
             ("official_document_files", ids["rollback_official_file"]),
@@ -520,6 +839,51 @@ def main() -> int:
             require(not rows(api_url, service_key, table, {"id": row_id}), f"{marker}:{table}")
 
     try:
+        signed_tus_upload(
+            api_url,
+            service_key,
+            anon_key,
+            bucket="edoc-private",
+            storage_path=success_staging_path,
+            mime_type="application/pdf",
+            data=pdf_data,
+        )
+        staged_bytes = backend_runtime.supabase_storage_download(
+            success_staging_path,
+            "edoc-private",
+        )
+        require(
+            staged_bytes == pdf_data,
+            "local_editor_finalize_tus_staging_bytes_invalid",
+        )
+        success_asset = rows(
+            api_url,
+            service_key,
+            "official_document_editor_assets",
+            {"id": success_asset_id},
+        )[0]
+        (
+            promoted_path,
+            promotion_job_id,
+            promotion_lease_token,
+        ) = backend_runtime._supabase_promote_editor_asset_to_immutable_storage(
+            success_document_id,
+            success_asset,
+            staged_bytes,
+            digest.upper(),
+        )
+        require(
+            promoted_path == success_final_path
+            and promotion_job_id == ids["storage_job"]
+            and len(promotion_lease_token) == 32
+            and backend_runtime.supabase_storage_download(
+                success_final_path,
+                "edoc-private",
+            )
+            == pdf_data,
+            "local_editor_finalize_immutable_promotion_invalid",
+        )
+
         # The anonymous browser role must not be able to discover or execute
         # this SECURITY DEFINER function, even with a structurally valid request.
         anon_status, _anon_body = rpc(api_url, anon_key, success_request)
@@ -602,9 +966,34 @@ def main() -> int:
             "local_editor_finalize_partial_asset_patch",
         )
 
-        status, body = rpc(api_url, service_key, success_request)
-        result = normalized_rpc_result(body)
-        require(status == 200, f"local_editor_finalize_commit_http:{status}")
+        # Two independent requests race for the same document/asset lock. The
+        # first call commits, while the second must observe the exact committed
+        # evidence and return idempotently instead of downgrading or duplicating
+        # any row.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(rpc, api_url, service_key, success_request)
+                for _ in range(2)
+            ]
+            concurrent_responses = [future.result(timeout=20) for future in futures]
+        concurrent_results = [
+            (status, normalized_rpc_result(body))
+            for status, body in concurrent_responses
+        ]
+        require(
+            all(status == 200 for status, _ in concurrent_results),
+            "local_editor_finalize_concurrent_http_failure",
+        )
+        require(
+            sorted(bool(result.get("idempotent")) for _, result in concurrent_results)
+            == [False, True],
+            "local_editor_finalize_concurrent_result_invalid",
+        )
+        result = next(
+            result
+            for _, result in concurrent_results
+            if result.get("idempotent") is False
+        )
         require(
             result.get("committed") is True
             and result.get("idempotent") is False
@@ -622,8 +1011,29 @@ def main() -> int:
             and finalized_asset["preflight_status"] == "passed"
             and finalized_asset["editor_revision_id"] == ids["revision"]
             and finalized_asset["file_object_id"] == ids["file"]
-            and finalized_asset["official_file_id"] == ids["official_file"],
+            and finalized_asset["official_file_id"] == ids["official_file"]
+            and finalized_asset["storage_bucket"] == "edoc-private"
+            and finalized_asset["storage_path"]
+              == success_request["file_object"]["storage_key"],
             "local_editor_finalize_asset_not_committed",
+        )
+        storage_job = rows(
+            api_url,
+            service_key,
+            "official_document_editor_storage_jobs",
+            {"id": ids["storage_job"]},
+        )[0]
+        require(
+            storage_job.get("status") == "committed"
+            and storage_job.get("final_file_object_id") == ids["file"]
+            and storage_job.get("final_path") == success_final_path,
+            "local_editor_finalize_storage_job_not_committed",
+        )
+        require_sql_rejected(
+            "update public.official_document_editor_storage_jobs set "
+            f"final_file_object_id = {sql_literal(ids['file'])} "
+            f"where id = {rollback_job_literal};",
+            "editor_storage_job_file_binding_forbidden",
         )
         for table, row_id in (
             ("file_objects", ids["file"]),
@@ -660,7 +1070,97 @@ def main() -> int:
             and not rows(api_url, service_key, "audit_logs", {"id": conflict_audit}),
             "local_editor_finalize_conflict_left_rows",
         )
+
+        # Finalized source assets are immutable even to the service role. Test
+        # status and evidence-binding fields through PostgREST, not only SQL.
+        asset_filter = parse.urlencode({"id": f"eq.{success_asset_id}"})
+        for patch_payload in (
+            {"upload_status": "failed"},
+            {"storage_path": success_final_path + ".mutated"},
+            {"sha256": "0" * 64},
+            {"size_bytes": file_size + 1},
+            {"file_object_id": ids["rollback_file"]},
+        ):
+            immutable_status, immutable_body = api_call(
+                api_url,
+                service_key,
+                "PATCH",
+                f"/rest/v1/official_document_editor_assets?{asset_filter}",
+                patch_payload,
+            )
+            immutable_error = normalized_rpc_result(immutable_body)
+            require(
+                immutable_status >= 400
+                and immutable_error.get("message")
+                == "editor_finalized_asset_immutable",
+                "local_editor_finalize_immutable_asset_mutation_accepted",
+            )
+
+        immutable_delete_status, immutable_delete_body = api_call(
+            api_url,
+            service_key,
+            "DELETE",
+            f"/rest/v1/official_document_editor_assets?{asset_filter}",
+        )
+        immutable_delete_error = normalized_rpc_result(immutable_delete_body)
+        require(
+            immutable_delete_status >= 400
+            and immutable_delete_error.get("message")
+            == "editor_finalized_asset_immutable",
+            "local_editor_finalize_immutable_asset_delete_accepted",
+        )
+
+        direct_asset_id = f"CI-EFIN-DIRECT-{suffix}"
+        direct_status, direct_body = api_call(
+            api_url,
+            service_key,
+            "POST",
+            "/rest/v1/official_document_editor_assets",
+            {
+                "id": direct_asset_id,
+                "document_id": success_document_id,
+                "editor_revision_id": ids["revision"],
+                "asset_kind": "source_pdf",
+                "file_name": "ci-direct-finalized-forbidden.pdf",
+                "mime_type": "application/pdf",
+                "size_bytes": file_size,
+                "sha256": digest,
+                "expected_sha256": digest,
+                "storage_bucket": "edoc-private",
+                "storage_path": success_final_path,
+                "upload_status": "finalized",
+                "scan_status": "passed",
+                "preflight_status": "passed",
+                "page_count": 1,
+                "metadata_json": "{}",
+                "file_object_id": ids["file"],
+                "created_by": applicant_id,
+                "created_at": created_at,
+            },
+        )
+        direct_error = normalized_rpc_result(direct_body)
+        require(
+            direct_status >= 400
+            and direct_error.get("message")
+            == "editor_finalized_asset_insert_forbidden",
+            "local_editor_finalize_direct_finalized_insert_accepted",
+        )
     finally:
+        for storage_path in {
+            success_staging_path,
+            success_final_path,
+            rollback_staging_path,
+            rollback_final_path,
+        }:
+            try:
+                backend_runtime.supabase_storage_delete(
+                    storage_path,
+                    "edoc-private",
+                )
+            except Exception:
+                # SQL fixture cleanup below is still mandatory. Storage object
+                # absence and idempotent delete behavior vary by local version.
+                pass
         # The immutable evidence triggers are intentionally bypassed only in
         # this isolated local cleanup transaction. Restore the exact audit head
         # captured before the gate so later CI assertions see an unchanged
@@ -686,6 +1186,8 @@ def main() -> int:
           delete from public.audit_logs where id in ({sql_literal(ids['audit'])}, {sql_literal(ids['rollback_audit'])}, {sql_literal('CI-EFIN-CAUD-' + suffix)});
           delete from public.official_document_approval_logs
           where id in ({sql_literal(ids['operation'])}, {sql_literal(ids['rollback_operation'])}, {sql_literal('CI-EFIN-CONFLICT-' + suffix)});
+          delete from public.official_document_editor_storage_jobs
+          where id in ({sql_literal(ids['storage_job'])}, {sql_literal(ids['rollback_storage_job'])});
           delete from public.official_document_editor_assets
           where id in ({sql_literal(success_asset_id)}, {sql_literal(rollback_asset_id)});
           delete from public.official_document_files
@@ -707,6 +1209,7 @@ def main() -> int:
     for table, column, prefix in (
         ("companies", "id", f"CI-EFIN-%-{suffix}"),
         ("official_documents", "id", f"CI-EFIN-%-{suffix}"),
+        ("official_document_editor_storage_jobs", "id", f"CI-EFIN-%-{suffix}"),
         ("official_document_editor_assets", "id", f"CI-EFIN-%-{suffix}"),
         ("file_objects", "id", f"CI-EFIN-%-{suffix}"),
         ("official_document_files", "id", f"CI-EFIN-%-{suffix}"),
@@ -728,7 +1231,14 @@ def main() -> int:
                 "rpcTransport": "PostgREST",
                 "principal": "local_service_role",
                 "atomicCommit": True,
+                "realSignedTus": True,
+                "immutableStoragePromotion": True,
+                "concurrentFinalize": True,
                 "idempotentReplay": True,
+                "finalizedAssetImmutable": True,
+                "finalizedAssetDeleteRejected": True,
+                "storageJobGuardNegativeCases": 9,
+                "pendingAssetLifecycleDeleteRejected": True,
                 "conflictRejected": True,
                 "revisionConflictRejected": True,
                 "businessConflictHttp409": True,

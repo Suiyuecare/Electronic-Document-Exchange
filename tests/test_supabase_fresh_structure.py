@@ -23,6 +23,12 @@ GRANT_HARDENING = MIGRATIONS / "20260827063824_lock_runtime_table_data_api_grant
 DISPATCH_EVENT_CAPTURE = (
     MIGRATIONS / "20260827101441_capture_official_dispatch_events.sql"
 )
+EDITOR_IMMUTABLE_PROMOTION = (
+    MIGRATIONS / "20260827194500_promote_editor_tus_staging_to_immutable.sql"
+)
+EDITOR_STORAGE_PREFLIGHT = (
+    VERIFICATION / "editor_storage_promotion_preflight.sql"
+)
 RUNTIME_SMOKE = VERIFICATION / "runtime_schema_parity_smoke.sql"
 FRESH_BOOTSTRAP_SMOKE = VERIFICATION / "fresh_bootstrap_smoke.sql"
 SERVICE_ROLE_GRANT_SMOKE = VERIFICATION / "service_role_data_api_grant_smoke.sql"
@@ -57,6 +63,131 @@ RUNTIME_TABLES = (
 
 
 class SupabaseFreshStructureTestCase(unittest.TestCase):
+    def test_editor_tus_finalize_binds_an_immutable_server_path(self) -> None:
+        sql = EDITOR_IMMUTABLE_PROMOTION.read_text(encoding="utf-8").lower()
+        cutover = CUTOVER.read_text(encoding="utf-8").lower()
+        runtime_smoke = RUNTIME_SMOKE.read_text(encoding="utf-8").lower()
+        fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
+        manifest = json.loads(MAIN_MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["migrations"][-1], EDITOR_IMMUTABLE_PROMOTION.name)
+        self.assertIn("editor-final/", sql)
+        self.assertIn("trg_edoc_bind_finalized_editor_asset_storage", sql)
+        self.assertIn("before insert or update or delete", sql)
+        self.assertIn("trg_edoc_guard_editor_storage_job", sql)
+        self.assertIn("before insert or update", sql)
+        self.assertIn("existing_editor_assets_require_immutable_promotion", sql)
+        self.assertIn("official_document_editor_storage_jobs", sql)
+        self.assertIn("editor_finalized_asset_immutable", sql)
+        self.assertRegex(
+            sql,
+            r"asset_id text not null unique\s+references public\.official_document_editor_assets\(id\) on delete restrict",
+        )
+        self.assertRegex(
+            sql,
+            r"document_id text not null\s+references public\.official_documents\(id\) on delete restrict",
+        )
+        self.assertIn("editor_finalized_asset_insert_forbidden", sql)
+        self.assertIn("editor_storage_job_binding_immutable", sql)
+        self.assertIn("editor_storage_job_file_binding_forbidden", sql)
+        self.assertIn("editor_storage_job_cleaned_immutable", sql)
+        self.assertIn("official_editor_storage_job_commit_file_check", sql)
+        self.assertIn("official_editor_storage_job_cleaned_at_check", sql)
+        self.assertIn("official_editor_storage_job_error_code_check", sql)
+        self.assertIn("official_editor_storage_job_lease_check", sql)
+        self.assertIn("lease_token", sql)
+        self.assertIn("lease_expires_at", sql)
+        self.assertIn("pg_catalog.pg_input_is_valid", sql)
+        self.assertIn("staging_bucket = 'edoc-private'", sql)
+        self.assertIn("final_bucket = 'edoc-private'", sql)
+        self.assertIn("idx_official_editor_storage_jobs_final_file", sql)
+        self.assertIn("new.storage_path := v_file.storage_key", sql)
+        self.assertIn("new.storage_bucket := v_file.bucket", sql)
+        self.assertIn(
+            "alter table public.official_document_editor_storage_jobs force row level security",
+            sql,
+        )
+        self.assertIn(
+            "revoke all on table public.official_document_editor_storage_jobs",
+            sql,
+        )
+        table_block = re.search(
+            r"create table if not exists public\.official_document_editor_storage_jobs\s*\((.*?)\n\);",
+            sql,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(table_block)
+        for constraint_name in re.findall(
+            r"constraint\s+([a-z0-9_]+)",
+            table_block.group(1),
+        ):
+            with self.subTest(storage_job_constraint=constraint_name):
+                self.assertIn(
+                    f"('official_document_editor_storage_jobs', '{constraint_name}')",
+                    cutover,
+                )
+        for index_name in re.findall(
+            r"create index if not exists\s+([a-z0-9_]+)\s+on public\.official_document_editor_storage_jobs",
+            sql,
+        ):
+            with self.subTest(storage_job_index=index_name):
+                self.assertIn(index_name, cutover)
+                self.assertIn(index_name, runtime_smoke)
+        self.assertNotIn("x-upsert", sql)
+        for verification_sql in (fresh_smoke, runtime_smoke, cutover):
+            self.assertRegex(
+                verification_sql,
+                r"trg_edoc_bind_finalized_editor_asset_storage[\s\S]*?tgtype = 31",
+            )
+
+    def test_editor_storage_promotion_has_fail_closed_preflight_and_runbook(self) -> None:
+        preflight = EDITOR_STORAGE_PREFLIGHT.read_text(encoding="utf-8").lower()
+        cutover = CUTOVER.read_text(encoding="utf-8").lower()
+        runtime_smoke = RUNTIME_SMOKE.read_text(encoding="utf-8").lower()
+        docs = DEPLOYMENT_DOC.read_text(encoding="utf-8")
+
+        self.assertIn("active_editor_upload_count", preflight)
+        self.assertIn("finalized_assets_requiring_byte_promotion", preflight)
+        self.assertIn("nonfinalized_assets_without_durable_job_input", preflight)
+        self.assertIn("editor_upload_maintenance_window_not_empty", preflight)
+        self.assertIn("editor_storage_promotion_preflight_ok", preflight)
+        self.assertNotIn("select asset.id", preflight)
+        self.assertNotIn("select asset.storage_path", preflight)
+        self.assertIn("invalid_finalized_editor_assets", cutover)
+        self.assertIn("invalid_editor_storage_jobs", cutover)
+        self.assertIn("editor_storage_cleanup_backlog", cutover)
+        self.assertIn("active_editor_storage_job_leases", cutover)
+        self.assertIn("expired_editor_storage_job_leases", cutover)
+        self.assertIn("pg_catalog.pg_input_is_valid", cutover)
+        self.assertIn("editor_storage_preflight_postgres_16_required", preflight)
+        self.assertIn("runtime_schema_postgres_16_required", runtime_smoke)
+        self.assertIn("constraint_validated", cutover)
+        self.assertIn("index_ready", cutover)
+        self.assertIn("relforcerowsecurity", cutover)
+        self.assertIn("idx_official_editor_storage_jobs_due", cutover)
+        self.assertIn("idx_official_editor_storage_jobs_document", cutover)
+        self.assertIn("idx_official_editor_storage_jobs_final_file", cutover)
+        self.assertIn("trg_edoc_guard_editor_storage_job", cutover)
+        self.assertIn("editor_storage_promotion_preflight.sql", docs)
+        self.assertIn("active_editor_upload_count=0", docs)
+        self.assertIn("finalized_assets_requiring_byte_promotion=0", docs)
+        self.assertIn("nonfinalized_assets_without_durable_job_input=0", docs)
+        self.assertIn("checkedAssetCount` 必須精確等於 SQL 的 `finalized_editor_asset_count", docs)
+        self.assertIn("verify_editor_storage_assets.py --acknowledge-private-document-download", docs)
+        self.assertIn("--post-migration", docs)
+        self.assertIn("invalid_editor_storage_jobs", docs)
+        pre_verify = docs.index(
+            "python3 scripts/verify_editor_storage_assets.py --acknowledge-private-document-download"
+        )
+        preflight_after_verify = docs.index(
+            "supabase/verification/editor_storage_promotion_preflight.sql",
+            pre_verify,
+        )
+        migration_boundary = docs.index("\n7.", preflight_after_verify)
+        post_verify = docs.index("--post-migration", migration_boundary)
+        self.assertLess(pre_verify, preflight_after_verify)
+        self.assertLess(preflight_after_verify, migration_boundary)
+        self.assertLess(migration_boundary, post_verify)
+
     def test_twelve_backend_runtime_tables_are_already_forward_migrated(self) -> None:
         sql = SCHEMA_PARITY.read_text(encoding="utf-8").lower()
         manifest = json.loads(MAIN_MANIFEST.read_text(encoding="utf-8"))
@@ -450,13 +581,18 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         )
         self.assertIsNotNone(select_block)
         granted_select = set(re.findall(r"public\.([a-z0-9_]+)", select_block.group(1)))
-        self.assertEqual(granted_select, backend_tables | extra_tables)
+        later_select = {
+            table
+            for table in backend_tables
+            if f"grant select, insert, update on table public.{table}" in EDITOR_IMMUTABLE_PROMOTION.read_text(encoding="utf-8").lower()
+        }
+        self.assertEqual(granted_select | later_select, backend_tables | extra_tables)
 
         matrix_smoke = SERVICE_ROLE_GRANT_SMOKE.read_text(encoding="utf-8").lower()
         expected_matrix = dict(
             re.findall(r"\('([a-z0-9_]+)',\s*'([siud]+)'\)", matrix_smoke)
         )
-        self.assertEqual(set(expected_matrix), granted_select)
+        self.assertEqual(set(expected_matrix), granted_select | later_select)
         for privilege, marker in (("insert", "i"), ("update", "u"), ("delete", "d")):
             block = re.search(
                 rf"grant {privilege} on table\s+(.*?)\s+to service_role;",
@@ -465,6 +601,8 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             )
             self.assertIsNotNone(block)
             granted = set(re.findall(r"public\.([a-z0-9_]+)", block.group(1)))
+            if privilege in {"insert", "update"}:
+                granted |= later_select
             self.assertEqual(
                 granted,
                 {table for table, operations in expected_matrix.items() if marker in operations},
@@ -519,7 +657,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             cutover,
         )
         self.assertNotIn("and table_name in (", cutover)
-        self.assertIn("87 direct postgrest tables", cutover)
+        self.assertIn("88 direct postgrest tables", cutover)
         self.assertIn("unexpected_service_role_function", cutover)
         for rpc_name in required_rpc_names:
             with self.subTest(rpc=rpc_name):
@@ -577,6 +715,13 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertIn("drop policy if exists %i on storage.objects", allowlist)
         self.assertIn("'application/zip'", checks)
         self.assertIn("'image/svg+xml'", checks)
+        self.assertIn("dedicated_storage_private_bucket_definition_invalid", checks)
+        self.assertIn("dedicated_storage_seal_bucket_definition_invalid", checks)
+        self.assertIn("dedicated_storage_browser_policy_exposed", checks)
+        self.assertIn("private_bucket.file_size_limit is distinct from 104857600", checks)
+        self.assertIn("seal_bucket.file_size_limit is distinct from 3145728", checks)
+        self.assertIn("private_mimes @> coalesce", checks)
+        self.assertIn("seal_mimes @> coalesce", checks)
         self.assertIn(
             "roles && array['public', 'anon', 'authenticated']::name[]",
             checks,
@@ -637,6 +782,10 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "python tests/support/local_supabase_editor_finalize_rpc_gate.py",
             workflow,
         )
+        self.assertIn("editor_storage_job_lease_active", gate)
+        self.assertIn("editor_storage_job_cleaned_immutable", gate)
+        self.assertIn("editor_storage_job_file_binding_forbidden", gate)
+        self.assertIn('"storageJobGuardNegativeCases": 9', gate)
         self.assertLess(
             workflow.index("supabase status -o env"),
             workflow.index(
@@ -676,6 +825,8 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         for path in (
             GRANT_HARDENING,
             DISPATCH_EVENT_CAPTURE,
+            EDITOR_IMMUTABLE_PROMOTION,
+            EDITOR_STORAGE_PREFLIGHT,
             FRESH_BOOTSTRAP_SMOKE,
             RUNTIME_SMOKE,
             SERVICE_ROLE_GRANT_SMOKE,
@@ -690,6 +841,8 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         for path in (
             GRANT_HARDENING,
             DISPATCH_EVENT_CAPTURE,
+            EDITOR_IMMUTABLE_PROMOTION,
+            EDITOR_STORAGE_PREFLIGHT,
             FRESH_BOOTSTRAP_SMOKE,
             SERVICE_ROLE_GRANT_SMOKE,
         ):

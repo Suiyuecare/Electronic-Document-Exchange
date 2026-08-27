@@ -4,6 +4,14 @@
 
 begin;
 
+do $$
+begin
+  if pg_catalog.current_setting('server_version_num')::integer < 160000 then
+    raise exception 'fresh_bootstrap_postgres_16_required';
+  end if;
+end;
+$$;
+
 -- Exercise effective privileges, not only catalog rows. PostgreSQL otherwise
 -- gives every future function PUBLIC EXECUTE through its global default ACL.
 -- This probe is transaction-local because the file always rolls back.
@@ -37,8 +45,45 @@ declare
 begin
   if pg_catalog.to_regclass('public.official_document_editor_revisions') is null
      or pg_catalog.to_regclass('public.official_document_editor_assets') is null
+     or pg_catalog.to_regclass('public.official_document_editor_storage_jobs') is null
      or pg_catalog.to_regclass('public.official_document_stamp_positions') is null then
     raise exception 'fresh_bootstrap_runtime_table_missing';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_class relation_row
+    where relation_row.oid =
+      'public.official_document_editor_storage_jobs'::pg_catalog.regclass
+      and relation_row.relrowsecurity
+      and relation_row.relforcerowsecurity
+  ) then
+    raise exception 'fresh_bootstrap_editor_storage_jobs_rls_not_forced';
+  end if;
+
+  select count(*) into v_count
+  from information_schema.columns
+  where table_schema = 'public'
+    and table_name = 'official_document_editor_storage_jobs'
+    and (column_name, data_type, is_nullable) in (
+      ('lease_token', 'text', 'NO'),
+      ('lease_expires_at', 'text', 'NO')
+    );
+  if v_count <> 2 then
+    raise exception 'fresh_bootstrap_editor_storage_job_lease_columns_missing:%',
+      v_count;
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_constraint constraint_row
+    where constraint_row.conrelid =
+      'public.official_document_editor_storage_jobs'::pg_catalog.regclass
+      and constraint_row.conname = 'official_editor_storage_job_lease_check'
+      and constraint_row.contype = 'c'
+      and constraint_row.convalidated
+  ) then
+    raise exception 'fresh_bootstrap_editor_storage_job_lease_constraint_missing';
   end if;
 
   if exists (
@@ -144,8 +189,108 @@ begin
 
   if pg_catalog.to_regprocedure('public.edoc_commit_official_document_submission(jsonb)') is null
      or pg_catalog.to_regprocedure('public.edoc_finalize_editor_asset_v2(jsonb)') is null
+     or pg_catalog.to_regprocedure('public.edoc_bind_finalized_editor_asset_storage()') is null
+     or pg_catalog.to_regprocedure('public.edoc_guard_editor_storage_job()') is null
      or pg_catalog.to_regprocedure('public.edoc_resolve_portal_finance_user(uuid,text)') is null then
     raise exception 'fresh_bootstrap_runtime_rpc_missing';
+  end if;
+
+  if 1 <> (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_editor_assets'::pg_catalog.regclass
+      and trigger_row.tgfoid =
+        'public.edoc_bind_finalized_editor_asset_storage()'::pg_catalog.regprocedure
+      and trigger_row.tgname = 'trg_edoc_bind_finalized_editor_asset_storage'
+      and trigger_row.tgenabled = 'O'
+      and trigger_row.tgtype = 31
+      and not trigger_row.tgisinternal
+  ) then
+    raise exception 'fresh_bootstrap_editor_immutable_storage_trigger_missing';
+  end if;
+
+  if 1 <> (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_editor_storage_jobs'::pg_catalog.regclass
+      and trigger_row.tgfoid =
+        'public.edoc_guard_editor_storage_job()'::pg_catalog.regprocedure
+      and trigger_row.tgname = 'trg_edoc_guard_editor_storage_job'
+      and trigger_row.tgenabled = 'O'
+      and trigger_row.tgtype = 23
+      and not trigger_row.tgisinternal
+  ) then
+    raise exception 'fresh_bootstrap_editor_storage_job_guard_missing';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_proc function_row
+    join pg_catalog.pg_namespace namespace_row
+      on namespace_row.oid = function_row.pronamespace
+    where namespace_row.nspname = 'public'
+      and function_row.proname = 'edoc_bind_finalized_editor_asset_storage'
+      and function_row.pronargs = 0
+      and function_row.prosecdef
+      and pg_catalog.pg_get_userbyid(function_row.proowner) = 'postgres'
+      and exists (
+        select 1
+        from pg_catalog.unnest(coalesce(function_row.proconfig, array[]::text[])) config(value)
+        where config.value in ('search_path=', 'search_path=""')
+      )
+      and not exists (
+        select 1
+        from pg_catalog.aclexplode(
+          coalesce(
+            function_row.proacl,
+            pg_catalog.acldefault('f', function_row.proowner)
+          )
+        ) privilege_row
+        where privilege_row.privilege_type = 'EXECUTE'
+          and (
+            privilege_row.grantee = 0
+            or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+              in ('anon', 'authenticated', 'service_role')
+          )
+      )
+  ) then
+    raise exception 'fresh_bootstrap_editor_immutable_function_security_invalid';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_proc function_row
+    join pg_catalog.pg_namespace namespace_row
+      on namespace_row.oid = function_row.pronamespace
+    where namespace_row.nspname = 'public'
+      and function_row.proname = 'edoc_guard_editor_storage_job'
+      and function_row.pronargs = 0
+      and not function_row.prosecdef
+      and pg_catalog.pg_get_userbyid(function_row.proowner) = 'postgres'
+      and exists (
+        select 1
+        from pg_catalog.unnest(coalesce(function_row.proconfig, array[]::text[])) config(value)
+        where config.value in ('search_path=', 'search_path=""')
+      )
+      and not exists (
+        select 1
+        from pg_catalog.aclexplode(
+          coalesce(
+            function_row.proacl,
+            pg_catalog.acldefault('f', function_row.proowner)
+          )
+        ) privilege_row
+        where privilege_row.privilege_type = 'EXECUTE'
+          and (
+            privilege_row.grantee = 0
+            or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+              in ('anon', 'authenticated', 'service_role')
+          )
+      )
+  ) then
+    raise exception 'fresh_bootstrap_editor_storage_job_guard_security_invalid';
   end if;
 
   if pg_catalog.to_regprocedure('extensions.digest(bytea,text)') is null

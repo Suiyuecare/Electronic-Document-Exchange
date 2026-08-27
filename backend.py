@@ -1814,6 +1814,7 @@ TABLES = {
     "official_document_text_overlays": "official_document_text_overlays",
     "official_document_editor_revisions": "official_document_editor_revisions",
     "official_document_editor_assets": "official_document_editor_assets",
+    "official_document_editor_storage_jobs": "official_document_editor_storage_jobs",
     "official_document_dispatch_records": "official_document_dispatch_records",
     "official_document_dispatch_events": "official_document_dispatch_events",
     "official_workflow_delegations": "official_workflow_delegations",
@@ -2260,6 +2261,31 @@ CREATE TABLE IF NOT EXISTS official_document_editor_assets (
   FOREIGN KEY(editor_revision_id) REFERENCES official_document_editor_revisions(id) ON DELETE RESTRICT,
   FOREIGN KEY(file_object_id) REFERENCES file_objects(id) ON DELETE SET NULL,
   FOREIGN KEY(official_file_id) REFERENCES official_document_files(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_document_editor_storage_jobs (
+  id TEXT PRIMARY KEY,
+  asset_id TEXT NOT NULL UNIQUE,
+  document_id TEXT NOT NULL,
+  staging_bucket TEXT NOT NULL,
+  staging_path TEXT NOT NULL,
+  final_bucket TEXT NOT NULL,
+  final_path TEXT NOT NULL,
+  expected_sha256 TEXT NOT NULL,
+  expected_size_bytes INTEGER NOT NULL,
+  token_expires_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  lease_token TEXT NOT NULL DEFAULT '',
+  lease_expires_at TEXT NOT NULL DEFAULT '',
+  final_file_object_id TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error_code TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  cleaned_at TEXT,
+  FOREIGN KEY(asset_id) REFERENCES official_document_editor_assets(id) ON DELETE RESTRICT,
+  FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE RESTRICT,
+  FOREIGN KEY(final_file_object_id) REFERENCES file_objects(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS official_document_dispatch_records (
@@ -3426,6 +3452,30 @@ CREATE INDEX IF NOT EXISTS idx_official_editor_assets_document ON official_docum
 CREATE INDEX IF NOT EXISTS idx_official_editor_assets_revision ON official_document_editor_assets(editor_revision_id, asset_kind);
 CREATE INDEX IF NOT EXISTS idx_official_editor_assets_file_object ON official_document_editor_assets(file_object_id);
 CREATE INDEX IF NOT EXISTS idx_official_editor_assets_official_file ON official_document_editor_assets(official_file_id);
+CREATE INDEX IF NOT EXISTS idx_official_editor_storage_jobs_due ON official_document_editor_storage_jobs(status, token_expires_at);
+CREATE INDEX IF NOT EXISTS idx_official_editor_storage_jobs_document ON official_document_editor_storage_jobs(document_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_official_editor_storage_jobs_final_file ON official_document_editor_storage_jobs(final_file_object_id);
+CREATE TRIGGER IF NOT EXISTS trg_official_editor_finalized_asset_no_insert
+BEFORE INSERT ON official_document_editor_assets
+WHEN NEW.asset_kind IN ('source_pdf','import_pdf','image')
+  AND NEW.upload_status = 'finalized'
+BEGIN
+  SELECT RAISE(ABORT, 'editor_finalized_asset_insert_forbidden');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_official_editor_finalized_asset_no_update
+BEFORE UPDATE ON official_document_editor_assets
+WHEN OLD.asset_kind IN ('source_pdf','import_pdf','image')
+  AND OLD.upload_status = 'finalized'
+BEGIN
+  SELECT RAISE(ABORT, 'editor_finalized_asset_immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_official_editor_finalized_asset_no_delete
+BEFORE DELETE ON official_document_editor_assets
+WHEN OLD.asset_kind IN ('source_pdf','import_pdf','image')
+  AND OLD.upload_status = 'finalized'
+BEGIN
+  SELECT RAISE(ABORT, 'editor_finalized_asset_immutable');
+END;
 CREATE TRIGGER IF NOT EXISTS trg_official_editor_revisions_no_update
 BEFORE UPDATE ON official_document_editor_revisions
 BEGIN
@@ -5275,7 +5325,7 @@ def launch_fix_acceptance(key: str) -> List[str]:
             "EDOC_DISABLE_DEMO_ACCOUNTS=true 且 Go / No-Go 重新檢查無 P0 blocker",
         ],
         "login_access": [
-            "申請人、主管、行政部主任、總務皆可用正式帳號登入",
+            "申請人、主管、主任、行政部主任、總務皆可用正式帳號登入",
             "正式站 demo/quick role login 不可使用",
         ],
         "seal_admin": [
@@ -5289,7 +5339,7 @@ def launch_fix_acceptance(key: str) -> List[str]:
             "送簽後案件出現在下一關待辦",
         ],
         "approvers": [
-            "主管與行政部主任只能簽核輪到自己的關卡",
+            "主管、主任與行政部主任只能簽核輪到自己的關卡",
             "前一關未核准時不可跳關",
         ],
         "general_affairs": [
@@ -5315,10 +5365,10 @@ def launch_fix_acceptance(key: str) -> List[str]:
 def launch_fix_done_when(key: str, fallback_action: str) -> str:
     done_when = {
         "ops": "重新執行 Go / No-Go 後，internalGo=true 且 blockerCount=0。",
-        "login_access": "四種正式角色都能登入，且 demo 帳密在正式站無法使用。",
+        "login_access": "五種必要正式角色都能登入，且 demo 帳密在正式站無法使用。",
         "seal_admin": "印鑑管理頁每間啟用公司 required seal 都顯示 current 版本。",
         "applicant": "申請人不用工程師協助即可完成一張空白公文與一張 PDF 用印申請。",
-        "approvers": "主管與行政部主任分別核准自己的關卡，系統拒絕跳關與代簽。",
+        "approvers": "主管、主任與行政部主任分別核准自己的關卡，系統拒絕跳關與代簽。",
         "general_affairs": "總務完成審核、寄發回填與證明附件上傳，案件可結案。",
         "notifications": "至少一筆待辦與一筆逾期/退回通知能被指定角色看見。",
         "user_journeys": "走測報告的 userJourneys 全部 ready=true。",
@@ -5833,12 +5883,12 @@ def launch_user_perspective_gaps(readiness: Dict[str, Any]) -> Dict[str, Any]:
         ),
         build_item(
             "approver_monday_queue",
-            "申請人主管 / 行政部門主任",
+            "申請人主管 / 部門主任 / 行政部門主任",
             "我週一打開待辦時，是否只會看到輪到我的關卡？",
             "發文管理 → 我的待簽核",
             ["approvers"],
             ["blank_official_document", "uploaded_pdf_stamping"],
-            "用主管與行政部主任正式帳號各核准一關，並測試不可跳關或代簽。",
+            "用主管、主任與行政部主任正式帳號各核准一關，並測試不可跳關或代簽。",
             "前一關未核准時下一關不能操作；每一關 audit log 有 actor 與時間。",
             "dispatch",
             "dispatchTasks",
@@ -5997,7 +6047,7 @@ def internal_launch_user_checklist(readiness: Dict[str, Any], data_readiness: Di
             "IT、行政部主任",
             login_blockers,
             login_warnings,
-            "用正式帳號或 Logging Portal 分別登入申請人、主管、行政部主任、總務，確認 demo 帳密不可進入正式站。",
+            "用正式帳號或 Logging Portal 分別登入申請人、主管、主任、行政部主任、總務，確認 demo 帳密不可進入正式站。",
             "同仁週一第一步是能進系統；正式帳號沒匯入時，後面的簽核與用印都無法開始。",
         ),
         launch_item(
@@ -6011,11 +6061,11 @@ def internal_launch_user_checklist(readiness: Dict[str, Any], data_readiness: Di
         ),
         launch_item(
             "approvers",
-            "主管與行政部主任",
-            "申請人主管、行政部主任",
-            [f"缺少啟用的「{role}」帳號。" for role in missing_roles if role in {"主管", "行政部主任"}] + workflow_missing,
+            "主管、主任與行政部主任",
+            "申請人主管、部門主任、行政部主任",
+            [f"缺少啟用的「{role}」帳號。" for role in missing_roles if role in {"主管", "主任", "行政部主任"}] + workflow_missing,
             [],
-            "用主管與行政部主任帳號各核准一關，確認不可跳關。",
+            "用主管、主任與行政部主任帳號各核准一關，確認不可跳關。",
             "簽核人要在我的待辦看到案件，且只能處理輪到自己的關卡。",
         ),
         launch_item(
@@ -7350,7 +7400,7 @@ def production_artifact_index_artifact() -> Dict[str, Any]:
             "fileName": "edoc-internal-launch-cutover-YYYY-MM-DD.json",
             "owner": "行政部主任、IT、總務",
             "purpose": "給上線會議分工使用，包含使用者視角卡點、值班看板、走測任務與 owner actions。",
-            "doneWhen": "申請人、主管、行政部主任、總務、收文承辦與內部收件同仁都完成正式帳號走測。",
+            "doneWhen": "申請人、主管、主任、行政部主任、總務、收文承辦與內部收件同仁都完成正式帳號走測。",
             "containsSecrets": False,
             "editBeforeUse": False,
             "neverCommit": False,
@@ -7362,8 +7412,8 @@ def production_artifact_index_artifact() -> Dict[str, Any]:
             "api": "GET /api/production/account-readiness-package",
             "fileName": "edoc-account-launch-readiness-YYYY-MM-DD.json",
             "owner": "IT、行政部主任",
-            "purpose": "確認申請人、主管、行政部主任、總務都有正式帳號，且 demo / quick role login 被阻擋。",
-            "doneWhen": "missingFormalRoleCount=0、activeUserCount>0、demoAccountsDisabled=true，且四種角色都完成登入走測。",
+            "purpose": "確認申請人、主管、主任、行政部主任、總務都有正式帳號，且 demo / quick role login 被阻擋。",
+            "doneWhen": "missingFormalRoleCount=0、activeUserCount>0、demoAccountsDisabled=true，且五種必要角色都完成登入走測。",
             "containsSecrets": False,
             "editBeforeUse": False,
             "neverCommit": False,
@@ -7427,7 +7477,7 @@ def production_artifact_index_artifact() -> Dict[str, Any]:
             "api": "GET /api/production/formal-account-roster/template",
             "fileName": "edoc-formal-account-import-template.csv",
             "owner": "IT、行政部主任",
-            "purpose": "讓行政部與 IT 在正式站登入尚未放行時，先補齊申請人、主管、行政部主任、總務與收文承辦的正式帳號 metadata。",
+            "purpose": "讓行政部與 IT 在正式站登入尚未放行時，先補齊申請人、主管、主任、行政部主任、總務與收文承辦的正式帳號 metadata。",
             "doneWhen": "填妥姓名、公司 Email、單位、職稱、角色與 MFA 狀態後，由具 system_permissions.manage 的正式帳號匯入，不包含任何密碼或 token。",
             "containsSecrets": False,
             "editBeforeUse": True,
@@ -7494,7 +7544,7 @@ def production_artifact_index_artifact() -> Dict[str, Any]:
         ],
         "userPerspectiveAcceptance": [
             "一般同仁可登入並建立空白公文與上傳 PDF 用印申請。",
-            "主管與行政部主任只能簽核輪到自己的關卡，不能跳關。",
+            "主管、主任與行政部主任只能簽核輪到自己的關卡，不能跳關。",
             "總務可審核用印、下載已用印 PDF、回填寄發資訊與證明附件。",
             "收文承辦可登錄來文、分派承辦、設定期限並結案。",
             "內部收件同仁可在期限內回覆文字與附件。",
@@ -7698,7 +7748,7 @@ def production_next_action_artifact(readiness: Dict[str, Any] | None = None) -> 
             "severity": "P0",
             "userImpact": first.get("impact") or "同仁即使進得去系統，也可能無法送簽、看不到待辦，或總務無法完成寄發。",
             "doNow": [
-                first.get("action") or "補齊申請人、主管、行政部主任與總務正式帳號。",
+                first.get("action") or "補齊申請人、主管、主任、行政部主任與總務正式帳號。",
                 "匯入正式 roster，確認不是 demo / seed / 共用測試帳號。",
                 "用正式帳號各登入一次，確認待辦與權限相符。",
             ],
@@ -7730,7 +7780,7 @@ def production_next_action_artifact(readiness: Dict[str, Any] | None = None) -> 
         primary_action = {
             "key": "run_user_journey_smoke",
             "title": "用正式帳號跑完五條使用者旅程",
-            "owner": "申請人、主管、行政部主任、總務、收文承辦、IT",
+            "owner": "申請人、主管、主任、行政部主任、總務、收文承辦、IT",
             "severity": "P0",
             "userImpact": "系統資料看似齊備仍不等於同仁會用；必須證明核心流程不用工程師陪同也能完成。",
             "doNow": [
@@ -7768,7 +7818,7 @@ def production_next_action_artifact(readiness: Dict[str, Any] | None = None) -> 
         primary_action = {
             "key": "run_final_user_journey_attestation",
             "title": "執行最終使用者旅程簽核與留存",
-            "owner": "申請人、主管、行政部主任、總務、收文承辦、IT",
+            "owner": "申請人、主管、主任、行政部主任、總務、收文承辦、IT",
             "severity": "Ready",
             "userImpact": "系統底座已可開給內部正式使用；最後要證明同仁不用工程師陪同也能完成工作。",
             "doNow": [
@@ -7837,7 +7887,7 @@ def production_next_action_artifact(readiness: Dict[str, Any] | None = None) -> 
         {
             "key": "run_user_journey_smoke",
             "title": "用正式帳號跑完五條使用者旅程",
-            "owner": "申請人、主管、行政部主任、總務、收文承辦、IT",
+            "owner": "申請人、主管、主任、行政部主任、總務、收文承辦、IT",
             "doneWhen": "launch-cutover-package 顯示 userJourneys 全部 ready=true。",
             "verifyApi": "GET /api/production/launch-smoke-report",
             "expectedSignals": [
@@ -8380,12 +8430,12 @@ def production_formal_account_roster_template_artifact() -> Dict[str, Any]:
         rows = [
             {
                 "role": role,
-                "required": "true" if role in {"員工", "主管", "行政部主任", "總務"} else "false",
+                "required": "true" if role in {"員工", "主管", "主任", "行政部主任", "總務"} else "false",
                 "name": "",
                 "email": "",
-                "unit": "行政部" if role in {"員工", "行政部主任"} else "總務" if role == "總務" else "營運管理部",
+                "unit": "行政部" if role in {"員工", "行政部主任"} else "總務" if role == "總務" else "各部門" if role == "主任" else "營運管理部",
                 "title": role,
-                "job_level": "部長" if role == "行政部主任" else "課長" if role == "主管" else "職員",
+                "job_level": "部長" if role in {"主任", "行政部主任"} else "課長" if role == "主管" else "職員",
                 "provider": "Google Workspace",
                 "mfa_status": "待設定",
                 "status": "啟用",
@@ -8393,7 +8443,7 @@ def production_formal_account_roster_template_artifact() -> Dict[str, Any]:
                 "done_when": f"{role} formalAccountCount >= 1，且正式帳號可登入並看到正確待辦。",
                 "notes": "請填公司正式姓名與 Email；不可填密碼、PIN、API key、session token 或 demo/seed 帳號。",
             }
-            for role in ["員工", "主管", "行政部主任", "總務", "業務助理"]
+            for role in ["員工", "主管", "主任", "行政部主任", "總務", "業務助理"]
         ]
     security_policy = {
         "metadataOnly": True,
@@ -8785,7 +8835,7 @@ def production_unblock_runbook_artifact() -> Dict[str, Any]:
             "key": "import_accounts_and_seal_current_versions",
             "owner": "行政部主任、總務、IT",
             "status": "pending",
-            "why": "Supabase 接上後仍需正式帳號、主管/行政/總務角色與 Seal Vault current 版本，否則同仁仍不能完成流程。",
+            "why": "Supabase 接上後仍需正式帳號、主管/主任/行政/總務角色與 Seal Vault current 版本，否則同仁仍不能完成流程。",
             "acceptance": [
                 "account-readiness-package: activeUserCount>0、missingFormalRoleCount=0、demoAccountsDisabled=true",
                 "seal-vault-readiness: decision=PASS、companyCount>0、requiredSealCount>0、missingCount=0",
@@ -8798,13 +8848,13 @@ def production_unblock_runbook_artifact() -> Dict[str, Any]:
         {
             "order": 6,
             "key": "final_user_journey_smoke",
-            "owner": "申請人、主管、行政部主任、總務、收文承辦",
+            "owner": "申請人、主管、主任、行政部主任、總務、收文承辦",
             "status": "pending",
             "why": "上線成功不是 API 變綠而已；同仁要能完成實際工作。",
             "journeys": [
                 "空白公文撰寫送簽",
                 "上傳 PDF 多位置用印申請",
-                "主管 / 行政部主任 / 總務依序簽核",
+                "主管 / 主任 / 行政部主任 / 總務依序簽核",
                 "總務寄發回填與證明附件",
                 "收文登錄分派與內部派文回文",
             ],
@@ -9259,11 +9309,21 @@ def current_production_cutover_readiness_package(conn: sqlite3.Connection | None
     access_counts = access.get("counts") or {}
     launch_data_checks = ((audit.get("dataReadiness") or {}).get("checks") or {})
     launch_company_scope = launch_data_checks.get("launchCompanyScope") or launch_company_scope_metadata([])
-    missing_roles = [
-        item.get("role")
-        for item in access.get("roleChecks") or []
-        if item.get("role") in {"主管", "行政部主任", "總務"} and not item.get("hasFormalAccount")
-    ]
+    cutover_required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+    access_role_checks = access.get("roleChecks") or []
+    missing_roles: List[str] = []
+    for role in cutover_required_roles:
+        matches = [item for item in access_role_checks if item.get("role") == role]
+        signatures = {
+            (
+                str(item.get("activeCount") or "0"),
+                str(item.get("formalAccountCount") or "0"),
+                bool(item.get("hasFormalAccount")),
+            )
+            for item in matches
+        }
+        if not matches or len(signatures) > 1 or not all(bool(item.get("hasFormalAccount")) for item in matches):
+            missing_roles.append(role)
 
     def env_status(names: List[str]) -> Dict[str, Any]:
         missing = []
@@ -9435,8 +9495,8 @@ def current_production_cutover_readiness_package(conn: sqlite3.Connection | None
             "IT、行政部主任",
             "issue" if missing_roles or not checks.get("demoAccountsDisabled") else "pass",
             f"missingRoles={ '、'.join([role for role in missing_roles if role]) or 'none' }; demoAccountsDisabled={bool(checks.get('demoAccountsDisabled'))}; demoSeedUserCount={int(access_counts.get('demoSeedUserCount') or 0)}",
-            "只在 Finance 補齊申請人、主管、行政部主任、總務正式帳號，確認 eDoc 自動鏡像，並維持 production 關閉 demo/quick role login。",
-            "四種角色由 Finance 自動同步後各登入一次，待辦與權限正確；eDoc 不提供第二份可編輯名冊，demo 帳密與快速角色切換在正式站被拒絕。",
+            "只在 Finance 補齊申請人、主管、主任、行政部主任、總務正式帳號，確認 eDoc 自動鏡像，並維持 production 關閉 demo/quick role login。",
+            "五種必要角色由 Finance 自動同步後各登入一次，待辦與權限正確；eDoc 不提供第二份可編輯名冊，demo 帳密與快速角色切換在正式站被拒絕。",
             ["EDOC_DISABLE_DEMO_ACCOUNTS"],
             "curl $EDOC_PUBLIC_BASE_URL/api/production/account-readiness-package",
             "GET /api/production/account-readiness-package",
@@ -9769,11 +9829,12 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
     access = report.get("accessReadiness") or {}
     counts = access.get("counts") or {}
     role_checks = access.get("roleChecks") or []
-    required_roles = ["員工", "主管", "行政部主任", "總務"]
+    required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
     recommended_roles = ["業務助理"]
     default_profiles = {
         "員工": {"unit": "行政部", "title": "承辦人", "provider": "Google Workspace"},
         "主管": {"unit": "營運管理部", "title": "申請人主管", "provider": "Google Workspace"},
+        "主任": {"unit": "各部門", "title": "部門主任", "provider": "Google Workspace"},
         "行政部主任": {"unit": "行政部", "title": "行政部主任", "provider": "Microsoft Entra / Google Workspace"},
         "總務": {"unit": "總務", "title": "總務", "provider": "Google Workspace"},
         "業務助理": {"unit": "業務部", "title": "業務助理", "provider": "Google Workspace"},
@@ -9782,17 +9843,54 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
     source_blockers: List[str] = []
     if not role_checks:
         source_blockers.append("正式帳號 readiness 沒有角色檢核資料；不可將空資料視為正式帳號已就緒。")
-        role_checks = [
-            {
+    expected_roles = [*required_roles, *recommended_roles]
+
+    def readiness_count(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    normalized_role_checks: List[Dict[str, Any]] = []
+    for role in expected_roles:
+        matches = [item for item in role_checks if str(item.get("role") or "") == role]
+        if not matches:
+            if role in required_roles:
+                source_blockers.append(f"正式帳號 readiness 缺少必要角色檢核資料：{role}。")
+            normalized_role_checks.append({
                 "role": role,
                 "activeCount": 0,
                 "formalAccountCount": 0,
                 "demoSeedCount": 0,
                 "hasActiveUser": False,
                 "hasFormalAccount": False,
-            }
-            for role in [*required_roles, *recommended_roles]
-        ]
+            })
+            continue
+
+        fingerprints = {
+            (
+                readiness_count(item.get("activeCount")),
+                readiness_count(item.get("formalAccountCount")),
+                readiness_count(item.get("demoSeedCount")),
+                bool(item.get("hasActiveUser")),
+                bool(item.get("hasFormalAccount")),
+            )
+            for item in matches
+        }
+        if len(fingerprints) > 1 and role in required_roles:
+            source_blockers.append(f"正式帳號 readiness 的必要角色「{role}」出現互相矛盾的重複檢核資料。")
+
+        active_count = min(readiness_count(item.get("activeCount")) for item in matches)
+        formal_count = min(readiness_count(item.get("formalAccountCount")) for item in matches)
+        normalized_role_checks.append({
+            "role": role,
+            "activeCount": active_count,
+            "formalAccountCount": formal_count,
+            "demoSeedCount": max(readiness_count(item.get("demoSeedCount")) for item in matches),
+            "hasActiveUser": active_count > 0 and all(bool(item.get("hasActiveUser")) for item in matches),
+            "hasFormalAccount": formal_count > 0 and all(bool(item.get("hasFormalAccount")) for item in matches),
+        })
+    role_checks = normalized_role_checks
     if active_user_count == 0:
         source_blockers.append("正式帳號 readiness 沒有任何啟用帳號；同仁登入、簽核與總務寄發不可驗收。")
     role_tasks: List[Dict[str, Any]] = []
@@ -9834,7 +9932,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "severity": "blocker",
             "status": "不可驗收",
             "nextAction": "先接上 Supabase production，匯入正式帳號 roster，並重新執行 account-readiness-package。",
-            "doneWhen": "activeUserCount > 0，且申請人、主管、行政部主任、總務都有非 demo / 外部同步正式帳號。",
+            "doneWhen": "activeUserCount > 0，且申請人、主管、主任、行政部主任、總務都有非 demo / 外部同步正式帳號。",
             "evidence": blocker,
         }
         for index, blocker in enumerate(source_blockers)
@@ -9855,8 +9953,8 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "title": "正式角色登入走測",
             "severity": "pass" if not required_missing else "blocker",
             "status": "可走測" if not required_missing else "缺角色",
-            "nextAction": "用申請人、主管、行政部主任、總務正式帳號各登入一次。",
-            "doneWhen": "四種角色都能登入，且待辦、簽核、總務寄發入口與權限相符。",
+            "nextAction": "用申請人、主管、主任、行政部主任、總務正式帳號各登入一次。",
+            "doneWhen": "五種角色都能登入，且待辦、簽核、總務寄發入口與權限相符。",
             "evidence": "missing=" + "、".join(item.get("role") or "" for item in required_missing) if required_missing else "required roles ready",
         },
         {
@@ -9875,6 +9973,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
         "員工": "職員",
         "業務助理": "職員",
         "主管": "課長",
+        "主任": "部長",
         "行政部主任": "部長",
         "總務": "職員",
         "執行長": "執行長",
@@ -9945,7 +10044,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "validationRules": [
                 "name 與 email 必填，且 email 必須是公司正式帳號。",
                 "不可使用 demo seed email、demo 密碼、共用測試帳號或個人非公司信箱。",
-                "主管、行政部主任、總務補齊後需各登入一次完成待辦權限走測。",
+                "主管、主任、行政部主任、總務補齊後需各登入一次完成待辦權限走測。",
                 "正式站必須設定 EDOC_DISABLE_DEMO_ACCOUNTS=true 並重新部署。",
             ],
             "securityPolicy": {
@@ -9958,6 +10057,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
         "loginSmokePlan": [
             "申請人正式帳號登入後建立空白公文與 PDF 用印申請。",
             "主管正式帳號只能看到並核准輪到自己的待辦。",
+            "主任正式帳號只能看到並核准部門主任關卡，不得跳關。",
             "行政部主任正式帳號核准後不可跳到總務寄發任務。",
             "總務正式帳號可審核用印、重試用印失敗、回填寄發證明。",
             "demo 帳密與快速角色登入在正式站必須被拒絕。",
@@ -25422,23 +25522,23 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
         "metadata_json": json.dumps({**metadata, "inspection_flags": (inspection or {}).get("flags") or {}, "renderer_version": EDOC_EDITOR_RENDERER_VERSION}, ensure_ascii=False),
         "finalized_at": now(),
     })
+    new_state = _editor_state_with_asset(latest, asset, inspection)
+    revision = _insert_editor_revision(conn, document_id, new_state, user, latest["id"])
+    asset["editor_revision_id"] = revision["id"]
     conn.execute(
         """
         UPDATE official_document_editor_assets
         SET file_object_id = ?, official_file_id = ?, sha256 = ?, upload_status = ?, scan_status = ?,
-            preflight_status = ?, page_count = ?, metadata_json = ?, finalized_at = ?
+            preflight_status = ?, page_count = ?, metadata_json = ?, finalized_at = ?, editor_revision_id = ?
         WHERE id = ?
         """,
-        (asset["file_object_id"], asset["official_file_id"], digest, asset["upload_status"], asset["scan_status"], asset["preflight_status"], asset["page_count"], asset["metadata_json"], asset["finalized_at"], upload_id),
+        (asset["file_object_id"], asset["official_file_id"], digest, asset["upload_status"], asset["scan_status"], asset["preflight_status"], asset["page_count"], asset["metadata_json"], asset["finalized_at"], revision["id"], upload_id),
     )
-    new_state = _editor_state_with_asset(latest, asset, inspection)
-    revision = _insert_editor_revision(conn, document_id, new_state, user, latest["id"])
-    conn.execute("UPDATE official_document_editor_assets SET editor_revision_id = ? WHERE id = ?", (revision["id"], upload_id))
     if target.exists():
         target.unlink()
     insert_official_log(conn, document_id, "finalize_editor_upload", user, f"asset_id={upload_id};sha256={digest};pages={asset['page_count']};scan=passed")
     public_revision = _editor_revision_public(revision)
-    return {"asset": _editor_asset_public({**asset, "editor_revision_id": revision["id"]}), "pages": inspection.get("pages") if inspection else [], "editor_state": public_revision["state"], "editor_revision": public_revision}
+    return {"asset": _editor_asset_public(asset), "pages": inspection.get("pages") if inspection else [], "editor_state": public_revision["state"], "editor_revision": public_revision}
 
 
 def get_official_editor_state(conn: sqlite3.Connection, document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -31490,7 +31590,9 @@ def supabase_storage_object_url(storage_key: str, bucket: str | None = None) -> 
 
 def supabase_storage_upload(storage_key: str, data: bytes, mime_type: str, bucket: str | None = None) -> None:
     url = supabase_storage_object_url(storage_key, bucket)
-    headers = supabase_storage_headers({"Content-Type": mime_type, "x-upsert": "false"})
+    # Supabase defines overwrite as an explicit `x-upsert: true` opt-in.  EDOC
+    # assets are create-only, so the header must be absent.
+    headers = supabase_storage_headers({"Content-Type": mime_type})
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with _urlopen_no_redirect(request, timeout=30) as response:
@@ -34539,7 +34641,11 @@ def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
     if not base:
         raise ValueError("supabase_storage_endpoint_required")
     url = f"{base.rstrip('/')}/object/upload/sign/{urllib.parse.quote(bucket, safe='')}/{urllib.parse.quote(storage_path, safe='/')}"
-    request = urllib.request.Request(url, data=json.dumps({"allowOverwrite": False}).encode("utf-8"), headers=supabase_storage_headers({"Content-Type": "application/json"}), method="POST")
+    # Supabase's SDK represents create-only uploads by omitting the overwrite
+    # header; the signed-token endpoint does not consume an `upsert: false`
+    # JSON option.  Keep the request body empty JSON and never opt in via a
+    # header.
+    request = urllib.request.Request(url, data=b"{}", headers=supabase_storage_headers({"Content-Type": "application/json"}), method="POST")
     try:
         with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
@@ -34568,7 +34674,6 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
     expires_at = (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")
     upload_url = _supabase_storage_direct_tus_url()
     storage_publishable_key = _supabase_storage_public_upload_key()
-    token = _supabase_create_signed_upload_token(storage_path, EDOC_STORAGE_BUCKET)
     row = supabase_insert("official_document_editor_assets", {
         "id": asset_id,
         "document_id": document_id,
@@ -34592,6 +34697,47 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
         "created_at": now(),
         "finalized_at": None,
     })
+    final_path = _supabase_editor_immutable_storage_path(
+        document_id,
+        row,
+        meta["expected_sha256"],
+    )
+    try:
+        supabase_insert("official_document_editor_storage_jobs", {
+            "id": f"EDOC-STORAGE-{asset_id}",
+            "asset_id": asset_id,
+            "document_id": document_id,
+            "staging_bucket": EDOC_STORAGE_BUCKET,
+            "staging_path": storage_path,
+            "final_bucket": EDOC_STORAGE_BUCKET,
+            "final_path": final_path,
+            "expected_sha256": meta["expected_sha256"].upper(),
+            "expected_size_bytes": meta["size_bytes"],
+            "token_expires_at": expires_at,
+            "status": "pending",
+            "lease_token": "",
+            "lease_expires_at": "",
+            "final_file_object_id": None,
+            "attempt_count": 0,
+            "last_error_code": "",
+            "created_at": now(),
+            "updated_at": now(),
+            "cleaned_at": None,
+        })
+    except Exception:
+        _supabase_editor_asset_failure(row, "editor_storage_job_create_failed")
+        raise RuntimeError("editor_storage_job_create_failed") from None
+    # Issue the browser capability only after its durable lifecycle job exists.
+    # If token creation is unavailable, no caller ever receives a writable
+    # staging capability and the existing job can still clean the empty paths.
+    try:
+        token = _supabase_create_signed_upload_token(
+            storage_path,
+            EDOC_STORAGE_BUCKET,
+        )
+    except Exception:
+        _supabase_editor_asset_failure(row, "editor_signed_upload_failed")
+        raise
     return {
         "upload_id": asset_id,
         "asset_id": asset_id,
@@ -34603,7 +34749,7 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
         "path": storage_path,
         "content_type": meta["mime_type"],
         "cache_control": "0",
-        "headers": {"x-signature": token, "x-upsert": "false", "Cache-Control": "no-store"},
+        "headers": {"x-signature": token, "Cache-Control": "no-store"},
         "metadata": {"bucketName": EDOC_STORAGE_BUCKET, "objectName": storage_path, "contentType": meta["mime_type"], "cacheControl": "0"},
         "error_contract": {
             "create_rejected": "editor_tus_create_failed",
@@ -34619,16 +34765,287 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
     }
 
 
-def _supabase_editor_asset_failure(asset: Dict[str, Any], error_code: str, *, quarantine: bool = False) -> None:
+def _supabase_editor_asset_failure(
+    asset: Dict[str, Any],
+    error_code: str,
+    *,
+    quarantine: bool = False,
+) -> Dict[str, Any]:
+    """Fail an upload only while it is still mutable.
+
+    Finalize and failure requests can race.  The status predicate makes the
+    transition compare-and-set so a stale request can never downgrade an
+    already finalized asset.
+    """
     metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
     metadata["error_code"] = error_code
-    supabase_patch("official_document_editor_assets", asset["id"], {
+    current_status = str(asset.get("upload_status") or "pending")
+    mutable_statuses = {"pending", "uploading", "uploaded"}
+    if current_status not in mutable_statuses:
+        rows = supabase_filter_rows(
+            "official_document_editor_assets",
+            {"id": asset["id"]},
+            limit=1,
+        )
+        return rows[0] if rows else dict(asset)
+    rows = supabase_update_many("official_document_editor_assets", {
+        "id": asset["id"],
+        "upload_status": current_status,
+    }, {
         "upload_status": "quarantined" if quarantine else "failed",
         "scan_status": "failed" if quarantine else "pending",
         "preflight_status": "blocked" if quarantine else "failed",
         "metadata_json": json.dumps(metadata, ensure_ascii=False),
         "finalized_at": now(),
     })
+    if rows:
+        return rows[0]
+    refreshed = supabase_filter_rows(
+        "official_document_editor_assets",
+        {"id": asset["id"]},
+        limit=1,
+    )
+    if refreshed and str(refreshed[0].get("upload_status") or "") in {
+        "finalized",
+        "failed",
+        "quarantined",
+    }:
+        return refreshed[0]
+    raise RuntimeError("editor_asset_failure_state_conflict")
+
+
+def _supabase_editor_immutable_storage_path(
+    document_id: str,
+    asset: Dict[str, Any],
+    digest: str,
+) -> str:
+    safe_name = Path(str(asset.get("file_name") or "asset.bin")).name
+    return (
+        f"editor-final/{document_id}/{asset['id']}/"
+        f"{digest.upper()}-{safe_name}"
+    )
+
+
+def _supabase_editor_storage_job(
+    document_id: str,
+    asset: Dict[str, Any],
+    digest: str,
+) -> Dict[str, Any]:
+    rows = supabase_filter_rows(
+        "official_document_editor_storage_jobs",
+        {"asset_id": asset.get("id"), "document_id": document_id},
+        limit=1,
+    )
+    if not rows:
+        raise ValueError("editor_storage_job_missing")
+    job = rows[0]
+    expected_final_path = _supabase_editor_immutable_storage_path(
+        document_id,
+        asset,
+        digest,
+    )
+    if (
+        str(job.get("staging_bucket") or "") != str(asset.get("storage_bucket") or EDOC_STORAGE_BUCKET)
+        or str(job.get("staging_path") or "") != str(asset.get("storage_path") or "")
+        or str(job.get("final_bucket") or "") != EDOC_STORAGE_BUCKET
+        or str(job.get("final_path") or "") != expected_final_path
+        or str(job.get("expected_sha256") or "").upper() != digest.upper()
+        or int(job.get("expected_size_bytes") or 0) != int(asset.get("size_bytes") or 0)
+        or str(job.get("status") or "")
+        not in {
+            "pending",
+            "promoting",
+            "committed",
+            "cleaning",
+            "cleanup_failed",
+        }
+    ):
+        raise ValueError("editor_storage_job_mismatch")
+    return job
+
+
+def _supabase_claim_editor_storage_job(
+    job: Dict[str, Any],
+    target_status: str,
+) -> Dict[str, Any] | None:
+    """CAS-claim one promotion or cleanup lease.
+
+    The object store and PostgreSQL cannot share one transaction. A durable,
+    short lease prevents cleanup from declaring a job complete while an
+    uploader is still creating the deterministic final object.
+    """
+    if target_status not in {"promoting", "cleaning"}:
+        raise ValueError("editor_storage_job_lease_target_invalid")
+    current_status = str(job.get("status") or "")
+    current_lease = str(job.get("lease_token") or "")
+    lease_expiry = parse_time(str(job.get("lease_expires_at") or ""))
+    active_lease = (
+        current_status in {"promoting", "cleaning"}
+        and current_lease
+        and lease_expiry != datetime.min
+        and lease_expiry > datetime.now()
+    )
+    if active_lease:
+        return None
+    allowed_sources = (
+        {"pending", "promoting"}
+        if target_status == "promoting"
+        else {"pending", "promoting", "committed", "cleaning", "cleanup_failed"}
+    )
+    if current_status not in allowed_sources:
+        return None
+    lease_token = secrets.token_hex(16).upper()
+    expires_at = (datetime.now() + timedelta(minutes=5)).isoformat(
+        timespec="seconds"
+    )
+    filters: Dict[str, Any] = {
+        "id": job.get("id"),
+        "status": current_status,
+    }
+    if current_status in {"promoting", "cleaning"}:
+        filters["lease_token"] = current_lease
+    rows = supabase_update_many(
+        "official_document_editor_storage_jobs",
+        filters,
+        {
+            "status": target_status,
+            "lease_token": lease_token,
+            "lease_expires_at": expires_at,
+            "attempt_count": int(job.get("attempt_count") or 0) + 1,
+            "last_error_code": "",
+            "updated_at": now(),
+            "cleaned_at": None,
+        },
+    )
+    return rows[0] if rows else None
+
+
+def _supabase_release_editor_storage_promotion(
+    job_id: str,
+    lease_token: str,
+    error_code: str,
+) -> None:
+    if not job_id or not lease_token:
+        return
+    supabase_update_many(
+        "official_document_editor_storage_jobs",
+        {
+            "id": job_id,
+            "status": "promoting",
+            "lease_token": lease_token,
+        },
+        {
+            "status": "pending",
+            "lease_token": "",
+            "lease_expires_at": "",
+            "last_error_code": error_code,
+            "updated_at": now(),
+            "cleaned_at": None,
+        },
+    )
+
+
+def _supabase_promote_editor_asset_to_immutable_storage(
+    document_id: str,
+    asset: Dict[str, Any],
+    data: bytes,
+    digest: str,
+) -> tuple[str, str, str]:
+    """Copy verified staging bytes to a server-only immutable object path.
+
+    Signed TUS capabilities remain valid for a short period and cannot be
+    individually revoked by Storage.  The business record must therefore
+    never keep referring to the capability-writable staging path after
+    finalize.  A deterministic digest path also makes retries idempotent: an
+    existing object is accepted only when its bytes are exactly identical.
+    """
+    job = _supabase_editor_storage_job(document_id, asset, digest)
+    claimed = _supabase_claim_editor_storage_job(job, "promoting")
+    if not claimed:
+        raise ValueError("editor_asset_promotion_in_progress")
+    lease_token = str(claimed.get("lease_token") or "")
+    bucket = str(claimed.get("final_bucket") or "")
+    final_path = str(claimed.get("final_path") or "")
+    try:
+        try:
+            supabase_storage_upload(
+                final_path,
+                data,
+                str(asset.get("mime_type") or "application/octet-stream"),
+                bucket,
+            )
+        except Exception as upload_error:
+            try:
+                existing = supabase_storage_download(final_path, bucket)
+            except Exception:
+                raise ValueError("editor_asset_promotion_failed") from upload_error
+            if len(existing) != len(data) or sha256_bytes(existing) != digest.upper():
+                raise ValueError("editor_immutable_asset_conflict") from None
+
+        promoted = supabase_storage_download(final_path, bucket)
+        if len(promoted) != len(data) or sha256_bytes(promoted) != digest.upper():
+            raise ValueError("editor_immutable_asset_verification_failed")
+        return final_path, str(claimed.get("id") or ""), lease_token
+    except Exception as promotion_error:
+        _supabase_release_editor_storage_promotion(
+            str(claimed.get("id") or ""),
+            lease_token,
+            _editor_storage_cleanup_error_code(promotion_error),
+        )
+        raise
+
+
+def _supabase_assert_finalized_editor_asset_immutable(
+    document_id: str,
+    asset: Dict[str, Any],
+) -> Dict[str, Any]:
+    expected_prefix = f"editor-final/{document_id}/{asset.get('id') or ''}/"
+    storage_path = str(asset.get("storage_path") or "")
+    file_object_id = str(asset.get("file_object_id") or "")
+    if (
+        asset.get("upload_status") != "finalized"
+        or not storage_path.startswith(expected_prefix)
+        or not file_object_id
+    ):
+        raise RuntimeError("editor_asset_immutable_path_not_committed")
+    file_object = supabase_get("file_objects", file_object_id)
+    if not file_object:
+        raise RuntimeError("editor_asset_immutable_path_not_committed")
+    try:
+        verify_private_storage_file_metadata(
+            asset,
+            file_object,
+            expected_document_id=document_id,
+            expected_storage_key=storage_path,
+            expected_bucket=str(asset.get("storage_bucket") or EDOC_STORAGE_BUCKET),
+        )
+    except (ValueError, PermissionError) as exc:
+        raise RuntimeError("editor_asset_immutable_path_not_committed") from exc
+    return file_object
+
+
+def _supabase_finalized_editor_upload_result(
+    document_id: str,
+    asset: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    _supabase_assert_finalized_editor_asset_immutable(document_id, asset)
+    latest_public = supabase_get_official_editor_state(document_id, session)
+    return {
+        "asset": _editor_asset_public(asset),
+        "pages": latest_public["state"].get("pages") or [],
+        "editor_state": latest_public["state"],
+        "editor_revision": latest_public,
+    }
+
+
+def _editor_storage_cleanup_error_code(error: BaseException) -> str:
+    """Return only a bounded machine code; never persist object paths or PII."""
+    match = re.search(
+        r"\b(?:editor|supabase_storage)_[a-z0-9_]+(?::[0-9]{3})?\b",
+        str(error).lower(),
+    )
+    return match.group(0)[:96] if match else "editor_storage_cleanup_failed"
 
 
 def supabase_fail_official_editor_upload(
@@ -34650,7 +35067,9 @@ def supabase_fail_official_editor_upload(
     if asset.get("upload_status") in {"finalized", "failed", "quarantined"}:
         return {"ok": True, "idempotent": True, "asset": _editor_asset_public(asset)}
     error_code = normalized_editor_upload_failure_code(payload.get("error_code"))
-    _supabase_editor_asset_failure(asset, error_code)
+    failed_asset = _supabase_editor_asset_failure(asset, error_code)
+    if failed_asset.get("upload_status") == "finalized":
+        return {"ok": True, "idempotent": True, "asset": _editor_asset_public(failed_asset)}
     try:
         supabase_storage_delete(
             str(asset.get("storage_path") or ""),
@@ -34679,47 +35098,145 @@ def supabase_fail_official_editor_upload(
 
 
 def supabase_cleanup_stale_official_editor_uploads(*, document_id: str = "") -> Dict[str, Any]:
-    rows: List[Dict[str, Any]] = []
-    for upload_status in ("pending", "uploaded"):
-        filters: Dict[str, Any] = {"upload_status": upload_status}
+    jobs: List[Dict[str, Any]] = []
+    for status in (
+        "pending",
+        "promoting",
+        "committed",
+        "cleaning",
+        "cleanup_failed",
+    ):
+        filters: Dict[str, Any] = {"status": status}
         if document_id:
             filters["document_id"] = document_id
-        rows.extend(
+        jobs.extend(
             supabase_filter_rows(
-                "official_document_editor_assets",
+                "official_document_editor_storage_jobs",
                 filters,
-                order="created_at.asc",
+                order="token_expires_at.asc",
                 limit=500,
             )
         )
-    expired: List[str] = []
-    for asset in rows:
-        metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
-        expires_at = parse_time(str(metadata.get("expires_at") or ""))
-        if expires_at == datetime.min or expires_at >= datetime.now():
+
+    cleaned: List[str] = []
+    failed: List[str] = []
+    grace = timedelta(minutes=5)
+    for job in jobs:
+        expires_at = parse_time(str(job.get("token_expires_at") or ""))
+        if expires_at == datetime.min or expires_at + grace >= datetime.now():
             continue
-        _supabase_editor_asset_failure(asset, "editor_upload_expired")
-        try:
-            supabase_storage_delete(
-                str(asset.get("storage_path") or ""),
-                asset.get("storage_bucket") or EDOC_STORAGE_BUCKET,
+        lease_expiry = parse_time(str(job.get("lease_expires_at") or ""))
+        if (
+            str(job.get("status") or "") in {"promoting", "cleaning"}
+            and lease_expiry != datetime.min
+            and lease_expiry > datetime.now()
+        ):
+            continue
+        claimed = _supabase_claim_editor_storage_job(job, "cleaning")
+        if not claimed:
+            continue
+        job = claimed
+        asset_rows = supabase_filter_rows(
+            "official_document_editor_assets",
+            {"id": job.get("asset_id"), "document_id": job.get("document_id")},
+            limit=1,
+        )
+        asset = asset_rows[0] if asset_rows else {}
+        errors: List[str] = []
+        finalized = str(asset.get("upload_status") or "") == "finalized"
+
+        if finalized:
+            try:
+                file_object = _supabase_assert_finalized_editor_asset_immutable(
+                    str(job.get("document_id") or ""),
+                    asset,
+                )
+                if (
+                    str(job.get("final_bucket") or "") != str(asset.get("storage_bucket") or "")
+                    or str(job.get("final_path") or "") != str(asset.get("storage_path") or "")
+                    or str(job.get("final_file_object_id") or "") != str(file_object.get("id") or "")
+                    or str(job.get("expected_sha256") or "").upper() != str(asset.get("sha256") or "").upper()
+                    or int(job.get("expected_size_bytes") or 0) != int(asset.get("size_bytes") or 0)
+                ):
+                    raise ValueError("editor_storage_job_commit_mismatch")
+                supabase_storage_delete(
+                    str(job.get("staging_path") or ""),
+                    str(job.get("staging_bucket") or EDOC_STORAGE_BUCKET),
+                )
+            except Exception as cleanup_error:
+                errors.append(_editor_storage_cleanup_error_code(cleanup_error))
+        else:
+            if asset and str(asset.get("upload_status") or "") in {"pending", "uploading", "uploaded"}:
+                asset = _supabase_editor_asset_failure(asset, "editor_upload_expired")
+                finalized = str(asset.get("upload_status") or "") == "finalized"
+            if finalized:
+                errors.append("editor_storage_cleanup_finalize_race")
+            final_refs = supabase_filter_rows(
+                "file_objects",
+                {"storage_key": job.get("final_path")},
+                limit=1,
             )
-        except Exception as cleanup_error:
+            if finalized:
+                pass
+            elif final_refs:
+                errors.append("editor_orphan_cleanup_file_object_present")
+            else:
+                for bucket_key, path_key in (
+                    ("staging_bucket", "staging_path"),
+                    ("final_bucket", "final_path"),
+                ):
+                    try:
+                        supabase_storage_delete(
+                            str(job.get(path_key) or ""),
+                            str(job.get(bucket_key) or EDOC_STORAGE_BUCKET),
+                        )
+                    except Exception as cleanup_error:
+                        errors.append(_editor_storage_cleanup_error_code(cleanup_error))
+
+        next_status = "cleanup_failed" if errors else "cleaned"
+        updated = supabase_update_many(
+            "official_document_editor_storage_jobs",
+            {
+                "id": job.get("id"),
+                "status": "cleaning",
+                "lease_token": job.get("lease_token"),
+            },
+            {
+                "status": next_status,
+                "lease_token": "",
+                "lease_expires_at": "",
+                "attempt_count": int(job.get("attempt_count") or 0),
+                "last_error_code": errors[0] if errors else "",
+                "updated_at": now(),
+                "cleaned_at": None if errors else now(),
+            },
+        )
+        if not updated:
+            continue
+        if errors:
+            failed.append(str(job.get("asset_id") or ""))
             log_structured(
                 "warning",
                 "editor_upload_storage_cleanup_failed",
-                document_id=asset.get("document_id") or "",
-                asset_id=asset.get("id") or "",
-                error=redact_text(str(cleanup_error)),
+                document_id=job.get("document_id") or "",
+                asset_id=job.get("asset_id") or "",
+                error=errors[0],
             )
-        supabase_insert_official_log(
-            str(asset.get("document_id") or ""),
-            "editor_upload_expired",
-            {"id": "system", "name": "Upload Cleanup", "role": "system"},
-            f"asset_id={asset['id']};error_code=editor_upload_expired",
-        )
-        expired.append(str(asset["id"]))
-    return {"count": len(expired), "asset_ids": expired}
+            continue
+        cleaned.append(str(job.get("asset_id") or ""))
+        if asset and not finalized:
+            supabase_insert_official_log(
+                str(job.get("document_id") or ""),
+                "editor_upload_expired",
+                {"id": "system", "name": "Upload Cleanup", "role": "system"},
+                f"asset_id={job.get('asset_id')};error_code=editor_upload_expired",
+            )
+    return {
+        "count": len(cleaned),
+        "asset_ids": cleaned,
+        "failure_count": len(failed),
+        "failed_asset_ids": failed,
+    }
 
 
 def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -34729,28 +35246,37 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
     if not rows:
         raise ValueError("editor_upload_not_found")
     asset = rows[0]
+    staging_storage_path = str(asset.get("storage_path") or "")
+    storage_bucket = str(asset.get("storage_bucket") or EDOC_STORAGE_BUCKET)
     expected_asset_status = str(asset.get("upload_status") or "pending")
     if asset.get("upload_status") == "finalized":
-        latest_public = supabase_get_official_editor_state(document_id, session)
-        return {"asset": _editor_asset_public(asset), "pages": latest_public["state"].get("pages") or [], "editor_state": latest_public["state"], "editor_revision": latest_public}
+        return _supabase_finalized_editor_upload_result(document_id, asset, session)
     if asset.get("upload_status") in {"failed", "quarantined"}:
         raise ValueError("editor_upload_new_intent_required")
     try:
         data = supabase_storage_download(asset["storage_path"], asset.get("storage_bucket") or EDOC_STORAGE_BUCKET)
     except Exception:
-        _supabase_editor_asset_failure(asset, "editor_upload_incomplete")
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_upload_incomplete")
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_upload_incomplete")
     if len(data) != int(asset["size_bytes"]):
-        _supabase_editor_asset_failure(asset, "editor_upload_size_mismatch")
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_upload_size_mismatch")
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_upload_size_mismatch")
     digest = sha256_bytes(data)
     if digest != str(asset["expected_sha256"]).upper() or (payload.get("sha256") and str(payload["sha256"]).upper() != digest):
-        _supabase_editor_asset_failure(asset, "editor_upload_hash_mismatch")
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_upload_hash_mismatch")
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_upload_hash_mismatch")
     latest = _supabase_editor_latest_revision(document_id)
     metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
     if not latest or int(metadata.get("base_revision_no") or 0) != int(latest.get("revision_no") or 0):
-        _supabase_editor_asset_failure(asset, "editor_revision_conflict")
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_revision_conflict")
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_revision_conflict")
     try:
         scan_status, signature = editor_scan_bytes_for_threats(
@@ -34761,15 +35287,45 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
             expected_sha256=digest,
         )
     except ValueError as exc:
-        _supabase_editor_asset_failure(asset, str(exc), quarantine=True)
+        failed_asset = _supabase_editor_asset_failure(asset, str(exc), quarantine=True)
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise
     if scan_status != "已通過":
-        _supabase_editor_asset_failure(asset, "editor_asset_quarantined", quarantine=True)
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_asset_quarantined", quarantine=True)
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_asset_quarantined")
     try:
         inspection = inspect_editor_pdf(data) if asset["asset_kind"] in {"source_pdf", "import_pdf"} else inspect_editor_image(data, asset["mime_type"])
     except Exception:
-        _supabase_editor_asset_failure(asset, "editor_asset_preflight_failed", quarantine=True)
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_asset_preflight_failed", quarantine=True)
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
+        raise
+    try:
+        (
+            final_storage_path,
+            promotion_job_id,
+            promotion_lease_token,
+        ) = _supabase_promote_editor_asset_to_immutable_storage(
+            document_id,
+            asset,
+            data,
+            digest,
+        )
+    except ValueError as promotion_error:
+        if str(promotion_error) in {
+            "editor_immutable_asset_conflict",
+            "editor_immutable_asset_verification_failed",
+        }:
+            failed_asset = _supabase_editor_asset_failure(
+                asset,
+                str(promotion_error),
+                quarantine=True,
+            )
+            if failed_asset.get("upload_status") == "finalized":
+                return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise
     operation_digest = hashlib.sha256(
         f"{document_id}\n{upload_id}\n{digest}\n{latest['id']}".encode("utf-8")
@@ -34787,8 +35343,8 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         "id": file_id,
         "document_id": document_id,
         "file_name": asset["file_name"],
-        "storage_key": asset["storage_path"],
-        "bucket": asset.get("storage_bucket") or EDOC_STORAGE_BUCKET,
+        "storage_key": final_storage_path,
+        "bucket": storage_bucket,
         "storage_provider": "supabase",
         "mime_type": asset["mime_type"],
         "size_bytes": len(data),
@@ -34817,7 +35373,7 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
             "file_object_id": file_id,
             "file_type": "original_pdf",
             "file_name": asset["file_name"],
-            "file_storage_key": asset["storage_path"],
+            "file_storage_key": final_storage_path,
             "file_mime_type": asset["mime_type"],
             "file_size": len(data),
             "file_hash": digest,
@@ -34833,7 +35389,15 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         "scan_status": "passed",
         "preflight_status": "passed",
         "page_count": int((inspection or {}).get("pageCount") or 0),
-        "metadata_json": json.dumps({**metadata, "inspection_flags": (inspection or {}).get("flags") or {}, "renderer_version": EDOC_EDITOR_RENDERER_VERSION}, ensure_ascii=False),
+        "storage_bucket": storage_bucket,
+        "storage_path": final_storage_path,
+        "metadata_json": json.dumps({
+            **metadata,
+            "inspection_flags": (inspection or {}).get("flags") or {},
+            "renderer_version": EDOC_EDITOR_RENDERER_VERSION,
+            "promoted_at": timestamp,
+            "staging_storage_path_sha256": sha256_bytes(staging_storage_path.encode("utf-8")),
+        }, ensure_ascii=False),
         "finalized_at": timestamp,
     }
     asset = {**asset, **update}
@@ -34941,10 +35505,41 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         ):
             asset = refreshed
         elif str(refreshed.get("upload_status") or "") in {"pending", "uploaded"}:
+            _supabase_release_editor_storage_promotion(
+                promotion_job_id,
+                promotion_lease_token,
+                _editor_storage_cleanup_error_code(finalize_error),
+            )
             raise
         else:
             raise RuntimeError("editor_finalize_commit_state_unknown") from finalize_error
-    asset = {**asset, **update}
+    committed_rows = supabase_filter_rows(
+        "official_document_editor_assets",
+        {"id": upload_id, "document_id": document_id},
+        limit=1,
+    )
+    committed_asset = committed_rows[0] if committed_rows else {}
+    if (
+        committed_asset.get("upload_status") != "finalized"
+        or str(committed_asset.get("file_object_id") or "") != file_id
+        or str(committed_asset.get("sha256") or "").upper() != digest
+        or str(committed_asset.get("storage_bucket") or "") != storage_bucket
+        or str(committed_asset.get("storage_path") or "") != final_storage_path
+    ):
+        raise RuntimeError("editor_asset_immutable_path_not_committed")
+    _supabase_assert_finalized_editor_asset_immutable(document_id, committed_asset)
+    asset = committed_asset
+    if staging_storage_path and staging_storage_path != final_storage_path:
+        try:
+            supabase_storage_delete(staging_storage_path, storage_bucket)
+        except Exception as cleanup_error:
+            log_structured(
+                "warning",
+                "editor_upload_staging_cleanup_failed",
+                document_id=document_id,
+                asset_id=upload_id,
+                error=redact_text(str(cleanup_error)),
+            )
     public = _editor_revision_public(revision)
     return {"asset": _editor_asset_public(asset), "pages": inspection.get("pages") if inspection else [], "editor_state": public["state"], "editor_revision": public}
 
@@ -35018,7 +35613,21 @@ def _supabase_editor_asset_bytes(document_id: str, state: Dict[str, Any]) -> Tup
         asset = rows[0]
         if asset.get("upload_status") != "finalized" or asset.get("scan_status") != "passed" or asset.get("preflight_status") != "passed":
             raise ValueError("editor_asset_not_ready")
-        data = supabase_storage_download(asset["storage_path"], asset.get("storage_bucket") or EDOC_STORAGE_BUCKET)
+        file_object_id = str(asset.get("file_object_id") or "")
+        file_object = supabase_get("file_objects", file_object_id) if file_object_id else None
+        if not file_object:
+            raise ValueError("editor_asset_file_object_missing")
+        verify_private_storage_file_metadata(
+            asset,
+            file_object,
+            expected_document_id=document_id,
+            expected_storage_key=str(asset.get("storage_path") or ""),
+            expected_bucket=str(asset.get("storage_bucket") or EDOC_STORAGE_BUCKET),
+        )
+        data = supabase_storage_download(
+            str(file_object.get("storage_key") or ""),
+            str(file_object.get("bucket") or EDOC_STORAGE_BUCKET),
+        )
         if sha256_bytes(data) != asset["sha256"]:
             raise ValueError("editor_asset_hash_mismatch")
         result[asset_id] = data

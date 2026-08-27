@@ -27,6 +27,10 @@ declare
     || 'old.created_byisdistinctfromnew.created_byor'
     || 'old.created_atisdistinctfromnew.created_at';
 begin
+  if pg_catalog.current_setting('server_version_num')::integer < 160000 then
+    raise exception 'runtime_schema_postgres_16_required';
+  end if;
+
   foreach v_table_name in array array[
     'inbound_document_attachments',
     'internal_dispatches',
@@ -37,6 +41,7 @@ begin
     'official_document_text_overlays',
     'official_document_editor_revisions',
     'official_document_editor_assets',
+    'official_document_editor_storage_jobs',
     'official_document_dispatch_events',
     'official_document_archive_exports',
     'official_workflow_delegations'
@@ -97,6 +102,44 @@ begin
     end if;
   end loop;
 
+  -- Lifecycle rows contain private staging/final object references. RLS is
+  -- forced as defense in depth even though browser table grants are revoked.
+  if not exists (
+    select 1
+    from pg_catalog.pg_class relation_row
+    where relation_row.oid =
+      'public.official_document_editor_storage_jobs'::pg_catalog.regclass
+      and relation_row.relrowsecurity
+      and relation_row.relforcerowsecurity
+  ) then
+    raise exception 'runtime_schema_editor_storage_jobs_rls_not_forced';
+  end if;
+
+  if 2 <> (
+    select pg_catalog.count(*)
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'official_document_editor_storage_jobs'
+      and (column_name, data_type, is_nullable) in (
+        ('lease_token', 'text', 'NO'),
+        ('lease_expires_at', 'text', 'NO')
+      )
+  ) then
+    raise exception 'runtime_schema_editor_storage_job_lease_columns_missing';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_constraint constraint_row
+    where constraint_row.conrelid =
+      'public.official_document_editor_storage_jobs'::pg_catalog.regclass
+      and constraint_row.conname = 'official_editor_storage_job_lease_check'
+      and constraint_row.contype = 'c'
+      and constraint_row.convalidated
+  ) then
+    raise exception 'runtime_schema_editor_storage_job_lease_constraint_missing';
+  end if;
+
   -- Legacy seal locking updates existing placements before submission, while
   -- draft replacement deletes and recreates the placement set.
   v_table_oid := 'public.official_document_stamp_positions'::regclass;
@@ -125,7 +168,8 @@ begin
   foreach v_table_name in array array[
     'internal_dispatches',
     'internal_dispatch_recipients',
-    'official_document_editor_assets'
+    'official_document_editor_assets',
+    'official_document_editor_storage_jobs'
   ]
   loop
     v_table_oid := pg_catalog.to_regclass(
@@ -394,6 +438,106 @@ begin
     raise exception 'runtime_schema_dispatch_event_capture_trigger_invalid';
   end if;
 
+  if pg_catalog.to_regprocedure(
+       'public.edoc_bind_finalized_editor_asset_storage()'
+     ) is null
+     or 1 <> (
+       select pg_catalog.count(*)
+       from pg_catalog.pg_trigger trigger_row
+       where trigger_row.tgrelid =
+         'public.official_document_editor_assets'::pg_catalog.regclass
+         and trigger_row.tgfoid =
+           'public.edoc_bind_finalized_editor_asset_storage()'::pg_catalog.regprocedure
+         and trigger_row.tgname = 'trg_edoc_bind_finalized_editor_asset_storage'
+         and trigger_row.tgenabled = 'O'
+         and trigger_row.tgtype = 31
+         and not trigger_row.tgisinternal
+     ) then
+    raise exception 'runtime_schema_editor_immutable_storage_trigger_invalid';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_proc function_row
+    where function_row.oid = pg_catalog.to_regprocedure(
+      'public.edoc_bind_finalized_editor_asset_storage()'
+    )
+      and function_row.prosecdef
+      and pg_catalog.pg_get_userbyid(function_row.proowner) = 'postgres'
+      and exists (
+        select 1
+        from pg_catalog.unnest(coalesce(function_row.proconfig, array[]::text[])) config(value)
+        where config.value in ('search_path=', 'search_path=""')
+      )
+      and not exists (
+        select 1
+        from pg_catalog.aclexplode(
+          coalesce(
+            function_row.proacl,
+            pg_catalog.acldefault('f', function_row.proowner)
+          )
+        ) privilege_row
+        where privilege_row.privilege_type = 'EXECUTE'
+          and (
+            privilege_row.grantee = 0
+            or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+              in ('anon', 'authenticated', 'service_role')
+          )
+      )
+  ) then
+    raise exception 'runtime_schema_editor_immutable_function_security_invalid';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+       'public.edoc_guard_editor_storage_job()'
+     ) is null
+     or 1 <> (
+       select pg_catalog.count(*)
+       from pg_catalog.pg_trigger trigger_row
+       where trigger_row.tgrelid =
+         'public.official_document_editor_storage_jobs'::pg_catalog.regclass
+         and trigger_row.tgfoid =
+           'public.edoc_guard_editor_storage_job()'::pg_catalog.regprocedure
+         and trigger_row.tgname = 'trg_edoc_guard_editor_storage_job'
+         and trigger_row.tgenabled = 'O'
+         and trigger_row.tgtype = 23
+         and not trigger_row.tgisinternal
+     ) then
+    raise exception 'runtime_schema_editor_storage_job_guard_invalid';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_proc function_row
+    where function_row.oid = pg_catalog.to_regprocedure(
+      'public.edoc_guard_editor_storage_job()'
+    )
+      and not function_row.prosecdef
+      and pg_catalog.pg_get_userbyid(function_row.proowner) = 'postgres'
+      and exists (
+        select 1
+        from pg_catalog.unnest(coalesce(function_row.proconfig, array[]::text[])) config(value)
+        where config.value in ('search_path=', 'search_path=""')
+      )
+      and not exists (
+        select 1
+        from pg_catalog.aclexplode(
+          coalesce(
+            function_row.proacl,
+            pg_catalog.acldefault('f', function_row.proowner)
+          )
+        ) privilege_row
+        where privilege_row.privilege_type = 'EXECUTE'
+          and (
+            privilege_row.grantee = 0
+            or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+              in ('anon', 'authenticated', 'service_role')
+          )
+      )
+  ) then
+    raise exception 'runtime_schema_editor_storage_job_guard_security_invalid';
+  end if;
+
   if exists (
     select required.index_name
     from (
@@ -416,13 +560,24 @@ begin
         ('idx_official_editor_revisions_parent'),
         ('idx_official_editor_assets_document'),
         ('idx_official_editor_assets_revision'),
+        ('idx_official_editor_storage_jobs_due'),
+        ('idx_official_editor_storage_jobs_document'),
+        ('idx_official_editor_storage_jobs_final_file'),
         ('idx_official_dispatch_events_document_created'),
         ('idx_official_archive_exports_document_created'),
         ('idx_official_archive_exports_requested_by')
     ) as required(index_name)
-    where pg_catalog.to_regclass(
-      pg_catalog.format('%I.%I', 'public', required.index_name)
-    ) is null
+    left join pg_catalog.pg_class index_relation
+      on index_relation.oid = pg_catalog.to_regclass(
+        pg_catalog.format('%I.%I', 'public', required.index_name)
+      )
+    left join pg_catalog.pg_index index_row
+      on index_row.indexrelid = index_relation.oid
+    where index_relation.oid is null
+       or index_row.indexrelid is null
+       or not index_row.indisvalid
+       or not index_row.indisready
+       or not index_row.indislive
   ) then
     raise exception 'runtime_schema_required_index_missing';
   end if;

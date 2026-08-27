@@ -24575,7 +24575,9 @@ function editorTusIntentHeaders(intent = {}) {
     error.retryable = true;
     throw error;
   }
-  const headers = { "x-signature": signature, "x-upsert": "false" };
+  // Supabase defines overwrite as an explicit x-upsert:true opt-in.  A
+  // create-only signed upload omits that header entirely.
+  const headers = { "x-signature": signature };
   const declaredPublicKey = String(intent.storage_publishable_key || intent.publishable_key || intent.apikey || "").trim();
   const publicKey = supabasePublishableStorageKey(intent);
   if (declaredPublicKey && !publicKey) {

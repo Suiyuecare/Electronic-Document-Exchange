@@ -48,6 +48,7 @@
     "20260827063824_lock_runtime_table_data_api_grants.sql",
     "20260827064100_remove_fresh_finance_bootstrap_sentinel.sql",
     "20260827101441_capture_official_dispatch_events.sql",
-    "20260827101636_avoid_postgrest_business_conflict_retries.sql"
+    "20260827101636_avoid_postgrest_business_conflict_retries.sql",
+    "20260827194500_promote_editor_tus_staging_to_immutable.sql"
   ]
 }

@@ -277,6 +277,153 @@ class GoLiveAuditTestCase(unittest.TestCase):
             for route in readiness["routeChecks"]
         ]))
 
+    def test_account_readiness_fails_closed_when_department_head_check_is_missing(self) -> None:
+        checked_roles = ["員工", "主管", "行政部主任", "總務", "業務助理"]
+        launch_smoke = {
+            "accessReadiness": {
+                "counts": {
+                    "activeUserCount": len(checked_roles),
+                    "demoAccountsDisabled": True,
+                    "demoAccountsExplicitlyDisabled": True,
+                    "demoAccountsSafeDefault": False,
+                    "demoSeedUserCount": 0,
+                },
+                "roleChecks": [
+                    {
+                        "role": role,
+                        "activeCount": 1,
+                        "formalAccountCount": 1,
+                        "demoSeedCount": 0,
+                        "hasActiveUser": True,
+                        "hasFormalAccount": True,
+                    }
+                    for role in checked_roles
+                ],
+            }
+        }
+        with mock.patch.object(
+            backend,
+            "current_go_live_audit_report",
+            return_value={
+                "launchScope": "internal_official",
+                "internalGo": False,
+                "launchSmokeReport": launch_smoke,
+            },
+        ):
+            package = backend.current_account_readiness_package()
+
+        department_head = next(
+            item for item in package["roleChecks"] if item["role"] == "主任"
+        )
+        self.assertEqual(package["requiredRoleCount"], 5)
+        self.assertEqual(package["missingFormalRoleCount"], 1)
+        self.assertEqual(package["decision"], "BLOCKED")
+        self.assertTrue(department_head["required"])
+        self.assertEqual(department_head["severity"], "blocker")
+        self.assertTrue(any("主任" in item for item in package["sourceBlockers"]))
+
+    def test_account_readiness_keeps_optional_assistant_as_warning(self) -> None:
+        required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+        launch_smoke = {
+            "accessReadiness": {
+                "counts": {
+                    "activeUserCount": len(required_roles),
+                    "demoAccountsDisabled": True,
+                    "demoAccountsExplicitlyDisabled": True,
+                    "demoAccountsSafeDefault": False,
+                    "demoSeedUserCount": 0,
+                },
+                "roleChecks": [
+                    {
+                        "role": role,
+                        "activeCount": 1,
+                        "formalAccountCount": 1,
+                        "demoSeedCount": 0,
+                        "hasActiveUser": True,
+                        "hasFormalAccount": True,
+                    }
+                    for role in required_roles
+                ],
+            }
+        }
+        with mock.patch.object(
+            backend,
+            "current_go_live_audit_report",
+            return_value={
+                "launchScope": "internal_official",
+                "internalGo": True,
+                "launchSmokeReport": launch_smoke,
+            },
+        ):
+            package = backend.current_account_readiness_package()
+
+        assistant = next(
+            item for item in package["roleChecks"] if item["role"] == "業務助理"
+        )
+        self.assertEqual(package["requiredRoleCount"], 5)
+        self.assertEqual(package["readyRequiredRoleCount"], 5)
+        self.assertEqual(package["missingFormalRoleCount"], 0)
+        self.assertEqual(package["sourceBlockerCount"], 0)
+        self.assertEqual(package["blockerCount"], 0)
+        self.assertFalse(assistant["required"])
+        self.assertEqual(assistant["severity"], "warning")
+
+    def test_account_readiness_rejects_conflicting_duplicate_required_role(self) -> None:
+        role_checks = [
+            {
+                "role": role,
+                "activeCount": 1,
+                "formalAccountCount": 1,
+                "demoSeedCount": 0,
+                "hasActiveUser": True,
+                "hasFormalAccount": True,
+            }
+            for role in ["員工", "主管", "主任", "行政部主任", "總務", "業務助理"]
+        ]
+        role_checks.append({
+            "role": "主任",
+            "activeCount": 0,
+            "formalAccountCount": 0,
+            "demoSeedCount": 0,
+            "hasActiveUser": False,
+            "hasFormalAccount": False,
+        })
+        with mock.patch.object(
+            backend,
+            "current_go_live_audit_report",
+            return_value={
+                "launchScope": "internal_official",
+                "internalGo": False,
+                "launchSmokeReport": {
+                    "accessReadiness": {
+                        "counts": {
+                            "activeUserCount": 6,
+                            "demoAccountsDisabled": True,
+                            "demoAccountsExplicitlyDisabled": True,
+                        },
+                        "roleChecks": role_checks,
+                    }
+                },
+            },
+        ):
+            package = backend.current_account_readiness_package()
+
+        department_head = next(
+            item for item in package["roleChecks"] if item["role"] == "主任"
+        )
+        self.assertEqual(package["decision"], "BLOCKED")
+        self.assertEqual(package["missingFormalRoleCount"], 1)
+        self.assertFalse(department_head["hasFormalAccount"])
+        self.assertTrue(any("互相矛盾" in item for item in package["sourceBlockers"]))
+
+    def test_cutover_package_requires_all_five_formal_roles(self) -> None:
+        source = inspect.getsource(backend.current_production_cutover_readiness_package)
+        self.assertIn(
+            'cutover_required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]',
+            source,
+        )
+        self.assertIn("len(signatures) > 1", source)
+
     def test_supabase_readiness_reports_non_seal_completion_separately(self) -> None:
         role_counts = {
             role: 1

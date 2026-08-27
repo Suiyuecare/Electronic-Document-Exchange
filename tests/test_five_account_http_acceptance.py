@@ -148,7 +148,7 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         cls.snapshots_by_email, cls.identity_by_email = cls._build_finance_snapshots()
         cls.av_scan_count = 0
         cls.av_quarantine_count = 0
-        cls.tus_duplicate_write_rejections = 0
+        cls.tus_replay_isolations = 0
         cls.private_storage_denials = 0
         cls.finalize_replay_idempotent_count = 0
         cls.failed_intent_replay_rejections = 0
@@ -297,7 +297,6 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
                 "cache_control": "0",
                 "headers": {
                     "x-signature": upload_token,
-                    "x-upsert": "false",
                     "Cache-Control": "no-store",
                 },
                 "metadata": {
@@ -703,7 +702,6 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         base_headers = {
             "apikey": cls.local_supabase_anon_key,
             "x-signature": signature,
-            "x-upsert": "false",
             "Tus-Resumable": "1.0.0",
         }
         create_headers = {
@@ -772,39 +770,123 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         if int(cls._header(completed, "Upload-Offset") or -1) != len(data):
             raise AssertionError("local_supabase_tus_complete_offset_mismatch")
 
-        reused = cls._storage_request("POST", endpoint, headers=create_headers)
-        if reused.status == 201:
-            reused_location = cls._header(reused, "Location")
-            if not reused_location:
-                raise AssertionError("local_supabase_tus_duplicate_location_missing")
-            reused_url = urllib.parse.urljoin(endpoint, reused_location)
-            reused_patch = cls._storage_request(
+        cls._assert_private_storage_denied(
+            metadata_values["bucketName"], metadata_values["objectName"]
+        )
+        return {"uploadUrl": upload_url, "offset": len(data)}
+
+    @classmethod
+    def _assert_tus_replay_cannot_mutate_finalized_asset(
+        cls,
+        intent: dict[str, Any],
+        original_data: bytes,
+        document_id: str,
+    ) -> None:
+        """Replay a still-valid capability with different bytes after finalize.
+
+        Supabase signed upload tokens are expiring, not cryptographically
+        single-use.  The invariant that matters is that the finalized file
+        object has already been promoted away from the capability-writable
+        staging path.
+        """
+        upload_id = str(intent.get("upload_id") or "")
+        with backend.connect() as conn:
+            before_asset = conn.execute(
+                "SELECT file_object_id, storage_bucket, storage_path, sha256, "
+                "upload_status FROM official_document_editor_assets "
+                "WHERE id = ? AND document_id = ?",
+                (upload_id, document_id),
+            ).fetchone()
+            if not before_asset or before_asset["upload_status"] != "finalized":
+                raise AssertionError("local_supabase_tus_finalized_asset_missing")
+            before_object, before_bytes = backend.read_file_object_bytes(
+                conn,
+                str(before_asset["file_object_id"]),
+            )
+        if before_bytes != original_data or backend.sha256_bytes(before_bytes) != str(before_asset["sha256"]):
+            raise AssertionError("local_supabase_tus_finalized_asset_hash_invalid")
+
+        endpoint = str(intent.get("upload_url") or "")
+        signature = str(intent.get("upload_token") or "")
+        metadata_values = {
+            "bucketName": str(intent.get("bucket") or ""),
+            "objectName": str(intent.get("path") or ""),
+            "contentType": str(intent.get("content_type") or ""),
+            "cacheControl": str(intent.get("cache_control") or "0"),
+        }
+        upload_metadata = ",".join(
+            f"{key} {base64.b64encode(value.encode('utf-8')).decode('ascii')}"
+            for key, value in metadata_values.items()
+        )
+        altered = b"X" + original_data[1:]
+        if len(altered) != len(original_data) or altered == original_data:
+            raise AssertionError("local_supabase_tus_replay_fixture_invalid")
+        base_headers = {
+            "apikey": cls.local_supabase_anon_key,
+            "x-signature": signature,
+            "Tus-Resumable": "1.0.0",
+        }
+        replay_create = cls._storage_request(
+            "POST",
+            endpoint,
+            headers={
+                **base_headers,
+                "Upload-Length": str(len(altered)),
+                "Upload-Metadata": upload_metadata,
+            },
+        )
+        replay_wrote_staging = False
+        if replay_create.status == 201:
+            location = cls._header(replay_create, "Location")
+            if not location:
+                raise AssertionError("local_supabase_tus_replay_location_missing")
+            replay_patch = cls._storage_request(
                 "PATCH",
-                reused_url,
+                urllib.parse.urljoin(endpoint, location),
                 headers={
                     **base_headers,
                     "Upload-Offset": "0",
                     "Content-Type": "application/offset+octet-stream",
                 },
-                body=data,
+                body=altered,
             )
-            if 200 <= reused_patch.status < 300:
+            if 200 <= replay_patch.status < 300:
+                replay_wrote_staging = True
+            elif not 400 <= replay_patch.status < 500:
                 raise AssertionError(
-                    "local_supabase_tus_duplicate_write_overwrote_object"
+                    f"local_supabase_tus_replay_unexpected:{replay_patch.status}"
                 )
-            if not 400 <= reused_patch.status < 500:
-                raise AssertionError(
-                    f"local_supabase_tus_duplicate_write_unexpected:{reused_patch.status}"
-                )
-        elif not 400 <= reused.status < 500:
+        elif not 400 <= replay_create.status < 500:
             raise AssertionError(
-                f"local_supabase_tus_duplicate_write_not_rejected:{reused.status}"
+                f"local_supabase_tus_replay_create_unexpected:{replay_create.status}"
             )
-        cls.tus_duplicate_write_rejections += 1
-        cls._assert_private_storage_denied(
-            metadata_values["bucketName"], metadata_values["objectName"]
-        )
-        return {"uploadUrl": upload_url, "offset": len(data)}
+
+        with backend.connect() as conn:
+            after_asset = conn.execute(
+                "SELECT file_object_id, storage_bucket, storage_path, sha256, "
+                "upload_status FROM official_document_editor_assets "
+                "WHERE id = ? AND document_id = ?",
+                (upload_id, document_id),
+            ).fetchone()
+            if not after_asset:
+                raise AssertionError("local_supabase_tus_finalized_asset_disappeared")
+            after_object, after_bytes = backend.read_file_object_bytes(
+                conn,
+                str(after_asset["file_object_id"]),
+            )
+        if (
+            tuple(before_asset) != tuple(after_asset)
+            or str(before_object.get("id") or "") != str(after_object.get("id") or "")
+            or before_bytes != after_bytes
+            or backend.sha256_bytes(after_bytes) != str(after_asset["sha256"])
+        ):
+            raise AssertionError("local_supabase_tus_replay_mutated_finalized_asset")
+        if replay_wrote_staging:
+            backend.supabase_storage_delete(
+                metadata_values["objectName"],
+                metadata_values["bucketName"],
+            )
+        cls.tus_replay_isolations += 1
 
     @classmethod
     def _assert_private_storage_denied(cls, bucket: str, storage_path: str) -> None:
@@ -1124,6 +1206,12 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
             token=applicant_token,
             json_body={"sha256": source_hash},
         )
+        if cls.upload_protocol == "local_supabase_tus":
+            cls._assert_tus_replay_cannot_mutate_finalized_asset(
+                upload_intent,
+                source_pdf,
+                document_id,
+            )
         revision = finalized["editor_revision"]
         finalize_replay = cls._expect_json(
             "POST",
@@ -1401,8 +1489,8 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
                 "crossCompanyDenial": True,
                 "tus": using_tus,
                 "signedTusCapability": using_tus,
-                "duplicateWriteRejectedWhileObjectExists": (
-                    cls.tus_duplicate_write_rejections >= 5 if using_tus else False
+                "stagingReplayCannotMutateFinalizedAsset": (
+                    cls.tus_replay_isolations >= 5 if using_tus else False
                 ),
                 "finalizeReplayIdempotentWithoutNewRevision": (
                     cls.finalize_replay_idempotent_count == 5
@@ -1418,7 +1506,7 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
                 "malwareFixtureRejected": cls.av_quarantine_count > 0 if using_tus else False,
             },
             "limitations": ([
-                "The signed Storage token is path-scoped and expiring; this suite proves duplicate writes are rejected while the object exists, not that the token is cryptographically single-use after object deletion.",
+                "The signed Storage token is path-scoped and expiring rather than cryptographically single-use; the suite replays different bytes and proves the finalized file remains isolated from the staging path.",
                 "The application upload intent is finalized idempotently without creating a second revision; quarantined intent replay is rejected and requires a new intent.",
                 "The production Finance endpoint, production AV transport, real Seal Vault files, and formal exchange provider are intentionally not contacted.",
                 "This HTTP suite does not replace browser visual/device acceptance.",

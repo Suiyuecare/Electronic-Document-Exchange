@@ -307,7 +307,7 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
             "upload_status": "pending",
             "metadata_json": "{}",
             "storage_path": "editor/OD-1/a.pdf",
-            "storage_bucket": "private",
+            "storage_bucket": backend.EDOC_STORAGE_BUCKET,
         }
         failed = {**pending, "upload_status": "failed"}
         patches = []
@@ -325,8 +325,8 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
             side_effect=[[pending], [failed]],
         ), mock.patch.object(
             backend,
-            "supabase_patch",
-            side_effect=lambda table, item_id, payload: patches.append(payload) or payload,
+            "supabase_update_many",
+            side_effect=lambda table, filters, payload: patches.append(payload) or [{**pending, **payload}],
         ), mock.patch.object(
             backend,
             "supabase_storage_delete",
@@ -591,7 +591,7 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
             "mime_type": "image/png",
             "size_bytes": len(data),
             "expected_sha256": digest,
-            "storage_bucket": "private",
+            "storage_bucket": backend.EDOC_STORAGE_BUCKET,
             "storage_path": "editor/OD-1/image.png",
             "upload_status": "pending",
             "metadata_json": json.dumps({"base_revision_no": 1}),
@@ -600,7 +600,50 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
         operation_digest = backend.hashlib.sha256(
             f"OD-1\nASSET-1\n{digest}\nREV-1".encode("utf-8")
         ).hexdigest().upper()
+        deterministic_file_id = f"FILE-EFIN-{operation_digest[:32]}"
         deterministic_revision_id = f"ODREV-EFIN-{operation_digest[:32]}"
+        final_storage_path = backend._supabase_editor_immutable_storage_path(
+            "OD-1",
+            asset,
+            digest,
+        )
+        storage_job = {
+            "id": "EDOC-STORAGE-ASSET-1",
+            "asset_id": "ASSET-1",
+            "document_id": "OD-1",
+            "staging_bucket": backend.EDOC_STORAGE_BUCKET,
+            "staging_path": asset["storage_path"],
+            "final_bucket": backend.EDOC_STORAGE_BUCKET,
+            "final_path": final_storage_path,
+            "expected_sha256": digest,
+            "expected_size_bytes": len(data),
+            "status": "pending",
+            "lease_token": "",
+            "lease_expires_at": "",
+            "attempt_count": 0,
+        }
+        promoting_job = {
+            **storage_job,
+            "status": "promoting",
+            "lease_token": "A" * 32,
+            "lease_expires_at": "2099-01-01T00:00:00",
+            "attempt_count": 1,
+        }
+        committed_asset = {
+            **asset,
+            "file_object_id": deterministic_file_id,
+            "sha256": digest,
+            "storage_path": final_storage_path,
+            "upload_status": "finalized",
+        }
+        committed_file_object = {
+            "id": deterministic_file_id,
+            "document_id": "OD-1",
+            "storage_key": final_storage_path,
+            "bucket": backend.EDOC_STORAGE_BUCKET,
+            "sha256": digest,
+            "size_bytes": len(data),
+        }
         revision = {
             "id": deterministic_revision_id,
             "document_id": "OD-1",
@@ -653,11 +696,28 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
         ), mock.patch.object(
             backend,
             "supabase_filter_rows",
-            return_value=[asset],
+            side_effect=[[asset], [storage_job], [committed_asset]],
         ), mock.patch.object(
             backend,
             "supabase_storage_download",
             return_value=data,
+        ), mock.patch.object(
+            backend,
+            "_supabase_claim_editor_storage_job",
+            return_value=promoting_job,
+        ), mock.patch.object(
+            backend,
+            "supabase_get",
+            return_value=committed_file_object,
+        ), mock.patch.object(
+            backend,
+            "supabase_storage_upload",
+        ) as storage_upload, mock.patch.object(
+            backend,
+            "supabase_storage_delete",
+        ) as storage_delete, mock.patch.object(
+            backend,
+            "log_structured",
         ), mock.patch.object(
             backend,
             "_supabase_editor_latest_revision",
@@ -701,6 +761,8 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
         self.assertEqual(rpc_payload["expected_asset_sha256"], digest)
         self.assertEqual(rpc_payload["revision"]["parent_revision_id"], "REV-1")
         self.assertEqual(rpc_payload["file_object"]["created_by"], "FIN-U1")
+        self.assertEqual(rpc_payload["file_object"]["storage_key"], final_storage_path)
+        self.assertEqual(rpc_payload["asset_patch"]["storage_path"], final_storage_path)
         self.assertIsNone(rpc_payload["file_object"]["signed_url_expires_at"])
         self.assertIsNone(rpc_payload["file_object"]["last_download_at"])
         self.assertEqual(
@@ -709,6 +771,16 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
         )
         insert.assert_not_called()
         patch.assert_not_called()
+        storage_upload.assert_called_once_with(
+            final_storage_path,
+            data,
+            "image/png",
+            backend.EDOC_STORAGE_BUCKET,
+        )
+        storage_delete.assert_called_once_with(
+            "editor/OD-1/image.png",
+            backend.EDOC_STORAGE_BUCKET,
+        )
 
 
 if __name__ == "__main__":

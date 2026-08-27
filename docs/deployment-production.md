@@ -32,9 +32,11 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
    - **全新空白 project**：`roles.sql` 必須先於歷史 migration chain 載入。先執行 `python3 tools/supabase_main_migration_push.py fresh-empty --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才在同一命令加 `--apply`。wrapper 只有在遠端 migration 歷程為空時才會加入 `supabase db push --include-roles`，否則拒絕。
    - **既有 project**：執行 `python3 tools/supabase_main_migration_push.py existing --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才加 `--apply`。此路徑永不加入 `--include-roles`，也不得手動重跑 `roles.sql`，避免在移除 migration 已通過後重新插入 fresh-only sentinel。
    - wrapper 只接受 Supabase CLI `2.116.0`，並用唯讀 `db query` JSON 介面驗證 migration table 與版本。`fresh-empty` 還要求 public 非 extension 物件、Auth 使用者、Storage buckets/objects 全部為 0；CLI 版本、查詢格式、linked ref 或遠端狀態無法確認時一律停止，不猜測 fresh／existing。
-5. 歷程一致後，先於隔離環境完整 reset／重建並執行 `fresh_bootstrap_smoke.sql`、`runtime_schema_parity_smoke.sql`、`service_role_data_api_grant_smoke.sql` 及五帳號驗收。
-6. 取得資料庫備份、指定回復點與人工變更核准後，才依核准路徑套用正式 migrations。
-7. 執行 `supabase/verification/production_cutover_checks.sql`；所有 required table/RPC、RLS、grant 與 demo-data 檢查必須通過，且 `fresh_finance_bootstrap_sentinel` 必須為 0。
+5. 歷程一致後，先確認 linked project 的 PostgreSQL major version 至少為 16（本 repository 的 `supabase/config.toml` 鎖定 17；Storage lifecycle 約束使用 `pg_input_is_valid`，舊版不得發布），再於隔離環境完整 reset／重建並執行 `fresh_bootstrap_smoke.sql`、`runtime_schema_parity_smoke.sql`、`service_role_data_api_grant_smoke.sql` 及五帳號驗收。
+6. 取得資料庫備份、指定回復點與人工變更核准後，才依核准路徑套用正式 migrations。既有 project 在套用 `20260827194500_promote_editor_tus_staging_to_immutable.sql` 前，必須先暫停 PDF Editor 的新建上傳與 finalize、等待在途請求與最晚一枚 signed TUS capability 失效。操作人員先以不輸出 credential 的方式，核對目前 server environment 的主資料庫與專用 Storage project ref 都等於核准變更單，再執行 `python3 scripts/verify_editor_storage_assets.py --acknowledge-private-document-download`；URL 與 service-role key 只能來自 server environment，不得寫入命令、shell history 或證據檔。工具必須 exit 0，且 aggregate JSON 為 `passed=true`、`invalidAssetCount=0`，不得輸出 path、檔名、hash、document ID 或文件內容。接著才以唯讀方式執行 `supabase/verification/editor_storage_promotion_preflight.sql`；`checkedAssetCount` 必須精確等於 SQL 的 `finalized_editor_asset_count`，且 `active_editor_upload_count=0`、`finalized_assets_requiring_byte_promotion=0`、`nonfinalized_assets_without_durable_job_input=0`，最後回傳 `editor_storage_promotion_preflight_ok` 才可繼續。若任一 gate 阻擋，先依變更單完成可稽核的 Storage bytes 搬移／清理，禁止只改資料庫 path、跳過檢查或把 metadata 相符當成 bytes 已驗證。
+7. migration 套用後仍維持 PDF Editor 維護狀態，先執行 `python3 scripts/verify_editor_storage_assets.py --acknowledge-private-document-download --post-migration`，再次要求 exit 0、`passed=true`、`invalidAssetCount=0`，並確認 `checkedAssetCount` 與 pre-migration 證據一致；此階段同時驗證已建立的 storage job 綁定。接著部署相容版本的後端，以既有 server-side `CRON_SECRET` 觸發受保護的 `/api/cron/run-due` cleanup，確認沒有 `cleanup_failed` 後，再執行 `fresh_bootstrap_smoke.sql`（fresh 隔離環境）、`runtime_schema_parity_smoke.sql` 與 `service_role_data_api_grant_smoke.sql`。不可在舊後端仍會建立「沒有 storage job 的 upload intent」時重開上傳，也不可為通過 cutover 直接人工把 job 狀態改成 `cleaned`。
+8. 執行 `supabase/verification/production_cutover_checks.sql`；所有 required table/RPC、RLS、grant 與 demo-data 檢查必須通過，`fresh_finance_bootstrap_sentinel`、`invalid_finalized_editor_assets`、`invalid_editor_storage_jobs`、`active_editor_storage_job_leases`、`expired_editor_storage_job_leases`、已逾期的 `editor_storage_cleanup_backlog` 必須為 0，且 immutable trigger/function 檢查必須為 true。`promoting`／`cleaning` 使用五分鐘 durable lease 與 compare-and-set；部署或回復時不得略過有效 lease，也不得把過期 lease 直接標為成功，必須由 cleanup worker 接管並完成或留下 bounded machine error code。
+9. 以隔離的五個正式測試帳號完成 TUS 上傳、finalize、簽核、用印、收件與下載；另以不同 bytes 重播尚未到期的 staging capability，確認 `editor-final/` 的 path、hash 與下載內容不變。證據完成後才解除 PDF Editor 維護狀態。
 
 `supabase/recovery/complete_edoc_runtime_recovery_20260827.sql` 是 2026-08-27 的唯讀災難復原快照，不在 `supabase/migrations`、不在 migration manifest，也不得用 `supabase db push` 套到既有正式資料庫。可線性部署的主資料庫變更只有 manifest 內的純 forward migrations；本次相關檔案依序為：
 
@@ -47,6 +49,7 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
 7. `20260827064100_remove_fresh_finance_bootstrap_sentinel.sql`：只在全新 reset 存在完整結構性 sentinel 且沒有任何引用時移除；既有環境沒有該列時為精確 no-op。
 8. `20260827101441_capture_official_dispatch_events.sql`：以後端私有 trigger 將寄送紀錄建立、欄位異動與狀態轉換寫入不可變事件；既有寄送紀錄只建立 baseline snapshot，不臆造歷史事件，並禁止改掛公文、改寫建立者或建立時間。
 9. `20260827101636_avoid_postgrest_business_conflict_retries.sql`：把公開 RPC 人工拋出的業務／樂觀鎖衝突改為 `PT409`，避免舊版 PostgREST 將 `40001` 當成可重試序列化失敗而使請求逾時，也讓人工 `23505` 與真正 constraint violation 分流；資料庫真正產生的序列化失敗與唯一鍵衝突仍維持原本行為。
+10. `20260827194500_promote_editor_tus_staging_to_immutable.sql`：建立後端專用的 Storage lifecycle job 與 promotion／cleanup durable lease、將 finalize 原子綁定至 `editor-final/` 不可變物件，並鎖定已 finalized asset（包含禁止刪除）。既有 finalized staging asset 無法由 SQL 安全搬移 bytes，必須先通過 `editor_storage_promotion_preflight.sql`；不得把 migration 的 fail-closed 例外當成可略過的警告。
 
 這些檔案仍須先在與正式 schema 相同的隔離環境完成 `supabase db reset`、RPC smoke 與安全檢查，並逐檔取得人工核准；拆成 forward migration 不代表可以略過備份、回復點或變更審查。
 
@@ -97,15 +100,23 @@ EDOC_SIGNED_URL_TTL_SECONDS=300
 EDOC_FILE_ENCRYPTION_ENABLED=true
 EDOC_FILE_ENCRYPTION_KEY=<server-only>
 EDOC_SCAN_ENGINE=ClamAV-compatible
-EDOC_AV_PROVIDER=<approved-provider>
-EDOC_AV_ENDPOINT=<approved-private-endpoint>
-EDOC_AV_API_KEY=<server-only>
+EDOC_AV_PROVIDER=vercel-sandbox-clamav-v1
+EDOC_AV_SANDBOX_SNAPSHOT_ID=<approved-snap_id>
+EDOC_AV_SANDBOX_PROJECT_ID=<optional-vercel-project-id>
+EDOC_AV_TIMEOUT_SECONDS=120
+EDOC_AV_SMOKE_SECRET=<server-only-random-32-byte-secret>
+# Legacy HTTPS HMAC alternative only when separately approved:
+# EDOC_AV_PROVIDER=edoc-clamav-https-v1
+# EDOC_AV_ENDPOINT=https://<approved-private-endpoint>/v1/scan
+# EDOC_AV_API_KEY=<server-only-32-byte-minimum>
 EDOC_MAX_FILE_SIZE_MB=100
 CRON_SECRET=<server-only>
 APP_SECRET=<server-only>
 ```
 
 `EDOC_STORAGE_PUBLISHABLE_KEY` 只用於專用 Storage 的可公開 client identification；上傳授權仍須由後端核發。`EDOC_STORAGE_SERVICE_ROLE_KEY` 與主資料庫的 `SUPABASE_SERVICE_ROLE_KEY` 必須分開保存、分開輪替，且只存在 server-side environment。
+
+PDF Editor 的 signed TUS 只可寫入 `editor/` 暫存路徑。Finalize 完成大小、SHA-256、掃毒與 PDF／圖片解析後，後端必須把已驗證 bytes 以 service role 建立在 `editor-final/<document>/<asset>/` 不可變路徑；migration `20260827194500_promote_editor_tus_staging_to_immutable.sql` 會在同一筆資料庫交易中將 asset 與 file object 綁到正式路徑，成功後才清除暫存。正式驗收不得把短效 Storage token 宣稱為密碼學上的一次性 token，而要用不同內容重播，確認正式檔案的路徑、hash 與下載內容完全不變。
 
 正式通知的最低可上線基準是站內通知。Email 與 LINE 為選配，未提供並驗證下列環境變數時必須保持 disabled/pending，不可放假值或把「待驗證」視為成功：
 
@@ -137,7 +148,9 @@ vercel env add EDOC_STORAGE_SERVICE_ROLE_KEY production --sensitive
 vercel env add EDOC_STORAGE_PUBLISHABLE_KEY production
 vercel env add EDOC_STORAGE_BUCKET production
 vercel env add EDOC_FILE_ENCRYPTION_KEY production --sensitive
-vercel env add EDOC_AV_API_KEY production --sensitive
+vercel env add EDOC_AV_PROVIDER production
+vercel env add EDOC_AV_SANDBOX_SNAPSHOT_ID production --sensitive
+vercel env add EDOC_AV_SMOKE_SECRET production --sensitive
 vercel env add CRON_SECRET production --sensitive
 vercel env add APP_SECRET production --sensitive
 ```
@@ -150,13 +163,13 @@ vercel env add APP_SECRET production --sensitive
 2. `supabase migration list --linked` 顯示遠端與 repository 歷程一致，沒有使用未核准的 `migration repair` 覆寫歷程。
 3. 隔離環境 fresh bootstrap 成功，且 `supabase/seed.sql` 未建立 demo data。
 4. `production_cutover_checks.sql` 的 demo identifier 計數為 0。
-5. 87 張後端直連表的 service-role 最小權限矩陣逐項相符，且 23 個直接 RPC 全部存在。
+5. 88 張後端直連表的 service-role 最小權限矩陣逐項相符，且 23 個直接 RPC 全部存在。
 6. 23 個直接 RPC 僅 `service_role` 可執行；`PUBLIC`、`anon`、`authenticated` 無權限，且沒有未列入 allowlist 的 legacy RPC。
 7. runtime tables 啟用 RLS，browser Data API grant 為 0；`login_events` 可由後端新增／讀取但不可更新或刪除。
 8. 40 個已確認的 eDoc 外鍵索引全部存在，且未新增 shared CMS index 或刪除 unused index。
 9. Storage bucket private、包含 ZIP、排除 SVG，舊 direct-object policies 不存在。
 10. 站內通知規則 ready；Email／LINE 若未設定應明確顯示 pending，而非阻擋內部上線或假裝成功。
-11. stale editor upload 檢查無超過允許時限的 pending/uploaded 資產。
+11. Pre／post-migration `verify_editor_storage_assets.py` 都 exit 0、`invalidAssetCount=0`，兩次 `checkedAssetCount` 與 SQL `finalized_editor_asset_count` 完全一致；`editor_storage_promotion_preflight.sql` 已於維護窗口通過。stale editor upload、invalid finalized asset、invalid storage job、active／expired lease 與逾期 cleanup backlog 均為 0。`official_document_editor_storage_jobs` 必須啟用並強制 RLS，immutable trigger/function 必須存在、owner/search path/EXECUTE ACL 正確。
 12. Finance 人員、公司、部門投影同步檢查通過，沒有手動維護的 demo 帳號。
 13. fresh-only Finance sentinel 計數為 0；既有 project 的發布紀錄中沒有 `--include-roles` 或重跑 `roles.sql`。
 
@@ -213,4 +226,4 @@ vercel ls
 vercel rollback <deployment-url-or-id>
 ```
 
-Vercel rollback 只能回復應用部署。已套用的資料庫 migration 要用經審查的 forward-fix migration；正式發布前必須先有資料庫備份、回復點與負責人。正式值班、告警分級與處理步驟見 `docs/production-monitoring-runbook.md`。
+Vercel rollback 只能回復應用部署。已套用的資料庫 migration 要用經審查的 forward-fix migration；正式發布前必須先有資料庫備份、回復點與負責人。若回退的應用版本不會建立 storage lifecycle job，必須同步關閉 PDF Editor 上傳／finalize，不能讓舊版後端寫入新 schema。正式值班、告警分級與處理步驟見 `docs/production-monitoring-runbook.md`。

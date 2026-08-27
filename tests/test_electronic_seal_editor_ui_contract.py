@@ -325,6 +325,7 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         self.assertIn("validateEditorTusEndpoint(intent)", upload)
         self.assertIn("editorTusIntentHeaders(intent)", upload)
         self.assertIn('"x-signature": signature', headers)
+        self.assertNotIn('"x-upsert"', headers.lower())
         self.assertIn("headers.apikey = publicKey", headers)
         self.assertIn('key.startsWith("sb_secret_")', self.js)
         self.assertIn('payload?.role === "anon"', self.js)

@@ -28,6 +28,12 @@ FK_INDEX_FORWARD = MIGRATIONS / "20260827050452_add_confirmed_edoc_fk_indexes_fo
 BUSINESS_CONFLICT_FORWARD = (
     MIGRATIONS / "20260827101636_avoid_postgrest_business_conflict_retries.sql"
 )
+EDITOR_IMMUTABLE_PROMOTION = (
+    MIGRATIONS / "20260827194500_promote_editor_tus_staging_to_immutable.sql"
+)
+EDITOR_STORAGE_PREFLIGHT = (
+    ROOT / "supabase" / "verification" / "editor_storage_promotion_preflight.sql"
+)
 FINANCE_TENANT_BACKFILL = MIGRATIONS / "20260825143558_backfill_finance_tenant_scope.sql"
 FRESH_FINANCE_SENTINEL_CLEANUP = (
     MIGRATIONS / "20260827064100_remove_fresh_finance_bootstrap_sentinel.sql"
@@ -789,6 +795,8 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
             FK_INDEX_FORWARD,
             AUDIT_HASH_HARDENING,
             FRESH_FINANCE_SENTINEL_CLEANUP,
+            EDITOR_IMMUTABLE_PROMOTION,
+            EDITOR_STORAGE_PREFLIGHT,
             ROOT / "supabase" / "seed.sql",
             ROOT / "supabase" / "verification" / "production_cutover_checks.sql",
             FRESH_BOOTSTRAP_SMOKE,
@@ -806,6 +814,8 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         for path in (
             AUDIT_HASH_HARDENING,
             FRESH_FINANCE_SENTINEL_CLEANUP,
+            EDITOR_IMMUTABLE_PROMOTION,
+            EDITOR_STORAGE_PREFLIGHT,
             FRESH_BOOTSTRAP_SMOKE,
             AUDIT_CONCURRENCY_CHECKS,
         ):

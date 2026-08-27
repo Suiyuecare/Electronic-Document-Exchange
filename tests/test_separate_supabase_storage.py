@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 import unittest
@@ -337,6 +338,147 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
                     "https://storage-project.storage.supabase.co/storage/v1/upload/resumable/sign",
                 )
 
+    def test_signed_upload_token_requests_create_only_semantics(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"token":"signed-create-only"}'
+        with mock.patch.dict(os.environ, {"EDOC_OBJECT_STORAGE_URL": ""}, clear=False):
+            with self.storage_config(
+                storage_url="https://storage-project.supabase.co",
+                storage_key="sb_secret_storage",
+            ), mock.patch.object(
+                backend,
+                "_urlopen_no_redirect",
+                return_value=response,
+            ) as open_no_redirect:
+                token = backend._supabase_create_signed_upload_token(
+                    "editor/OD-1/asset.pdf",
+                    "private",
+                )
+
+        self.assertEqual(token, "signed-create-only")
+        request = open_no_redirect.call_args.args[0]
+        self.assertEqual(json.loads(request.data.decode("utf-8")), {})
+        self.assertNotIn("x-upsert", {key.lower() for key in request.headers})
+
+    def test_server_storage_upload_omits_upsert_header(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b""
+        captured_extra_headers = []
+
+        def storage_headers(extra=None):
+            captured_extra_headers.append(dict(extra or {}))
+            return {"apikey": "server-only", **dict(extra or {})}
+
+        with mock.patch.object(
+            backend,
+            "supabase_storage_object_url",
+            return_value="https://storage-project.supabase.co/storage/v1/object/private/a.pdf",
+        ), mock.patch.object(
+            backend,
+            "supabase_storage_headers",
+            side_effect=storage_headers,
+        ), mock.patch.object(
+            backend,
+            "_urlopen_no_redirect",
+            return_value=response,
+        ):
+            backend.supabase_storage_upload("a.pdf", b"pdf", "application/pdf")
+
+        self.assertEqual(captured_extra_headers, [{"Content-Type": "application/pdf"}])
+        self.assertNotIn("x-upsert", {key.lower() for key in captured_extra_headers[0]})
+
+    def test_editor_promotion_retry_accepts_only_identical_immutable_bytes(self):
+        data = b"verified-editor-asset"
+        digest = backend.sha256_bytes(data)
+        asset = {
+            "id": "ASSET-1",
+            "file_name": "source.pdf",
+            "mime_type": "application/pdf",
+            "storage_bucket": "edoc-private",
+            "storage_path": "editor/OD-1/ASSET-1-source.pdf",
+            "size_bytes": len(data),
+        }
+        expected_path = backend._supabase_editor_immutable_storage_path(
+            "OD-1",
+            asset,
+            digest,
+        )
+        storage_job = {
+            "id": "EDOC-STORAGE-ASSET-1",
+            "asset_id": "ASSET-1",
+            "document_id": "OD-1",
+            "staging_bucket": "edoc-private",
+            "staging_path": asset["storage_path"],
+            "final_bucket": "edoc-private",
+            "final_path": expected_path,
+            "expected_sha256": digest,
+            "expected_size_bytes": len(data),
+            "status": "pending",
+        }
+        claimed_job = {
+            **storage_job,
+            "status": "promoting",
+            "lease_token": "A" * 32,
+            "lease_expires_at": "2099-01-01T00:00:00",
+        }
+        with mock.patch.object(
+            backend,
+            "supabase_filter_rows",
+            return_value=[storage_job],
+        ), mock.patch.object(
+            backend,
+            "supabase_storage_upload",
+            side_effect=ValueError("supabase_storage_upload_failed:409"),
+        ), mock.patch.object(
+            backend,
+            "supabase_storage_download",
+            return_value=data,
+        ) as download, mock.patch.object(
+            backend,
+            "_supabase_claim_editor_storage_job",
+            return_value=claimed_job,
+        ):
+            promoted = backend._supabase_promote_editor_asset_to_immutable_storage(
+                "OD-1",
+                asset,
+                data,
+                digest,
+            )
+
+        self.assertEqual(promoted, (expected_path, storage_job["id"], "A" * 32))
+        self.assertEqual(download.call_count, 2)
+
+        with mock.patch.object(
+            backend,
+            "supabase_filter_rows",
+            return_value=[storage_job],
+        ), mock.patch.object(
+            backend,
+            "supabase_storage_upload",
+            side_effect=ValueError("supabase_storage_upload_failed:409"),
+        ), mock.patch.object(
+            backend,
+            "supabase_storage_download",
+            return_value=b"different-editor-bytes",
+        ), mock.patch.object(
+            backend,
+            "_supabase_claim_editor_storage_job",
+            return_value=claimed_job,
+        ), mock.patch.object(
+            backend,
+            "_supabase_release_editor_storage_promotion",
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "editor_immutable_asset_conflict",
+            ):
+                backend._supabase_promote_editor_asset_to_immutable_storage(
+                    "OD-1",
+                    asset,
+                    data,
+                    digest,
+                )
+
     def test_signed_tus_route_contract_never_returns_server_credential(self):
         with mock.patch.dict(os.environ, {"EDOC_OBJECT_STORAGE_URL": ""}, clear=False):
             with self.storage_config(
@@ -370,6 +512,7 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
         self.assertEqual(intent["storage_publishable_key"], "sb_publishable_browser_safe")
         self.assertEqual(intent["upload_token"], "short-lived-object-signature")
         self.assertEqual(intent["headers"]["x-signature"], "short-lived-object-signature")
+        self.assertNotIn("x-upsert", {key.lower() for key in intent["headers"]})
         self.assertNotIn("apikey", intent["headers"])
         self.assertNotIn("authorization", {key.lower() for key in intent["headers"]})
         self.assertNotIn("sb_secret_storage", repr(intent))

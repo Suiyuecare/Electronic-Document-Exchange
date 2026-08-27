@@ -2,6 +2,14 @@
 -- Never select document content, attachment/storage paths, seal originals,
 -- credentials, session tokens, notification bodies or personal data here.
 
+do $postgres_version_check$
+begin
+  if pg_catalog.current_setting('server_version_num')::integer < 160000 then
+    raise exception 'production_cutover_postgres_16_required';
+  end if;
+end;
+$postgres_version_check$;
+
 -- 1. Required runtime tables: every row must report table_exists=true and
 -- rls_enabled=true.
 with required_tables(table_name) as (
@@ -15,7 +23,8 @@ with required_tables(table_name) as (
     ('official_document_approval_logs'), ('official_document_approval_steps'),
     ('official_document_archive_exports'), ('official_document_dispatch_events'),
     ('official_document_dispatch_records'), ('official_document_editor_assets'),
-    ('official_document_editor_revisions'), ('official_document_files'),
+    ('official_document_editor_revisions'),
+    ('official_document_editor_storage_jobs'), ('official_document_files'),
     ('official_document_rejection_jobs'),
     ('official_document_stamp_positions'), ('official_document_stamp_requests'),
     ('official_document_text_overlays'), ('official_documents'),
@@ -113,10 +122,10 @@ where schemaname = 'public'
   and roles && array['public', 'anon', 'authenticated']::name[]
 order by tablename, policyname;
 
--- 2b. Exact backend grant parity for all 87 direct PostgREST tables.
+-- 2b. Exact backend grant parity for all 88 direct PostgREST tables.
 -- Pass condition: table_exists, owner_matches, no_unexpected_table_grants and
 -- grant_matches must all be true for every row, in addition to the zero-row
--- browser-grant checks in section 2. The first 81 are backend.TABLES and the
+-- browser-grant checks in section 2. The first 82 are backend.TABLES and the
 -- final six are dedicated Finance/SSO/rejection workflow tables. Write arrays
 -- are the direct backend.py call matrix, not a blanket CRUD grant.
 with backend_tables(table_name) as (
@@ -139,7 +148,8 @@ with backend_tables(table_name) as (
     'official_document_approval_logs', 'official_document_approval_steps',
     'official_document_archive_exports', 'official_document_dispatch_events',
     'official_document_dispatch_records', 'official_document_editor_assets',
-    'official_document_editor_revisions', 'official_document_files',
+    'official_document_editor_revisions',
+    'official_document_editor_storage_jobs', 'official_document_files',
     'official_document_stamp_positions', 'official_document_stamp_requests',
     'official_document_text_overlays', 'official_documents',
     'official_workflow_delegations', 'pdf_versions', 'permissions',
@@ -167,7 +177,8 @@ with backend_tables(table_name) as (
     'login_events', 'module_account_links', 'notification_deliveries',
     'notifications', 'official_document_approval_logs',
     'official_document_approval_steps', 'official_document_editor_assets',
-    'official_document_editor_revisions', 'official_document_files',
+    'official_document_editor_revisions',
+    'official_document_editor_storage_jobs', 'official_document_files',
     'official_document_stamp_positions', 'official_document_stamp_requests',
     'official_document_text_overlays', 'official_documents', 'pdf_versions',
     'seal_permissions', 'seal_usage_approvals', 'seal_usage_logs',
@@ -184,6 +195,7 @@ with backend_tables(table_name) as (
     'module_account_links', 'notification_channel_credentials',
     'notifications', 'official_document_approval_steps',
     'official_document_dispatch_records', 'official_document_editor_assets',
+    'official_document_editor_storage_jobs',
     'official_document_stamp_positions', 'official_document_stamp_requests',
     'official_documents', 'seal_usage_approvals', 'seal_usage_requests',
     'settings', 'system_inbox', 'users', 'finance_member_sync_receipts',
@@ -657,6 +669,25 @@ with required_columns(table_name, column_name, data_type, nullable) as (
     ('official_document_editor_assets', 'upload_status', 'text', false),
     ('official_document_editor_assets', 'scan_status', 'text', false),
     ('official_document_editor_assets', 'preflight_status', 'text', false),
+    ('official_document_editor_storage_jobs', 'id', 'text', false),
+    ('official_document_editor_storage_jobs', 'asset_id', 'text', false),
+    ('official_document_editor_storage_jobs', 'document_id', 'text', false),
+    ('official_document_editor_storage_jobs', 'staging_bucket', 'text', false),
+    ('official_document_editor_storage_jobs', 'staging_path', 'text', false),
+    ('official_document_editor_storage_jobs', 'final_bucket', 'text', false),
+    ('official_document_editor_storage_jobs', 'final_path', 'text', false),
+    ('official_document_editor_storage_jobs', 'expected_sha256', 'text', false),
+    ('official_document_editor_storage_jobs', 'expected_size_bytes', 'bigint', false),
+    ('official_document_editor_storage_jobs', 'token_expires_at', 'text', false),
+    ('official_document_editor_storage_jobs', 'status', 'text', false),
+    ('official_document_editor_storage_jobs', 'lease_token', 'text', false),
+    ('official_document_editor_storage_jobs', 'lease_expires_at', 'text', false),
+    ('official_document_editor_storage_jobs', 'final_file_object_id', 'text', true),
+    ('official_document_editor_storage_jobs', 'attempt_count', 'integer', false),
+    ('official_document_editor_storage_jobs', 'last_error_code', 'text', false),
+    ('official_document_editor_storage_jobs', 'created_at', 'text', false),
+    ('official_document_editor_storage_jobs', 'updated_at', 'text', false),
+    ('official_document_editor_storage_jobs', 'cleaned_at', 'text', true),
     ('official_document_stamp_positions', 'page_ref', 'text', true),
     ('official_document_stamp_positions', 'locked_seal_file_id', 'text', true),
     ('official_document_stamp_positions', 'locked_seal_sha256', 'text', true)
@@ -749,6 +780,22 @@ with required_constraints(table_name, constraint_name) as (
     ('official_document_editor_assets', 'official_editor_asset_sha256_check'),
     ('official_document_editor_assets', 'official_editor_asset_size_check'),
     ('official_document_editor_assets', 'official_editor_asset_upload_status_check'),
+    ('official_document_editor_storage_jobs', 'official_document_editor_storage_jobs_pkey'),
+    ('official_document_editor_storage_jobs', 'official_document_editor_storage_jobs_asset_id_key'),
+    ('official_document_editor_storage_jobs', 'official_document_editor_storage_jobs_asset_id_fkey'),
+    ('official_document_editor_storage_jobs', 'official_document_editor_storage_jobs_document_id_fkey'),
+    ('official_document_editor_storage_jobs', 'official_document_editor_storage_jobs_final_file_object_id_fkey'),
+    ('official_document_editor_storage_jobs', 'official_document_editor_storage_jobs_staging_path_key'),
+    ('official_document_editor_storage_jobs', 'official_document_editor_storage_jobs_final_path_key'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_sha256_check'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_size_check'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_path_check'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_attempt_check'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_status_check'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_lease_check'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_commit_file_check'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_cleaned_at_check'),
+    ('official_document_editor_storage_jobs', 'official_editor_storage_job_error_code_check'),
     ('official_document_dispatch_events', 'official_document_dispatch_events_pkey'),
     ('official_document_dispatch_events', 'official_document_dispatch_events_dispatch_record_id_fkey'),
     ('official_document_dispatch_events', 'official_document_dispatch_events_document_id_fkey'),
@@ -763,6 +810,7 @@ select
   r.table_name,
   r.constraint_name,
   con.oid is not null as constraint_exists,
+  coalesce(con.convalidated, false) as constraint_validated,
   case when con.oid is null then null else pg_catalog.pg_get_constraintdef(con.oid, true) end as definition
 from required_constraints r
 left join pg_catalog.pg_class rel
@@ -1331,6 +1379,308 @@ from public.official_document_editor_assets
 where upload_status in ('pending', 'uploading', 'uploaded')
   and created_at < to_char(now() - interval '2 hours', 'YYYY-MM-DD HH24:MI:SS');
 
+select count(*) as editor_storage_cleanup_backlog
+from public.official_document_editor_storage_jobs
+where status <> 'cleaned'
+  and (
+    token_expires_at !~
+      '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+    or not pg_catalog.pg_input_is_valid(
+         token_expires_at,
+         'timestamp without time zone'
+       )
+    or case
+         when token_expires_at ~
+                '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+              and pg_catalog.pg_input_is_valid(
+                token_expires_at,
+                'timestamp without time zone'
+              )
+         then token_expires_at::timestamp <
+              pg_catalog.now() - interval '5 minutes'
+         else false
+       end
+  );
+
+-- No promotion or cleanup worker may still own a lifecycle row when the
+-- maintenance-window cutover is approved. Pass condition: 0.
+select count(*) as active_editor_storage_job_leases
+from public.official_document_editor_storage_jobs
+where status in ('promoting', 'cleaning');
+
+-- An expired worker lease means promotion or cleanup stopped before its
+-- compare-and-set completion. It must be reclaimed and resolved before
+-- cutover. Pass condition: 0.
+select count(*) as expired_editor_storage_job_leases
+from public.official_document_editor_storage_jobs
+where status in ('promoting', 'cleaning')
+  and case
+        when lease_expires_at ~
+               '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+             and pg_catalog.pg_input_is_valid(
+               lease_expires_at,
+               'timestamp without time zone'
+             )
+        then lease_expires_at::timestamp <= pg_catalog.clock_timestamp()
+        else false
+      end;
+
+select count(*) as invalid_finalized_editor_assets
+from public.official_document_editor_assets asset
+left join public.file_objects file_object on file_object.id = asset.file_object_id
+left join public.official_document_editor_storage_jobs storage_job
+  on storage_job.asset_id = asset.id
+where asset.asset_kind in ('source_pdf', 'import_pdf', 'image')
+  and asset.upload_status = 'finalized'
+  and (
+    asset.sha256 !~ '^[A-Fa-f0-9]{64}$'
+    or pg_catalog.lower(asset.expected_sha256)
+         is distinct from pg_catalog.lower(asset.sha256)
+    or asset.size_bytes <= 0
+    or asset.created_at !~
+         '^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}'
+    or not pg_catalog.pg_input_is_valid(
+         asset.created_at,
+         'timestamp without time zone'
+       )
+    or file_object.id is null
+    or file_object.document_id is distinct from asset.document_id
+    or file_object.bucket is distinct from 'edoc-private'
+    or file_object.storage_provider is distinct from 'supabase'
+    or pg_catalog.left(
+         file_object.storage_key,
+         pg_catalog.length(
+           'editor-final/' || asset.document_id || '/' || asset.id || '/' ||
+           pg_catalog.upper(asset.sha256) || '-'
+         )
+       ) is distinct from
+       'editor-final/' || asset.document_id || '/' || asset.id || '/' ||
+       pg_catalog.upper(asset.sha256) || '-'
+    or file_object.storage_key is distinct from asset.storage_path
+    or file_object.bucket is distinct from asset.storage_bucket
+    or pg_catalog.lower(file_object.sha256) is distinct from pg_catalog.lower(asset.sha256)
+    or file_object.size_bytes is distinct from asset.size_bytes
+    or storage_job.id is null
+    or storage_job.document_id is distinct from asset.document_id
+    or storage_job.status not in ('committed', 'cleaned')
+    or storage_job.final_file_object_id is distinct from file_object.id
+    or storage_job.final_path is distinct from file_object.storage_key
+    or storage_job.final_bucket is distinct from file_object.bucket
+    or pg_catalog.lower(storage_job.expected_sha256)
+         is distinct from pg_catalog.lower(asset.sha256)
+    or storage_job.expected_size_bytes is distinct from asset.size_bytes
+  );
+
+-- Every lifecycle row must remain bound to exactly one asset, document,
+-- staging object and deterministic immutable destination. Pass condition: 0.
+select count(*) as invalid_editor_storage_jobs
+from public.official_document_editor_storage_jobs storage_job
+left join public.official_document_editor_assets asset
+  on asset.id = storage_job.asset_id
+left join public.file_objects final_file_object
+  on final_file_object.id = storage_job.final_file_object_id
+where asset.id is null
+   or storage_job.document_id is distinct from asset.document_id
+   or storage_job.staging_bucket is distinct from 'edoc-private'
+   or pg_catalog.left(
+        storage_job.staging_path,
+        pg_catalog.length(
+          'editor/' || storage_job.document_id || '/' ||
+          storage_job.asset_id || '-'
+        )
+      ) is distinct from
+      'editor/' || storage_job.document_id || '/' ||
+      storage_job.asset_id || '-'
+   or storage_job.final_bucket is distinct from 'edoc-private'
+   or pg_catalog.left(
+        storage_job.final_path,
+        pg_catalog.length(
+          'editor-final/' || storage_job.document_id || '/' ||
+          storage_job.asset_id || '/' ||
+          pg_catalog.upper(storage_job.expected_sha256) || '-'
+        )
+      ) is distinct from
+      'editor-final/' || storage_job.document_id || '/' ||
+      storage_job.asset_id || '/' ||
+      pg_catalog.upper(storage_job.expected_sha256) || '-'
+   or storage_job.expected_sha256 !~ '^[A-Fa-f0-9]{64}$'
+   or storage_job.expected_size_bytes <= 0
+   or storage_job.status not in (
+        'pending', 'promoting', 'committed',
+        'cleaning', 'cleaned', 'cleanup_failed'
+      )
+   or (
+     storage_job.last_error_code <> ''
+     and storage_job.last_error_code !~ '^[a-z0-9_:-]{1,96}$'
+   )
+   or storage_job.token_expires_at !~
+        '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+   or not pg_catalog.pg_input_is_valid(
+        storage_job.token_expires_at,
+        'timestamp without time zone'
+      )
+   or (
+     storage_job.status in ('promoting', 'cleaning')
+     and (
+       storage_job.lease_token !~ '^[A-F0-9]{32}$'
+       or storage_job.lease_expires_at !~
+            '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+       or not pg_catalog.pg_input_is_valid(
+            storage_job.lease_expires_at,
+            'timestamp without time zone'
+          )
+     )
+   )
+   or (
+     storage_job.status not in ('promoting', 'cleaning')
+     and (
+       storage_job.lease_token <> ''
+       or storage_job.lease_expires_at <> ''
+     )
+   )
+   or storage_job.attempt_count < 0
+   or (storage_job.status = 'committed' and storage_job.final_file_object_id is null)
+   or (
+     storage_job.status = 'committed'
+     and asset.upload_status is distinct from 'finalized'
+   )
+   or (
+     storage_job.final_file_object_id is not null
+     and (
+       final_file_object.id is null
+       or final_file_object.document_id is distinct from storage_job.document_id
+       or final_file_object.bucket is distinct from storage_job.final_bucket
+       or final_file_object.storage_key is distinct from storage_job.final_path
+       or pg_catalog.lower(final_file_object.sha256)
+            is distinct from pg_catalog.lower(storage_job.expected_sha256)
+       or final_file_object.size_bytes is distinct from storage_job.expected_size_bytes
+       or final_file_object.storage_provider is distinct from 'supabase'
+     )
+   )
+   or (storage_job.status = 'cleaned' and storage_job.cleaned_at is null)
+   or (storage_job.status <> 'cleaned' and storage_job.cleaned_at is not null)
+   or (
+     asset.upload_status = 'finalized'
+     and (
+       pg_catalog.lower(storage_job.expected_sha256)
+         is distinct from pg_catalog.lower(asset.sha256)
+       or storage_job.expected_size_bytes is distinct from asset.size_bytes
+     )
+   )
+   or (
+     asset.upload_status <> 'finalized'
+     and (
+       pg_catalog.lower(storage_job.expected_sha256)
+         is distinct from pg_catalog.lower(asset.expected_sha256)
+       or storage_job.expected_size_bytes is distinct from asset.size_bytes
+       or storage_job.staging_bucket is distinct from asset.storage_bucket
+       or storage_job.staging_path is distinct from asset.storage_path
+     )
+   );
+
+-- Finalized browser uploads must be rebound to a server-only immutable object
+-- path inside the same database transaction that registers the file object.
+with immutable_function as (
+  select
+    pg_catalog.to_regprocedure(
+      'public.edoc_bind_finalized_editor_asset_storage()'
+    ) as oid,
+    pg_catalog.to_regprocedure(
+      'public.edoc_guard_editor_storage_job()'
+    ) as guard_oid
+)
+select immutable_function.oid is not null
+  and immutable_function.guard_oid is not null
+  and exists (
+    select 1
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_editor_storage_jobs'::pg_catalog.regclass
+      and trigger_row.tgfoid = immutable_function.guard_oid
+      and trigger_row.tgname = 'trg_edoc_guard_editor_storage_job'
+      and trigger_row.tgenabled = 'O'
+      and trigger_row.tgtype = 23
+      and not trigger_row.tgisinternal
+  )
+  and exists (
+    select 1
+    from pg_catalog.pg_class relation_row
+    where relation_row.oid =
+      'public.official_document_editor_storage_jobs'::pg_catalog.regclass
+      and relation_row.relrowsecurity
+      and relation_row.relforcerowsecurity
+  )
+  and exists (
+    select 1
+    from pg_catalog.pg_trigger trigger_row
+    where trigger_row.tgrelid =
+      'public.official_document_editor_assets'::pg_catalog.regclass
+      and trigger_row.tgfoid = immutable_function.oid
+      and trigger_row.tgname = 'trg_edoc_bind_finalized_editor_asset_storage'
+      and trigger_row.tgenabled = 'O'
+      and trigger_row.tgtype = 31
+      and not trigger_row.tgisinternal
+  )
+  and exists (
+    select 1
+    from pg_catalog.pg_proc function_row
+    where function_row.oid = immutable_function.oid
+      and function_row.prosecdef
+      and pg_catalog.pg_get_userbyid(function_row.proowner) = 'postgres'
+      and exists (
+        select 1
+        from pg_catalog.unnest(
+          coalesce(function_row.proconfig, array[]::text[])
+        ) config(value)
+        where config.value in ('search_path=', 'search_path=""')
+      )
+      and not exists (
+        select 1
+        from pg_catalog.aclexplode(
+          coalesce(
+            function_row.proacl,
+            pg_catalog.acldefault('f', function_row.proowner)
+          )
+        ) privilege_row
+        where privilege_row.privilege_type = 'EXECUTE'
+          and (
+            privilege_row.grantee = 0
+            or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+              in ('anon', 'authenticated', 'service_role')
+          )
+      )
+  )
+  and exists (
+    select 1
+    from pg_catalog.pg_proc function_row
+    where function_row.oid = immutable_function.guard_oid
+      and not function_row.prosecdef
+      and pg_catalog.pg_get_userbyid(function_row.proowner) = 'postgres'
+      and exists (
+        select 1
+        from pg_catalog.unnest(
+          coalesce(function_row.proconfig, array[]::text[])
+        ) config(value)
+        where config.value in ('search_path=', 'search_path=""')
+      )
+      and not exists (
+        select 1
+        from pg_catalog.aclexplode(
+          coalesce(
+            function_row.proacl,
+            pg_catalog.acldefault('f', function_row.proowner)
+          )
+        ) privilege_row
+        where privilege_row.privilege_type = 'EXECUTE'
+          and (
+            privilege_row.grantee = 0
+            or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+              in ('anon', 'authenticated', 'service_role')
+          )
+      )
+  ) as editor_immutable_storage_trigger_ready
+from immutable_function;
+
 -- 11. Confirmed eDoc foreign-key indexes. Every row must report
 -- index_exists=true after the forward migration.
 select exists (
@@ -1370,6 +1720,9 @@ with required_indexes(index_name) as (
     ('idx_internal_dispatch_replies_recipient'),
     ('idx_internal_dispatch_replies_attachment'),
     ('idx_official_archive_exports_requested_by'),
+    ('idx_official_editor_storage_jobs_due'),
+    ('idx_official_editor_storage_jobs_document'),
+    ('idx_official_editor_storage_jobs_final_file'),
     ('idx_official_stamp_positions_seal'),
     ('idx_official_rejection_jobs_expected_step'),
     ('idx_official_rejection_jobs_source_revision'),
@@ -1406,9 +1759,21 @@ with required_indexes(index_name) as (
     ('idx_virus_scan_jobs_attachment_fk'),
     ('idx_virus_scan_jobs_document_fk')
 )
-select index_name, pg_catalog.to_regclass('public.' || index_name) is not null as index_exists
+select
+  required_indexes.index_name,
+  index_relation.oid is not null as index_exists,
+  coalesce(
+    index_row.indisvalid and index_row.indisready and index_row.indislive,
+    false
+  ) as index_ready
 from required_indexes
-order by index_name;
+left join pg_catalog.pg_class index_relation
+  on index_relation.oid = pg_catalog.to_regclass(
+    pg_catalog.format('%I.%I', 'public', required_indexes.index_name)
+  )
+left join pg_catalog.pg_index index_row
+  on index_row.indexrelid = index_relation.oid
+order by required_indexes.index_name;
 
 -- 12. Safe index review: duplicate definitions should return zero rows. This
 -- reports names only, never indexed values.
