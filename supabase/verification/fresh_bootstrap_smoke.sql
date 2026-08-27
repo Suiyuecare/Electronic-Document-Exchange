@@ -50,6 +50,18 @@ begin
     from pg_catalog.pg_policies
     where schemaname = 'public'
       and roles && array['public', 'anon', 'authenticated']::name[]
+  ) or exists (
+    select 1
+    from pg_catalog.pg_default_acl default_acl
+    join pg_catalog.pg_namespace namespace_row
+      on namespace_row.oid = default_acl.defaclnamespace
+    cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege_row
+    where namespace_row.nspname = 'public'
+      and (
+        privilege_row.grantee = 0
+        or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+          in ('anon', 'authenticated', 'service_role')
+      )
   ) then
     raise exception 'fresh_bootstrap_browser_data_api_exposed';
   end if;

@@ -20,6 +20,7 @@ VERIFICATION = SUPABASE / "verification"
 SCHEMA_PARITY = MIGRATIONS / "20260827050436_complete_edoc_runtime_schema_parity.sql"
 GRANT_HARDENING = MIGRATIONS / "20260827063824_lock_runtime_table_data_api_grants.sql"
 RUNTIME_SMOKE = VERIFICATION / "runtime_schema_parity_smoke.sql"
+FRESH_BOOTSTRAP_SMOKE = VERIFICATION / "fresh_bootstrap_smoke.sql"
 SERVICE_ROLE_GRANT_SMOKE = VERIFICATION / "service_role_data_api_grant_smoke.sql"
 CUTOVER = VERIFICATION / "production_cutover_checks.sql"
 MAIN_MANIFEST = VERIFICATION / "migration_manifest.json"
@@ -162,6 +163,14 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         )
         self.assertIn("revoke all privileges on sequences", sql)
         self.assertIn("revoke all privileges on functions", sql)
+        self.assertRegex(
+            sql,
+            r"revoke all privileges on tables\s+from public, anon, authenticated, service_role",
+        )
+        self.assertRegex(
+            sql,
+            r"revoke all privileges on sequences\s+from public, anon, authenticated, service_role",
+        )
         self.assertIn(
             "revoke all privileges on all tables in schema public",
             sql,
@@ -282,6 +291,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         )
         self.assertEqual(len(required_rpc_names), 23)
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
+        fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
         self.assertIn("from information_schema.table_privileges", cutover)
         self.assertIn("from information_schema.usage_privileges", cutover)
         self.assertIn("from information_schema.routine_privileges", cutover)
@@ -289,6 +299,9 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertNotIn("from information_schema.role_usage_grants", cutover)
         self.assertNotIn("from information_schema.role_routine_grants", cutover)
         self.assertIn("from pg_catalog.pg_policies", cutover)
+        self.assertIn("from pg_catalog.pg_default_acl", cutover)
+        self.assertIn("from pg_catalog.pg_default_acl", matrix_smoke)
+        self.assertIn("from pg_catalog.pg_default_acl", fresh_smoke)
         self.assertIn(
             "grantee in ('public', 'anon', 'authenticated')",
             cutover,

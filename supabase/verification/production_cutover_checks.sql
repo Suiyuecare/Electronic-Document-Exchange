@@ -56,6 +56,27 @@ where routine_schema = 'public'
   and grantee in ('PUBLIC', 'anon', 'authenticated')
 order by routine_name, grantee, privilege_type;
 
+select
+  owner_role.rolname as owner_role,
+  default_acl.defaclobjtype as object_type,
+  case
+    when privilege_row.grantee = 0 then 'PUBLIC'
+    else pg_catalog.pg_get_userbyid(privilege_row.grantee)
+  end as grantee,
+  privilege_row.privilege_type
+from pg_catalog.pg_default_acl default_acl
+join pg_catalog.pg_roles owner_role on owner_role.oid = default_acl.defaclrole
+join pg_catalog.pg_namespace namespace_row
+  on namespace_row.oid = default_acl.defaclnamespace
+cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege_row
+where namespace_row.nspname = 'public'
+  and (
+    privilege_row.grantee = 0
+    or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+      in ('anon', 'authenticated', 'service_role')
+  )
+order by owner_role, object_type, grantee, privilege_row.privilege_type;
+
 select tablename, policyname, roles
 from pg_catalog.pg_policies
 where schemaname = 'public'

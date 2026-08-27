@@ -185,6 +185,26 @@ begin
 end
 $service_role_table_matrix$;
 
+do $service_role_default_acl_matrix$
+begin
+  if exists (
+    select 1
+    from pg_catalog.pg_default_acl default_acl
+    join pg_catalog.pg_namespace namespace_row
+      on namespace_row.oid = default_acl.defaclnamespace
+    cross join lateral pg_catalog.aclexplode(default_acl.defaclacl) privilege_row
+    where namespace_row.nspname = 'public'
+      and (
+        privilege_row.grantee = 0
+        or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+          in ('anon', 'authenticated', 'service_role')
+      )
+  ) then
+    raise exception 'service_role_unexpected_public_default_acl';
+  end if;
+end
+$service_role_default_acl_matrix$;
+
 do $service_role_function_matrix$
 declare
   v_signature text;

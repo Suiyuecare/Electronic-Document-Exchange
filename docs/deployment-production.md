@@ -17,10 +17,11 @@ legacy permission reference rows、早期 migration 所需的 pgcrypto `digest()
 相容 overload、空的後端專用 `private` schema，以及只供全新 reset 通過既有
 Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司或組織資料，
 且會由 `20260827064100_remove_fresh_finance_bootstrap_sentinel.sql` 核對完整簽章、
-確認零引用後於同一次 migration replay 中刪除。相容函式與 schema 均已撤銷
-前台角色權限，只允許資料庫擁有者與 `service_role` 使用；此做法不改寫任何
-已套用的 migration。既有正式資料庫不得為此重跑舊 migration，仍只依核准的
-forward migration 與變更單發布。
+確認零引用後於同一次 migration replay 中刪除。相容函式在歷史 replay 階段
+僅供資料庫擁有者與 `service_role` 使用；runtime hardening 完成後會再收回
+`service_role` 權限，只保留資料庫擁有者。空的相容 schema 不授權前台角色。
+此做法不改寫任何已套用的 migration。既有正式資料庫不得為此重跑舊 migration，
+仍只依核准的 forward migration 與變更單發布。
 
 ### 主 eDoc Supabase
 
