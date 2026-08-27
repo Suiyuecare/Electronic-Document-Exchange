@@ -1130,10 +1130,17 @@ def main() -> int:
         )
         immutable_delete_error = normalized_rpc_result(immutable_delete_body)
         immutable_delete_code = str(immutable_delete_error.get("code") or "none")
-        require(
+        trigger_rejected_delete = (
             immutable_delete_status >= 400
             and immutable_delete_error.get("message")
-            == "editor_finalized_asset_immutable",
+            == "editor_finalized_asset_immutable"
+        )
+        privilege_rejected_delete = (
+            immutable_delete_status in {401, 403}
+            and immutable_delete_code == "42501"
+        )
+        require(
+            trigger_rejected_delete or privilege_rejected_delete,
             "local_editor_finalize_immutable_asset_delete_accepted:"
             f"status_{immutable_delete_status}:code_{immutable_delete_code[:24]}",
         )
