@@ -1,5 +1,5 @@
--- Dedicated eDoc Storage project only. Keep this out of the main website/CMS
--- migration chain because that project has unrelated bucket policies.
+-- Dedicated eDoc Storage project only. Keep this out of the independent main
+-- eDoc, legacy website/CMS and Finance migration chains.
 
 update storage.buckets
 set public = false,

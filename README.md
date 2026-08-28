@@ -62,7 +62,7 @@ python3 backend.py --host 127.0.0.1 --port 5174
 
 - GitHub：本地 Git repo 已建立，Codex GitHub connector 已授權到 `Suiyuecare/Electronic-Document-Exchange`；本機 Git HTTPS credential 仍需更新後才能直接 push。
 - Vercel：`vercel.json` 與 `api/index.py` 已建立，可部署靜態前端與 Python API。
-- Supabase：`supabase/migrations/202605220001_edoc_core.sql`、`supabase/migrations/202605230001_auth_rbac.sql` 與 `supabase/seed.sql` 已建立；後端在 `SUPABASE_URL` 與 `SUPABASE_SERVICE_ROLE_KEY` 存在時會自動改走 Supabase REST API。
+- Supabase：`supabase/migrations/202605220001_edoc_core.sql`、`supabase/migrations/202605230001_auth_rbac.sql` 與 `supabase/seed.sql` 已建立；後端在 `SUPABASE_URL` 與 `SUPABASE_SERVICE_ROLE_KEY` 存在時會自動改走 Supabase REST API。正式 `SUPABASE_URL` 必須是獨立主 eDoc project，不可指向官網 CMS、會計或專用 Storage project。
 
 Vercel 需要設定的環境變數：
 

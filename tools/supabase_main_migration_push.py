@@ -150,6 +150,46 @@ def require_pristine_fresh_project() -> None:
             raise CutoverError("fresh_empty_mode_refuses_nonempty_project")
 
 
+def require_dedicated_existing_project() -> None:
+    """Refuse to run eDoc's global Data API hardening on a shared project.
+
+    The forward chain intentionally revokes browser grants and policies across
+    the public schema before restoring the exact eDoc backend allowlist.  That
+    is correct only for a dedicated eDoc database.  Applying it to the legacy
+    website/CMS database would disable unrelated public pages, forms and
+    analytics, so identify that topology before even constructing db push.
+    """
+
+    rows = linked_query_rows(
+        "select "
+        "(select pg_catalog.count(*) from pg_catalog.pg_class relation_row "
+        "join pg_catalog.pg_namespace namespace_row "
+        "on namespace_row.oid = relation_row.relnamespace "
+        "where namespace_row.nspname = 'public' "
+        "and relation_row.relkind in ('r','p','v','m','f') "
+        "and relation_row.relname = any(array["
+        "'pages','page_sections','media','article_categories','articles',"
+        "'analytics_page_views','analytics_events','form_submissions',"
+        "'content_templates','courses','recruiting_pages','site_settings',"
+        "'cms_content_areas','cms_change_sets'])) as shared_module_marker_count, "
+        "(select pg_catalog.count(*) from storage.buckets "
+        "where id not in ('edoc-private','edoc-seal-vault')) "
+        "as unrelated_storage_bucket_count"
+    )
+    expected_fields = {
+        "shared_module_marker_count",
+        "unrelated_storage_bucket_count",
+    }
+    if len(rows) != 1 or set(rows[0]) != expected_fields:
+        raise CutoverError("existing_project_partition_state_unknown")
+    for field in expected_fields:
+        value = rows[0].get(field)
+        if type(value) is not int or value < 0:
+            raise CutoverError("existing_project_partition_state_invalid")
+        if value != 0:
+            raise CutoverError("existing_main_project_refuses_shared_module_project")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("fresh-empty", "existing"))
@@ -175,6 +215,8 @@ def main() -> int:
         raise CutoverError("existing_mode_refuses_empty_project")
     if args.mode == "fresh-empty":
         require_pristine_fresh_project()
+    else:
+        require_dedicated_existing_project()
 
     command = ["supabase", "db", "push", "--linked"]
     if args.mode == "fresh-empty":

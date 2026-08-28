@@ -6,8 +6,8 @@
 -- anon or authenticated access, regardless of its historical name.
 -- service_role keeps Supabase Storage's built-in backend bypass.
 --
--- Do not apply this file to the main website/CMS Supabase project: that project
--- has unrelated, explicitly reviewed CMS bucket policies.
+-- Do not apply this file to the independent main eDoc, legacy website/CMS or
+-- Finance Supabase projects; their schemas and policies have different owners.
 do $policy_cleanup$
 declare
   candidate record;

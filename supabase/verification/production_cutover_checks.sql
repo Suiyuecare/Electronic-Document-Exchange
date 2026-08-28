@@ -952,8 +952,9 @@ order by r.table_name, r.column_name;
 
 -- Dedicated Storage checks intentionally live in
 -- supabase/verification/dedicated_storage_cutover_checks.sql. Do not apply the
--- dedicated project's empty browser-policy allowlist to this shared main/CMS
--- project.
+-- dedicated project's bucket checks to this independent main eDoc database.
+-- This file is also intentionally incompatible with a shared website/CMS
+-- database because section 2 requires zero browser Data API access.
 
 -- 8. Retired demo identifiers. Every count must be zero. Exact identifiers
 -- only; no user names, emails or business document content are returned.

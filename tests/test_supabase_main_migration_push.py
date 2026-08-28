@@ -62,6 +62,11 @@ if args[:2] == ["db", "query"]:
         if dirty_field:
             counts[dirty_field] = 1
         rows = [counts]
+    elif "shared_module_marker_count" in sql:
+        rows = [{
+            "shared_module_marker_count": 1 if os.environ.get("FAKE_SUPABASE_SHARED_MAIN") == "1" else 0,
+            "unrelated_storage_bucket_count": 1 if os.environ.get("FAKE_SUPABASE_SHARED_MAIN") == "1" else 0,
+        }]
     elif "to_regclass" in sql:
         rows = [{"migration_table_exists": state == "existing"}]
     elif "schema_migrations" in sql and "version" in sql:
@@ -146,6 +151,32 @@ class SupabaseMainMigrationPushTestCase(unittest.TestCase):
         self.assertEqual(commands[-1][:2], ["db", "push"])
         self.assertNotIn("--include-roles", commands[-1])
         self.assertIn("--dry-run", commands[-1])
+
+    def test_existing_mode_refuses_shared_website_or_cms_project(self) -> None:
+        self.state_path.write_text("existing", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ, {"FAKE_SUPABASE_SHARED_MAIN": "1"}, clear=False
+        ):
+            argv = [
+                str(TOOL_PATH),
+                "existing",
+                "--project-ref",
+                "abcdefghijklmnopqrst",
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(
+                    self.tool.CutoverError,
+                    "existing_main_project_refuses_shared_module_project",
+                ):
+                    self.tool.main()
+        commands = [
+            json.loads(line)
+            for line in self.log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertTrue(
+            any("shared_module_marker_count" in command[-1] for command in commands)
+        )
+        self.assertFalse(any(command[:2] == ["db", "push"] for command in commands))
 
     def test_fresh_apply_rechecks_recorded_remote_history(self) -> None:
         self.state_path.write_text("empty", encoding="utf-8")

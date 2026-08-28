@@ -1,8 +1,8 @@
 -- Dedicated eDoc Storage project cutover checks (read-only metadata only).
 --
--- Run this file only against the dedicated Storage project.  The main eDoc
--- database also hosts CMS storage policies and must not satisfy this project's
--- empty browser-policy allowlist.
+-- Run this file only against the dedicated Storage project.  The independent
+-- main eDoc database, website/CMS and Finance projects must never receive this
+-- project's bucket or empty browser-policy allowlist checks.
 
 -- 1. Fail closed unless both bucket definitions exactly match the reviewed
 -- limits and MIME allowlists.  A permissive extra MIME type is drift, not a

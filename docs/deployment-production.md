@@ -4,7 +4,7 @@
 
 ## 1. 資料庫與檔案儲存分工
 
-- 主 eDoc Supabase：Postgres、Auth 對應資料與應用資料。
+- 主 eDoc Supabase：獨立的 Postgres、Auth 對應資料與應用資料；不得與官網 CMS、會計或其他模組共用 public schema。
 - 專用 Storage Supabase：只存放 `edoc-private`、`edoc-seal-vault` 私有 bucket 與物件。
 - Finance／會計系統：人員、公司與組織的唯一主資料來源；eDoc 不手動建立正式人員。
 - 前端不得取得任一 project 的 `service_role`，也不得列舉 bucket 或接受任意 storage path。
@@ -30,7 +30,8 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
 3. 若遠端出現 repository 不存在的 migration，或同一版本的套用狀態不一致，立即停止；不得自行執行 `supabase migration repair`、不得略過版本，也不得用 `db pull` 產生未經審查的正式基線。先由資料庫負責人核對遠端 SQL、雜湊與變更單，再以核准的 baseline／forward migration 補齊 repository。
 4. 先判定 linked project 是「全新空白」或「已有 migration 歷程」，兩條路徑不可混用：
    - **全新空白 project**：`roles.sql` 必須先於歷史 migration chain 載入。先執行 `python3 tools/supabase_main_migration_push.py fresh-empty --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才在同一命令加 `--apply`。wrapper 只有在遠端 migration 歷程為空時才會加入 `supabase db push --include-roles`，否則拒絕。
-   - **既有 project**：執行 `python3 tools/supabase_main_migration_push.py existing --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才加 `--apply`。此路徑永不加入 `--include-roles`，也不得手動重跑 `roles.sql`，避免在移除 migration 已通過後重新插入 fresh-only sentinel。
+   - **既有 project**：執行 `python3 tools/supabase_main_migration_push.py existing --project-ref <main-edoc-project-ref>` 做 dry-run；核准後才加 `--apply`。此路徑永不加入 `--include-roles`，也不得手動重跑 `roles.sql`，避免在移除 migration 已通過後重新插入 fresh-only sentinel。wrapper 會檢查官網／CMS relation marker 與非 eDoc bucket；只要判定為共用 project 就拒絕，因為後續 Data API hardening 會全面收回 public schema 的 browser grant／policy。
+   - 若既有 eDoc 資料仍位於官網／CMS project，禁止在該 project 直接套用本 migration chain。先建立乾淨的獨立主 eDoc project，依核准的欄位級匯出／匯入與 hash、筆數、外鍵驗證移轉 eDoc 資料；官網 project 僅作為唯讀來源，且不得把公文本文、附件、憑證或個資輸出到 log／證據檔。
    - wrapper 只接受 Supabase CLI `2.116.0`，並用唯讀 `db query` JSON 介面驗證 migration table 與版本。`fresh-empty` 還要求 public 非 extension 物件、Auth 使用者、Storage buckets/objects 全部為 0；CLI 版本、查詢格式、linked ref 或遠端狀態無法確認時一律停止，不猜測 fresh／existing。
 5. 歷程一致後，先確認 linked project 的 PostgreSQL major version 至少為 16（本 repository 的 `supabase/config.toml` 鎖定 17；Storage lifecycle 約束使用 `pg_input_is_valid`，舊版不得發布），再於隔離環境完整 reset／重建並執行 `fresh_bootstrap_smoke.sql`、`runtime_schema_parity_smoke.sql`、`service_role_data_api_grant_smoke.sql` 及五帳號驗收。
 6. 取得資料庫備份、指定回復點與人工變更核准後，才依核准路徑套用正式 migrations。既有 project 在套用 `20260827194500_promote_editor_tus_staging_to_immutable.sql` 前，必須先暫停 PDF Editor 的新建上傳與 finalize、等待在途請求與最晚一枚 signed TUS capability 失效。操作人員先以不輸出 credential 的方式，核對目前 server environment 的主資料庫與專用 Storage project ref 都等於核准變更單，再執行 `python3 scripts/verify_editor_storage_assets.py --acknowledge-private-document-download`；URL 與 service-role key 只能來自 server environment，不得寫入命令、shell history 或證據檔。工具必須 exit 0，且 aggregate JSON 為 `passed=true`、`invalidAssetCount=0`，不得輸出 path、檔名、hash、document ID 或文件內容。接著才以唯讀方式執行 `supabase/verification/editor_storage_promotion_preflight.sql`；`checkedAssetCount` 必須精確等於 SQL 的 `finalized_editor_asset_count`，且 `active_editor_upload_count=0`、`finalized_assets_requiring_byte_promotion=0`、`nonfinalized_assets_without_durable_job_input=0`，最後回傳 `editor_storage_promotion_preflight_ok` 才可繼續。若任一 gate 阻擋，先依變更單完成可稽核的 Storage bytes 搬移／清理，禁止只改資料庫 path、跳過檢查或把 metadata 相符當成 bytes 已驗證。
@@ -66,9 +67,9 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
 2. `supabase/storage-migrations/20260827042214_harden_edoc_storage_buckets.sql`
 3. `supabase/storage-migrations/20260827050000_enforce_empty_storage_client_policy_allowlist.sql`
 
-這三個檔案只允許套用到 dedicated Storage project，絕不可套用到主網站／CMS Supabase project；其中 allowlist migration 會移除 dedicated project 的所有 browser client object policies。檔案要作為獨立、經人工核准的 Storage 變更執行；不得在仍連結專用 Storage project 時執行主資料庫的 `supabase db push`。完成後再次 `supabase unlink`，避免下一次誤把主資料庫 migration 推到 Storage project。
+這三個檔案只允許套用到 dedicated Storage project，絕不可套用到官網／CMS、會計或主 eDoc database project；其中 allowlist migration 會移除 dedicated project 的所有 browser client object policies。檔案要作為獨立、經人工核准的 Storage 變更執行；不得在仍連結專用 Storage project 時執行主資料庫的 `supabase db push`。完成後再次 `supabase unlink`，避免下一次誤把主資料庫 migration 推到 Storage project。
 
-主資料庫只執行 `supabase/verification/production_cutover_checks.sql`；專用 Storage project 另執行 `supabase/verification/dedicated_storage_cutover_checks.sql`。不可把兩份檢查互換，因為主資料庫同時承載 CMS storage policies，而專用 Storage project 的 browser policy allowlist 必須為空。
+獨立主 eDoc 資料庫只執行 `supabase/verification/production_cutover_checks.sql`；專用 Storage project 另執行 `supabase/verification/dedicated_storage_cutover_checks.sql`。不可把兩份檢查互換，也不可對官網／CMS 或會計 project 執行任一份 eDoc cutover SQL。
 
 套用後必須確認：
 
