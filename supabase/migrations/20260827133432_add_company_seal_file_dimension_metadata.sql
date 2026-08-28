@@ -35,7 +35,7 @@ update public.company_seal_files as seal_file
    and (
      seal_file.dimension_policy_version is distinct from
        'institution-seal-v2-calibrated'
-     or not pg_catalog.coalesce(
+     or not coalesce(
        public.edoc_company_seal_dimensions_are_valid(
          seal.seal_size_type,
          seal_file.pixel_width,

@@ -19,7 +19,7 @@ declare
   v_expected_job_level text;
   v_job_level text;
 begin
-  if nullif(pg_catalog.btrim(pg_catalog.coalesce(p_user_id, '')), '') is null then
+  if nullif(pg_catalog.btrim(coalesce(p_user_id, '')), '') is null then
     raise exception using
       errcode = '42501',
       message = 'official_workflow_delegation_finance_actor_ineligible';
@@ -36,7 +36,7 @@ begin
       message = 'official_workflow_delegation_finance_actor_ineligible';
   end if;
 
-  v_role_key := case pg_catalog.btrim(pg_catalog.coalesce(v_user.logging_role_key, ''))
+  v_role_key := case pg_catalog.btrim(coalesce(v_user.logging_role_key, ''))
     when 'team_member' then 'staff'
     when 'staff' then 'staff'
     when 'employee' then 'staff'
@@ -77,7 +77,7 @@ begin
     when 'region-manager' then 'district_manager'
     when 'external-audit' then 'external_auditor'
     when 'external-auditor' then 'external_auditor'
-    else pg_catalog.btrim(pg_catalog.coalesce(v_user.logging_role_key, ''))
+    else pg_catalog.btrim(coalesce(v_user.logging_role_key, ''))
   end;
 
   select expected.role_name, expected.job_level
@@ -102,7 +102,7 @@ begin
     ) as expected(role_key, role_name, job_level)
    where expected.role_key = v_role_key;
 
-  v_job_level := case pg_catalog.btrim(pg_catalog.coalesce(v_user.job_level, ''))
+  v_job_level := case pg_catalog.btrim(coalesce(v_user.job_level, ''))
     when 'L1 員工' then '職員'
     when 'L2 專員' then '職員'
     when 'L3 主管' then '課長'
@@ -122,13 +122,13 @@ begin
   end;
 
   if v_user.status is distinct from '啟用'
-     or pg_catalog.lower(pg_catalog.btrim(pg_catalog.coalesce(v_user.account_source, ''))) <> 'finance'
-     or nullif(pg_catalog.btrim(pg_catalog.coalesce(v_user.auth_user_id::text, '')), '') is null
-     or nullif(pg_catalog.btrim(pg_catalog.coalesce(v_user.finance_employee_id, '')), '') is null
-     or nullif(pg_catalog.btrim(pg_catalog.coalesce(v_user.company_id, '')), '') is null
-     or nullif(pg_catalog.btrim(pg_catalog.coalesce(v_user.title, '')), '') is null
+     or pg_catalog.lower(pg_catalog.btrim(coalesce(v_user.account_source, ''))) <> 'finance'
+     or nullif(pg_catalog.btrim(coalesce(v_user.auth_user_id::text, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(v_user.finance_employee_id, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(v_user.company_id, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(v_user.title, '')), '') is null
      or v_expected_role is null
-     or pg_catalog.btrim(pg_catalog.coalesce(v_user.role, '')) is distinct from v_expected_role
+     or pg_catalog.btrim(coalesce(v_user.role, '')) is distinct from v_expected_role
      or v_job_level is distinct from v_expected_job_level then
     raise exception using
       errcode = '42501',
@@ -153,7 +153,7 @@ language sql
 immutable
 set search_path = ''
 as $function$
-  select pg_catalog.coalesce(p_profile->>'logging_role_key', '') = 'admin_director';
+  select coalesce(p_profile->>'logging_role_key', '') = 'admin_director';
 $function$;
 
 alter function edoc_private.assert_finance_delegation_profile(text) owner to postgres;

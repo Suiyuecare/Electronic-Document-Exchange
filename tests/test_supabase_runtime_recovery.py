@@ -271,6 +271,7 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
 
         for sql in (migration_sql, recovery_sql):
             with self.subTest(contract="migration_or_recovery"):
+                self.assertNotIn("pg_catalog.coalesce", sql)
                 for column, definition in expected_columns.items():
                     self.assertIn(
                         f"add column if not exists {column} {definition}",
@@ -487,6 +488,7 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
                 )
 
         compact_forward = re.sub(r"\s+", "", forward_sql)
+        self.assertNotIn("pg_catalog.coalesce", forward_sql)
         self.assertIn(
             f"alterfunction{profile_signature}ownertopostgres",
             compact_forward,
