@@ -759,6 +759,10 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("drop policy if exists %i on storage.objects", policy_allowlist)
         self.assertNotIn("policyname in (", checks)
         self.assertIn("roles && array['public', 'anon', 'authenticated']::name[]", checks)
+        self.assertIn("dedicated_storage_unexpected_bucket_count", checks)
+        self.assertIn("dedicated_storage_project_not_isolated", checks)
+        self.assertIn("from auth.users", checks)
+        self.assertIn("dependency_row.deptype = 'e'", checks)
 
     def test_notification_bootstrap_does_not_fake_external_readiness(self) -> None:
         sql = NOTIFICATIONS.read_text(encoding="utf-8").lower()

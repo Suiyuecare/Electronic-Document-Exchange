@@ -29,6 +29,10 @@ declare
     'image/png', 'image/jpeg', 'image/webp'
   ]::text[];
   browser_policy_count bigint;
+  unexpected_bucket_count bigint;
+  auth_user_count bigint;
+  public_app_relation_count bigint;
+  public_app_function_count bigint;
 begin
   select * into private_bucket
   from storage.buckets
@@ -76,6 +80,54 @@ begin
     raise exception 'dedicated_storage_browser_policy_exposed:%',
       browser_policy_count;
   end if;
+
+  select pg_catalog.count(*) into unexpected_bucket_count
+  from storage.buckets
+  where id not in ('edoc-private', 'edoc-seal-vault');
+
+  if unexpected_bucket_count <> 0 then
+    raise exception 'dedicated_storage_unexpected_bucket_count:%',
+      unexpected_bucket_count;
+  end if;
+
+  select pg_catalog.count(*) into auth_user_count
+  from auth.users;
+
+  select pg_catalog.count(*) into public_app_relation_count
+  from pg_catalog.pg_class relation_row
+  join pg_catalog.pg_namespace namespace_row
+    on namespace_row.oid = relation_row.relnamespace
+  where namespace_row.nspname = 'public'
+    and relation_row.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+    and not exists (
+      select 1
+      from pg_catalog.pg_depend dependency_row
+      where dependency_row.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+        and dependency_row.objid = relation_row.oid
+        and dependency_row.deptype = 'e'
+    );
+
+  select pg_catalog.count(*) into public_app_function_count
+  from pg_catalog.pg_proc procedure_row
+  join pg_catalog.pg_namespace namespace_row
+    on namespace_row.oid = procedure_row.pronamespace
+  where namespace_row.nspname = 'public'
+    and not exists (
+      select 1
+      from pg_catalog.pg_depend dependency_row
+      where dependency_row.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+        and dependency_row.objid = procedure_row.oid
+        and dependency_row.deptype = 'e'
+    );
+
+  if auth_user_count <> 0
+     or public_app_relation_count <> 0
+     or public_app_function_count <> 0 then
+    raise exception 'dedicated_storage_project_not_isolated:%:%:%',
+      auth_user_count,
+      public_app_relation_count,
+      public_app_function_count;
+  end if;
 end
 $dedicated_storage_cutover_gate$;
 
@@ -113,3 +165,44 @@ where schemaname = 'storage'
   and roles && array['public', 'anon', 'authenticated']::name[]
 order by policyname;
 -- The DO block above already aborts unless this query returns zero rows.
+
+-- 3. A dedicated Storage project is not an application/Auth project.  The
+-- hard gate above requires these bounded counts to remain zero and also
+-- refuses any bucket outside the two reviewed eDoc buckets.  Do not emit
+-- object names, account identifiers or stored paths as cutover evidence.
+select
+  (select pg_catalog.count(*) from auth.users) as auth_user_count,
+  (
+    select pg_catalog.count(*)
+    from storage.buckets
+    where id not in ('edoc-private', 'edoc-seal-vault')
+  ) as unexpected_bucket_count,
+  (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_class relation_row
+    join pg_catalog.pg_namespace namespace_row
+      on namespace_row.oid = relation_row.relnamespace
+    where namespace_row.nspname = 'public'
+      and relation_row.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+      and not exists (
+        select 1
+        from pg_catalog.pg_depend dependency_row
+        where dependency_row.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
+          and dependency_row.objid = relation_row.oid
+          and dependency_row.deptype = 'e'
+      )
+  ) as public_app_relation_count,
+  (
+    select pg_catalog.count(*)
+    from pg_catalog.pg_proc procedure_row
+    join pg_catalog.pg_namespace namespace_row
+      on namespace_row.oid = procedure_row.pronamespace
+    where namespace_row.nspname = 'public'
+      and not exists (
+        select 1
+        from pg_catalog.pg_depend dependency_row
+        where dependency_row.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+          and dependency_row.objid = procedure_row.oid
+          and dependency_row.deptype = 'e'
+      )
+  ) as public_app_function_count;

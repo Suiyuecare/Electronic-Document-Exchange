@@ -1691,5 +1691,280 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         )
 
 
+class FourPerspectiveFiveAccountMatrixTest(unittest.TestCase):
+    """Prove five distinct Finance accounts for each requested perspective.
+
+    The full HTTP suite above replays five applicant documents.  That does not,
+    by itself, prove five distinct supervisors, general-affairs reviewers, and
+    CEOs.  This deterministic, deidentified matrix exercises the production
+    Finance snapshot contract and server-owned workflow policy for five
+    independent organization chains across every A-D route.  It performs no
+    database, Storage, Finance, exchange-provider, or other network call.
+    """
+
+    PERSPECTIVE_BY_STEP = {
+        "applicant_manager": "supervisor",
+        "department_head": "supervisor",
+        "ceo": "ceo",
+        "general_affairs_review": "general_affairs",
+        "applicant_confirm": "new_employee",
+    }
+
+    @staticmethod
+    def _finance_record(
+        *,
+        seed_token: str,
+        role: str,
+        tenant_id: str,
+        entity_id: str,
+        department_code: str,
+        department_name: str,
+        revision: int,
+    ) -> dict[str, Any]:
+        profile = backend.strict_finance_role_profile(role)
+        fingerprint = _fingerprint(seed_token)
+        email = f"perspective-{fingerprint}@example.test"
+        return {
+            "tenantId": tenant_id,
+            "financeUserId": f"perspective-{fingerprint}",
+            "authUserId": f"google-{_fingerprint(seed_token + ':auth')}",
+            "name": f"隔離驗收角色{fingerprint[:6]}",
+            "email": email,
+            "role": role,
+            "roleLabel": profile["title"],
+            "entityId": entity_id,
+            "departmentCode": department_code,
+            "departmentName": department_name,
+            "jobTitle": profile["title"],
+            "extension": f"8{revision:03d}",
+            "contactEmail": email,
+            "orgStatus": "active",
+            "sourceUpdatedAt": "2026-08-27T00:00:00Z",
+            "memberRevision": revision,
+            "active": True,
+            "authUserBound": True,
+            "googleLoginVerified": True,
+        }
+
+    @classmethod
+    def _build_fixtures(cls) -> list[dict[str, Any]]:
+        rng = random.Random(ACCEPTANCE_SEED)
+        random_tokens = rng.sample(range(100_000, 1_000_000), 25)
+        token_index = 0
+        fixtures: list[dict[str, Any]] = []
+        required_step_keys = {
+            step["key"]
+            for route in ("A", "B", "C", "D")
+            for step in backend.official_workflow_steps_for_finance_applicant(route, "staff")
+        }
+        for ordinal in range(1, 6):
+            tenant_id = f"tenant-perspective-{ordinal}"
+            entity_id = f"TEST-ENTITY-{ordinal}"
+            department_code = f"TEST-DEPT-{ordinal}"
+            department_name = f"隔離驗收部門{ordinal}"
+
+            records: dict[str, dict[str, Any]] = {}
+            for perspective, role in (
+                ("new_employee", "staff"),
+                ("supervisor", "department_head"),
+                ("general_affairs", "ga_chief"),
+                ("ceo", "ceo"),
+                ("admin_director", "admin_director"),
+            ):
+                random_token = random_tokens[token_index]
+                token_index += 1
+                records[perspective] = cls._finance_record(
+                    seed_token=(
+                        f"{ACCEPTANCE_SEED}:{random_token}:{ordinal}:"
+                        f"{perspective}:{role}"
+                    ),
+                    role=role,
+                    tenant_id=tenant_id,
+                    entity_id=entity_id,
+                    department_code=department_code,
+                    department_name=department_name,
+                    revision=ordinal * 10 + token_index,
+                )
+
+            snapshot = {
+                "ok": True,
+                "source": "finance",
+                "schemaVersion": 2,
+                "snapshotAt": "2026-08-27T00:00:00Z",
+                "identity": records["new_employee"],
+                "company": {
+                    "tenantId": tenant_id,
+                    "entityId": entity_id,
+                    "name": f"隔離驗收公司{ordinal}",
+                    "taxId": f"TEST-{ordinal:04d}",
+                    "address": f"隔離測試地址{ordinal}",
+                    "active": True,
+                },
+                # One Finance department head may validly fill both consecutive
+                # supervisor slots; the real workflow still records two decisions.
+                "actors": {
+                    "applicantManager": records["supervisor"],
+                    "departmentHead": records["supervisor"],
+                    "ceo": records["ceo"],
+                    "adminDirector": records["admin_director"],
+                    "generalAffairs": records["general_affairs"],
+                },
+                "workflowReady": True,
+                "issues": [],
+            }
+            normalized = backend.normalize_finance_bridge_snapshot(
+                snapshot,
+                require_workflow=True,
+                required_step_keys=required_step_keys,
+            )
+            applicant_projection = normalized["applicant"]
+            actor_projections = normalized["actors"]
+
+            def projected_user(item: dict[str, Any], company_id: str) -> dict[str, Any]:
+                return {
+                    "id": item["finance_user_id"],
+                    "finance_employee_id": item["finance_user_id"],
+                    "email": item["email"],
+                    "account_source": "finance",
+                    "logging_role_key": item["profile"]["logging_role_key"],
+                    "company_id": company_id,
+                    "unit": item.get("department_name") or department_name,
+                }
+
+            company_id = f"TEST-CO-{ordinal}"
+            supervisor = projected_user(actor_projections["applicantManager"], company_id)
+            applicant = projected_user(applicant_projection, company_id)
+            applicant.update(
+                {
+                    "manager_employee_id": supervisor["finance_employee_id"],
+                    "manager_email": supervisor["email"],
+                    "approval_manager_employee_id": supervisor["finance_employee_id"],
+                    "approval_manager_email": supervisor["email"],
+                }
+            )
+            fixtures.append(
+                {
+                    "company": {"id": company_id, "name": f"隔離驗收公司{ordinal}"},
+                    "applicant": applicant,
+                    "actors": {
+                        "applicant_manager": supervisor,
+                        "department_head": supervisor,
+                        "ceo": projected_user(actor_projections["ceo"], company_id),
+                        "admin_director": projected_user(
+                            actor_projections["adminDirector"], company_id
+                        ),
+                        "general_affairs_review": projected_user(
+                            actor_projections["generalAffairs"], company_id
+                        ),
+                    },
+                    "fixtureEmails": [record["email"] for record in records.values()],
+                }
+            )
+        return fixtures
+
+    def test_five_accounts_per_perspective_cover_every_approval_route(self) -> None:
+        fixtures = self._build_fixtures()
+        # The seed must select a stable, replayable set instead of live accounts.
+        self.assertEqual(fixtures, self._build_fixtures())
+        self.assertEqual(len(fixtures), 5)
+
+        fixture_by_applicant_id = {
+            fixture["applicant"]["id"]: fixture for fixture in fixtures
+        }
+        companies = [fixture["company"] for fixture in fixtures]
+        applicants_by_company = {
+            fixture["company"]["id"]: [fixture["applicant"]]
+            for fixture in fixtures
+        }
+
+        def resolve_step(
+            step: dict[str, Any],
+            applicant: dict[str, Any],
+            _company: dict[str, Any],
+        ) -> dict[str, Any] | None:
+            if step["key"] == "applicant_confirm":
+                return applicant
+            return fixture_by_applicant_id[applicant["id"]]["actors"].get(step["key"])
+
+        readiness = backend.build_internal_launch_workflow_readiness(
+            companies,
+            applicants_by_company,
+            resolve_step,
+        )
+        self.assertTrue(readiness["ready"], readiness["blockers"])
+        # The launch summary intentionally collapses routes with identical
+        # approval shapes (A/B and C/D). The explicit loop below still checks
+        # all four business route codes independently.
+        self.assertEqual(readiness["routeCodes"], ["A", "C"])
+        self.assertEqual(len(readiness["routeChecks"]), 10)
+        self.assertTrue(all(check["ready"] for check in readiness["routeChecks"]))
+
+        actions: dict[str, dict[str, int]] = {
+            perspective: {}
+            for perspective in ("new_employee", "supervisor", "general_affairs", "ceo")
+        }
+        route_summaries: list[dict[str, Any]] = []
+        for fixture in fixtures:
+            applicant = fixture["applicant"]
+            for route in ("A", "B", "C", "D"):
+                steps = backend.official_workflow_steps_for_finance_applicant(
+                    route, applicant["logging_role_key"]
+                )
+                step_keys = [step["key"] for step in steps]
+                self.assertEqual("ceo" in step_keys, route in {"C", "D"})
+                route_summary = backend.workflow_readiness_summary(
+                    applicant,
+                    route,
+                    [
+                        (step, resolve_step(step, applicant, fixture["company"]))
+                        for step in steps
+                    ],
+                    company_ready=True,
+                )
+                self.assertTrue(route_summary["ready"], route_summary["blockers"])
+                route_summaries.append(route_summary)
+                for step_key in step_keys:
+                    perspective = self.PERSPECTIVE_BY_STEP.get(step_key)
+                    if not perspective:
+                        continue
+                    actor = (
+                        applicant
+                        if step_key == "applicant_confirm"
+                        else fixture["actors"][step_key]
+                    )
+                    actions[perspective][actor["id"]] = (
+                        actions[perspective].get(actor["id"], 0) + 1
+                    )
+
+        self.assertEqual(len(route_summaries), 20)
+        self.assertEqual(
+            {summary["routeCode"] for summary in route_summaries},
+            {"A", "B", "C", "D"},
+        )
+
+        expected_actions_per_account = {
+            "new_employee": 4,
+            "supervisor": 8,
+            "general_affairs": 4,
+            "ceo": 2,
+        }
+        for perspective, expected_count in expected_actions_per_account.items():
+            with self.subTest(perspective=perspective):
+                self.assertEqual(len(actions[perspective]), 5)
+                self.assertEqual(set(actions[perspective].values()), {expected_count})
+
+        required_account_ids = {
+            account_id
+            for perspective_accounts in actions.values()
+            for account_id in perspective_accounts
+        }
+        self.assertEqual(len(required_account_ids), 20)
+        fixture_emails = {
+            email for fixture in fixtures for email in fixture["fixtureEmails"]
+        }
+        self.assertEqual(len(fixture_emails), 25)
+        self.assertTrue(all(email.endswith("@example.test") for email in fixture_emails))
+
+
 if __name__ == "__main__":
     unittest.main()

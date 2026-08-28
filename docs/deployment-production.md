@@ -73,9 +73,11 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
 套用後必須確認：
 
 - `edoc-private`、`edoc-seal-vault` 均為 private。
+- Storage project 只能有上述兩個 bucket；不得殘留其他模組 bucket。
 - `edoc-private` 接受 PDF、核准的辦公文件／圖片及 archive 所需的 `application/zip`。
 - 兩個 bucket 均不接受 `image/svg+xml`。
 - `storage.objects` 的 `PUBLIC`／`anon`／`authenticated` policy allowlist 為空；瀏覽器僅使用後端簽發的短效能力。若其他模組未來需要直接 Storage policy，必須先拆分 bucket／project 或另行安全審查，不可直接加回共用 policy。
+- `auth.users`、public 非 extension application relations/functions 都必須為 0；若專案仍有舊系統帳號、資料表或函式，必須改用乾淨的專用 Storage project，或依獨立核准的除役變更單處理，不能由 eDoc 部署流程直接刪除。
 
 ## 2. Vercel 正式環境變數
 
