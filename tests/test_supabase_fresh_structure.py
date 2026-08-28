@@ -757,6 +757,11 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             2,
         )
         self.assertIn("EDOC_ACCEPTANCE_UPLOAD_PROTOCOL=local_supabase_tus", workflow)
+        self.assertIn(
+            "supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0",
+            workflow,
+        )
+        self.assertNotIn("supabase/setup-cli@v1", workflow)
         self.assertIn("supabase status -o env", workflow)
         self.assertIn("local_storage_tus_private_bucket_public", gate)
         self.assertIn("local_storage_tus_browser_policy_exposed", gate)

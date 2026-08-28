@@ -22,7 +22,10 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install pinned Supabase CLI
-        uses: supabase/setup-cli@v1
+        # setup-cli v3 installs the pinned CLI through npm and runs on the
+        # current Actions runtime. Pin the reviewed v3.0.0 commit so upstream
+        # tag movement cannot silently change this production gate.
+        uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
         with:
           # 2.116.0 fixes stale local DB connections, loopback proxy routing,
           # Kong DNS caching and service-start reliability. Keep this pinned so
