@@ -31,6 +31,18 @@ BUSINESS_CONFLICT_FORWARD = (
 EDITOR_IMMUTABLE_PROMOTION = (
     MIGRATIONS / "20260827194500_promote_editor_tus_staging_to_immutable.sql"
 )
+COMPANY_SEAL_DIMENSION_FORWARD = (
+    MIGRATIONS / "20260827133432_add_company_seal_file_dimension_metadata.sql"
+)
+FUNCTION_TYPE_RESOLUTION_FORWARD = (
+    MIGRATIONS / "20260827133545_fix_official_document_function_type_resolution.sql"
+)
+FINANCE_DELEGATION_HELPERS_FORWARD = (
+    MIGRATIONS / "20260827133700_add_finance_delegation_profile_helpers.sql"
+)
+INBOUND_MUTATION_CONTRACT = (
+    MIGRATIONS / "20260826033323_inbound_mutation_contract.sql"
+)
 EDITOR_STORAGE_PREFLIGHT = (
     ROOT / "supabase" / "verification" / "editor_storage_promotion_preflight.sql"
 )
@@ -142,6 +154,25 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         names = set(manifest["migrations"])
         self.assertIn(SCHEMA_PARITY.name, names)
+        self.assertIn(COMPANY_SEAL_DIMENSION_FORWARD.name, names)
+        self.assertIn(FUNCTION_TYPE_RESOLUTION_FORWARD.name, names)
+        self.assertIn(FINANCE_DELEGATION_HELPERS_FORWARD.name, names)
+        self.assertLess(
+            manifest["migrations"].index(SCHEMA_PARITY.name),
+            manifest["migrations"].index(COMPANY_SEAL_DIMENSION_FORWARD.name),
+        )
+        self.assertLess(
+            manifest["migrations"].index(COMPANY_SEAL_DIMENSION_FORWARD.name),
+            manifest["migrations"].index(FUNCTION_TYPE_RESOLUTION_FORWARD.name),
+        )
+        self.assertLess(
+            manifest["migrations"].index(FUNCTION_TYPE_RESOLUTION_FORWARD.name),
+            manifest["migrations"].index(FINANCE_DELEGATION_HELPERS_FORWARD.name),
+        )
+        self.assertLess(
+            manifest["migrations"].index(FINANCE_DELEGATION_HELPERS_FORWARD.name),
+            manifest["migrations"].index(EDITOR_IMMUTABLE_PROMOTION.name),
+        )
         self.assertNotIn(RECOVERY.name, names)
         self.assertFalse((MIGRATIONS / RECOVERY.name).exists())
         for storage_path in (STORAGE_BASE, STORAGE_HARDEN, STORAGE_POLICY_ALLOWLIST):
@@ -222,6 +253,268 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         self.assertIn("official_document_files_stamp_request_id_fkey", sql)
         self.assertIn("official_document_dispatch_records_document_key", sql)
         self.assertNotIn("drop index", sql)
+
+    def test_company_seal_dimension_forward_adds_rpc_rowtype_fields_without_fabricating_legacy_metadata(self) -> None:
+        migration_sql = COMPANY_SEAL_DIMENSION_FORWARD.read_text(encoding="utf-8").lower()
+        recovery_sql = RECOVERY.read_text(encoding="utf-8").lower()
+        fresh_smoke_sql = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
+        cutover_sql = CUTOVER_CHECKS.read_text(encoding="utf-8").lower()
+        expected_columns = {
+            "pixel_width": "integer",
+            "pixel_height": "integer",
+            "source_aspect_ratio": "numeric",
+            "render_width_mm": "numeric",
+            "render_height_mm": "numeric",
+            "dimension_policy_version": "text",
+            "dimension_validated": "boolean not null default false",
+        }
+
+        for sql in (migration_sql, recovery_sql):
+            with self.subTest(contract="migration_or_recovery"):
+                for column, definition in expected_columns.items():
+                    self.assertIn(
+                        f"add column if not exists {column} {definition}",
+                        sql,
+                    )
+                self.assertIn("set is_current = false", sql)
+                self.assertIn("seal_file.is_current is true", sql)
+                self.assertIn("from public.company_seals as seal", sql)
+                self.assertIn(
+                    "seal_file.dimension_policy_version is distinct from\n       "
+                    "'institution-seal-v2-calibrated'",
+                    sql,
+                )
+                self.assertIn("public.edoc_company_seal_dimensions_are_valid(", sql)
+                self.assertIn("seal_file.dimension_validated", sql)
+                self.assertIn("set dimension_validated = false", sql)
+                self.assertIn("where dimension_validated is null", sql)
+                self.assertIn("alter column dimension_validated set default false", sql)
+                self.assertIn("alter column dimension_validated set not null", sql)
+                for column in (
+                    "pixel_width",
+                    "pixel_height",
+                    "source_aspect_ratio",
+                    "render_width_mm",
+                    "render_height_mm",
+                    "dimension_policy_version",
+                ):
+                    self.assertNotRegex(sql, rf"set\s+{column}\s*=")
+                self.assertNotRegex(sql, r"set\s+dimension_validated\s*=\s*true")
+
+        self.assertLess(
+            recovery_sql.index("add column if not exists pixel_width"),
+            recovery_sql.index(
+                "create or replace function public.edoc_company_seal_dimensions_are_valid"
+            ),
+        )
+        self.assertIn("fresh_bootstrap_company_seal_dimension_columns_missing", fresh_smoke_sql)
+        self.assertIn("fresh_bootstrap_company_seal_dimension_guard_invalid", fresh_smoke_sql)
+        for column, definition in expected_columns.items():
+            expected_data_type = definition.split()[0]
+            expected_nullable = "false" if column == "dimension_validated" else "true"
+            self.assertIn(
+                f"('company_seal_files', '{column}', '{expected_data_type}', {expected_nullable})",
+                cutover_sql,
+            )
+        if parse_sql is not None:
+            parse_sql(migration_sql)
+
+    def test_official_document_function_type_resolution_is_explicit_and_forward_compatible(self) -> None:
+        schema_sql = SCHEMA_PARITY.read_text(encoding="utf-8").lower()
+        recovery_sql = RECOVERY.read_text(encoding="utf-8").lower()
+        inbound_sql = INBOUND_MUTATION_CONTRACT.read_text(encoding="utf-8").lower()
+        forward_sql = FUNCTION_TYPE_RESOLUTION_FORWARD.read_text(
+            encoding="utf-8"
+        ).lower()
+        fresh_smoke_sql = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
+        cutover_sql = CUTOVER_CHECKS.read_text(encoding="utf-8").lower()
+
+        validator_signature = (
+            "edoc_private.validate_official_document_decision_evidence("
+            "text,text,text,text,text,jsonb)"
+        )
+        validator_definition = (
+            "create or replace function "
+            "edoc_private.validate_official_document_decision_evidence("
+        )
+
+        for sql in (schema_sql, recovery_sql):
+            with self.subTest(contract="schema_or_recovery"):
+                self.assertIn(
+                    "p_position_ids->>((v_position_index - 1)::integer)",
+                    sql,
+                )
+                self.assertIn(
+                    "p_overlay_ids->>((v_overlay_index - 1)::integer)",
+                    sql,
+                )
+                self.assertIn("'approve'::text,", sql)
+                self.assertIn("'reject'::text,", sql)
+                self.assertIn(validator_definition, sql)
+                self.assertIn("security definer\n set search_path to ''", sql)
+                self.assertIn("for share", sql)
+                for evidence_marker in (
+                    "official_document_source_evidence_mismatch",
+                    "official_document_prepared_evidence_mismatch",
+                    "official_document_attachment_manifest_mismatch",
+                    "official_document_review_acknowledgements_required",
+                    "official_document_review_access_required",
+                    "official_document_rejection_reason_category_required",
+                    "official_document_rejection_missing_items_invalid",
+                    "official_document_correction_due_date_invalid",
+                ):
+                    self.assertIn(evidence_marker, sql)
+                self.assertIn(
+                    f"revokeallonfunction{validator_signature}"
+                    "frompublic,anon,authenticated,service_role",
+                    re.sub(r"\s+", "", sql),
+                )
+
+        self.assertIn("v_now timestamptz := clock_timestamp();", inbound_sql)
+        self.assertNotIn(
+            "v_now text := to_char(clock_timestamp(), 'yyyy-mm-dd hh24:mi:ss');",
+            inbound_sql,
+        )
+        self.assertGreaterEqual(
+            inbound_sql.count("to_char(v_now, 'yyyy-mm-dd hh24:mi:ss')"),
+            2,
+        )
+
+        signature = "create or replace function public.edoc_mutate_inbound_document_v1("
+        self.assertEqual(forward_sql.count(signature), 1)
+        self.assertIn("set search_path = pg_catalog, extensions", forward_sql)
+        self.assertIn("v_now timestamptz := clock_timestamp();", forward_sql)
+        self.assertEqual(forward_sql.count("errcode = 'pt409'"), 7)
+        self.assertNotIn("errcode = '40001'", forward_sql)
+        self.assertGreaterEqual(
+            forward_sql.count("to_char(v_now, 'yyyy-mm-dd hh24:mi:ss')"),
+            2,
+        )
+        for marker in (
+            "v_legacy_position constant text",
+            "v_fixed_position constant text",
+            "v_legacy_overlay constant text",
+            "v_fixed_overlay constant text",
+            "v_legacy_approve constant text",
+            "v_fixed_approve constant text",
+            "v_legacy_reject constant text",
+            "v_fixed_reject constant text",
+            "edoc_function_type_resolution_definition_drift",
+            "edoc_function_type_resolution_rewrite_failed",
+        ):
+            self.assertIn(marker, forward_sql)
+        self.assertEqual(forward_sql.count(validator_definition), 1)
+        self.assertLess(
+            forward_sql.index(validator_definition),
+            forward_sql.index("do $official_document_function_type_resolution$"),
+        )
+        self.assertIn(
+            f"alterfunction{validator_signature}ownertopostgres",
+            re.sub(r"\s+", "", forward_sql),
+        )
+        self.assertIn(
+            f"revokeallonfunction{validator_signature}"
+            "frompublic,anon,authenticated,service_role",
+            re.sub(r"\s+", "", forward_sql),
+        )
+        self.assertIn("notify pgrst, 'reload schema'", forward_sql)
+        self.assertIn(validator_signature, fresh_smoke_sql)
+        self.assertIn(
+            "fresh_bootstrap_decision_evidence_validator_security_invalid",
+            fresh_smoke_sql,
+        )
+        self.assertIn(validator_signature, cutover_sql)
+        self.assertIn("service_role_execute_revoked", cutover_sql)
+
+        if parse_sql is not None:
+            parse_sql(INBOUND_MUTATION_CONTRACT.read_text(encoding="utf-8"))
+            parse_sql(FUNCTION_TYPE_RESOLUTION_FORWARD.read_text(encoding="utf-8"))
+        if parse_plpgsql is not None:
+            parse_plpgsql(
+                FUNCTION_TYPE_RESOLUTION_FORWARD.read_text(encoding="utf-8")
+            )
+
+    def test_finance_delegation_helpers_fail_closed_and_remain_private(self) -> None:
+        schema_sql = SCHEMA_PARITY.read_text(encoding="utf-8").lower()
+        recovery_sql = RECOVERY.read_text(encoding="utf-8").lower()
+        forward_sql = FINANCE_DELEGATION_HELPERS_FORWARD.read_text(
+            encoding="utf-8"
+        ).lower()
+        fresh_smoke_sql = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
+        cutover_sql = CUTOVER_CHECKS.read_text(encoding="utf-8").lower()
+        profile_signature = "edoc_private.assert_finance_delegation_profile(text)"
+        manage_signature = (
+            "edoc_private.finance_actor_has_delegation_manage(jsonb)"
+        )
+
+        for sql in (schema_sql, recovery_sql, forward_sql):
+            with self.subTest(contract="schema_recovery_or_forward"):
+                self.assertIn(
+                    "function edoc_private.assert_finance_delegation_profile(",
+                    sql,
+                )
+                self.assertIn(
+                    "function edoc_private.finance_actor_has_delegation_manage(",
+                    sql,
+                )
+                for identity_marker in (
+                    "account_source",
+                    "auth_user_id",
+                    "finance_employee_id",
+                    "company_id",
+                    "logging_role_key",
+                    "job_level",
+                    "official_workflow_delegation_finance_actor_ineligible",
+                ):
+                    self.assertIn(identity_marker, sql)
+                for role_marker in (
+                    "admin_director",
+                    "department_head",
+                    "section_chief",
+                    "staff",
+                ):
+                    self.assertIn(role_marker, sql)
+                compact = re.sub(r"\s+", "", sql)
+                self.assertIn(
+                    f"revokeallonfunction{profile_signature}"
+                    "frompublic,anon,authenticated,service_role",
+                    compact,
+                )
+                self.assertIn(
+                    f"revokeallonfunction{manage_signature}"
+                    "frompublic,anon,authenticated,service_role",
+                    compact,
+                )
+
+        compact_forward = re.sub(r"\s+", "", forward_sql)
+        self.assertIn(
+            f"alterfunction{profile_signature}ownertopostgres",
+            compact_forward,
+        )
+        self.assertIn(
+            f"alterfunction{manage_signature}ownertopostgres",
+            compact_forward,
+        )
+        self.assertIn("security definer", forward_sql)
+        self.assertIn("set search_path = ''", forward_sql)
+        self.assertIn("finance_actor_has_delegation_manage", fresh_smoke_sql)
+        self.assertIn(
+            "fresh_bootstrap_finance_delegation_helper_security_invalid",
+            fresh_smoke_sql,
+        )
+        self.assertIn(
+            "fresh_bootstrap_finance_delegation_manage_guard_invalid",
+            fresh_smoke_sql,
+        )
+        self.assertIn(profile_signature, cutover_sql)
+        self.assertIn(manage_signature, cutover_sql)
+
+        if parse_sql is not None:
+            parse_sql(FINANCE_DELEGATION_HELPERS_FORWARD.read_text(encoding="utf-8"))
+        if parse_plpgsql is not None:
+            parse_plpgsql(
+                FINANCE_DELEGATION_HELPERS_FORWARD.read_text(encoding="utf-8")
+            )
 
     def test_recovery_defines_backend_rpc_inventory_and_atomic_contracts(self) -> None:
         sql = RECOVERY.read_text(encoding="utf-8").lower()
@@ -795,6 +1088,8 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
             FK_INDEX_FORWARD,
             AUDIT_HASH_HARDENING,
             FRESH_FINANCE_SENTINEL_CLEANUP,
+            FUNCTION_TYPE_RESOLUTION_FORWARD,
+            FINANCE_DELEGATION_HELPERS_FORWARD,
             EDITOR_IMMUTABLE_PROMOTION,
             EDITOR_STORAGE_PREFLIGHT,
             ROOT / "supabase" / "seed.sql",
@@ -814,6 +1109,8 @@ class SupabaseRuntimeRecoveryTestCase(unittest.TestCase):
         for path in (
             AUDIT_HASH_HARDENING,
             FRESH_FINANCE_SENTINEL_CLEANUP,
+            FUNCTION_TYPE_RESOLUTION_FORWARD,
+            FINANCE_DELEGATION_HELPERS_FORWARD,
             EDITOR_IMMUTABLE_PROMOTION,
             EDITOR_STORAGE_PREFLIGHT,
             FRESH_BOOTSTRAP_SMOKE,

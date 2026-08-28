@@ -385,6 +385,112 @@ where n.nspname = 'public'
   and p.oid not in (select oid from allowed_oids where oid is not null)
 order by 1;
 
+-- 4b.1. The approval/rejection evidence validator must remain a private,
+-- postgres-owned, fixed-search-path SECURITY DEFINER function. Every boolean
+-- must be true; browser and backend service roles must not invoke it directly.
+with validator as (
+  select pg_catalog.to_regprocedure(
+    'edoc_private.validate_official_document_decision_evidence(text,text,text,text,text,jsonb)'
+  ) as oid
+), metadata as (
+  select
+    validator.oid,
+    function_row.prosecdef,
+    pg_catalog.pg_get_userbyid(function_row.proowner) as owner_name,
+    exists (
+      select 1
+      from pg_catalog.unnest(
+        coalesce(function_row.proconfig, array[]::text[])
+      ) config(value)
+      where config.value in ('search_path=', 'search_path=""')
+    ) as fixed_search_path,
+    exists (
+      select 1
+      from pg_catalog.aclexplode(
+        coalesce(
+          function_row.proacl,
+          pg_catalog.acldefault('f', function_row.proowner)
+        )
+      ) privilege_row
+      where privilege_row.grantee = 0
+        and privilege_row.privilege_type = 'EXECUTE'
+    ) as public_execute
+  from validator
+  left join pg_catalog.pg_proc function_row on function_row.oid = validator.oid
+)
+select
+  oid is not null as validator_exists,
+  coalesce(prosecdef, false) as security_definer,
+  coalesce(owner_name = 'postgres', false) as postgres_owned,
+  coalesce(fixed_search_path, false) as fixed_search_path,
+  not coalesce(public_execute, true) as public_execute_revoked,
+  case when oid is null then false
+       else not pg_catalog.has_function_privilege('anon', oid, 'EXECUTE')
+  end as anon_execute_revoked,
+  case when oid is null then false
+       else not pg_catalog.has_function_privilege('authenticated', oid, 'EXECUTE')
+  end as authenticated_execute_revoked,
+  case when oid is null then false
+       else not pg_catalog.has_function_privilege('service_role', oid, 'EXECUTE')
+  end as service_role_execute_revoked
+from metadata;
+
+-- 4b.2. Finance delegation helpers must be private and owned by postgres.
+-- The profile assertion is SECURITY DEFINER; the pure JSON role predicate is
+-- intentionally an immutable invoker function. Every returned boolean must
+-- be true.
+with required(signature, requires_security_definer) as (
+  values
+    ('edoc_private.assert_finance_delegation_profile(text)', true),
+    ('edoc_private.finance_actor_has_delegation_manage(jsonb)', false)
+), metadata as (
+  select
+    required.signature,
+    required.requires_security_definer,
+    function_row.oid,
+    function_row.prosecdef,
+    pg_catalog.pg_get_userbyid(function_row.proowner) as owner_name,
+    exists (
+      select 1
+        from pg_catalog.unnest(
+          coalesce(function_row.proconfig, array[]::text[])
+        ) config(value)
+       where config.value in ('search_path=', 'search_path=""')
+    ) as fixed_search_path,
+    exists (
+      select 1
+        from pg_catalog.aclexplode(
+          coalesce(
+            function_row.proacl,
+            pg_catalog.acldefault('f', function_row.proowner)
+          )
+        ) privilege_row
+       where privilege_row.grantee = 0
+         and privilege_row.privilege_type = 'EXECUTE'
+    ) as public_execute
+  from required
+  left join pg_catalog.pg_proc function_row
+    on function_row.oid = pg_catalog.to_regprocedure(required.signature)
+)
+select
+  signature,
+  oid is not null as helper_exists,
+  coalesce(owner_name = 'postgres', false) as postgres_owned,
+  coalesce(fixed_search_path, false) as fixed_search_path,
+  coalesce(not requires_security_definer or prosecdef, false) as security_mode_valid,
+  not coalesce(public_execute, true) as public_execute_revoked,
+  case when oid is null then false
+       else not pg_catalog.has_function_privilege('anon', oid, 'EXECUTE')
+  end as anon_execute_revoked,
+  case when oid is null then false
+       else not pg_catalog.has_function_privilege('authenticated', oid, 'EXECUTE')
+  end as authenticated_execute_revoked,
+  case when oid is null then false
+       else not pg_catalog.has_function_privilege('service_role', oid, 'EXECUTE')
+  end as service_role_execute_revoked
+from metadata
+order by signature;
+
 -- 4c. Database-owned dispatch evidence. Every boolean must be true. This only
 -- inspects metadata and aggregate existence/sequence properties; it does not
 -- select recipient, contact, note, document text, or attachment information.
@@ -628,6 +734,13 @@ cross join expected_quals expected;
 -- the live catalog and are now restored by the forward schema-parity migration.
 with required_columns(table_name, column_name, data_type, nullable) as (
   values
+    ('company_seal_files', 'pixel_width', 'integer', true),
+    ('company_seal_files', 'pixel_height', 'integer', true),
+    ('company_seal_files', 'source_aspect_ratio', 'numeric', true),
+    ('company_seal_files', 'render_width_mm', 'numeric', true),
+    ('company_seal_files', 'render_height_mm', 'numeric', true),
+    ('company_seal_files', 'dimension_policy_version', 'text', true),
+    ('company_seal_files', 'dimension_validated', 'boolean', false),
     ('official_documents', 'workflow_template_key', 'text', false),
     ('official_documents', 'stamped_file_id', 'text', true),
     ('official_documents', 'requires_stamp', 'boolean', false),

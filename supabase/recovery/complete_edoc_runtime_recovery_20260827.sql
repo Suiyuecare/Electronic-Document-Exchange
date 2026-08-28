@@ -419,6 +419,26 @@ drop policy if exists "service_role_manages_rejection_jobs" on public.official_d
 create policy "service_role_manages_rejection_jobs" on public.official_document_rejection_jobs
   for all to service_role using (true) with check (true);
 
+-- company_seal_files predates calibrated physical-size metadata. Keep legacy
+-- rows as history, but never infer dimensions or leave an unvalidated legacy
+-- file designated as the current selectable seal.
+alter table public.company_seal_files
+  add column if not exists pixel_width integer,
+  add column if not exists pixel_height integer,
+  add column if not exists source_aspect_ratio numeric,
+  add column if not exists render_width_mm numeric,
+  add column if not exists render_height_mm numeric,
+  add column if not exists dimension_policy_version text,
+  add column if not exists dimension_validated boolean not null default false;
+
+update public.company_seal_files
+   set dimension_validated = false
+ where dimension_validated is null;
+
+alter table public.company_seal_files
+  alter column dimension_validated set default false,
+  alter column dimension_validated set not null;
+
 -- Reproduce the current backend-only posture for pre-existing workflow tables.
 -- Older migrations granted browser roles direct table access; the production
 -- architecture now routes these operations through the authenticated backend.
@@ -506,6 +526,29 @@ AS $function$
       )
     );
 $function$;
+
+update public.company_seal_files as seal_file
+   set is_current = false
+  from public.company_seals as seal
+ where seal_file.is_current is true
+   and seal.id = seal_file.seal_id
+   and (
+     seal_file.dimension_policy_version is distinct from
+       'institution-seal-v2-calibrated'
+     or not coalesce(
+       public.edoc_company_seal_dimensions_are_valid(
+         seal.seal_size_type,
+         seal_file.pixel_width,
+         seal_file.pixel_height,
+         seal_file.source_aspect_ratio,
+         seal_file.render_width_mm,
+         seal_file.render_height_mm,
+         seal_file.dimension_policy_version,
+         seal_file.dimension_validated
+       ),
+       false
+     )
+   );
 
 CREATE OR REPLACE FUNCTION public.edoc_enforce_company_seal_position_dimensions()
  RETURNS trigger
@@ -1195,6 +1238,431 @@ begin
      ) then
     raise exception using errcode = '42501', message = 'official_workflow_delegation_not_active';
   end if;
+end;
+$function$;
+
+CREATE OR REPLACE FUNCTION edoc_private.validate_official_document_decision_evidence(
+  p_document_id text,
+  p_expected_step_id text,
+  p_approver_user_id text,
+  p_decision_actor_user_id text,
+  p_decision_type text,
+  p_decision_evidence jsonb
+)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO ''
+ SET lock_timeout TO '5s'
+AS $function$
+declare
+  v_document public.official_documents%rowtype;
+  v_step public.official_document_approval_steps%rowtype;
+  v_source public.official_document_files%rowtype;
+  v_prepared public.official_document_files%rowtype;
+  v_request public.official_document_stamp_requests%rowtype;
+  v_revision public.official_document_editor_revisions%rowtype;
+  v_file_object public.file_objects%rowtype;
+  v_access_log public.official_document_approval_logs%rowtype;
+  v_attachment record;
+  v_entry jsonb;
+  v_ack jsonb;
+  v_review_access jsonb;
+  v_access_entries jsonb;
+  v_required_entries jsonb;
+  v_attachment_entries jsonb;
+  v_missing jsonb;
+  v_expected_source_type text;
+  v_attachment_manifest_payload text := '';
+  v_attachment_manifest_sha256 text;
+  v_due_text text;
+  v_due_date date;
+  v_log_id text;
+  v_count integer;
+  v_distinct_count integer;
+  v_attachment_ids text[] := array[]::text[];
+  v_required_ids text[] := array[]::text[];
+  v_expected_required_ids text[] := array[]::text[];
+  v_supplied_required_ids text[] := array[]::text[];
+  v_is_v2 boolean := false;
+begin
+  if nullif(pg_catalog.btrim(coalesce(p_document_id, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(p_expected_step_id, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(p_approver_user_id, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(p_decision_actor_user_id, '')), '') is null
+     or p_decision_type not in ('approve', 'reject')
+     or pg_catalog.jsonb_typeof(coalesce(p_decision_evidence, 'null'::jsonb)) <> 'object'
+     or coalesce(p_decision_evidence->>'schema_version', '') <> '2'
+     or coalesce(p_decision_evidence->>'decision_type', '') <> p_decision_type then
+    raise exception using errcode = '22023', message = 'official_document_decision_evidence_invalid';
+  end if;
+
+  select document.* into v_document
+    from public.official_documents as document
+   where document.id = p_document_id
+   for share;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'official_document_not_found';
+  end if;
+
+  select step.* into v_step
+    from public.official_document_approval_steps as step
+   where step.id = p_expected_step_id
+     and step.document_id = p_document_id
+   for share;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'official_document_approval_step_not_found';
+  end if;
+  if v_step.status <> 'pending'
+     or v_document.current_step is distinct from v_step.step_key
+     or v_step.approver_user_id is distinct from p_approver_user_id
+     or coalesce(p_decision_evidence->>'expected_step_id', '') <> p_expected_step_id
+     or coalesce(p_decision_evidence->>'principal_actor_id', '') <> p_approver_user_id
+     or coalesce(p_decision_evidence->>'decision_actor_user_id', '') <> p_decision_actor_user_id then
+    raise exception using errcode = '42501', message = 'official_document_decision_evidence_actor_mismatch';
+  end if;
+  if p_decision_actor_user_id = v_document.applicant_id
+     and v_step.step_key <> 'applicant_confirm' then
+    raise exception using errcode = '42501', message = 'applicant_cannot_self_approve';
+  end if;
+  perform edoc_private.assert_official_decision_actor(
+    v_document.company_id,
+    p_approver_user_id,
+    p_decision_actor_user_id
+  );
+
+  v_ack := p_decision_evidence->'review_acknowledgements';
+  if pg_catalog.jsonb_typeof(coalesce(v_ack, 'null'::jsonb)) <> 'object'
+     or v_ack->'original_reviewed' is distinct from 'true'::jsonb
+     or v_ack->'edited_version_reviewed' is distinct from 'true'::jsonb
+     or v_ack->'attachments_reviewed' is distinct from 'true'::jsonb then
+    raise exception using errcode = '22023', message = 'official_document_review_acknowledgements_required';
+  end if;
+
+  v_expected_source_type := case
+    when v_document.source_type = 'uploaded_pdf' then 'original_pdf'
+    else 'generated_pdf'
+  end;
+  select file.* into v_source
+    from public.official_document_files as file
+   where file.document_id = p_document_id
+     and file.file_type = v_expected_source_type
+   order by file.version desc, file.created_at desc, file.id desc
+   limit 1
+   for share;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'official_document_source_pdf_required';
+  end if;
+  v_entry := p_decision_evidence->'source_file';
+  if pg_catalog.jsonb_typeof(coalesce(v_entry, 'null'::jsonb)) <> 'object'
+     or coalesce(v_entry->>'id', '') <> v_source.id
+     or coalesce(v_entry->>'type', '') <> v_source.file_type
+     or pg_catalog.lower(coalesce(v_entry->>'sha256', ''))
+          <> pg_catalog.lower(v_source.file_hash)
+     or coalesce(v_entry->>'version', '') <> v_source.version::text
+     or coalesce(v_entry->>'size', '') <> v_source.file_size::text then
+    raise exception using errcode = '22023', message = 'official_document_source_evidence_mismatch';
+  end if;
+  select object.* into v_file_object
+    from public.file_objects as object
+   where object.id = v_source.file_object_id
+   for share;
+  if not found
+     or v_file_object.document_id is distinct from p_document_id
+     or pg_catalog.lower(v_file_object.sha256) is distinct from pg_catalog.lower(v_source.file_hash)
+     or v_file_object.size_bytes is distinct from v_source.file_size
+     or (
+       v_source.file_type = 'original_pdf'
+       and pg_catalog.lower(pg_catalog.btrim(coalesce(v_file_object.scan_status, '')))
+         not in ('已通過', 'clean', 'passed')
+     ) then
+    raise exception using errcode = '22023', message = 'official_document_source_file_invalid';
+  end if;
+
+  select request.* into v_request
+    from public.official_document_stamp_requests as request
+   where request.document_id = p_document_id
+   order by request.created_at desc, request.id desc
+   limit 1
+   for share;
+  v_is_v2 := found and (
+    nullif(pg_catalog.btrim(coalesce(v_request.locked_editor_revision_id, '')), '') is not null
+    or nullif(pg_catalog.btrim(coalesce(v_request.locked_source_sha256, '')), '') is not null
+    or nullif(pg_catalog.btrim(coalesce(v_request.prepared_file_id, '')), '') is not null
+    or nullif(pg_catalog.btrim(coalesce(v_request.prepared_sha256, '')), '') is not null
+    or nullif(pg_catalog.btrim(coalesce(v_request.editor_manifest_sha256, '')), '') is not null
+    or coalesce(v_request.editor_schema_version, 0) <> 0
+    or nullif(pg_catalog.btrim(coalesce(v_request.renderer_version, '')), '') is not null
+  );
+
+  if v_is_v2 then
+    if nullif(pg_catalog.btrim(coalesce(v_request.locked_editor_revision_id, '')), '') is null
+       or coalesce(v_request.locked_source_sha256, '') !~ '^[0-9A-Fa-f]{64}$'
+       or nullif(pg_catalog.btrim(coalesce(v_request.prepared_file_id, '')), '') is null
+       or coalesce(v_request.prepared_sha256, '') !~ '^[0-9A-Fa-f]{64}$'
+       or coalesce(v_request.editor_manifest_sha256, '') !~ '^[0-9A-Fa-f]{64}$'
+       or coalesce(v_request.editor_schema_version, 0) < 2
+       or nullif(pg_catalog.btrim(coalesce(v_request.renderer_version, '')), '') is null
+       or p_decision_evidence->'legacy_renderer' is distinct from 'false'::jsonb
+       or pg_catalog.lower(coalesce(p_decision_evidence->>'source_bundle_sha256', ''))
+            <> pg_catalog.lower(v_request.locked_source_sha256)
+       or pg_catalog.lower(coalesce(p_decision_evidence->>'prepared_sha256', ''))
+            <> pg_catalog.lower(v_request.prepared_sha256)
+       or pg_catalog.lower(coalesce(p_decision_evidence->>'manifest_sha256', ''))
+            <> pg_catalog.lower(v_request.editor_manifest_sha256)
+       or coalesce(p_decision_evidence->>'editor_revision_id', '')
+            <> v_request.locked_editor_revision_id
+       or coalesce(p_decision_evidence->>'editor_schema_version', '')
+            <> v_request.editor_schema_version::text
+       or coalesce(p_decision_evidence->>'renderer_version', '')
+            <> v_request.renderer_version then
+      raise exception using errcode = '22023', message = 'official_document_editor_decision_lock_incomplete';
+    end if;
+
+    select revision.* into v_revision
+      from public.official_document_editor_revisions as revision
+     where revision.id = v_request.locked_editor_revision_id
+       and revision.document_id = p_document_id
+     for share;
+    if not found
+       or pg_catalog.lower(v_revision.manifest_sha256)
+            is distinct from pg_catalog.lower(v_request.editor_manifest_sha256) then
+      raise exception using errcode = '22023', message = 'editor_locked_revision_invalid';
+    end if;
+
+    select file.* into v_prepared
+      from public.official_document_files as file
+     where file.id = v_request.prepared_file_id
+       and file.document_id = p_document_id
+       and file.file_type = 'prepared_pdf'
+     for share;
+    if not found
+       or pg_catalog.lower(v_prepared.file_hash)
+            is distinct from pg_catalog.lower(v_request.prepared_sha256) then
+      raise exception using errcode = '22023', message = 'official_document_prepared_file_missing';
+    end if;
+    select object.* into v_file_object
+      from public.file_objects as object
+     where object.id = v_prepared.file_object_id
+     for share;
+    if not found
+       or v_file_object.document_id is distinct from p_document_id
+       or pg_catalog.lower(v_file_object.sha256) is distinct from pg_catalog.lower(v_prepared.file_hash)
+       or v_file_object.size_bytes is distinct from v_prepared.file_size then
+      raise exception using errcode = '22023', message = 'official_document_prepared_file_invalid';
+    end if;
+    if not exists (
+      select 1
+        from public.official_document_editor_assets as asset
+       where asset.document_id = p_document_id
+         and asset.editor_revision_id = v_request.locked_editor_revision_id
+         and asset.asset_kind = 'prepared_pdf'
+         and asset.official_file_id = v_prepared.id
+         and pg_catalog.lower(asset.sha256) = pg_catalog.lower(v_prepared.file_hash)
+         and asset.preflight_status = 'passed'
+    ) then
+      raise exception using errcode = '22023', message = 'editor_preflight_not_completed';
+    end if;
+    v_entry := p_decision_evidence->'prepared_file';
+    if pg_catalog.jsonb_typeof(coalesce(v_entry, 'null'::jsonb)) <> 'object'
+       or coalesce(v_entry->>'id', '') <> v_prepared.id
+       or coalesce(v_entry->>'type', '') <> v_prepared.file_type
+       or pg_catalog.lower(coalesce(v_entry->>'sha256', ''))
+            <> pg_catalog.lower(v_prepared.file_hash)
+       or coalesce(v_entry->>'version', '') <> v_prepared.version::text
+       or coalesce(v_entry->>'size', '') <> v_prepared.file_size::text then
+      raise exception using errcode = '22023', message = 'official_document_prepared_evidence_mismatch';
+    end if;
+  else
+    if p_decision_evidence->'legacy_renderer' is distinct from 'true'::jsonb
+       or pg_catalog.jsonb_typeof(coalesce(p_decision_evidence->'prepared_file', 'null'::jsonb)) <> 'null'
+       or coalesce(p_decision_evidence->>'source_bundle_sha256', '') <> ''
+       or coalesce(p_decision_evidence->>'prepared_sha256', '') <> ''
+       or coalesce(p_decision_evidence->>'manifest_sha256', '') <> ''
+       or coalesce(p_decision_evidence->>'editor_revision_id', '') <> ''
+       or coalesce(p_decision_evidence->>'editor_schema_version', '') not in ('', '0')
+       or coalesce(p_decision_evidence->>'renderer_version', '') <> '' then
+      raise exception using errcode = '22023', message = 'official_document_legacy_renderer_evidence_invalid';
+    end if;
+  end if;
+
+  v_attachment_entries := p_decision_evidence->'attachments';
+  if pg_catalog.jsonb_typeof(coalesce(v_attachment_entries, 'null'::jsonb)) <> 'array' then
+    raise exception using errcode = '22023', message = 'official_document_attachment_evidence_invalid';
+  end if;
+  select
+    coalesce(pg_catalog.string_agg(
+      pg_catalog.char_length(file.id)::text || ':' || file.id || '|'
+      || pg_catalog.char_length(file.file_type)::text || ':' || file.file_type || '|'
+      || pg_catalog.upper(file.file_hash) || '|'
+      || file.version::text || '|' || file.file_size::text,
+      E'\n' order by file.id
+    ), ''),
+    coalesce(pg_catalog.array_agg(file.id order by file.id), array[]::text[])
+    into v_attachment_manifest_payload, v_attachment_ids
+    from public.official_document_files as file
+   where file.document_id = p_document_id
+     and file.file_type = 'attachment';
+  if pg_catalog.jsonb_array_length(v_attachment_entries) <> pg_catalog.cardinality(v_attachment_ids) then
+    raise exception using errcode = '22023', message = 'official_document_attachment_evidence_invalid';
+  end if;
+  v_attachment_manifest_sha256 := pg_catalog.encode(
+    extensions.digest(pg_catalog.convert_to(v_attachment_manifest_payload, 'UTF8'), 'sha256'),
+    'hex'
+  );
+  if pg_catalog.lower(coalesce(p_decision_evidence->>'attachments_manifest_sha256', ''))
+       <> v_attachment_manifest_sha256 then
+    raise exception using errcode = '22023', message = 'official_document_attachment_manifest_mismatch';
+  end if;
+
+  for v_attachment in
+    select file.*
+      from public.official_document_files as file
+     where file.document_id = p_document_id
+       and file.file_type = 'attachment'
+     order by file.id
+     for share
+  loop
+    select pg_catalog.count(*) into v_count
+      from pg_catalog.jsonb_array_elements(v_attachment_entries) as item(value)
+     where item.value->>'id' = v_attachment.id;
+    if v_count <> 1 then
+      raise exception using errcode = '22023', message = 'official_document_attachment_evidence_invalid';
+    end if;
+    select item.value into v_entry
+      from pg_catalog.jsonb_array_elements(v_attachment_entries) as item(value)
+     where item.value->>'id' = v_attachment.id;
+    if pg_catalog.jsonb_typeof(v_entry) <> 'object'
+       or coalesce(v_entry->>'type', '') <> v_attachment.file_type
+       or pg_catalog.lower(coalesce(v_entry->>'sha256', ''))
+            <> pg_catalog.lower(v_attachment.file_hash)
+       or coalesce(v_entry->>'version', '') <> v_attachment.version::text
+       or coalesce(v_entry->>'size', '') <> v_attachment.file_size::text then
+      raise exception using errcode = '22023', message = 'official_document_attachment_evidence_invalid';
+    end if;
+    select object.* into v_file_object
+      from public.file_objects as object
+     where object.id = v_attachment.file_object_id
+     for share;
+    if not found
+       or v_file_object.document_id is distinct from p_document_id
+       or pg_catalog.lower(v_file_object.sha256) is distinct from pg_catalog.lower(v_attachment.file_hash)
+       or v_file_object.size_bytes is distinct from v_attachment.file_size
+       or pg_catalog.lower(pg_catalog.btrim(coalesce(v_file_object.scan_status, '')))
+            not in ('已通過', 'clean', 'passed') then
+      raise exception using errcode = '22023', message = 'official_document_attachment_file_invalid';
+    end if;
+  end loop;
+
+  if nullif(pg_catalog.btrim(coalesce(v_step.review_started_at, '')), '') is null then
+    raise exception using errcode = '22023', message = 'official_document_review_session_not_started';
+  end if;
+  v_review_access := p_decision_evidence->'review_access';
+  v_required_entries := v_review_access->'required_file_ids';
+  v_access_entries := v_review_access->'access_logs';
+  if pg_catalog.jsonb_typeof(coalesce(v_review_access, 'null'::jsonb)) <> 'object'
+     or v_review_access->'server_verified' is distinct from 'true'::jsonb
+     or coalesce(v_review_access->>'step_started_at', '') <> v_step.review_started_at
+     or pg_catalog.jsonb_typeof(coalesce(v_required_entries, 'null'::jsonb)) <> 'array'
+     or pg_catalog.jsonb_typeof(coalesce(v_access_entries, 'null'::jsonb)) <> 'array' then
+    raise exception using errcode = '22023', message = 'official_document_review_access_invalid';
+  end if;
+  v_required_ids := array[v_source.id];
+  if v_is_v2 then
+    v_required_ids := v_required_ids || v_prepared.id;
+  end if;
+  v_required_ids := v_required_ids || v_attachment_ids;
+  select pg_catalog.array_agg(item order by item)
+    into v_expected_required_ids
+    from pg_catalog.unnest(v_required_ids) as item;
+  if exists (
+    select 1
+      from pg_catalog.jsonb_array_elements(v_required_entries) as item(value)
+     where pg_catalog.jsonb_typeof(item.value) <> 'string'
+  ) then
+    raise exception using errcode = '22023', message = 'official_document_review_access_invalid';
+  end if;
+  select
+    coalesce(pg_catalog.array_agg(item.value order by item.value), array[]::text[]),
+    pg_catalog.count(*),
+    pg_catalog.count(distinct item.value)
+    into v_supplied_required_ids, v_count, v_distinct_count
+    from pg_catalog.jsonb_array_elements_text(v_required_entries) as item(value);
+  if v_supplied_required_ids is distinct from v_expected_required_ids
+     or v_count <> pg_catalog.cardinality(v_expected_required_ids)
+     or v_distinct_count <> v_count
+     or pg_catalog.jsonb_array_length(v_access_entries) <> v_count then
+    raise exception using errcode = '22023', message = 'official_document_review_access_invalid';
+  end if;
+
+  foreach v_log_id in array v_expected_required_ids
+  loop
+    select pg_catalog.count(*) into v_count
+      from pg_catalog.jsonb_array_elements(v_access_entries) as item(value)
+     where item.value->>'file_id' = v_log_id;
+    if v_count <> 1 then
+      raise exception using errcode = '22023', message = 'official_document_review_access_invalid';
+    end if;
+    select item.value into v_entry
+      from pg_catalog.jsonb_array_elements(v_access_entries) as item(value)
+     where item.value->>'file_id' = v_log_id;
+    if pg_catalog.jsonb_typeof(v_entry) <> 'object'
+       or coalesce(v_entry->>'action', '') <> 'download_file'
+       or nullif(pg_catalog.btrim(coalesce(v_entry->>'access_log_id', '')), '') is null then
+      raise exception using errcode = '22023', message = 'official_document_review_access_invalid';
+    end if;
+    select log.* into v_access_log
+      from public.official_document_approval_logs as log
+     where log.id = v_entry->>'access_log_id'
+     for share;
+    if not found
+       or v_access_log.document_id is distinct from p_document_id
+       or v_access_log.actor_id is distinct from p_decision_actor_user_id
+       or v_access_log.file_id is distinct from v_log_id
+       or v_access_log.action <> 'download_file'
+       or v_access_log.created_at < v_step.review_started_at
+       or coalesce(v_entry->>'accessed_at', '') <> v_access_log.created_at then
+      raise exception using errcode = '22023', message = 'official_document_review_access_required';
+    end if;
+  end loop;
+
+  if p_decision_type = 'reject' then
+    if nullif(pg_catalog.btrim(coalesce(p_decision_evidence->>'reason_category', '')), '') is null
+       or pg_catalog.char_length(pg_catalog.btrim(p_decision_evidence->>'reason_category')) > 80 then
+      raise exception using errcode = '22023', message = 'official_document_rejection_reason_category_required';
+    end if;
+    v_missing := coalesce(p_decision_evidence->'missing_items', 'null'::jsonb);
+    if pg_catalog.jsonb_typeof(v_missing) <> 'array'
+       or pg_catalog.jsonb_array_length(v_missing) > 50
+       or exists (
+         select 1
+           from pg_catalog.jsonb_array_elements(v_missing) as item(value)
+          where pg_catalog.jsonb_typeof(item.value) <> 'string'
+             or nullif(pg_catalog.btrim(item.value #>> array[]::text[]), '') is null
+             or pg_catalog.char_length(pg_catalog.btrim(item.value #>> array[]::text[])) > 240
+       ) then
+      raise exception using errcode = '22023', message = 'official_document_rejection_missing_items_invalid';
+    end if;
+    v_due_text := pg_catalog.btrim(coalesce(p_decision_evidence->>'correction_due_date', ''));
+    if v_due_text <> '' then
+      if v_due_text !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' then
+        raise exception using errcode = '22023', message = 'official_document_correction_due_date_invalid';
+      end if;
+      begin
+        v_due_date := v_due_text::date;
+      exception when others then
+        raise exception using errcode = '22023', message = 'official_document_correction_due_date_invalid';
+      end;
+      if pg_catalog.to_char(v_due_date, 'YYYY-MM-DD') <> v_due_text then
+        raise exception using errcode = '22023', message = 'official_document_correction_due_date_invalid';
+      end if;
+      if v_due_date < current_date then
+        raise exception using errcode = '22023', message = 'official_document_correction_due_date_in_past';
+      end if;
+    end if;
+  end if;
+
+  return p_decision_evidence;
 end;
 $function$;
 
@@ -2447,7 +2915,7 @@ begin
         locked_render_height_pt, locked_dimension_policy_version,
         order_index, created_at, updated_at
       ) values (
-        p_position_ids->>(v_position_index - 1), v_active_request_id,
+        p_position_ids->>((v_position_index - 1)::integer), v_active_request_id,
         v_position->>'seal_id', (v_position->>'page')::integer,
         (v_position->>'x')::numeric, (v_position->>'y')::numeric,
         (v_position->>'width')::numeric, (v_position->>'height')::numeric,
@@ -2472,7 +2940,7 @@ begin
         id, request_id, page, x, y, text_content, font_size,
         font_family, order_index, created_at, updated_at
       ) values (
-        p_overlay_ids->>(v_overlay_index - 1), v_active_request_id,
+        p_overlay_ids->>((v_overlay_index - 1)::integer), v_active_request_id,
         (v_overlay->>'page')::integer, (v_overlay->>'x')::numeric,
         (v_overlay->>'y')::numeric, v_overlay->>'text_content',
         (v_overlay->>'font_size')::numeric, 'biau_kai',
@@ -2787,7 +3255,7 @@ begin
     p_expected_step_id,
     p_approver_user_id,
     p_decision_actor_user_id,
-    'approve',
+    'approve'::text,
     p_decision_evidence
   );
   v_result := public.edoc_claim_official_document_approval_v2(
@@ -2861,7 +3329,7 @@ begin
     p_expected_step_id,
     p_approver_user_id,
     p_decision_actor_user_id,
-    'reject',
+    'reject'::text,
     p_decision_evidence
   );
   v_result := public.edoc_claim_official_document_rejection_v2(
@@ -3433,11 +3901,140 @@ revoke all on function public.edoc_register_official_archive_export(p_id text, p
 grant execute on function public.edoc_register_official_archive_export(p_id text, p_document_id text, p_requested_by text, p_manifest_sha256 text, p_package_sha256 text, p_entry_count integer, p_package_size_bytes bigint, p_renderer_version text, p_storage_bucket text, p_storage_path text) to service_role;
 revoke all on function public.edoc_resolve_portal_finance_user(p_auth_user_id uuid, p_email text) from public, anon, authenticated;
 grant execute on function public.edoc_resolve_portal_finance_user(p_auth_user_id uuid, p_email text) to service_role;
+CREATE OR REPLACE FUNCTION edoc_private.assert_finance_delegation_profile(p_user_id text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ STABLE
+ SECURITY DEFINER
+ SET search_path TO ''
+AS $function$
+declare
+  v_user public.users%rowtype;
+  v_aliases constant jsonb := $json$
+    {
+      "team_member":"staff","staff":"staff","employee":"staff",
+      "supervisor":"section_chief","section_chief":"section_chief",
+      "dept_manager":"department_head","hr":"hr_chief","super_admin":"ceo",
+      "company_admin":"admin_director","hr_manager":"hr_chief",
+      "accounting":"accounting_chief","accountant":"accounting_chief",
+      "cashier":"accounting_chief","general_affairs":"ga_chief",
+      "department_manager":"department_head","homecare_supervisor":"section_chief",
+      "homecare_worker":"staff","daycare_staff":"staff",
+      "system":"system_department","system_admin":"system_department",
+      "it":"system_department","it_admin":"system_department",
+      "系統處":"system_department","資訊":"system_department",
+      "admin-director":"admin_director","hr-chief":"hr_chief",
+      "hr-staff":"hr_staff","accounting-chief":"accounting_chief",
+      "cashier-chief":"accounting_chief","ga-chief":"ga_chief",
+      "business-director":"department_head","department-head":"department_head",
+      "section-chief":"section_chief","課長":"section_chief",
+      "主任":"department_head","部門主任":"department_head",
+      "team-lead":"team_lead","region-manager":"district_manager",
+      "external-audit":"external_auditor","external-auditor":"external_auditor"
+    }
+  $json$::jsonb;
+  v_profiles constant jsonb := $json$
+    {
+      "board":{"role":"董事會","job_level":"董事會"},
+      "shareholder":{"role":"股東","job_level":"股東"},
+      "ceo":{"role":"執行長","job_level":"執行長"},
+      "district_manager":{"role":"主管","job_level":"區經理"},
+      "department_head":{"role":"主任","job_level":"部長"},
+      "section_chief":{"role":"主管","job_level":"課長"},
+      "team_lead":{"role":"主管","job_level":"組長"},
+      "staff":{"role":"員工","job_level":"職員"},
+      "external_auditor":{"role":"外部檢核單位","job_level":"外部檢核單位"},
+      "system_department":{"role":"行政部主任","job_level":"部長"},
+      "admin_director":{"role":"行政部主任","job_level":"部長"},
+      "hr_chief":{"role":"人資","job_level":"課長"},
+      "hr_staff":{"role":"人資","job_level":"職員"},
+      "accounting_chief":{"role":"會計","job_level":"課長"},
+      "ga_chief":{"role":"總務","job_level":"課長"}
+    }
+  $json$::jsonb;
+  v_raw_role text;
+  v_role_key text;
+  v_raw_job_level text;
+  v_job_level text;
+  v_expected jsonb;
+begin
+  if nullif(pg_catalog.btrim(coalesce(p_user_id, '')), '') is null then
+    raise exception using errcode = '42501',
+      message = 'official_workflow_delegation_finance_actor_ineligible';
+  end if;
+
+  select candidate.* into v_user
+    from public.users as candidate
+   where candidate.id = p_user_id
+   limit 1;
+  if not found then
+    raise exception using errcode = '42501',
+      message = 'official_workflow_delegation_finance_actor_ineligible';
+  end if;
+
+  v_raw_role := pg_catalog.btrim(coalesce(v_user.logging_role_key, ''));
+  v_role_key := coalesce(v_aliases->>v_raw_role, v_raw_role);
+  v_expected := v_profiles->v_role_key;
+  v_raw_job_level := pg_catalog.btrim(coalesce(v_user.job_level, ''));
+  v_job_level := case v_raw_job_level
+    when 'L1 員工' then '職員'
+    when 'L2 專員' then '職員'
+    when 'L3 主管' then '課長'
+    when 'L4 部門主管' then '部長'
+    when 'L5 高階主管' then '區經理'
+    when 'L6 執行長' then '執行長'
+    else case
+      when v_raw_job_level = any(array[
+        '職員','組長','課長','部長','區經理','執行長',
+        '董事會','股東','外部檢核單位'
+      ]::text[]) then v_raw_job_level
+      else '職員'
+    end
+  end;
+
+  if v_user.status is distinct from '啟用'
+     or pg_catalog.lower(pg_catalog.btrim(coalesce(v_user.account_source, ''))) <> 'finance'
+     or nullif(pg_catalog.btrim(coalesce(v_user.auth_user_id::text, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(v_user.finance_employee_id, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(v_user.company_id, '')), '') is null
+     or nullif(pg_catalog.btrim(coalesce(v_user.title, '')), '') is null
+     or v_expected is null
+     or pg_catalog.btrim(coalesce(v_user.role, '')) is distinct from v_expected->>'role'
+     or v_job_level is distinct from v_expected->>'job_level' then
+    raise exception using errcode = '42501',
+      message = 'official_workflow_delegation_finance_actor_ineligible';
+  end if;
+
+  return pg_catalog.jsonb_build_object(
+    'company_id', pg_catalog.btrim(v_user.company_id),
+    'logging_role_key', v_role_key,
+    'role', v_expected->>'role',
+    'job_level', v_expected->>'job_level',
+    'title', pg_catalog.btrim(v_user.title)
+  );
+end;
+$function$;
+
+CREATE OR REPLACE FUNCTION edoc_private.finance_actor_has_delegation_manage(p_profile jsonb)
+ RETURNS boolean
+ LANGUAGE sql
+ IMMUTABLE
+ SET search_path TO ''
+AS $function$
+  select coalesce(p_profile->>'logging_role_key', '') = 'admin_director';
+$function$;
+
+ALTER FUNCTION edoc_private.assert_finance_delegation_profile(text) OWNER TO postgres;
+ALTER FUNCTION edoc_private.finance_actor_has_delegation_manage(jsonb) OWNER TO postgres;
+
 revoke all on function public.edoc_revoke_official_workflow_delegation(p_delegation_id text, p_revoked_by text) from public, anon, authenticated;
 grant execute on function public.edoc_revoke_official_workflow_delegation(p_delegation_id text, p_revoked_by text) to service_role;
 revoke all on function public.edoc_set_current_company_seal_file(p_file_id text, p_actor text, p_usage_log_id text, p_audit_log_id text) from public, anon, authenticated;
 grant execute on function public.edoc_set_current_company_seal_file(p_file_id text, p_actor text, p_usage_log_id text, p_audit_log_id text) to service_role;
 revoke all on function edoc_private.assert_official_decision_actor(p_company_id text, p_principal_user_id text, p_decision_actor_user_id text) from public, anon, authenticated, service_role;
+revoke all on function edoc_private.validate_official_document_decision_evidence(text, text, text, text, text, jsonb) from public, anon, authenticated, service_role;
+revoke all on function edoc_private.assert_finance_delegation_profile(text) from public, anon, authenticated, service_role;
+revoke all on function edoc_private.finance_actor_has_delegation_manage(jsonb) from public, anon, authenticated, service_role;
 revoke all on function edoc_private.guard_official_workflow_delegation_insert() from public, anon, authenticated, service_role;
 revoke all on function edoc_private.guard_official_workflow_delegation_update() from public, anon, authenticated, service_role;
 revoke all on function edoc_private.reject_official_editor_revision_mutation() from public, anon, authenticated, service_role;

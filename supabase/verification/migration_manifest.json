@@ -49,6 +49,9 @@
     "20260827064100_remove_fresh_finance_bootstrap_sentinel.sql",
     "20260827101441_capture_official_dispatch_events.sql",
     "20260827101636_avoid_postgrest_business_conflict_retries.sql",
+    "20260827133432_add_company_seal_file_dimension_metadata.sql",
+    "20260827133545_fix_official_document_function_type_resolution.sql",
+    "20260827133700_add_finance_delegation_profile_helpers.sql",
     "20260827194500_promote_editor_tus_staging_to_immutable.sql"
   ]
 }

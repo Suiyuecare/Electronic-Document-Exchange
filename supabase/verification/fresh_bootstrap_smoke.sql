@@ -50,6 +50,34 @@ begin
     raise exception 'fresh_bootstrap_runtime_table_missing';
   end if;
 
+  select pg_catalog.count(*) into v_count
+  from information_schema.columns
+  where table_schema = 'public'
+    and table_name = 'company_seal_files'
+    and (column_name, data_type, is_nullable) in (
+      ('pixel_width', 'integer', 'YES'),
+      ('pixel_height', 'integer', 'YES'),
+      ('source_aspect_ratio', 'numeric', 'YES'),
+      ('render_width_mm', 'numeric', 'YES'),
+      ('render_height_mm', 'numeric', 'YES'),
+      ('dimension_policy_version', 'text', 'YES'),
+      ('dimension_validated', 'boolean', 'NO')
+    );
+  if v_count <> 7 then
+    raise exception 'fresh_bootstrap_company_seal_dimension_columns_missing:%',
+      v_count;
+  end if;
+
+  if public.edoc_company_seal_dimensions_are_valid(
+       'large_seal', 300, 300, 1.0, 30.0, 30.0,
+       'institution-seal-v2-calibrated', true
+     ) is distinct from true
+     or public.edoc_company_seal_dimensions_are_valid(
+       'large_seal', null, null, null, null, null, null, false
+     ) is distinct from false then
+    raise exception 'fresh_bootstrap_company_seal_dimension_guard_invalid';
+  end if;
+
   if not exists (
     select 1
     from pg_catalog.pg_class relation_row
@@ -191,8 +219,103 @@ begin
      or pg_catalog.to_regprocedure('public.edoc_finalize_editor_asset_v2(jsonb)') is null
      or pg_catalog.to_regprocedure('public.edoc_bind_finalized_editor_asset_storage()') is null
      or pg_catalog.to_regprocedure('public.edoc_guard_editor_storage_job()') is null
-     or pg_catalog.to_regprocedure('public.edoc_resolve_portal_finance_user(uuid,text)') is null then
+     or pg_catalog.to_regprocedure('public.edoc_resolve_portal_finance_user(uuid,text)') is null
+     or pg_catalog.to_regprocedure(
+       'edoc_private.assert_finance_delegation_profile(text)'
+     ) is null
+     or pg_catalog.to_regprocedure(
+       'edoc_private.finance_actor_has_delegation_manage(jsonb)'
+     ) is null
+     or pg_catalog.to_regprocedure(
+       'edoc_private.validate_official_document_decision_evidence(text,text,text,text,text,jsonb)'
+     ) is null then
     raise exception 'fresh_bootstrap_runtime_rpc_missing';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_catalog.pg_proc function_row
+    join pg_catalog.pg_namespace namespace_row
+      on namespace_row.oid = function_row.pronamespace
+    where function_row.oid = pg_catalog.to_regprocedure(
+            'edoc_private.validate_official_document_decision_evidence(text,text,text,text,text,jsonb)'
+          )
+      and namespace_row.nspname = 'edoc_private'
+      and function_row.prosecdef
+      and pg_catalog.pg_get_userbyid(function_row.proowner) = 'postgres'
+      and exists (
+        select 1
+        from pg_catalog.unnest(
+          coalesce(function_row.proconfig, array[]::text[])
+        ) config(value)
+        where config.value in ('search_path=', 'search_path=""')
+      )
+      and not exists (
+        select 1
+        from pg_catalog.aclexplode(
+          coalesce(
+            function_row.proacl,
+            pg_catalog.acldefault('f', function_row.proowner)
+          )
+        ) privilege_row
+        where privilege_row.privilege_type = 'EXECUTE'
+          and (
+            privilege_row.grantee = 0
+            or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+              in ('anon', 'authenticated', 'service_role')
+          )
+      )
+  ) then
+    raise exception 'fresh_bootstrap_decision_evidence_validator_security_invalid';
+  end if;
+
+  if 2 <> (
+    select pg_catalog.count(*)
+      from (
+        values
+          ('edoc_private.assert_finance_delegation_profile(text)'),
+          ('edoc_private.finance_actor_has_delegation_manage(jsonb)')
+      ) as required(signature)
+      join pg_catalog.pg_proc function_row
+        on function_row.oid = pg_catalog.to_regprocedure(required.signature)
+     where pg_catalog.pg_get_userbyid(function_row.proowner) = 'postgres'
+       and (
+         required.signature = 'edoc_private.finance_actor_has_delegation_manage(jsonb)'
+         or function_row.prosecdef
+       )
+       and exists (
+         select 1
+           from pg_catalog.unnest(
+             coalesce(function_row.proconfig, array[]::text[])
+           ) config(value)
+          where config.value in ('search_path=', 'search_path=""')
+       )
+       and not exists (
+         select 1
+           from pg_catalog.aclexplode(
+             coalesce(
+               function_row.proacl,
+               pg_catalog.acldefault('f', function_row.proowner)
+             )
+           ) privilege_row
+          where privilege_row.privilege_type = 'EXECUTE'
+            and (
+              privilege_row.grantee = 0
+              or pg_catalog.pg_get_userbyid(privilege_row.grantee)
+                in ('anon', 'authenticated', 'service_role')
+            )
+       )
+  ) then
+    raise exception 'fresh_bootstrap_finance_delegation_helper_security_invalid';
+  end if;
+
+  if edoc_private.finance_actor_has_delegation_manage(
+       '{"logging_role_key":"admin_director"}'::jsonb
+     ) is distinct from true
+     or edoc_private.finance_actor_has_delegation_manage(
+       '{"logging_role_key":"staff"}'::jsonb
+     ) is distinct from false then
+    raise exception 'fresh_bootstrap_finance_delegation_manage_guard_invalid';
   end if;
 
   if 1 <> (
