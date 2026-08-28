@@ -43,6 +43,10 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
             f"/rpc/{name}": {"post": {}}
             for name in backend.EDOC_READINESS_REQUIRED_RPC_NAMES
         }
+        rpc_paths.update({
+            f"/{name}": {"get": {}}
+            for name in backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES
+        })
         with self.production_runtime_config(), mock.patch.object(
             backend,
             "_readiness_http_json",
@@ -136,6 +140,10 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
             f"/rpc/{name}": {"post": {}}
             for name in backend.EDOC_READINESS_REQUIRED_RPC_NAMES
         }
+        rpc_paths.update({
+            f"/{name}": {"get": {}}
+            for name in backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES
+        })
 
         def response_for(url, **_kwargs):
             if "official_documents?" in url:
@@ -166,6 +174,10 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
             readiness["checks"]["databaseRpcs"]["requiredRpcCount"],
             len(backend.EDOC_READINESS_REQUIRED_RPC_NAMES),
         )
+        self.assertEqual(
+            readiness["checks"]["databaseRpcs"]["requiredEditorTableCount"],
+            len(backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES),
+        )
         self.assertTrue(
             readiness["checks"]["privateStorage"]["documentBucket"]["private"]
         )
@@ -182,6 +194,10 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
             f"/rpc/{name}": {"post": {}}
             for name in backend.EDOC_READINESS_REQUIRED_RPC_NAMES[1:]
         }
+        rpc_paths.update({
+            f"/{name}": {"get": {}}
+            for name in backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES
+        })
 
         def response_for(url, **_kwargs):
             if "official_documents?" in url:
@@ -210,6 +226,36 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
         self.assertIn("storage_bucket_not_private", readiness["errorCodes"])
         self.assertEqual(readiness["checks"]["databaseRpcs"]["missingRpcCount"], 1)
         self.assertEqual(readiness["checks"]["privateStorage"]["publicBucketCount"], 1)
+
+    def test_missing_editor_storage_job_table_fails_closed(self):
+        rpc_paths = {
+            f"/rpc/{name}": {"post": {}}
+            for name in backend.EDOC_READINESS_REQUIRED_RPC_NAMES
+        }
+        rpc_paths.update({
+            f"/{name}": {"get": {}}
+            for name in backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES
+            if name != "official_document_editor_storage_jobs"
+        })
+
+        with self.production_runtime_config(), mock.patch.object(
+            backend,
+            "_readiness_http_json",
+            return_value={"paths": rpc_paths},
+        ):
+            result = backend._probe_main_supabase_rpcs(0.25)
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["missingRpcCount"], 0)
+        self.assertEqual(result["missingEditorTableCount"], 1)
+        self.assertEqual(
+            result["missingEditorTableNames"],
+            ["official_document_editor_storage_jobs"],
+        )
+        self.assertEqual(
+            result["errorCode"],
+            "database_required_editor_table_missing",
+        )
 
     def test_storage_publishable_key_affinity_uses_public_read_only_endpoint(self):
         publishable_key = "sb_publishable_" + ("p" * 40)
@@ -316,6 +362,10 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
             f"/rpc/{name}": {"post": {}}
             for name in backend.EDOC_READINESS_REQUIRED_RPC_NAMES
         }
+        rpc_paths.update({
+            f"/{name}": {"get": {}}
+            for name in backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES
+        })
         publishable_key = "sb_publishable_" + ("p" * 40)
 
         def response_for(url, **_kwargs):

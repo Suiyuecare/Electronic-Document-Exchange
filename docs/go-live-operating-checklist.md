@@ -53,6 +53,7 @@
 7. 測試通知通道。
 8. 更新法遵控制矩陣與缺失追蹤。
 9. 抽查 `official_document_editor_storage_jobs`：逾期 cleanup backlog、invalid finalized asset、invalid job、active／expired lease 均為 0，且不得輸出完整 path、hash 或文件名稱；過期 lease 必須由 worker 以 compare-and-set 接管，不得人工直改為成功。
+10. 正式站 `/readyz` 必須通過 required RPC 與 PDF Editor V2 server-only table 的 Data API contract；任一缺少時，建立草稿、取得 TUS 上傳資格、finalize 與 prepared PDF preflight 必須先回 `editor_runtime_maintenance`（503），不得建立半套草稿或把資料庫缺件誤顯示為登入失敗。
 
 ## 4. 上線後 7 日觀察
 

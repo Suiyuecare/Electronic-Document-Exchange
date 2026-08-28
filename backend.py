@@ -147,6 +147,20 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_revoke_official_workflow_delegation",
     "edoc_set_current_company_seal_file",
 )
+# These server-only tables are the minimum immutable PDF Editor V2 contract.
+# Checking only the RPC inventory is insufficient: PostgREST can still expose
+# a function after an operator has omitted or later dropped one of the tables
+# that its workflow depends on. The service-role OpenAPI inventory proves both
+# object existence and the explicit Data API grant without reading document
+# rows.
+EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES = (
+    "file_objects",
+    "official_documents",
+    "official_document_files",
+    "official_document_editor_assets",
+    "official_document_editor_revisions",
+    "official_document_editor_storage_jobs",
+)
 EDOC_MAX_FILE_SIZE_MB = int(os.getenv("EDOC_MAX_FILE_SIZE_MB", "100"))
 EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB = min(3, max(1, int(os.getenv("EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB", "3"))))
 EDOC_ALLOWED_MIME_TYPES = os.getenv("EDOC_ALLOWED_MIME_TYPES", "application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream")
@@ -562,6 +576,7 @@ def api_value_error_status(detail: str) -> int:
         "formal_tsa",
         "editor_antivirus_not_ready",
         "editor_antivirus_scan_failed",
+        "editor_runtime_maintenance",
     )):
         return 503
     return 409 if detail in API_CONFLICT_ERROR_CODES else 422
@@ -4328,7 +4343,12 @@ def _probe_main_supabase_query(timeout: float) -> Dict[str, Any]:
 
 
 def _probe_main_supabase_rpcs(timeout: float) -> Dict[str, Any]:
-    """Use PostgREST's read-only OpenAPI inventory to verify required RPCs."""
+    """Verify the required RPC and editor-table Data API contract.
+
+    PostgREST's OpenAPI inventory is read-only and reflects the current
+    service-role grants. This avoids mutating probe rows while still catching
+    a partially migrated database before a user receives a TUS capability.
+    """
     try:
         if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
             raise RuntimeError("database_runtime_config_missing")
@@ -4346,12 +4366,25 @@ def _probe_main_supabase_rpcs(timeout: float) -> Dict[str, Any]:
             for name in EDOC_READINESS_REQUIRED_RPC_NAMES
             if f"/rpc/{name}" not in paths
         ]
+        missing_tables = [
+            name
+            for name in EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES
+            if f"/{name}" not in paths
+        ]
+        error_code = ""
+        if missing_tables:
+            error_code = "database_required_editor_table_missing"
+        elif missing:
+            error_code = "database_required_rpc_missing"
         return {
-            "ready": not missing,
+            "ready": not missing and not missing_tables,
             "requiredRpcCount": len(EDOC_READINESS_REQUIRED_RPC_NAMES),
             "missingRpcCount": len(missing),
             "missingRpcNames": missing,
-            "errorCode": "" if not missing else "database_required_rpc_missing",
+            "requiredEditorTableCount": len(EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES),
+            "missingEditorTableCount": len(missing_tables),
+            "missingEditorTableNames": missing_tables,
+            "errorCode": error_code,
         }
     except Exception:
         return {
@@ -4359,8 +4392,27 @@ def _probe_main_supabase_rpcs(timeout: float) -> Dict[str, Any]:
             "requiredRpcCount": len(EDOC_READINESS_REQUIRED_RPC_NAMES),
             "missingRpcCount": None,
             "missingRpcNames": [],
+            "requiredEditorTableCount": len(EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES),
+            "missingEditorTableCount": None,
+            "missingEditorTableNames": [],
             "errorCode": "database_rpc_inventory_unavailable",
         }
+
+
+def require_production_editor_runtime_ready() -> None:
+    """Fail before any production editor mutation when dependencies are stale.
+
+    The readiness endpoint is advisory to the platform and does not prevent an
+    already-open browser tab from calling a write endpoint. Reusing the same
+    bounded, non-mutating probes here prevents partial draft rows, upload
+    lifecycle rows, or browser upload capabilities during an incomplete
+    production cutover.
+    """
+    if not is_production():
+        return
+    readiness = production_runtime_dependency_readiness()
+    if not readiness.get("ready"):
+        raise ValueError("editor_runtime_maintenance")
 
 
 def _probe_supabase_private_buckets(timeout: float) -> Dict[str, Any]:
@@ -34542,6 +34594,7 @@ def _supabase_insert_editor_revision(document_id: str, state: Dict[str, Any], ac
 
 
 def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
     user = supabase_official_session_user(session)
     if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
         raise PermissionError("official_document_create_forbidden")
@@ -34662,6 +34715,7 @@ def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
 
 
 def supabase_create_official_editor_upload_intent(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
     supabase_cleanup_stale_official_editor_uploads(document_id=document_id)
@@ -35240,6 +35294,7 @@ def supabase_cleanup_stale_official_editor_uploads(*, document_id: str = "") -> 
 
 
 def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
     rows = supabase_filter_rows("official_document_editor_assets", {"id": upload_id, "document_id": document_id}, limit=1)
@@ -35636,6 +35691,7 @@ def _supabase_editor_asset_bytes(document_id: str, state: Dict[str, Any]) -> Tup
 
 
 def supabase_preflight_official_editor(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
     latest = _supabase_editor_latest_revision(document_id)

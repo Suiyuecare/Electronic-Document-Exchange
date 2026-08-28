@@ -19349,6 +19349,7 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     seal_file_antivirus_rejected: "印章檔案未通過防毒掃描，系統未將它設為可用版本。",
     editor_antivirus_not_ready: "正式防毒服務尚未就緒，系統已阻止檔案上傳。",
     editor_antivirus_scan_failed: "正式防毒掃描失敗，系統未將檔案設為可用版本。",
+    editor_runtime_maintenance: "電子用印正在進行資料庫與檔案庫切換，系統已先停止建立草稿、上傳與產生確認版。登入及既有案件查閱不受影響；請稍後重試，若持續出現請通知系統管理員。",
     official_file_antivirus_required: "公文來源檔或附件尚未通過防毒掃描，不能送簽、預覽用印或下載。",
     official_file_antivirus_rejected: "公文來源檔或附件未通過防毒掃描，系統未保存為可用檔案。",
     official_file_quarantined: "公文來源檔或附件已被防毒系統隔離，不能送簽、用印或下載。",
@@ -24828,6 +24829,10 @@ function editorUploadFailureCode(error) {
 
 async function reportEditorUploadFailure(intent, error) {
   if (!intent?.documentId || !intent?.upload_id) return;
+  // A production cutover/outage is not an asset validation failure. Preserve
+  // the durable pending lifecycle job so the server can expire or resume it;
+  // do not incorrectly quarantine this upload because readiness closed.
+  if (error?.detail === "editor_runtime_maintenance") return;
   try {
     await backendRequest(`/official-documents/${encodeURIComponent(intent.documentId)}/editor-uploads/${encodeURIComponent(intent.upload_id)}/fail`, {
       method: "POST",
@@ -26125,7 +26130,9 @@ async function handleUploadedEditorImportPdf(files) {
       await loadUploadedPdfIntoEditor(file, intent, finalized, { append: true });
     } catch (error) {
       await reportEditorUploadFailure(intent, error);
-      const retrySameFile = error?.retryable === true || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
+      const retrySameFile = error?.detail === "editor_runtime_maintenance"
+        || error?.retryable === true
+        || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
       showUploadedEditorUploadError(
         error,
         retrySameFile ? () => handleUploadedEditorImportPdf([file]) : () => document.querySelector("#uploadedEditorImportPdfInput")?.click(),
@@ -26537,7 +26544,9 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     await reportEditorUploadFailure(intent, error);
     setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
     setUploadedEditorSaveStatus("error", "PDF 未通過上傳或預檢");
-    const retrySameFile = error?.retryable === true || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
+    const retrySameFile = error?.detail === "editor_runtime_maintenance"
+      || error?.retryable === true
+      || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
     showUploadedEditorUploadError(
       error,
       retrySameFile ? () => handleUploadedSealPdfChange(file) : openUploadedPdfPicker,

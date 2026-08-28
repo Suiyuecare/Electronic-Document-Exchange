@@ -356,11 +356,13 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         reporter = javascript_function(self.js, "reportEditorUploadFailure")
         self.assertIn("/editor-uploads/${encodeURIComponent(intent.upload_id)}/fail", reporter)
         self.assertIn('JSON.stringify({ error_code: editorUploadFailureCode(error) })', reporter)
+        self.assertIn('error?.detail === "editor_runtime_maintenance"', reporter)
 
         handler = javascript_function(self.js, "handleUploadedSealPdfChange")
         self.assertIn("await reportEditorUploadFailure(intent, error)", handler)
         self.assertIn("showUploadedEditorUploadError(", handler)
         self.assertIn("handleUploadedSealPdfChange(file)", handler)
+        self.assertIn('error?.detail === "editor_runtime_maintenance"', handler)
         self.assertIn('clearUploadedEditorUploadError()', handler)
 
     def test_mobile_editor_drawers_have_close_backdrop_escape_and_safe_bottom_clearance(self) -> None:
