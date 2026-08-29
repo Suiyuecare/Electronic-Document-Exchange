@@ -1450,9 +1450,13 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
     def _write_artifacts(cls, cases: list[dict[str, Any]]) -> None:
         ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
         passed = sum(1 for case in cases if case.get("status") == "passed")
+        acceptance_passed = len(cases) == 5 and passed == len(cases)
         using_tus = cls.upload_protocol == "local_supabase_tus"
         report = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
+            "artifactKind": "five-account-full-http-acceptance",
+            "passed": acceptance_passed,
+            "caseCount": len(cases),
             "seed": ACCEPTANCE_SEED,
             "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "isolation": {
@@ -1711,6 +1715,84 @@ class FourPerspectiveFiveAccountMatrixTest(unittest.TestCase):
     }
 
     @staticmethod
+    def _write_perspective_artifact(
+        fixtures: list[dict[str, Any]],
+        actions: dict[str, dict[str, int]],
+        route_summaries: list[dict[str, Any]],
+        expected_actions_per_account: dict[str, int],
+    ) -> dict[str, Any]:
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        perspectives = []
+        for perspective in ("new_employee", "supervisor", "general_affairs", "ceo"):
+            account_actions = actions[perspective]
+            perspectives.append(
+                {
+                    "perspective": perspective,
+                    "accountCount": len(account_actions),
+                    "accountFingerprints": sorted(
+                        _fingerprint(account_id) for account_id in account_actions
+                    ),
+                    "actionsPerAccount": sorted(set(account_actions.values())),
+                    "expectedActionsPerAccount": expected_actions_per_account[perspective],
+                    "totalActions": sum(account_actions.values()),
+                }
+            )
+
+        passed = (
+            len(fixtures) == 5
+            and len(route_summaries) == 20
+            and {summary["routeCode"] for summary in route_summaries}
+            == {"A", "B", "C", "D"}
+            and all(
+                item["accountCount"] == 5
+                and item["actionsPerAccount"] == [item["expectedActionsPerAccount"]]
+                for item in perspectives
+            )
+        )
+        report = {
+            "schemaVersion": 1,
+            "artifactKind": "four-perspective-five-account-workflow-matrix",
+            "passed": passed,
+            "seed": ACCEPTANCE_SEED,
+            "selection": "deterministic-replayable-random-seed",
+            "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "isolation": {
+                "accounts": "synthetic-example.test-only",
+                "financeBridge": "deterministic-snapshot-double",
+                "productionSystemsContacted": False,
+                "formalExchange": "mock-disabled",
+            },
+            "coverage": {
+                "perspectives": [
+                    "new_employee",
+                    "supervisor",
+                    "general_affairs",
+                    "ceo",
+                ],
+                "accountsPerPerspective": 5,
+                "uniqueRequiredAccounts": len(
+                    {
+                        account_id
+                        for perspective_accounts in actions.values()
+                        for account_id in perspective_accounts
+                    }
+                ),
+                "routes": ["A", "B", "C", "D"],
+                "routeChecks": len(route_summaries),
+            },
+            "perspectives": perspectives,
+        }
+        report_json = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        if "@" in report_json:
+            raise AssertionError("perspective acceptance artifact contains an email address")
+        for report_path in (
+            ARTIFACT_DIR / "latest-perspectives.json",
+            ARTIFACT_DIR / f"perspective-seed-{ACCEPTANCE_SEED}.json",
+        ):
+            report_path.write_text(report_json, encoding="utf-8")
+        return report
+
+    @staticmethod
     def _finance_record(
         *,
         seed_token: str,
@@ -1964,6 +2046,16 @@ class FourPerspectiveFiveAccountMatrixTest(unittest.TestCase):
         }
         self.assertEqual(len(fixture_emails), 25)
         self.assertTrue(all(email.endswith("@example.test") for email in fixture_emails))
+
+        evidence = self._write_perspective_artifact(
+            fixtures,
+            actions,
+            route_summaries,
+            expected_actions_per_account,
+        )
+        self.assertTrue(evidence["passed"])
+        self.assertEqual(evidence["coverage"]["accountsPerPerspective"], 5)
+        self.assertEqual(evidence["coverage"]["uniqueRequiredAccounts"], 20)
 
 
 if __name__ == "__main__":
