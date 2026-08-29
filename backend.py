@@ -14514,9 +14514,9 @@ PRODUCTION_OPERATIONS_ARTIFACT_GET_PATHS = {
 
 
 def is_production_operations_artifact_endpoint(method: str, parts: List[str]) -> bool:
-    """Protect deployment artifacts that are useful to operators, not the public."""
+    """Protect operator artifacts on every remotely deployed environment."""
     return (
-        is_production()
+        (is_production() or RUNNING_ON_VERCEL)
         and method == "GET"
         and tuple(parts) in PRODUCTION_OPERATIONS_ARTIFACT_GET_PATHS
     )

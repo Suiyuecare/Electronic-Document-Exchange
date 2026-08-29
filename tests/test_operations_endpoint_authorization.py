@@ -102,6 +102,28 @@ class OperationsEndpointAuthorizationTest(unittest.TestCase):
                         backend.is_production_operations_artifact_endpoint("GET", parts)
                     )
 
+    def test_preview_deployment_protects_operator_artifacts_too(self) -> None:
+        with (
+            mock.patch.object(backend, "is_production", return_value=False),
+            mock.patch.object(backend, "RUNNING_ON_VERCEL", True),
+        ):
+            self.assertTrue(
+                backend.is_production_operations_artifact_endpoint(
+                    "GET", ["production", "next-action"]
+                )
+            )
+
+    def test_local_development_keeps_bootstrap_artifact_available(self) -> None:
+        with (
+            mock.patch.object(backend, "is_production", return_value=False),
+            mock.patch.object(backend, "RUNNING_ON_VERCEL", False),
+        ):
+            self.assertFalse(
+                backend.is_production_operations_artifact_endpoint(
+                    "GET", ["production", "next-action"]
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
