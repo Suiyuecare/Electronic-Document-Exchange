@@ -207,12 +207,17 @@ vercel deploy --prebuilt --prod
 curl https://edoc.suiyuecare.com/api/healthz
 curl https://edoc.suiyuecare.com/api/readyz
 curl https://edoc.suiyuecare.com/api/production/readiness
-curl https://edoc.suiyuecare.com/api/production/deployment
-curl https://edoc.suiyuecare.com/api/production/monitoring
-curl https://edoc.suiyuecare.com/api/files/storage-health
+curl -H "Authorization: Bearer $EDOC_OPERATOR_TOKEN" https://edoc.suiyuecare.com/api/production/deployment
+curl -H "Authorization: Bearer $EDOC_OPERATOR_TOKEN" https://edoc.suiyuecare.com/api/production/monitoring
+curl -H "Authorization: Bearer $EDOC_OPERATOR_TOKEN" https://edoc.suiyuecare.com/api/files/storage-health
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/run-due
 curl -H "Authorization: Bearer $CRON_SECRET" https://edoc.suiyuecare.com/api/cron/monitoring
 ```
+
+`EDOC_OPERATOR_TOKEN` 必須來自已登入且具有「系統管理」權限的短效 eDoc
+session；不得寫入 repo、操作文件或 shell history。部署資訊、監控明細、Storage／AV
+狀態、憑證狀態與切換產物 API 一律拒絕一般員工及未登入請求。健康檢查與經過遮罩的
+readiness 才維持公開，供 Vercel 與負載平衡器探測。
 
 判斷標準：
 

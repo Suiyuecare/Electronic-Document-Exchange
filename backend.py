@@ -14493,10 +14493,48 @@ def session_has_any_permission(session: Dict[str, Any] | None, permissions: List
 OPERATIONS_MAINTENANCE_PERMISSIONS = ["settings.system_manage", "settings.manage"]
 
 
+PRODUCTION_OPERATIONS_ARTIFACT_GET_PATHS = {
+    ("production", "supabase-cutover-sql"),
+    ("production", "vercel-env-template"),
+    ("production", "supabase-bootstrap-checklist"),
+    ("production", "first-admin-bootstrap"),
+    ("production", "login-release-decision"),
+    ("production", "environment-unlock-handoff"),
+    ("production", "employee-launch-notice"),
+    ("production", "emergency-manual-intake-template"),
+    ("production", "artifact-index"),
+    ("production", "next-action"),
+    ("production", "day-one-support-brief"),
+    ("production", "handoff-note"),
+    ("production", "company-launch-roster", "template"),
+    ("production", "formal-account-roster", "template"),
+    ("production", "seal-vault-custody-template"),
+    ("production", "unblock-runbook"),
+}
+
+
+def is_production_operations_artifact_endpoint(method: str, parts: List[str]) -> bool:
+    """Protect deployment artifacts that are useful to operators, not the public."""
+    return (
+        is_production()
+        and method == "GET"
+        and tuple(parts) in PRODUCTION_OPERATIONS_ARTIFACT_GET_PATHS
+    )
+
+
 def is_operations_maintenance_endpoint(method: str, parts: List[str]) -> bool:
     """Identify notification/scheduler operations that must be admin-only."""
     if method == "GET":
-        return parts == ["notifications", "gateway-status"]
+        return parts in (
+            ["notifications", "gateway-status"],
+            ["production", "deployment"],
+            ["production", "monitoring"],
+            ["production", "smoke-test-pdf"],
+            ["production", "dispatch-proof-template"],
+            ["files", "storage-health"],
+            ["certificates", "health"],
+            ["schema"],
+        )
     if method != "POST":
         return False
     if parts in (
@@ -43914,6 +43952,23 @@ class Handler(SimpleHTTPRequestHandler):
         )
         return False
 
+    def current_request_session(self) -> Dict[str, Any] | None:
+        """Resolve one authenticated session before database-mode branching."""
+        token = self.bearer_token()
+        if USE_SUPABASE:
+            return supabase_current_session(token)
+        with connect() as conn:
+            session = current_session(conn, token)
+            conn.commit()
+            return session
+
+    def require_production_operations_artifact_access(self) -> bool:
+        session = self.current_request_session()
+        if not session:
+            self.send_json({"error": "unauthorized"}, 401)
+            return False
+        return self.require_operations_maintenance_access(session)
+
     def require_exchange_mutation_access(self, session: Dict[str, Any] | None) -> bool:
         if session_has_any_permission(session, ["exchange.manage"]):
             return True
@@ -43966,6 +44021,9 @@ class Handler(SimpleHTTPRequestHandler):
                 )
                 self.send_json(result, 200 if result["ok"] else 503)
                 return
+            if is_production_operations_artifact_endpoint(method, parts):
+                if not self.require_production_operations_artifact_access():
+                    return
             if method == "GET" and parts == ["production", "supabase-cutover-sql"]:
                 self.send_production_cutover_sql()
                 return

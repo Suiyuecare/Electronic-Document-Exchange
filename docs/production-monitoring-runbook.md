@@ -10,9 +10,15 @@
 - `POST /api/production/monitoring/check`：由維運中心手動執行，會寫入 audit log 並在有告警時呼叫 webhook。
 - `GET /api/cron/monitoring`：由 Vercel Cron 執行，必須帶 `Authorization: Bearer $CRON_SECRET`。
 
+除 `healthz`、`readyz` 與經遮罩的 `production/readiness` 外，上述部署／監控明細
+必須帶具有「系統管理」權限的登入 session；一般員工與未登入請求不得取得環境、
+Storage、AV、憑證、背景任務或切換產物資訊。維運頁必須讀取
+`/api/exchange/gateway-status` 的真實狀態；正式交換停用時不得產生假的 jAgent Token、
+延遲或成功紀錄。
+
 ## 告警分級
 
-- `critical`：正式環境不可持續營運，例如 Supabase 未啟用、交換任務失敗、Cron 停擺、正式憑證缺漏或到期。
+- `critical`：正式環境不可持續營運，例如 Supabase 未啟用或 Cron 停擺；交換任務與正式憑證只在政府正式交換另行核准啟用後納入本級告警。
 - `warning`：需要排程處理，例如 Sentry/外部 webhook 未設定、通知派送失敗、憑證即將到期。
 - `healthy`：沒有告警，或只剩已確認可接受的維運資訊。
 

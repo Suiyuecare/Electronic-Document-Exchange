@@ -5670,8 +5670,30 @@ function clearFrontendSeedRecordsForAuthenticatedSession() {
     contractAuditLog,
     contractSealAuditLog,
     trackingCases,
-    trackingAuditLog
+    trackingAuditLog,
+    opsApiLogs,
+    opsConfigVersions,
+    opsAuditLog
   ].forEach((records) => records.splice(0, records.length));
+  Object.assign(jagentState, {
+    certificate: "未檢查",
+    certificateNote: "正式交換狀態尚未向後端查詢",
+    token: "",
+    tokenExpiresAt: null,
+    center: "未檢查",
+    latency: "-",
+    addressResults: []
+  });
+  Object.assign(opsState, {
+    health: "未檢查",
+    environment: "",
+    configVersion: "",
+    restoredBackup: "",
+    readiness: null,
+    deployment: null,
+    monitoring: null,
+    lastMonitorCheck: ""
+  });
   officialWorkflowItems = [];
   internalDispatchItems = [];
   internalDispatchRecipientDirectory = [];
@@ -17642,28 +17664,44 @@ function renderOps() {
 }
 
 async function runOpsHealthCheck() {
-  const latency = `${Math.floor(32 + Math.random() * 45)}ms`;
-  jagentState.center = "已連線";
-  jagentState.latency = latency;
-  if (!jagentState.tokenExpiresAt) {
-    jagentState.token = `tk_${Date.now()}`;
-    jagentState.tokenExpiresAt = Date.now() + 8 * 60 * 60 * 1000;
-  }
   const started = performance.now();
   try {
-    const health = await fetchOpsJson("/health");
+    const [health, gateway] = await Promise.all([
+      fetchOpsJson("/health"),
+      fetchOpsJson("/exchange/gateway-status")
+    ]);
     const duration = `${Math.round(performance.now() - started)}ms`;
     opsState.health = health.ok ? "Healthy" : "API 異常";
     opsState.readiness = health.data.production || opsState.readiness;
     opsApiLogs.unshift({ time: nowTime(), service: "Backend", api: "GET /health", status: health.status, duration, code: health.ok ? "OK" : "HEALTH-FAIL", message: health.ok ? "後端健康檢查通過" : "後端健康檢查未通過" });
+    const exchange = gateway.data || {};
+    const formalExchangeReady = Boolean(exchange.formalConnection) && !exchange.formalExchangeDisabled;
+    jagentState.center = formalExchangeReady ? "已連線" : "未啟用";
+    jagentState.latency = formalExchangeReady ? duration : "-";
+    if (!formalExchangeReady) {
+      jagentState.certificate = "未啟用";
+      jagentState.certificateNote = exchange.formalDisabledReason || "政府電子交換目前維持 Mock／停用。";
+      jagentState.token = "";
+      jagentState.tokenExpiresAt = null;
+    }
+    opsApiLogs.unshift({
+      time: nowTime(),
+      service: "jAgent",
+      api: "GET /exchange/gateway-status",
+      status: gateway.status,
+      duration,
+      code: formalExchangeReady ? "FORMAL-READY" : "FORMAL-DISABLED",
+      message: formalExchangeReady ? "正式交換 provider 已核准並可用" : (exchange.formalDisabledReason || "正式交換維持 Mock／停用")
+    });
   } catch (error) {
     opsState.health = "API 異常";
-    opsApiLogs.unshift({ time: nowTime(), service: "Backend", api: "GET /health", status: 500, duration: latency, code: "HEALTH-ERROR", message: error.message });
+    jagentState.center = "檢查失敗";
+    jagentState.latency = "-";
+    opsApiLogs.unshift({ time: nowTime(), service: "Backend", api: "GET /health", status: 500, duration: "-", code: "HEALTH-ERROR", message: error.message });
   }
-  opsApiLogs.unshift({ time: nowTime(), service: "jAgent", api: "GET /health", status: 200, duration: latency, code: "OK", message: "憑證、Token、交換中心與地址簿健康檢查通過" });
   renderJagentStatus();
   renderOps();
-  addOpsAudit("健康檢查", `Backend ${opsState.health}，jAgent 延遲 ${latency}，Token ${tokenTimeLeft()}。`);
+  addOpsAudit("健康檢查", `Backend ${opsState.health}，正式交換 ${jagentState.center}。`);
   showToast("健康檢查完成。");
 }
 

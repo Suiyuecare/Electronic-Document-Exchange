@@ -26,6 +26,8 @@
 | PostgreSQL major version 至少 16（本版目標 17） | 待確認 |
 | invalid finalized asset、invalid storage job、active／expired storage job lease、逾期 cleanup backlog 均為 0 | 待確認 |
 | Signed TUS 暫存重播無法改動 `editor-final/` 正式檔 | 待確認 |
+| 維運 API／切換產物拒絕未登入與一般員工，只允許系統管理權限 | 待確認 |
+| 維運頁 jAgent 狀態來自後端；停用時無假 Token、延遲或成功紀錄 | 待確認 |
 | `/api/production/go-live-audit` 回傳 `decision=INTERNAL_GO`、`formalGo=false` | 待確認 |
 | `/readyz` 回傳 HTTP 200，內部 Go/No-Go 通過 | 待確認 |
 | `/api/production/readiness`、jAgent URL、機關代碼及交換憑證 | 未來正式交換啟用時確認；本次維持 Mock／停用 |
