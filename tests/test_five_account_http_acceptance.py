@@ -1659,8 +1659,13 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "supabase_storage_download_failed"):
             backend.supabase_storage_download(intent["path"], intent["bucket"])
-        self.av_quarantine_count += 1
-        self.failed_intent_replay_rejections += 1
+        # These counters feed the class-level acceptance artifact written by
+        # the following full-journey test.  Updating the individual test
+        # instance would make the passing security checks appear false in CI.
+        type(self).av_quarantine_count += 1
+        type(self).failed_intent_replay_rejections += 1
+        self.assertGreaterEqual(type(self).av_quarantine_count, 1)
+        self.assertGreaterEqual(type(self).failed_intent_replay_rejections, 1)
 
     def test_five_replayable_finance_accounts_complete_isolated_http_journeys(self) -> None:
         self.assertTrue(backend.exchange_gateway_status()["formalExchangeDisabled"])
