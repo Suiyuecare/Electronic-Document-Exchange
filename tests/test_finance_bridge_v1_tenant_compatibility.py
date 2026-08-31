@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -58,7 +59,13 @@ def production_v1_snapshot() -> dict:
     }
 
 
-def projected_user(*, row_id: str = "FIN-EXISTING-001", tenant_id: str = TENANT_ID) -> dict:
+def projected_user(
+    *,
+    row_id: str = "FIN-EXISTING-001",
+    tenant_id: str = TENANT_ID,
+    unit: str = "D100",
+    title: str = "一般人員",
+) -> dict:
     return {
         "id": row_id,
         "email": EMAIL,
@@ -71,9 +78,16 @@ def projected_user(*, row_id: str = "FIN-EXISTING-001", tenant_id: str = TENANT_
         "role": "員工",
         "logging_role_key": "staff",
         "job_level": "職員",
-        "unit": "D100",
-        "title": "一般人員",
+        "unit": unit,
+        "title": title,
         "finance_source_status": "active",
+        "external_account_payload_json": json.dumps({
+            "financeProfile": {
+                "departmentCode": "D100",
+                "departmentName": unit if unit != "D100" else "",
+                "jobTitle": title if title != "一般人員" else "",
+            }
+        }, ensure_ascii=False),
     }
 
 
@@ -164,6 +178,35 @@ class FinanceBridgeV1TenantCompatibilityTest(unittest.TestCase):
         self.assertEqual(normalized["applicant"]["tenant_id"], TENANT_ID)
         self.assertNotIn("tenantId", snapshot["identity"], "authenticated upstream snapshot must stay immutable")
         self.assertNotIn("tenantId", snapshot["company"])
+
+    def test_portal_authentication_may_replace_only_missing_finance_auth_evidence(self) -> None:
+        snapshot = production_v1_snapshot()
+        snapshot["identity"]["authUserBound"] = False
+        snapshot["identity"]["googleLoginVerified"] = False
+
+        with self.assertRaisesRegex(
+            finance_bridge.FinanceBridgeDenied,
+            "finance_identity_denied",
+        ):
+            finance_bridge.validate_finance_bridge_snapshot(snapshot, EMAIL)
+
+        accepted = finance_bridge.validate_finance_bridge_snapshot(
+            snapshot,
+            EMAIL,
+            allow_portal_authenticated_identity=True,
+        )
+        self.assertIs(accepted, snapshot)
+
+        snapshot["identity"]["active"] = False
+        with self.assertRaisesRegex(
+            finance_bridge.FinanceBridgeDenied,
+            "finance_identity_denied",
+        ):
+            finance_bridge.validate_finance_bridge_snapshot(
+                snapshot,
+                EMAIL,
+                allow_portal_authenticated_identity=True,
+            )
 
     def test_v1_never_guesses_a_global_or_company_tenant_without_exact_user_match(self) -> None:
         with (
@@ -292,6 +335,86 @@ class FinanceBridgeV1TenantCompatibilityTest(unittest.TestCase):
         company_upsert.assert_not_called()
         user_upsert.assert_not_called()
         link_upsert.assert_not_called()
+
+    def test_v1_login_accepts_enriched_outbox_department_and_title(self) -> None:
+        snapshot = production_v1_snapshot()
+        user = projected_user(
+            unit="去識別化行政部",
+            title="去識別化行政專員",
+        )
+        company = projected_company()
+
+        def get_row(table: str, row_id: str) -> dict | None:
+            if table == "users" and row_id == user["id"]:
+                return dict(user)
+            if table == "companies" and row_id == company["id"]:
+                return dict(company)
+            return None
+
+        with (
+            patch("backend.supabase_request", side_effect=[[user], [user]]),
+            patch("backend.supabase_filter_rows", return_value=[company]),
+            patch("backend.supabase_get", side_effect=get_row),
+            patch("backend.launch_company_in_scope", return_value=True),
+            patch("backend.is_production", return_value=False),
+            patch("backend.supabase_insert") as insert,
+        ):
+            logged_in = backend.sync_supabase_finance_login_snapshot(
+                snapshot,
+                portal_authenticated=True,
+            )
+
+        self.assertEqual(logged_in["unit"], user["unit"])
+        self.assertEqual(logged_in["title"], user["title"])
+        insert.assert_not_called()
+
+    def test_v1_pending_finance_auth_is_atomically_promoted_by_signed_portal(self) -> None:
+        snapshot = production_v1_snapshot()
+        snapshot["identity"]["authUserBound"] = False
+        snapshot["identity"]["googleLoginVerified"] = False
+        pending_user = {
+            **projected_user(
+                unit="去識別化行政部",
+                title="去識別化行政專員",
+            ),
+            "status": "待啟用",
+            "finance_source_status": "pending",
+        }
+        active_user = {
+            **pending_user,
+            "status": "啟用",
+            "finance_source_status": "active",
+        }
+        company = projected_company()
+
+        def get_row(table: str, row_id: str) -> dict | None:
+            if table == "users" and row_id == pending_user["id"]:
+                return dict(pending_user)
+            if table == "companies" and row_id == company["id"]:
+                return dict(company)
+            return None
+
+        with (
+            patch(
+                "backend.supabase_request",
+                side_effect=[[pending_user], [pending_user], [active_user]],
+            ) as request,
+            patch("backend.supabase_filter_rows", return_value=[company]),
+            patch("backend.supabase_get", side_effect=get_row),
+            patch("backend.launch_company_in_scope", return_value=True),
+            patch("backend.is_production", return_value=False),
+            patch("backend.supabase_insert", return_value={"id": "AUD-DEIDENTIFIED"}) as insert,
+        ):
+            logged_in = backend.sync_supabase_finance_login_snapshot(
+                snapshot,
+                portal_authenticated=True,
+            )
+
+        self.assertEqual(logged_in["status"], "啟用")
+        self.assertEqual(logged_in["finance_source_status"], "active")
+        self.assertEqual(request.call_args_list[-1].args[0], "PATCH")
+        self.assertIn("status=eq.%E5%BE%85%E5%95%9F%E7%94%A8", request.call_args_list[-1].args[1])
+        insert.assert_called_once()
 
     def test_v1_login_rejects_stored_high_role_not_authorized_by_signed_snapshot(self) -> None:
         stale_high_role = {

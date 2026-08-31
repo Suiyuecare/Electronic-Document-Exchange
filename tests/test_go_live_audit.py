@@ -22,6 +22,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
                 "EDOC_STORAGE_PROVIDER",
                 "EDOC_STORAGE_BUCKET",
                 "EDOC_SEAL_STORAGE_BUCKET",
+                "EDOC_STORAGE_PUBLISHABLE_KEY",
                 "EDOC_OBJECT_STORAGE_URL",
                 "EDOC_STORAGE_ACCESS_MODE",
                 "EDOC_FILE_ENCRYPTION_ENABLED",
@@ -76,6 +77,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
             "EDOC_STORAGE_PROVIDER": "supabase",
             "EDOC_STORAGE_BUCKET": "edoc-private",
             "EDOC_SEAL_STORAGE_BUCKET": "edoc-seal-vault",
+            "EDOC_STORAGE_PUBLISHABLE_KEY": "sb_publishable_test-only-public-key",
             "EDOC_OBJECT_STORAGE_URL": "https://project.supabase.co/storage/v1",
             "EDOC_STORAGE_ACCESS_MODE": "server-signed-url",
             "EDOC_FILE_ENCRYPTION_KEY": "file-key",
@@ -108,6 +110,9 @@ class GoLiveAuditTestCase(unittest.TestCase):
         backend.EDOC_STORAGE_PROVIDER = "supabase"
         backend.EDOC_STORAGE_BUCKET = "edoc-private"
         backend.EDOC_SEAL_STORAGE_BUCKET = "edoc-seal-vault"
+        backend.EDOC_STORAGE_PUBLISHABLE_KEY = values[
+            "EDOC_STORAGE_PUBLISHABLE_KEY"
+        ]
         backend.EDOC_OBJECT_STORAGE_URL = values["EDOC_OBJECT_STORAGE_URL"]
         backend.EDOC_STORAGE_ACCESS_MODE = "server-signed-url"
         backend.EDOC_FILE_ENCRYPTION_ENABLED = True
@@ -191,11 +196,21 @@ class GoLiveAuditTestCase(unittest.TestCase):
         with (
             mock.patch.object(backend, "is_production", return_value=True),
             mock.patch.object(backend, "internal_readiness", return_value={"ready": True}),
+            mock.patch.object(
+                backend,
+                "production_runtime_dependency_readiness",
+                return_value={"ready": True, "errorCodes": []},
+            ),
         ):
             ready_payload, ready_status = backend.public_readiness_response(["readyz"])
         with (
             mock.patch.object(backend, "is_production", return_value=True),
             mock.patch.object(backend, "internal_readiness", return_value={"ready": False}),
+            mock.patch.object(
+                backend,
+                "production_runtime_dependency_readiness",
+                return_value={"ready": True, "errorCodes": []},
+            ),
         ):
             blocked_payload, blocked_status = backend.public_readiness_response(["readyz"])
 
@@ -261,6 +276,153 @@ class GoLiveAuditTestCase(unittest.TestCase):
             {"steps": [step["step_key"] for step in route["steps"]]}
             for route in readiness["routeChecks"]
         ]))
+
+    def test_account_readiness_fails_closed_when_department_head_check_is_missing(self) -> None:
+        checked_roles = ["員工", "主管", "行政部主任", "總務", "業務助理"]
+        launch_smoke = {
+            "accessReadiness": {
+                "counts": {
+                    "activeUserCount": len(checked_roles),
+                    "demoAccountsDisabled": True,
+                    "demoAccountsExplicitlyDisabled": True,
+                    "demoAccountsSafeDefault": False,
+                    "demoSeedUserCount": 0,
+                },
+                "roleChecks": [
+                    {
+                        "role": role,
+                        "activeCount": 1,
+                        "formalAccountCount": 1,
+                        "demoSeedCount": 0,
+                        "hasActiveUser": True,
+                        "hasFormalAccount": True,
+                    }
+                    for role in checked_roles
+                ],
+            }
+        }
+        with mock.patch.object(
+            backend,
+            "current_go_live_audit_report",
+            return_value={
+                "launchScope": "internal_official",
+                "internalGo": False,
+                "launchSmokeReport": launch_smoke,
+            },
+        ):
+            package = backend.current_account_readiness_package()
+
+        department_head = next(
+            item for item in package["roleChecks"] if item["role"] == "主任"
+        )
+        self.assertEqual(package["requiredRoleCount"], 5)
+        self.assertEqual(package["missingFormalRoleCount"], 1)
+        self.assertEqual(package["decision"], "BLOCKED")
+        self.assertTrue(department_head["required"])
+        self.assertEqual(department_head["severity"], "blocker")
+        self.assertTrue(any("主任" in item for item in package["sourceBlockers"]))
+
+    def test_account_readiness_keeps_optional_assistant_as_warning(self) -> None:
+        required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+        launch_smoke = {
+            "accessReadiness": {
+                "counts": {
+                    "activeUserCount": len(required_roles),
+                    "demoAccountsDisabled": True,
+                    "demoAccountsExplicitlyDisabled": True,
+                    "demoAccountsSafeDefault": False,
+                    "demoSeedUserCount": 0,
+                },
+                "roleChecks": [
+                    {
+                        "role": role,
+                        "activeCount": 1,
+                        "formalAccountCount": 1,
+                        "demoSeedCount": 0,
+                        "hasActiveUser": True,
+                        "hasFormalAccount": True,
+                    }
+                    for role in required_roles
+                ],
+            }
+        }
+        with mock.patch.object(
+            backend,
+            "current_go_live_audit_report",
+            return_value={
+                "launchScope": "internal_official",
+                "internalGo": True,
+                "launchSmokeReport": launch_smoke,
+            },
+        ):
+            package = backend.current_account_readiness_package()
+
+        assistant = next(
+            item for item in package["roleChecks"] if item["role"] == "業務助理"
+        )
+        self.assertEqual(package["requiredRoleCount"], 5)
+        self.assertEqual(package["readyRequiredRoleCount"], 5)
+        self.assertEqual(package["missingFormalRoleCount"], 0)
+        self.assertEqual(package["sourceBlockerCount"], 0)
+        self.assertEqual(package["blockerCount"], 0)
+        self.assertFalse(assistant["required"])
+        self.assertEqual(assistant["severity"], "warning")
+
+    def test_account_readiness_rejects_conflicting_duplicate_required_role(self) -> None:
+        role_checks = [
+            {
+                "role": role,
+                "activeCount": 1,
+                "formalAccountCount": 1,
+                "demoSeedCount": 0,
+                "hasActiveUser": True,
+                "hasFormalAccount": True,
+            }
+            for role in ["員工", "主管", "主任", "行政部主任", "總務", "業務助理"]
+        ]
+        role_checks.append({
+            "role": "主任",
+            "activeCount": 0,
+            "formalAccountCount": 0,
+            "demoSeedCount": 0,
+            "hasActiveUser": False,
+            "hasFormalAccount": False,
+        })
+        with mock.patch.object(
+            backend,
+            "current_go_live_audit_report",
+            return_value={
+                "launchScope": "internal_official",
+                "internalGo": False,
+                "launchSmokeReport": {
+                    "accessReadiness": {
+                        "counts": {
+                            "activeUserCount": 6,
+                            "demoAccountsDisabled": True,
+                            "demoAccountsExplicitlyDisabled": True,
+                        },
+                        "roleChecks": role_checks,
+                    }
+                },
+            },
+        ):
+            package = backend.current_account_readiness_package()
+
+        department_head = next(
+            item for item in package["roleChecks"] if item["role"] == "主任"
+        )
+        self.assertEqual(package["decision"], "BLOCKED")
+        self.assertEqual(package["missingFormalRoleCount"], 1)
+        self.assertFalse(department_head["hasFormalAccount"])
+        self.assertTrue(any("互相矛盾" in item for item in package["sourceBlockers"]))
+
+    def test_cutover_package_requires_all_five_formal_roles(self) -> None:
+        source = inspect.getsource(backend.current_production_cutover_readiness_package)
+        self.assertIn(
+            'cutover_required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]',
+            source,
+        )
+        self.assertIn("len(signatures) > 1", source)
 
     def test_supabase_readiness_reports_non_seal_completion_separately(self) -> None:
         role_counts = {

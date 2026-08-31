@@ -1,4 +1,6 @@
 import hashlib
+import importlib.metadata
+import inspect
 import types
 import unittest
 from unittest import mock
@@ -95,6 +97,29 @@ def _sdk(sandbox, calls):
 class VercelSandboxAntivirusTestCase(unittest.TestCase):
     snapshot_id = "snap_1234567890abcdefghijklmnop"
 
+    def test_pinned_sdk_exposes_required_public_surface(self):
+        sdk = av._load_sdk()
+
+        self.assertEqual(importlib.metadata.version("vercel"), "0.10.0")
+        self.assertEqual(importlib.metadata.version("vercel-sandbox"), "0.4.0")
+        self.assertTrue(callable(sdk.create_sandbox))
+        self.assertTrue(
+            {
+                "source",
+                "execution_time_limit",
+                "resources",
+                "persistent",
+                "network_policy",
+                "destroy",
+            }.issubset(inspect.signature(sdk.create_sandbox).parameters)
+        )
+        self.assertEqual(sdk.NetworkPolicy.deny_all().mode, "deny-all")
+        self.assertEqual(
+            sdk.SnapshotSource(snapshot_id=self.snapshot_id).snapshot_id,
+            self.snapshot_id,
+        )
+        self.assertEqual(sdk.SandboxResources(vcpus=2).vcpus, 2)
+
     def run_scan(self, payload=b"%PDF clean", **sandbox_kwargs):
         sandbox = _Sandbox(data=payload, **sandbox_kwargs)
         calls = []
@@ -160,4 +185,3 @@ class VercelSandboxAntivirusTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

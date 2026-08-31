@@ -8,6 +8,7 @@
 
 ```bash
 curl -X POST https://edoc.suiyuecare.com/api/backup/restore-drill \
+  -H "Authorization: Bearer $EDOC_OPERATOR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "scope": "全部資料表",
@@ -16,6 +17,9 @@ curl -X POST https://edoc.suiyuecare.com/api/backup/restore-drill \
     "rpo_target_minutes": 15
   }'
 ```
+
+此 API 只允許具有「系統管理」權限的登入者執行；一般員工與未登入請求必須分別
+回傳 403／401。`EDOC_OPERATOR_TOKEN` 是短效 session，不得保存於文件、repo 或 log。
 
 ## 本機 / SQLite 演練
 

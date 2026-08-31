@@ -23,6 +23,20 @@ class CiWorkflowContractTest(unittest.TestCase):
         self.assertIn("assert_unauthorized /api/documents", self.workflow)
         self.assertNotIn("curl --fail http://127.0.0.1:5174/api/cron/run-due", self.workflow)
 
+    def test_actions_use_node24_compatible_runtimes(self) -> None:
+        self.assertIn("actions/checkout@v5", self.workflow)
+        self.assertIn("actions/setup-python@v6", self.workflow)
+        self.assertIn("actions/setup-node@v5", self.workflow)
+        self.assertIn("actions/upload-artifact@v6", self.workflow)
+        self.assertIn("package-manager-cache: false", self.workflow)
+        for retired_action in (
+            "actions/checkout@v4",
+            "actions/setup-python@v5",
+            "actions/setup-node@v4",
+            "actions/upload-artifact@v4",
+        ):
+            self.assertNotIn(retired_action, self.workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

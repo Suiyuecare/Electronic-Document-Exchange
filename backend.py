@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import concurrent.futures
 import copy
 import csv
 import html
@@ -80,6 +81,16 @@ DEPLOYMENT_ENV = os.getenv("EDOC_DEPLOYMENT_ENV", os.getenv("VERCEL_ENV", "devel
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 USE_SUPABASE = os.getenv("EDOC_DB_MODE", "").lower() == "supabase" or bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+# The historical deployment uses PostgREST's default ``public`` schema and a
+# service-role credential.  A shared Supabase project must instead isolate all
+# eDoc relations in one dedicated schema and use a secret API key whose JWT
+# template resolves to the non-BYPASSRLS ``edoc_backend`` Postgres role.
+# Keeping these values explicit also prevents a copied shared-project key from
+# silently reaching the HR tables that remain in ``public``.
+EDOC_SUPABASE_SCHEMA = os.getenv("EDOC_SUPABASE_SCHEMA", "public").strip().lower()
+EDOC_SUPABASE_BACKEND_ROLE = os.getenv(
+    "EDOC_SUPABASE_BACKEND_ROLE", "service_role"
+).strip().lower()
 EDOC_STORAGE_PROVIDER = os.getenv("EDOC_STORAGE_PROVIDER", "local").lower()
 EDOC_STORAGE_BUCKET = os.getenv("EDOC_STORAGE_BUCKET", "edoc-private")
 EDOC_SEAL_STORAGE_BUCKET = os.getenv("EDOC_SEAL_STORAGE_BUCKET", "edoc-seal-vault")
@@ -88,6 +99,14 @@ EDOC_SEAL_STORAGE_BUCKET = os.getenv("EDOC_SEAL_STORAGE_BUCKET", "edoc-seal-vaul
 # database service key is never sent to another project.
 EDOC_STORAGE_SUPABASE_URL = os.getenv("EDOC_STORAGE_SUPABASE_URL", "").rstrip("/")
 EDOC_STORAGE_SERVICE_ROLE_KEY = os.getenv("EDOC_STORAGE_SERVICE_ROLE_KEY", "")
+# Direct browser uploads still require the Storage project's public API key in
+# addition to the short-lived, path-scoped signed upload token.  This value is
+# intentionally separate from the privileged service-role credential because
+# eDoc Storage can live in a dedicated Supabase project.
+EDOC_STORAGE_PUBLISHABLE_KEY = os.getenv(
+    "EDOC_STORAGE_PUBLISHABLE_KEY",
+    os.getenv("SUPABASE_ANON_KEY", "") if not EDOC_STORAGE_SUPABASE_URL else "",
+).strip()
 # ``auto`` preserves every existing same-project installation.  Operators who
 # provisioned a Storage-only Supabase project must explicitly select
 # ``dedicated-project`` so a copied Storage URL can never silently replace the
@@ -113,6 +132,45 @@ EDOC_AV_HTTP_INLINE_MAX_BYTES = min(8, max(1, int(os.getenv("EDOC_AV_HTTP_INLINE
 EDOC_AV_HMAC_MAX_AGE_SECONDS = 60
 EDOC_AV_SANDBOX_SNAPSHOT_ID = os.getenv("EDOC_AV_SANDBOX_SNAPSHOT_ID", "")
 EDOC_AV_SANDBOX_PROJECT_ID = os.getenv("EDOC_AV_SANDBOX_PROJECT_ID", "")
+EDOC_READINESS_REQUIRED_RPC_NAMES = (
+    "edoc_apply_finance_organization_projection_v2",
+    "edoc_apply_official_document_correction",
+    "edoc_cancel_official_document",
+    "edoc_claim_official_document_approval_v3",
+    "edoc_claim_official_document_rejection_v3",
+    "edoc_claim_official_document_stamp",
+    "edoc_commit_official_document_submission",
+    "edoc_complete_official_document_dispatch",
+    "edoc_complete_official_document_stamp",
+    "edoc_create_company_seal_file_version",
+    "edoc_create_finance_login_session_v2",
+    "edoc_create_official_document_dispatch_record",
+    "edoc_create_official_workflow_delegation",
+    "edoc_fail_official_document_stamp",
+    "edoc_finalize_editor_asset_v2",
+    "edoc_finalize_official_document_resubmit",
+    "edoc_mutate_inbound_document_v1",
+    "edoc_register_official_archive_export",
+    "edoc_resolve_finance_session_v1",
+    "edoc_resolve_portal_finance_user",
+    "edoc_revalidate_finance_session_v2",
+    "edoc_revoke_official_workflow_delegation",
+    "edoc_set_current_company_seal_file",
+)
+# These server-only tables are the minimum immutable PDF Editor V2 contract.
+# Checking only the RPC inventory is insufficient: PostgREST can still expose
+# a function after an operator has omitted or later dropped one of the tables
+# that its workflow depends on. The service-role OpenAPI inventory proves both
+# object existence and the explicit Data API grant without reading document
+# rows.
+EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES = (
+    "file_objects",
+    "official_documents",
+    "official_document_files",
+    "official_document_editor_assets",
+    "official_document_editor_revisions",
+    "official_document_editor_storage_jobs",
+)
 EDOC_MAX_FILE_SIZE_MB = int(os.getenv("EDOC_MAX_FILE_SIZE_MB", "100"))
 EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB = min(3, max(1, int(os.getenv("EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB", "3"))))
 EDOC_ALLOWED_MIME_TYPES = os.getenv("EDOC_ALLOWED_MIME_TYPES", "application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream")
@@ -153,11 +211,82 @@ EDOC_EDITOR_ALLOWED_ASSET_KINDS = {"source_pdf", "import_pdf", "image", "prepare
 EDOC_EDITOR_ALLOWED_ELEMENT_KINDS = {
     "seal", "text", "replacement", "image", "shape", "checkmark", "highlight", "redaction"
 }
+EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
+    "editor_tus_create_failed",
+    "editor_tus_signature_rejected",
+    "editor_tus_signature_expired",
+    "editor_tus_resume_failed",
+    "editor_tus_finalize_failed",
+    "editor_upload_cancelled",
+    "editor_upload_network_failed",
+    "editor_upload_expired",
+})
+# PostgREST ``PT409`` messages are upstream-controlled text.  Only these
+# immutable, non-sensitive business codes may cross the transport boundary as
+# application errors.  Everything else remains an opaque machine-code marker.
+POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
+    "finance_member_sync_event_id_conflict",
+    "finance_organization_revision_conflict",
+    "editor_upload_new_intent_required",
+    "editor_revision_conflict",
+    "editor_finalize_operation_conflict",
+    "editor_file_object_conflict",
+    "editor_official_file_conflict",
+    "official_document_submit_stale",
+    "official_submission_operation_conflict",
+    "official_workflow_existing_steps_invalid",
+    "official_document_resubmit_generation_conflict",
+    "official_document_resubmit_idempotency_conflict",
+    "official_document_resubmit_audit_idempotency_conflict",
+    "official_document_approval_claim_conflict",
+    "official_document_approval_evidence_conflict",
+    "official_document_next_step_activation_conflict",
+    "official_document_rejection_claim_conflict",
+    "official_document_rejection_evidence_conflict",
+    "official_document_rejection_correction_conflict",
+    "official_dispatch_route_conflict",
+    "official_dispatch_completion_conflict",
+    "official_workflow_delegation_revoke_conflict",
+    "inbound_idempotency_conflict",
+    "inbound_version_conflict",
+    "inbound_registration_state_conflict",
+    "inbound_mutation_state_conflict",
+})
+# Compatibility contract for projects where the forward migration that
+# normalizes caller-generated 23505 conflicts to PT409 has not been applied
+# yet.  Native constraint violations use free-form PostgreSQL messages and are
+# intentionally excluded.
+POSTGREST_23505_BUSINESS_CONFLICT_CODES = frozenset({
+    "finance_member_sync_event_id_conflict",
+    "finance_organization_revision_conflict",
+    "editor_revision_conflict",
+    "editor_finalize_operation_conflict",
+    "editor_file_object_conflict",
+    "editor_official_file_conflict",
+    "official_submission_operation_conflict",
+    "official_workflow_existing_steps_invalid",
+    "official_document_resubmit_idempotency_conflict",
+    "official_document_resubmit_audit_idempotency_conflict",
+    "official_dispatch_route_conflict",
+})
+POSTGREST_BUSINESS_CONFLICT_CODES = (
+    POSTGREST_PT409_BUSINESS_CONFLICT_CODES
+    | POSTGREST_23505_BUSINESS_CONFLICT_CODES
+)
+API_CONFLICT_ERROR_CODES = POSTGREST_BUSINESS_CONFLICT_CODES | frozenset({
+    "editor_locked_after_submit",
+})
 EDOC_EDITOR_ALLOWED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg"}
 EDOC_PUBLIC_BASE_URL = os.getenv("EDOC_PUBLIC_BASE_URL", os.getenv("PRODUCTION_BASE_URL", "")).rstrip("/")
 MONITORING_WEBHOOK_URL = os.getenv("MONITORING_WEBHOOK_URL", "")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
-EDOC_MONITORING_EXPECTED_CRON_MINUTES = int(os.getenv("EDOC_MONITORING_EXPECTED_CRON_MINUTES", "1440"))
+try:
+    EDOC_MONITORING_EXPECTED_CRON_MINUTES = max(
+        60,
+        min(10_080, int(os.getenv("EDOC_MONITORING_EXPECTED_CRON_MINUTES", "1440"))),
+    )
+except (TypeError, ValueError):
+    EDOC_MONITORING_EXPECTED_CRON_MINUTES = 1440
 EDOC_RESTORE_DRILL_ENDPOINT = os.getenv("EDOC_RESTORE_DRILL_ENDPOINT", "").strip()
 EDOC_RESTORE_DRILL_TOKEN = os.getenv("EDOC_RESTORE_DRILL_TOKEN", "").strip()
 EDOC_RESTORE_DRILL_TIMEOUT_SECONDS = max(30, min(900, int(os.getenv("EDOC_RESTORE_DRILL_TIMEOUT_SECONDS", "300"))))
@@ -447,6 +576,20 @@ EDOC_ROLE_PERMISSION_GRANTS = {
 
 def roster_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def api_value_error_status(detail: str) -> int:
+    """Map stable application error codes without inspecting free-form text."""
+    if detail.startswith((
+        "formal_signing_service_not_ready",
+        "formal_signature_provider",
+        "formal_tsa",
+        "editor_antivirus_not_ready",
+        "editor_antivirus_scan_failed",
+        "editor_runtime_maintenance",
+    )):
+        return 503
+    return 409 if detail in API_CONFLICT_ERROR_CODES else 422
 
 
 def normalize_edoc_job_level(job_level: Any) -> str:
@@ -907,7 +1050,11 @@ def strict_finance_role_profile(role: Any) -> Dict[str, str]:
     return {"logging_role_key": canonical, **profile}
 
 
-def current_finance_bridge_snapshot(email: str) -> Dict[str, Any]:
+def current_finance_bridge_snapshot(
+    email: str,
+    *,
+    portal_authenticated: bool = False,
+) -> Dict[str, Any]:
     """Fetch one live snapshot; request ids are random and never include PII."""
     return fetch_finance_bridge_snapshot(
         url=EDOC_FINANCE_BRIDGE_URL,
@@ -916,6 +1063,7 @@ def current_finance_bridge_snapshot(email: str) -> Dict[str, Any]:
         email=str(email or "").strip().lower(),
         request_id=f"edoc-{secrets.token_hex(12)}",
         require_https=is_production(),
+        allow_portal_authenticated_identity=portal_authenticated,
     )
 
 
@@ -1411,7 +1559,10 @@ def upsert_logging_bridge_user(conn: sqlite3.Connection, payload: Dict[str, Any]
         raise ValueError(error)
     if is_production():
         auth_user_id, email = portal_finance_identity(source_user)
-        snapshot = current_finance_bridge_snapshot(email)
+        snapshot = current_finance_bridge_snapshot(
+            email,
+            portal_authenticated=True,
+        )
         user, _ = sync_sqlite_finance_snapshot(
             conn,
             snapshot,
@@ -1649,7 +1800,10 @@ def authenticate_verified_portal_handoff_sqlite(
     try:
         if is_production():
             auth_user_id, email = portal_finance_identity(source_user)
-            snapshot = current_finance_bridge_snapshot(email)
+            snapshot = current_finance_bridge_snapshot(
+                email,
+                portal_authenticated=True,
+            )
             synced_user, _ = sync_sqlite_finance_snapshot(conn, snapshot, auth_user_id=auth_user_id)
             user = conn.execute("SELECT * FROM users WHERE id = ?", (synced_user["id"],)).fetchone()
             if not user:
@@ -1696,6 +1850,7 @@ TABLES = {
     "official_document_text_overlays": "official_document_text_overlays",
     "official_document_editor_revisions": "official_document_editor_revisions",
     "official_document_editor_assets": "official_document_editor_assets",
+    "official_document_editor_storage_jobs": "official_document_editor_storage_jobs",
     "official_document_dispatch_records": "official_document_dispatch_records",
     "official_document_dispatch_events": "official_document_dispatch_events",
     "official_workflow_delegations": "official_workflow_delegations",
@@ -2142,6 +2297,31 @@ CREATE TABLE IF NOT EXISTS official_document_editor_assets (
   FOREIGN KEY(editor_revision_id) REFERENCES official_document_editor_revisions(id) ON DELETE RESTRICT,
   FOREIGN KEY(file_object_id) REFERENCES file_objects(id) ON DELETE SET NULL,
   FOREIGN KEY(official_file_id) REFERENCES official_document_files(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_document_editor_storage_jobs (
+  id TEXT PRIMARY KEY,
+  asset_id TEXT NOT NULL UNIQUE,
+  document_id TEXT NOT NULL,
+  staging_bucket TEXT NOT NULL,
+  staging_path TEXT NOT NULL,
+  final_bucket TEXT NOT NULL,
+  final_path TEXT NOT NULL,
+  expected_sha256 TEXT NOT NULL,
+  expected_size_bytes INTEGER NOT NULL,
+  token_expires_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  lease_token TEXT NOT NULL DEFAULT '',
+  lease_expires_at TEXT NOT NULL DEFAULT '',
+  final_file_object_id TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error_code TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  cleaned_at TEXT,
+  FOREIGN KEY(asset_id) REFERENCES official_document_editor_assets(id) ON DELETE RESTRICT,
+  FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE RESTRICT,
+  FOREIGN KEY(final_file_object_id) REFERENCES file_objects(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS official_document_dispatch_records (
@@ -3308,6 +3488,30 @@ CREATE INDEX IF NOT EXISTS idx_official_editor_assets_document ON official_docum
 CREATE INDEX IF NOT EXISTS idx_official_editor_assets_revision ON official_document_editor_assets(editor_revision_id, asset_kind);
 CREATE INDEX IF NOT EXISTS idx_official_editor_assets_file_object ON official_document_editor_assets(file_object_id);
 CREATE INDEX IF NOT EXISTS idx_official_editor_assets_official_file ON official_document_editor_assets(official_file_id);
+CREATE INDEX IF NOT EXISTS idx_official_editor_storage_jobs_due ON official_document_editor_storage_jobs(status, token_expires_at);
+CREATE INDEX IF NOT EXISTS idx_official_editor_storage_jobs_document ON official_document_editor_storage_jobs(document_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_official_editor_storage_jobs_final_file ON official_document_editor_storage_jobs(final_file_object_id);
+CREATE TRIGGER IF NOT EXISTS trg_official_editor_finalized_asset_no_insert
+BEFORE INSERT ON official_document_editor_assets
+WHEN NEW.asset_kind IN ('source_pdf','import_pdf','image')
+  AND NEW.upload_status = 'finalized'
+BEGIN
+  SELECT RAISE(ABORT, 'editor_finalized_asset_insert_forbidden');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_official_editor_finalized_asset_no_update
+BEFORE UPDATE ON official_document_editor_assets
+WHEN OLD.asset_kind IN ('source_pdf','import_pdf','image')
+  AND OLD.upload_status = 'finalized'
+BEGIN
+  SELECT RAISE(ABORT, 'editor_finalized_asset_immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_official_editor_finalized_asset_no_delete
+BEFORE DELETE ON official_document_editor_assets
+WHEN OLD.asset_kind IN ('source_pdf','import_pdf','image')
+  AND OLD.upload_status = 'finalized'
+BEGIN
+  SELECT RAISE(ABORT, 'editor_finalized_asset_immutable');
+END;
 CREATE TRIGGER IF NOT EXISTS trg_official_editor_revisions_no_update
 BEFORE UPDATE ON official_document_editor_revisions
 BEGIN
@@ -3718,8 +3922,88 @@ def object_storage_endpoint() -> str:
 
 
 def _url_origin(value: str) -> tuple[str, str, int | None]:
-    parsed = urllib.parse.urlparse(str(value or "").strip())
-    return ((parsed.scheme or "").lower(), (parsed.hostname or "").lower(), parsed.port)
+    try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+        scheme = (parsed.scheme or "").lower()
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ("", "", None)
+    if port is None and scheme == "https":
+        port = 443
+    elif port is None and scheme == "http":
+        port = 80
+    return (scheme, hostname, port)
+
+
+def _supabase_cloud_project_origin(value: str) -> str:
+    """Return one canonical Supabase Cloud project origin or an empty string.
+
+    Storage service credentials must never be sent to a custom/unknown host.
+    eDoc currently supports Supabase Cloud projects, whose API origin is one
+    direct child of ``supabase.co`` over the default HTTPS port.
+    """
+    try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+        hostname = str(parsed.hostname or "").lower()
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if not (
+        parsed.scheme.lower() == "https"
+        and re.fullmatch(r"[a-z0-9-]+\.supabase\.co", hostname)
+        and port in {None, 443}
+        and not parsed.username
+        and not parsed.password
+        and parsed.path in {"", "/"}
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    ):
+        return ""
+    return f"https://{hostname}"
+
+
+def _supabase_database_endpoint_issue() -> str:
+    """Require the production database key to target one Supabase project."""
+    if not is_production():
+        return ""
+    if not _supabase_cloud_project_origin(SUPABASE_URL):
+        return "database_supabase_project_url_invalid"
+    return ""
+
+
+def _supabase_storage_endpoint_issue() -> str:
+    """Validate the effective server-side Storage REST endpoint fail-closed."""
+    if EDOC_STORAGE_PROVIDER != "supabase":
+        return ""
+    project_url = str(EDOC_STORAGE_SUPABASE_URL or SUPABASE_URL or "").strip()
+    project_origin = _supabase_cloud_project_origin(project_url)
+    if not project_origin:
+        return "storage_supabase_project_url_invalid"
+    expected_endpoint = f"{project_origin}/storage/v1"
+    explicit_endpoint = os.getenv("EDOC_OBJECT_STORAGE_URL", "").strip().rstrip("/")
+    if not explicit_endpoint:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(explicit_endpoint)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return "storage_object_endpoint_project_mismatch"
+    if not (
+        parsed.scheme.lower() == "https"
+        and str(parsed.hostname or "").lower() == urllib.parse.urlparse(project_origin).hostname
+        and port in {None, 443}
+        and not parsed.username
+        and not parsed.password
+        and parsed.path == "/storage/v1"
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and explicit_endpoint == expected_endpoint
+    ):
+        return "storage_object_endpoint_project_mismatch"
+    return ""
 
 
 def storage_uses_database_supabase_project() -> bool:
@@ -3732,28 +4016,57 @@ def supabase_project_partition_issues() -> List[str]:
     """Return fail-closed configuration errors for DB/Storage project roles.
 
     ``auto`` and ``same-project`` remain backward compatible.  The dedicated
-    mode is the guardrail for the production topology used by eDoc: the main
-    ``SUPABASE_URL`` remains the database/Auth project while
-    ``EDOC_STORAGE_SUPABASE_URL`` names a distinct private Storage project.
+    mode keeps database and Storage in separate projects.  The explicitly
+    approved ``shared-project-schema`` mode keeps HR in ``public`` while eDoc
+    uses the ``edoc`` schema, the ``edoc_backend`` role and bucket-scoped RLS.
     No credential values are ever returned or logged.
     """
     mode = str(EDOC_STORAGE_SUPABASE_MODE or "auto").strip().lower()
-    if mode not in {"auto", "same-project", "dedicated-project"}:
+    if mode not in {
+        "auto",
+        "same-project",
+        "dedicated-project",
+        "shared-project-schema",
+    }:
         return ["storage_supabase_mode_invalid"]
+    issues: List[str] = []
+    database_endpoint_issue = _supabase_database_endpoint_issue()
+    if database_endpoint_issue:
+        issues.append(database_endpoint_issue)
     database_origin = _url_origin(SUPABASE_URL)
     storage_origin = _url_origin(EDOC_STORAGE_SUPABASE_URL)
     if mode == "dedicated-project":
         if not all((database_origin[0], database_origin[1])):
-            return ["edoc_database_supabase_url_required"]
+            issues.append("edoc_database_supabase_url_required")
         if not all((storage_origin[0], storage_origin[1])):
-            return ["dedicated_storage_supabase_url_required"]
-        if database_origin == storage_origin:
-            return ["dedicated_storage_project_must_differ_from_database"]
+            issues.append("dedicated_storage_supabase_url_required")
+        if all((database_origin[0], database_origin[1], storage_origin[0], storage_origin[1])) and database_origin == storage_origin:
+            issues.append("dedicated_storage_project_must_differ_from_database")
         if not str(EDOC_STORAGE_SERVICE_ROLE_KEY or "").strip():
-            return ["dedicated_storage_service_role_key_required"]
+            issues.append("dedicated_storage_service_role_key_required")
     if mode == "same-project" and storage_origin[0] and storage_origin != database_origin:
-        return ["same_project_storage_url_mismatch"]
-    return []
+        issues.append("same_project_storage_url_mismatch")
+    if mode == "shared-project-schema":
+        if EDOC_SUPABASE_SCHEMA != "edoc":
+            issues.append("shared_project_edoc_schema_required")
+        if EDOC_SUPABASE_BACKEND_ROLE != "edoc_backend":
+            issues.append("shared_project_backend_role_required")
+        if not str(SUPABASE_SERVICE_ROLE_KEY or "").startswith("sb_secret_"):
+            issues.append("shared_project_custom_role_secret_required")
+        if storage_origin[0] and storage_origin != database_origin:
+            issues.append("shared_project_storage_url_mismatch")
+        explicit_storage_key = str(EDOC_STORAGE_SERVICE_ROLE_KEY or "").strip()
+        if explicit_storage_key and explicit_storage_key != str(
+            SUPABASE_SERVICE_ROLE_KEY or ""
+        ).strip():
+            issues.append("shared_project_storage_key_mismatch")
+    elif EDOC_SUPABASE_SCHEMA != "public" or EDOC_SUPABASE_BACKEND_ROLE != "service_role":
+        issues.append("supabase_schema_role_mode_mismatch")
+
+    endpoint_issue = _supabase_storage_endpoint_issue()
+    if endpoint_issue:
+        issues.append(endpoint_issue)
+    return issues
 
 
 def storage_service_role_key() -> str:
@@ -3930,6 +4243,536 @@ def internal_antivirus_readiness() -> Dict[str, Any]:
     }
 
 
+def _runtime_readiness_probe_timeout_seconds() -> float:
+    """Keep public readiness checks bounded even when a dependency is down."""
+    try:
+        configured = float(os.getenv("EDOC_READINESS_PROBE_TIMEOUT_SECONDS", "1.5"))
+    except (TypeError, ValueError):
+        configured = 1.5
+    return max(0.25, min(5.0, configured))
+
+
+class _RejectHttpRedirects(urllib.request.HTTPRedirectHandler):
+    """Keep privileged server credentials on their pre-validated origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def _urlopen_no_redirect(request: urllib.request.Request, *, timeout: float):
+    return urllib.request.build_opener(_RejectHttpRedirects()).open(
+        request,
+        timeout=timeout,
+    )
+
+
+def _consume_http_error(exc: urllib.error.HTTPError, *, max_bytes: int = 4096) -> bytes:
+    """Read a bounded diagnostic prefix and always release the response.
+
+    Callers must not expose the returned bytes. Upstream bodies can contain
+    document text, email addresses or credentials and therefore never belong
+    in application exceptions or logs.
+    """
+    try:
+        return exc.read(max(0, int(max_bytes)))
+    except Exception:
+        return b""
+    finally:
+        try:
+            exc.close()
+        except Exception:
+            pass
+
+
+def _safe_http_error_contract(
+    exc: urllib.error.HTTPError,
+    prefix: str,
+) -> Tuple[str, str]:
+    """Return an opaque marker plus an allowlisted business-conflict code.
+
+    PostgREST forwards PostgreSQL ``message``, ``detail`` and ``hint`` fields.
+    Those fields may contain document text or personal data, so callers may
+    only receive a message when the HTTP status, provider code and exact
+    immutable business code all match this service's PT409/legacy-23505
+    conflict contract.
+    """
+    raw = _consume_http_error(exc)
+    provider_code = ""
+    business_conflict = ""
+    try:
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        candidate = str(payload.get("code") or "") if isinstance(payload, dict) else ""
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", candidate):
+            provider_code = candidate
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if int(getattr(exc, "code", 0) or 0) == 409 and isinstance(message, str):
+            if (
+                provider_code == "PT409"
+                and message in POSTGREST_PT409_BUSINESS_CONFLICT_CODES
+            ) or (
+                provider_code == "23505"
+                and message in POSTGREST_23505_BUSINESS_CONFLICT_CODES
+            ):
+                business_conflict = message
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        # PostgREST error bodies can be much larger than the diagnostic read
+        # limit. Extract only the bounded machine-code field from the prefix;
+        # never retain or expose message/detail/hint/document content.
+        prefix_text = raw.decode("utf-8", "ignore")
+        match = re.search(
+            r'["\']code["\']\s*:\s*["\']([A-Za-z0-9._-]{1,64})["\']',
+            prefix_text,
+        )
+        provider_code = match.group(1) if match else ""
+    marker = f"{prefix}:{int(getattr(exc, 'code', 0) or 0)}"
+    marker = f"{marker}:{provider_code}" if provider_code else marker
+    return marker, business_conflict
+
+
+def _safe_http_error_marker(exc: urllib.error.HTTPError, prefix: str) -> str:
+    marker, _business_conflict = _safe_http_error_contract(exc, prefix)
+    return marker
+
+
+def _readiness_http_json(
+    url: str,
+    *,
+    headers: Dict[str, str] | None = None,
+    timeout: float,
+    max_bytes: int = 8 * 1024 * 1024,
+    allow_redirects: bool = True,
+    method: str = "GET",
+    body: bytes | None = None,
+) -> Any:
+    """Fetch a small readiness response without returning transport details."""
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=headers or {"Accept": "application/json"},
+        method=method,
+    )
+    opener = urllib.request.urlopen if allow_redirects else _urlopen_no_redirect
+    try:
+        with opener(request, timeout=timeout) as response:
+            response_status = getattr(response, "status", None)
+            status = int(response_status if response_status is not None else response.getcode())
+            if status < 200 or status >= 300:
+                raise RuntimeError("readiness_http_status")
+            raw = response.read(max_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        _consume_http_error(exc)
+        raise RuntimeError("readiness_http_error") from None
+    if len(raw) > max_bytes:
+        raise RuntimeError("readiness_response_too_large")
+    return json.loads(raw.decode("utf-8")) if raw else None
+
+
+def _probe_main_supabase_query(timeout: float) -> Dict[str, Any]:
+    """Prove the configured main Supabase project can serve eDoc rows."""
+    try:
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            raise RuntimeError("database_runtime_config_missing")
+        query = urllib.parse.urlencode({"select": "id", "limit": "1"})
+        payload = _readiness_http_json(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/official_documents?{query}",
+            headers=supabase_headers({"Accept": "application/json"}),
+            timeout=timeout,
+            max_bytes=256 * 1024,
+            allow_redirects=False,
+        )
+        if not isinstance(payload, list):
+            raise RuntimeError("database_query_contract_invalid")
+        return {"ready": True, "errorCode": ""}
+    except Exception:
+        return {"ready": False, "errorCode": "database_query_unavailable"}
+
+
+def _probe_main_supabase_rpcs(timeout: float) -> Dict[str, Any]:
+    """Verify the required RPC and editor-table Data API contract.
+
+    PostgREST's OpenAPI inventory is read-only and reflects the current
+    service-role grants. This avoids mutating probe rows while still catching
+    a partially migrated database before a user receives a TUS capability.
+    """
+    try:
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            raise RuntimeError("database_runtime_config_missing")
+        payload = _readiness_http_json(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/",
+            headers=supabase_headers({"Accept": "application/openapi+json"}),
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        paths = payload.get("paths") if isinstance(payload, dict) else None
+        if not isinstance(paths, dict):
+            raise RuntimeError("database_rpc_inventory_invalid")
+        missing = [
+            name
+            for name in EDOC_READINESS_REQUIRED_RPC_NAMES
+            if f"/rpc/{name}" not in paths
+        ]
+        missing_tables = [
+            name
+            for name in EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES
+            if f"/{name}" not in paths
+        ]
+        error_code = ""
+        if missing_tables:
+            error_code = "database_required_editor_table_missing"
+        elif missing:
+            error_code = "database_required_rpc_missing"
+        return {
+            "ready": not missing and not missing_tables,
+            "requiredRpcCount": len(EDOC_READINESS_REQUIRED_RPC_NAMES),
+            "missingRpcCount": len(missing),
+            "missingRpcNames": missing,
+            "requiredEditorTableCount": len(EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES),
+            "missingEditorTableCount": len(missing_tables),
+            "missingEditorTableNames": missing_tables,
+            "errorCode": error_code,
+        }
+    except Exception:
+        return {
+            "ready": False,
+            "requiredRpcCount": len(EDOC_READINESS_REQUIRED_RPC_NAMES),
+            "missingRpcCount": None,
+            "missingRpcNames": [],
+            "requiredEditorTableCount": len(EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES),
+            "missingEditorTableCount": None,
+            "missingEditorTableNames": [],
+            "errorCode": "database_rpc_inventory_unavailable",
+        }
+
+
+def _probe_shared_supabase_identity(timeout: float) -> Dict[str, Any]:
+    """Prove the shared-project key resolves to the isolated backend role."""
+    if EDOC_STORAGE_SUPABASE_MODE != "shared-project-schema":
+        return {"ready": True, "checked": False, "errorCode": ""}
+    try:
+        payload = _readiness_http_json(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/edoc_runtime_identity",
+            headers=supabase_headers(
+                {
+                    "Accept": "application/json",
+                    "Prefer": "return=representation",
+                }
+            ),
+            timeout=timeout,
+            max_bytes=64 * 1024,
+            allow_redirects=False,
+            method="POST",
+            body=b"{}",
+        )
+        if isinstance(payload, list) and len(payload) == 1:
+            payload = payload[0]
+        ready = bool(
+            isinstance(payload, dict)
+            and payload.get("databaseRole") == "edoc_backend"
+            and payload.get("schemaName") == "edoc"
+            and payload.get("storageMode") == "shared-project-schema"
+        )
+        return {
+            "ready": ready,
+            "checked": True,
+            "errorCode": "" if ready else "shared_project_identity_mismatch",
+        }
+    except Exception:
+        return {
+            "ready": False,
+            "checked": True,
+            "errorCode": "shared_project_identity_unavailable",
+        }
+
+
+def require_production_editor_runtime_ready() -> None:
+    """Fail before any production editor mutation when dependencies are stale.
+
+    The readiness endpoint is advisory to the platform and does not prevent an
+    already-open browser tab from calling a write endpoint. Reusing the same
+    bounded, non-mutating probes here prevents partial draft rows, upload
+    lifecycle rows, or browser upload capabilities during an incomplete
+    production cutover.
+    """
+    if not is_production():
+        return
+    readiness = production_runtime_dependency_readiness()
+    if not readiness.get("ready"):
+        raise ValueError("editor_runtime_maintenance")
+
+
+def _probe_supabase_private_buckets(timeout: float) -> Dict[str, Any]:
+    """Verify both dedicated eDoc buckets exist and cannot be served publicly."""
+    try:
+        endpoint_issue = _supabase_storage_endpoint_issue()
+        if endpoint_issue:
+            return {
+                "ready": False,
+                "documentBucket": {"exists": False, "private": False},
+                "sealVaultBucket": {"exists": False, "private": False},
+                "missingBucketCount": None,
+                "publicBucketCount": None,
+                "errorCode": endpoint_issue,
+            }
+        endpoint = object_storage_endpoint()
+        if EDOC_STORAGE_PROVIDER != "supabase" or not endpoint:
+            raise RuntimeError("storage_runtime_config_missing")
+        payload = _readiness_http_json(
+            f"{endpoint.rstrip('/')}/bucket",
+            headers=supabase_storage_headers({"Accept": "application/json"}),
+            timeout=timeout,
+            max_bytes=1024 * 1024,
+            allow_redirects=False,
+        )
+        rows = payload.get("buckets") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            raise RuntimeError("storage_bucket_inventory_invalid")
+        buckets = {
+            str(row.get("id") or row.get("name") or ""): row
+            for row in rows
+            if isinstance(row, dict)
+        }
+        document = buckets.get(EDOC_STORAGE_BUCKET)
+        seal = buckets.get(EDOC_SEAL_STORAGE_BUCKET)
+        document_exists = isinstance(document, dict)
+        seal_exists = isinstance(seal, dict)
+        document_private = document_exists and document.get("public") is False
+        seal_private = seal_exists and seal.get("public") is False
+        missing = int(not document_exists) + int(not seal_exists)
+        public = int(document_exists and not document_private) + int(seal_exists and not seal_private)
+        error_code = ""
+        if missing:
+            error_code = "storage_bucket_missing"
+        elif public:
+            error_code = "storage_bucket_not_private"
+        return {
+            "ready": not missing and not public,
+            "documentBucket": {"exists": document_exists, "private": document_private},
+            "sealVaultBucket": {"exists": seal_exists, "private": seal_private},
+            "missingBucketCount": missing,
+            "publicBucketCount": public,
+            "errorCode": error_code,
+        }
+    except Exception:
+        return {
+            "ready": False,
+            "documentBucket": {"exists": False, "private": False},
+            "sealVaultBucket": {"exists": False, "private": False},
+            "missingBucketCount": None,
+            "publicBucketCount": None,
+            "errorCode": "storage_bucket_inventory_unavailable",
+        }
+
+
+def _probe_supabase_publishable_key_affinity(timeout: float) -> Dict[str, Any]:
+    """Confirm the browser upload key belongs to the configured Storage project.
+
+    Supabase documents ``GET /auth/v1/settings`` as a public, read-only check
+    made with the project's public ``apikey``.  A publishable key from another
+    project is rejected by the API gateway, so this proves URL/key affinity
+    without listing or mutating user data.  The result intentionally contains
+    neither the endpoint nor the credential.
+    """
+    safe_result = {
+        "checked": True,
+        "containsEndpoint": False,
+        "containsKey": False,
+    }
+    try:
+        if EDOC_STORAGE_PROVIDER != "supabase":
+            raise RuntimeError("storage_runtime_config_missing")
+        configured_project_url = str(
+            EDOC_STORAGE_SUPABASE_URL or SUPABASE_URL or ""
+        ).strip()
+        project_url = _supabase_cloud_project_origin(configured_project_url)
+        if not project_url:
+            raise RuntimeError("storage_publishable_key_affinity_config_invalid")
+        publishable_key = str(EDOC_STORAGE_PUBLISHABLE_KEY or "").strip()
+        if not _browser_safe_supabase_public_key(publishable_key):
+            raise RuntimeError("storage_publishable_key_affinity_config_invalid")
+        payload = _readiness_http_json(
+            f"{project_url}/auth/v1/settings",
+            headers={"Accept": "application/json", "apikey": publishable_key},
+            timeout=timeout,
+            max_bytes=256 * 1024,
+            allow_redirects=False,
+        )
+        if not isinstance(payload, dict):
+            return {
+                **safe_result,
+                "ready": False,
+                "errorCode": "storage_publishable_key_affinity_contract_invalid",
+            }
+        return {**safe_result, "ready": True, "errorCode": ""}
+    except urllib.error.HTTPError as exc:
+        _consume_http_error(exc)
+        if int(getattr(exc, "code", 0) or 0) in {401, 403}:
+            error_code = "storage_publishable_key_affinity_rejected"
+        else:
+            error_code = "storage_publishable_key_affinity_unavailable"
+        return {**safe_result, "ready": False, "errorCode": error_code}
+    except RuntimeError as exc:
+        error_code = str(exc)
+        if error_code != "storage_publishable_key_affinity_config_invalid":
+            error_code = "storage_publishable_key_affinity_unavailable"
+        return {**safe_result, "ready": False, "errorCode": error_code}
+    except Exception:
+        return {
+            **safe_result,
+            "ready": False,
+            "errorCode": "storage_publishable_key_affinity_unavailable",
+        }
+
+
+def _probe_antivirus_runtime(timeout: float) -> Dict[str, Any]:
+    """Probe an AV health protocol only when the selected provider exposes one."""
+    av = av_endpoint_configuration()
+    contract = str(av.get("contract") or "")
+    if contract == VERCEL_SANDBOX_AV_PROVIDER_ID:
+        # The Sandbox provider creates an isolated VM per scan and has no
+        # independent health API. Configuration plus launch scan evidence is
+        # the strongest non-mutating signal available.
+        ready = bool(av.get("transportConfigured") and av.get("credentialConfigured"))
+        return {
+            "ready": ready,
+            "checked": False,
+            "healthApiAvailable": False,
+            "errorCode": "" if ready else "antivirus_runtime_config_invalid",
+        }
+    if contract == "clamd-instream":
+        try:
+            with socket.create_connection(
+                (str(av.get("hostname") or ""), int(av.get("port") or 3310)),
+                timeout=timeout,
+            ) as connection:
+                connection.settimeout(timeout)
+                connection.sendall(b"zPING\0")
+                response = connection.recv(32)
+            ready = b"PONG" in response.upper()
+            return {
+                "ready": ready,
+                "checked": True,
+                "healthApiAvailable": True,
+                "errorCode": "" if ready else "antivirus_health_not_ready",
+            }
+        except Exception:
+            return {
+                "ready": False,
+                "checked": True,
+                "healthApiAvailable": True,
+                "errorCode": "antivirus_health_unavailable",
+            }
+    if contract == "edoc-clamav-https-v1":
+        try:
+            parsed = urllib.parse.urlparse(str(EDOC_AV_ENDPOINT or ""))
+            health_url = urllib.parse.urlunparse(
+                (parsed.scheme, parsed.netloc, "/healthz", "", "", "")
+            )
+            payload = _readiness_http_json(
+                health_url,
+                headers={"Accept": "application/json"},
+                timeout=timeout,
+                max_bytes=64 * 1024,
+            )
+            ready = bool(
+                isinstance(payload, dict)
+                and payload.get("ok") is True
+                and payload.get("status") in {None, "ready", "ok"}
+            )
+            return {
+                "ready": ready,
+                "checked": True,
+                "healthApiAvailable": True,
+                "errorCode": "" if ready else "antivirus_health_not_ready",
+            }
+        except Exception:
+            return {
+                "ready": False,
+                "checked": True,
+                "healthApiAvailable": True,
+                "errorCode": "antivirus_health_unavailable",
+            }
+    return {
+        "ready": False,
+        "checked": False,
+        "healthApiAvailable": False,
+        "errorCode": "antivirus_runtime_config_invalid",
+    }
+
+
+def production_runtime_dependency_readiness() -> Dict[str, Any]:
+    """Run bounded, non-mutating production dependency probes for ``/readyz``."""
+    if not is_production():
+        return {
+            "ready": True,
+            "checked": False,
+            "checks": {},
+            "errorCodes": [],
+            "containsEndpoint": False,
+            "containsSecret": False,
+            "containsPii": False,
+        }
+    timeout = _runtime_readiness_probe_timeout_seconds()
+    probes = {
+        "databaseQuery": lambda: _probe_main_supabase_query(timeout),
+        "databaseRpcs": lambda: _probe_main_supabase_rpcs(timeout),
+        "privateStorage": lambda: _probe_supabase_private_buckets(timeout),
+        "storagePublicKeyAffinity": lambda: _probe_supabase_publishable_key_affinity(timeout),
+        "antivirus": lambda: _probe_antivirus_runtime(timeout),
+    }
+    if EDOC_STORAGE_SUPABASE_MODE == "shared-project-schema":
+        probes["sharedProjectIdentity"] = lambda: _probe_shared_supabase_identity(
+            timeout
+        )
+    results: Dict[str, Dict[str, Any]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
+        pending = {name: executor.submit(probe) for name, probe in probes.items()}
+        for name, future in pending.items():
+            try:
+                results[name] = future.result(timeout=(timeout * 2) + 0.5)
+            except Exception:
+                results[name] = {
+                    "ready": False,
+                    "errorCode": f"{name}_probe_failed",
+                }
+    error_codes = [
+        str(result.get("errorCode") or "")
+        for result in results.values()
+        if not result.get("ready") and result.get("errorCode")
+    ]
+    ready = all(bool(result.get("ready")) for result in results.values())
+    return {
+        "ready": ready,
+        "checked": True,
+        "checks": results,
+        "errorCodes": error_codes,
+        "containsEndpoint": False,
+        "containsSecret": False,
+        "containsPii": False,
+    }
+
+
+def enrich_internal_readiness_with_runtime_dependencies(
+    readiness: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Combine configuration and live probes without mutating shared fixtures."""
+    if not is_production():
+        return readiness
+    result = copy.deepcopy(readiness)
+    runtime = production_runtime_dependency_readiness()
+    result.setdefault("checks", {})["runtimeDependencies"] = runtime
+    runtime_ready = bool(runtime.get("ready"))
+    result["ready"] = bool(result.get("ready")) and runtime_ready
+    result["internalGo"] = bool(result.get("internalGo", result["ready"])) and runtime_ready
+    if not runtime_ready:
+        error_codes = runtime.get("errorCodes") or ["runtime_dependency_unavailable"]
+        result.setdefault("blockers", []).append(
+            "Production runtime dependency probe failed: "
+            + ", ".join(str(code) for code in error_codes)
+            + "."
+        )
+    return result
+
+
 def production_readiness() -> Dict[str, Any]:
     required = [
         "EDOC_DEPLOYMENT_ENV",
@@ -4049,20 +4892,11 @@ def production_readiness() -> Dict[str, Any]:
 
 def public_health_payload(*, database: str = "", project: str = "") -> Dict[str, Any]:
     """Return a liveness response that never inventories production internals."""
-    timestamp = now()
-    if is_production():
-        return {"ok": True, "status": "ok", "time": timestamp}
-    payload: Dict[str, Any] = {
-        "ok": True,
-        "status": "ok",
-        "database": database,
-        "time": timestamp,
-        "tables": list(TABLES),
-        "production": production_readiness(),
-    }
-    if project:
-        payload["project"] = project
-    return payload
+    # Keep both legacy ``/health`` and Kubernetes-style ``/healthz`` as pure
+    # process liveness. Dependency and configuration checks belong exclusively
+    # to ``/readyz``; otherwise a harmless liveness poll can become slow or
+    # disclose infrastructure inventory in a non-production deployment.
+    return {"ok": True, "status": "ok", "time": now()}
 
 
 def public_readiness_payload(readiness: Dict[str, Any]) -> Dict[str, Any]:
@@ -4149,6 +4983,54 @@ def pdf_editor_v2_enabled_for_company(company_id: str) -> bool:
     if mode != "manual_allowlist":
         return False
     return bool(company_id and company_id in set(pdf_editor_v2_company_scope_ids()))
+
+
+def _browser_safe_supabase_public_key(value: Any) -> bool:
+    """Accept only Supabase publishable keys or legacy anon JWTs."""
+    key = str(value or "").strip()
+    if not key:
+        return False
+    lowered = key.lower()
+    if key.startswith("sb_publishable_"):
+        return True
+    if key.startswith("sb_secret_") or "service_role" in lowered:
+        return False
+    parts = key.split(".")
+    if len(parts) != 3:
+        return False
+    try:
+        payload_segment = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_segment).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        return False
+    return str(claims.get("role") or "").lower() == "anon"
+
+
+def supabase_storage_browser_upload_key_status() -> Dict[str, Any]:
+    """Expose upload-key readiness without ever returning the key itself."""
+    editor_mode = pdf_editor_v2_company_scope_mode()
+    editor_enabled = editor_mode == "finance_active" or (
+        editor_mode == "manual_allowlist"
+        and bool(pdf_editor_v2_company_scope_ids())
+    )
+    required = EDOC_STORAGE_PROVIDER == "supabase" and editor_enabled
+    configured = bool(EDOC_STORAGE_PUBLISHABLE_KEY)
+    valid = configured and _browser_safe_supabase_public_key(
+        EDOC_STORAGE_PUBLISHABLE_KEY
+    )
+    error_code = ""
+    if required and not configured:
+        error_code = "editor_storage_publishable_key_required"
+    elif required and not valid:
+        error_code = "editor_storage_publishable_key_invalid"
+    return {
+        "required": required,
+        "configured": configured,
+        "valid": valid,
+        "ready": not required or valid,
+        "errorCode": error_code,
+        "containsKey": False,
+    }
 
 
 def launch_company_scope_metadata(companies: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -4264,6 +5146,13 @@ def internal_readiness() -> Dict[str, Any]:
     editor_company_mode = pdf_editor_v2_company_scope_mode()
     launch_company_ids = launch_company_scope_ids()
     editor_company_ids = pdf_editor_v2_company_scope_ids()
+    browser_upload_key = supabase_storage_browser_upload_key_status()
+    if (
+        browser_upload_key["required"]
+        and not browser_upload_key["configured"]
+        and "EDOC_STORAGE_PUBLISHABLE_KEY" not in missing
+    ):
+        missing.append("EDOC_STORAGE_PUBLISHABLE_KEY")
     finance_bridge_url = urllib.parse.urlparse(EDOC_FINANCE_BRIDGE_URL)
     finance_bridge_https = bool(
         finance_bridge_url.scheme == "https"
@@ -4282,11 +5171,12 @@ def internal_readiness() -> Dict[str, Any]:
         and finance_bridge_timeout_ready
     )
     storage_ready = bool(
-        EDOC_STORAGE_PROVIDER in {"supabase", "s3", "r2", "private-object-storage"}
+        EDOC_STORAGE_PROVIDER == "supabase"
         and EDOC_STORAGE_BUCKET
         and EDOC_SEAL_STORAGE_BUCKET
         and object_storage_endpoint()
         and (EDOC_STORAGE_PROVIDER != "supabase" or storage_service_role_key())
+        and browser_upload_key["ready"]
     )
     project_partition_issues = supabase_project_partition_issues()
     if project_partition_issues:
@@ -4299,6 +5189,11 @@ def internal_readiness() -> Dict[str, Any]:
         blockers.append("內部正式上線必須使用 Supabase；Vercel production 不可依賴本機 SQLite。")
     if is_production() and not storage_ready:
         blockers.append("內部正式上線必須設定 private object storage 與 Seal Vault bucket。")
+    if is_production() and browser_upload_key["required"] and not browser_upload_key["ready"]:
+        blockers.append(
+            "PDF Editor V2 的 Supabase 直傳公開金鑰缺少或不是 browser-safe publishable/anon key："
+            f"{browser_upload_key['errorCode']}。"
+        )
     if is_production() and not antivirus["ready"]:
         av_reasons = [*antivirus["missingEnvironment"], *antivirus["configurationIssues"]]
         blockers.append(f"內部正式上線必須完成可用的防毒掃描設定；缺少或不支援：{', '.join(av_reasons)}。")
@@ -4379,6 +5274,7 @@ def internal_readiness() -> Dict[str, Any]:
                 "containsSecret": False,
             },
             "privateStorage": storage_ready,
+            "browserUploadKey": browser_upload_key,
             "supabaseProjectPartition": {
                 "ready": not project_partition_issues,
                 "mode": EDOC_STORAGE_SUPABASE_MODE,
@@ -4449,7 +5345,9 @@ def readiness_for_public_endpoint(parts: List[str]) -> Dict[str, Any]:
     and therefore remains fail-closed until those providers are approved.
     """
     if parts == ["readyz"]:
-        return internal_readiness()
+        return enrich_internal_readiness_with_runtime_dependencies(
+            internal_readiness()
+        )
     return production_readiness()
 
 
@@ -4568,7 +5466,7 @@ def launch_fix_acceptance(key: str) -> List[str]:
             "EDOC_DISABLE_DEMO_ACCOUNTS=true 且 Go / No-Go 重新檢查無 P0 blocker",
         ],
         "login_access": [
-            "申請人、主管、行政部主任、總務皆可用正式帳號登入",
+            "申請人、主管、主任、行政部主任、總務皆可用正式帳號登入",
             "正式站 demo/quick role login 不可使用",
         ],
         "seal_admin": [
@@ -4582,7 +5480,7 @@ def launch_fix_acceptance(key: str) -> List[str]:
             "送簽後案件出現在下一關待辦",
         ],
         "approvers": [
-            "主管與行政部主任只能簽核輪到自己的關卡",
+            "主管、主任與行政部主任只能簽核輪到自己的關卡",
             "前一關未核准時不可跳關",
         ],
         "general_affairs": [
@@ -4608,10 +5506,10 @@ def launch_fix_acceptance(key: str) -> List[str]:
 def launch_fix_done_when(key: str, fallback_action: str) -> str:
     done_when = {
         "ops": "重新執行 Go / No-Go 後，internalGo=true 且 blockerCount=0。",
-        "login_access": "四種正式角色都能登入，且 demo 帳密在正式站無法使用。",
+        "login_access": "五種必要正式角色都能登入，且 demo 帳密在正式站無法使用。",
         "seal_admin": "印鑑管理頁每間啟用公司 required seal 都顯示 current 版本。",
         "applicant": "申請人不用工程師協助即可完成一張空白公文與一張 PDF 用印申請。",
-        "approvers": "主管與行政部主任分別核准自己的關卡，系統拒絕跳關與代簽。",
+        "approvers": "主管、主任與行政部主任分別核准自己的關卡，系統拒絕跳關與代簽。",
         "general_affairs": "總務完成審核、寄發回填與證明附件上傳，案件可結案。",
         "notifications": "至少一筆待辦與一筆逾期/退回通知能被指定角色看見。",
         "user_journeys": "走測報告的 userJourneys 全部 ready=true。",
@@ -5126,12 +6024,12 @@ def launch_user_perspective_gaps(readiness: Dict[str, Any]) -> Dict[str, Any]:
         ),
         build_item(
             "approver_monday_queue",
-            "申請人主管 / 行政部門主任",
+            "申請人主管 / 部門主任 / 行政部門主任",
             "我週一打開待辦時，是否只會看到輪到我的關卡？",
             "發文管理 → 我的待簽核",
             ["approvers"],
             ["blank_official_document", "uploaded_pdf_stamping"],
-            "用主管與行政部主任正式帳號各核准一關，並測試不可跳關或代簽。",
+            "用主管、主任與行政部主任正式帳號各核准一關，並測試不可跳關或代簽。",
             "前一關未核准時下一關不能操作；每一關 audit log 有 actor 與時間。",
             "dispatch",
             "dispatchTasks",
@@ -5290,7 +6188,7 @@ def internal_launch_user_checklist(readiness: Dict[str, Any], data_readiness: Di
             "IT、行政部主任",
             login_blockers,
             login_warnings,
-            "用正式帳號或 Logging Portal 分別登入申請人、主管、行政部主任、總務，確認 demo 帳密不可進入正式站。",
+            "用正式帳號或 Logging Portal 分別登入申請人、主管、主任、行政部主任、總務，確認 demo 帳密不可進入正式站。",
             "同仁週一第一步是能進系統；正式帳號沒匯入時，後面的簽核與用印都無法開始。",
         ),
         launch_item(
@@ -5304,11 +6202,11 @@ def internal_launch_user_checklist(readiness: Dict[str, Any], data_readiness: Di
         ),
         launch_item(
             "approvers",
-            "主管與行政部主任",
-            "申請人主管、行政部主任",
-            [f"缺少啟用的「{role}」帳號。" for role in missing_roles if role in {"主管", "行政部主任"}] + workflow_missing,
+            "主管、主任與行政部主任",
+            "申請人主管、部門主任、行政部主任",
+            [f"缺少啟用的「{role}」帳號。" for role in missing_roles if role in {"主管", "主任", "行政部主任"}] + workflow_missing,
             [],
-            "用主管與行政部主任帳號各核准一關，確認不可跳關。",
+            "用主管、主任與行政部主任帳號各核准一關，確認不可跳關。",
             "簽核人要在我的待辦看到案件，且只能處理輪到自己的關卡。",
         ),
         launch_item(
@@ -5867,8 +6765,9 @@ def production_vercel_env_template_artifact() -> Dict[str, Any]:
         "# EDOC_STORAGE_SUPABASE_URL=<paste-storage-project-url>",
         "# EDOC_STORAGE_SERVICE_ROLE_KEY=<paste-storage-project-server-key-never-public>",
         "# 同專案 Storage 可省略以上兩項；系統會由 SUPABASE_URL 推導 /storage/v1。",
-        "# 若改用 S3/R2/private-object-storage，才需要明確設定：",
-        "# EDOC_OBJECT_STORAGE_URL=<paste-private-storage-endpoint>",
+        "# 目前正式檔案 provider 僅支援 Supabase。通常不需設定下列值；若設定，",
+        "# 必須與 EDOC_STORAGE_SUPABASE_URL 完全同專案且為 /storage/v1：",
+        "# EDOC_OBJECT_STORAGE_URL=<paste-matching-supabase-storage-v1-endpoint>",
         "EDOC_STORAGE_ACCESS_MODE=server-signed-url",
         "EDOC_FILE_ENCRYPTION_ENABLED=true",
         "EDOC_FILE_ENCRYPTION_KEY=<paste-file-encryption-key>",
@@ -6642,7 +7541,7 @@ def production_artifact_index_artifact() -> Dict[str, Any]:
             "fileName": "edoc-internal-launch-cutover-YYYY-MM-DD.json",
             "owner": "行政部主任、IT、總務",
             "purpose": "給上線會議分工使用，包含使用者視角卡點、值班看板、走測任務與 owner actions。",
-            "doneWhen": "申請人、主管、行政部主任、總務、收文承辦與內部收件同仁都完成正式帳號走測。",
+            "doneWhen": "申請人、主管、主任、行政部主任、總務、收文承辦與內部收件同仁都完成正式帳號走測。",
             "containsSecrets": False,
             "editBeforeUse": False,
             "neverCommit": False,
@@ -6654,8 +7553,8 @@ def production_artifact_index_artifact() -> Dict[str, Any]:
             "api": "GET /api/production/account-readiness-package",
             "fileName": "edoc-account-launch-readiness-YYYY-MM-DD.json",
             "owner": "IT、行政部主任",
-            "purpose": "確認申請人、主管、行政部主任、總務都有正式帳號，且 demo / quick role login 被阻擋。",
-            "doneWhen": "missingFormalRoleCount=0、activeUserCount>0、demoAccountsDisabled=true，且四種角色都完成登入走測。",
+            "purpose": "確認申請人、主管、主任、行政部主任、總務都有正式帳號，且 demo / quick role login 被阻擋。",
+            "doneWhen": "missingFormalRoleCount=0、activeUserCount>0、demoAccountsDisabled=true，且五種必要角色都完成登入走測。",
             "containsSecrets": False,
             "editBeforeUse": False,
             "neverCommit": False,
@@ -6719,7 +7618,7 @@ def production_artifact_index_artifact() -> Dict[str, Any]:
             "api": "GET /api/production/formal-account-roster/template",
             "fileName": "edoc-formal-account-import-template.csv",
             "owner": "IT、行政部主任",
-            "purpose": "讓行政部與 IT 在正式站登入尚未放行時，先補齊申請人、主管、行政部主任、總務與收文承辦的正式帳號 metadata。",
+            "purpose": "讓行政部與 IT 在正式站登入尚未放行時，先補齊申請人、主管、主任、行政部主任、總務與收文承辦的正式帳號 metadata。",
             "doneWhen": "填妥姓名、公司 Email、單位、職稱、角色與 MFA 狀態後，由具 system_permissions.manage 的正式帳號匯入，不包含任何密碼或 token。",
             "containsSecrets": False,
             "editBeforeUse": True,
@@ -6786,7 +7685,7 @@ def production_artifact_index_artifact() -> Dict[str, Any]:
         ],
         "userPerspectiveAcceptance": [
             "一般同仁可登入並建立空白公文與上傳 PDF 用印申請。",
-            "主管與行政部主任只能簽核輪到自己的關卡，不能跳關。",
+            "主管、主任與行政部主任只能簽核輪到自己的關卡，不能跳關。",
             "總務可審核用印、下載已用印 PDF、回填寄發資訊與證明附件。",
             "收文承辦可登錄來文、分派承辦、設定期限並結案。",
             "內部收件同仁可在期限內回覆文字與附件。",
@@ -6990,7 +7889,7 @@ def production_next_action_artifact(readiness: Dict[str, Any] | None = None) -> 
             "severity": "P0",
             "userImpact": first.get("impact") or "同仁即使進得去系統，也可能無法送簽、看不到待辦，或總務無法完成寄發。",
             "doNow": [
-                first.get("action") or "補齊申請人、主管、行政部主任與總務正式帳號。",
+                first.get("action") or "補齊申請人、主管、主任、行政部主任與總務正式帳號。",
                 "匯入正式 roster，確認不是 demo / seed / 共用測試帳號。",
                 "用正式帳號各登入一次，確認待辦與權限相符。",
             ],
@@ -7022,7 +7921,7 @@ def production_next_action_artifact(readiness: Dict[str, Any] | None = None) -> 
         primary_action = {
             "key": "run_user_journey_smoke",
             "title": "用正式帳號跑完五條使用者旅程",
-            "owner": "申請人、主管、行政部主任、總務、收文承辦、IT",
+            "owner": "申請人、主管、主任、行政部主任、總務、收文承辦、IT",
             "severity": "P0",
             "userImpact": "系統資料看似齊備仍不等於同仁會用；必須證明核心流程不用工程師陪同也能完成。",
             "doNow": [
@@ -7060,7 +7959,7 @@ def production_next_action_artifact(readiness: Dict[str, Any] | None = None) -> 
         primary_action = {
             "key": "run_final_user_journey_attestation",
             "title": "執行最終使用者旅程簽核與留存",
-            "owner": "申請人、主管、行政部主任、總務、收文承辦、IT",
+            "owner": "申請人、主管、主任、行政部主任、總務、收文承辦、IT",
             "severity": "Ready",
             "userImpact": "系統底座已可開給內部正式使用；最後要證明同仁不用工程師陪同也能完成工作。",
             "doNow": [
@@ -7129,7 +8028,7 @@ def production_next_action_artifact(readiness: Dict[str, Any] | None = None) -> 
         {
             "key": "run_user_journey_smoke",
             "title": "用正式帳號跑完五條使用者旅程",
-            "owner": "申請人、主管、行政部主任、總務、收文承辦、IT",
+            "owner": "申請人、主管、主任、行政部主任、總務、收文承辦、IT",
             "doneWhen": "launch-cutover-package 顯示 userJourneys 全部 ready=true。",
             "verifyApi": "GET /api/production/launch-smoke-report",
             "expectedSignals": [
@@ -7672,12 +8571,12 @@ def production_formal_account_roster_template_artifact() -> Dict[str, Any]:
         rows = [
             {
                 "role": role,
-                "required": "true" if role in {"員工", "主管", "行政部主任", "總務"} else "false",
+                "required": "true" if role in {"員工", "主管", "主任", "行政部主任", "總務"} else "false",
                 "name": "",
                 "email": "",
-                "unit": "行政部" if role in {"員工", "行政部主任"} else "總務" if role == "總務" else "營運管理部",
+                "unit": "行政部" if role in {"員工", "行政部主任"} else "總務" if role == "總務" else "各部門" if role == "主任" else "營運管理部",
                 "title": role,
-                "job_level": "部長" if role == "行政部主任" else "課長" if role == "主管" else "職員",
+                "job_level": "部長" if role in {"主任", "行政部主任"} else "課長" if role == "主管" else "職員",
                 "provider": "Google Workspace",
                 "mfa_status": "待設定",
                 "status": "啟用",
@@ -7685,7 +8584,7 @@ def production_formal_account_roster_template_artifact() -> Dict[str, Any]:
                 "done_when": f"{role} formalAccountCount >= 1，且正式帳號可登入並看到正確待辦。",
                 "notes": "請填公司正式姓名與 Email；不可填密碼、PIN、API key、session token 或 demo/seed 帳號。",
             }
-            for role in ["員工", "主管", "行政部主任", "總務", "業務助理"]
+            for role in ["員工", "主管", "主任", "行政部主任", "總務", "業務助理"]
         ]
     security_policy = {
         "metadataOnly": True,
@@ -8077,7 +8976,7 @@ def production_unblock_runbook_artifact() -> Dict[str, Any]:
             "key": "import_accounts_and_seal_current_versions",
             "owner": "行政部主任、總務、IT",
             "status": "pending",
-            "why": "Supabase 接上後仍需正式帳號、主管/行政/總務角色與 Seal Vault current 版本，否則同仁仍不能完成流程。",
+            "why": "Supabase 接上後仍需正式帳號、主管/主任/行政/總務角色與 Seal Vault current 版本，否則同仁仍不能完成流程。",
             "acceptance": [
                 "account-readiness-package: activeUserCount>0、missingFormalRoleCount=0、demoAccountsDisabled=true",
                 "seal-vault-readiness: decision=PASS、companyCount>0、requiredSealCount>0、missingCount=0",
@@ -8090,13 +8989,13 @@ def production_unblock_runbook_artifact() -> Dict[str, Any]:
         {
             "order": 6,
             "key": "final_user_journey_smoke",
-            "owner": "申請人、主管、行政部主任、總務、收文承辦",
+            "owner": "申請人、主管、主任、行政部主任、總務、收文承辦",
             "status": "pending",
             "why": "上線成功不是 API 變綠而已；同仁要能完成實際工作。",
             "journeys": [
                 "空白公文撰寫送簽",
                 "上傳 PDF 多位置用印申請",
-                "主管 / 行政部主任 / 總務依序簽核",
+                "主管 / 主任 / 行政部主任 / 總務依序簽核",
                 "總務寄發回填與證明附件",
                 "收文登錄分派與內部派文回文",
             ],
@@ -8551,11 +9450,21 @@ def current_production_cutover_readiness_package(conn: sqlite3.Connection | None
     access_counts = access.get("counts") or {}
     launch_data_checks = ((audit.get("dataReadiness") or {}).get("checks") or {})
     launch_company_scope = launch_data_checks.get("launchCompanyScope") or launch_company_scope_metadata([])
-    missing_roles = [
-        item.get("role")
-        for item in access.get("roleChecks") or []
-        if item.get("role") in {"主管", "行政部主任", "總務"} and not item.get("hasFormalAccount")
-    ]
+    cutover_required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+    access_role_checks = access.get("roleChecks") or []
+    missing_roles: List[str] = []
+    for role in cutover_required_roles:
+        matches = [item for item in access_role_checks if item.get("role") == role]
+        signatures = {
+            (
+                str(item.get("activeCount") or "0"),
+                str(item.get("formalAccountCount") or "0"),
+                bool(item.get("hasFormalAccount")),
+            )
+            for item in matches
+        }
+        if not matches or len(signatures) > 1 or not all(bool(item.get("hasFormalAccount")) for item in matches):
+            missing_roles.append(role)
 
     def env_status(names: List[str]) -> Dict[str, Any]:
         missing = []
@@ -8727,8 +9636,8 @@ def current_production_cutover_readiness_package(conn: sqlite3.Connection | None
             "IT、行政部主任",
             "issue" if missing_roles or not checks.get("demoAccountsDisabled") else "pass",
             f"missingRoles={ '、'.join([role for role in missing_roles if role]) or 'none' }; demoAccountsDisabled={bool(checks.get('demoAccountsDisabled'))}; demoSeedUserCount={int(access_counts.get('demoSeedUserCount') or 0)}",
-            "只在 Finance 補齊申請人、主管、行政部主任、總務正式帳號，確認 eDoc 自動鏡像，並維持 production 關閉 demo/quick role login。",
-            "四種角色由 Finance 自動同步後各登入一次，待辦與權限正確；eDoc 不提供第二份可編輯名冊，demo 帳密與快速角色切換在正式站被拒絕。",
+            "只在 Finance 補齊申請人、主管、主任、行政部主任、總務正式帳號，確認 eDoc 自動鏡像，並維持 production 關閉 demo/quick role login。",
+            "五種必要角色由 Finance 自動同步後各登入一次，待辦與權限正確；eDoc 不提供第二份可編輯名冊，demo 帳密與快速角色切換在正式站被拒絕。",
             ["EDOC_DISABLE_DEMO_ACCOUNTS"],
             "curl $EDOC_PUBLIC_BASE_URL/api/production/account-readiness-package",
             "GET /api/production/account-readiness-package",
@@ -9061,11 +9970,12 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
     access = report.get("accessReadiness") or {}
     counts = access.get("counts") or {}
     role_checks = access.get("roleChecks") or []
-    required_roles = ["員工", "主管", "行政部主任", "總務"]
+    required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
     recommended_roles = ["業務助理"]
     default_profiles = {
         "員工": {"unit": "行政部", "title": "承辦人", "provider": "Google Workspace"},
         "主管": {"unit": "營運管理部", "title": "申請人主管", "provider": "Google Workspace"},
+        "主任": {"unit": "各部門", "title": "部門主任", "provider": "Google Workspace"},
         "行政部主任": {"unit": "行政部", "title": "行政部主任", "provider": "Microsoft Entra / Google Workspace"},
         "總務": {"unit": "總務", "title": "總務", "provider": "Google Workspace"},
         "業務助理": {"unit": "業務部", "title": "業務助理", "provider": "Google Workspace"},
@@ -9074,17 +9984,54 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
     source_blockers: List[str] = []
     if not role_checks:
         source_blockers.append("正式帳號 readiness 沒有角色檢核資料；不可將空資料視為正式帳號已就緒。")
-        role_checks = [
-            {
+    expected_roles = [*required_roles, *recommended_roles]
+
+    def readiness_count(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    normalized_role_checks: List[Dict[str, Any]] = []
+    for role in expected_roles:
+        matches = [item for item in role_checks if str(item.get("role") or "") == role]
+        if not matches:
+            if role in required_roles:
+                source_blockers.append(f"正式帳號 readiness 缺少必要角色檢核資料：{role}。")
+            normalized_role_checks.append({
                 "role": role,
                 "activeCount": 0,
                 "formalAccountCount": 0,
                 "demoSeedCount": 0,
                 "hasActiveUser": False,
                 "hasFormalAccount": False,
-            }
-            for role in [*required_roles, *recommended_roles]
-        ]
+            })
+            continue
+
+        fingerprints = {
+            (
+                readiness_count(item.get("activeCount")),
+                readiness_count(item.get("formalAccountCount")),
+                readiness_count(item.get("demoSeedCount")),
+                bool(item.get("hasActiveUser")),
+                bool(item.get("hasFormalAccount")),
+            )
+            for item in matches
+        }
+        if len(fingerprints) > 1 and role in required_roles:
+            source_blockers.append(f"正式帳號 readiness 的必要角色「{role}」出現互相矛盾的重複檢核資料。")
+
+        active_count = min(readiness_count(item.get("activeCount")) for item in matches)
+        formal_count = min(readiness_count(item.get("formalAccountCount")) for item in matches)
+        normalized_role_checks.append({
+            "role": role,
+            "activeCount": active_count,
+            "formalAccountCount": formal_count,
+            "demoSeedCount": max(readiness_count(item.get("demoSeedCount")) for item in matches),
+            "hasActiveUser": active_count > 0 and all(bool(item.get("hasActiveUser")) for item in matches),
+            "hasFormalAccount": formal_count > 0 and all(bool(item.get("hasFormalAccount")) for item in matches),
+        })
+    role_checks = normalized_role_checks
     if active_user_count == 0:
         source_blockers.append("正式帳號 readiness 沒有任何啟用帳號；同仁登入、簽核與總務寄發不可驗收。")
     role_tasks: List[Dict[str, Any]] = []
@@ -9126,7 +10073,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "severity": "blocker",
             "status": "不可驗收",
             "nextAction": "先接上 Supabase production，匯入正式帳號 roster，並重新執行 account-readiness-package。",
-            "doneWhen": "activeUserCount > 0，且申請人、主管、行政部主任、總務都有非 demo / 外部同步正式帳號。",
+            "doneWhen": "activeUserCount > 0，且申請人、主管、主任、行政部主任、總務都有非 demo / 外部同步正式帳號。",
             "evidence": blocker,
         }
         for index, blocker in enumerate(source_blockers)
@@ -9147,8 +10094,8 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "title": "正式角色登入走測",
             "severity": "pass" if not required_missing else "blocker",
             "status": "可走測" if not required_missing else "缺角色",
-            "nextAction": "用申請人、主管、行政部主任、總務正式帳號各登入一次。",
-            "doneWhen": "四種角色都能登入，且待辦、簽核、總務寄發入口與權限相符。",
+            "nextAction": "用申請人、主管、主任、行政部主任、總務正式帳號各登入一次。",
+            "doneWhen": "五種角色都能登入，且待辦、簽核、總務寄發入口與權限相符。",
             "evidence": "missing=" + "、".join(item.get("role") or "" for item in required_missing) if required_missing else "required roles ready",
         },
         {
@@ -9167,6 +10114,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
         "員工": "職員",
         "業務助理": "職員",
         "主管": "課長",
+        "主任": "部長",
         "行政部主任": "部長",
         "總務": "職員",
         "執行長": "執行長",
@@ -9237,7 +10185,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "validationRules": [
                 "name 與 email 必填，且 email 必須是公司正式帳號。",
                 "不可使用 demo seed email、demo 密碼、共用測試帳號或個人非公司信箱。",
-                "主管、行政部主任、總務補齊後需各登入一次完成待辦權限走測。",
+                "主管、主任、行政部主任、總務補齊後需各登入一次完成待辦權限走測。",
                 "正式站必須設定 EDOC_DISABLE_DEMO_ACCOUNTS=true 並重新部署。",
             ],
             "securityPolicy": {
@@ -9250,6 +10198,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
         "loginSmokePlan": [
             "申請人正式帳號登入後建立空白公文與 PDF 用印申請。",
             "主管正式帳號只能看到並核准輪到自己的待辦。",
+            "主任正式帳號只能看到並核准部門主任關卡，不得跳關。",
             "行政部主任正式帳號核准後不可跳到總務寄發任務。",
             "總務正式帳號可審核用印、重試用印失敗、回填寄發證明。",
             "demo 帳密與快速角色登入在正式站必須被拒絕。",
@@ -9848,9 +10797,31 @@ def age_minutes(value: str | None) -> int | None:
     if not value:
         return None
     parsed = parse_time(value)
-    if not parsed:
+    if not parsed or parsed == datetime.min:
         return None
-    return int((datetime.now() - parsed).total_seconds() // 60)
+    return max(0, int((datetime.now() - parsed).total_seconds() // 60))
+
+
+def cron_run_is_stalled(last_run_age_minutes: int | None) -> bool:
+    """Treat the configured interval as the alert threshold, not a hint.
+
+    The previous extra two-hour grace period made an operator-selected
+    threshold silently inaccurate.  Vercel schedule jitter should be included
+    in the configured value so dashboards and alerts describe the same SLA.
+    """
+    return bool(
+        is_production()
+        and (
+            last_run_age_minutes is None
+            or last_run_age_minutes > EDOC_MONITORING_EXPECTED_CRON_MINUTES
+        )
+    )
+
+
+def cron_monitoring_status(last_run_age_minutes: int | None) -> str:
+    if cron_run_is_stalled(last_run_age_minutes):
+        return "stalled"
+    return "ok" if last_run_age_minutes is not None else "not_yet_run"
 
 
 def append_alert(alerts: List[Dict[str, str]], level: str, code: str, message: str, action: str) -> None:
@@ -9867,6 +10838,30 @@ def monitoring_status(alerts: List[Dict[str, str]]) -> str:
 
 def log_structured(level: str, message: str, **fields: Any) -> None:
     print(json.dumps({"level": level, "message": message, "time": now(), **fields}, ensure_ascii=False), flush=True)
+
+
+def safe_runtime_diagnostic_code(error: BaseException) -> str:
+    """Return a non-sensitive infrastructure code for production logs.
+
+    Supabase/PostgREST failures may include row values or upstream response
+    bodies in their exception text. Finance synchronization logs therefore
+    retain only a protocol status or machine error code and never the original
+    message.
+    """
+    detail = str(error or "")
+    direct = detail.strip().lower()
+    if re.fullmatch(r"[a-z][a-z0-9_]{2,79}", direct):
+        return direct
+    postgrest = re.search(r"\b(PGRST\d{3})\b", detail, re.IGNORECASE)
+    if postgrest:
+        return postgrest.group(1).upper()
+    postgres = re.search(r'["\']code["\']\s*:\s*["\']([0-9A-Z]{5})["\']', detail, re.IGNORECASE)
+    if postgres:
+        return f"postgres_{postgres.group(1).lower()}"
+    status = re.search(r"\bSupabase\s+(\d{3})\s*:", detail, re.IGNORECASE)
+    if status:
+        return f"supabase_http_{status.group(1)}"
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", type(error).__name__).lower()[:80] or "runtime_error"
 
 
 def signing_service_status() -> Dict[str, Any]:
@@ -9906,8 +10901,9 @@ def signing_service_status() -> Dict[str, Any]:
 def storage_service_status() -> Dict[str, Any]:
     endpoint = object_storage_endpoint()
     av = av_endpoint_configuration()
+    browser_upload_key = supabase_storage_browser_upload_key_status()
     services = {
-        "provider": {"configured": EDOC_STORAGE_PROVIDER in {"supabase", "s3", "gcs", "azure"}, "value": EDOC_STORAGE_PROVIDER or "未設定"},
+        "provider": {"configured": EDOC_STORAGE_PROVIDER == "supabase", "value": EDOC_STORAGE_PROVIDER or "未設定"},
         "bucket": {"configured": bool(EDOC_STORAGE_BUCKET), "value": EDOC_STORAGE_BUCKET or "未設定"},
         "sealBucket": {"configured": bool(EDOC_SEAL_STORAGE_BUCKET), "value": EDOC_SEAL_STORAGE_BUCKET or "未設定"},
         "serverCredential": {
@@ -9918,6 +10914,20 @@ def storage_service_status() -> Dict[str, Any]:
                 else "同專案 server credential"
                 if EDOC_STORAGE_PROVIDER == "supabase"
                 else "由 provider 管理"
+            ),
+        },
+        "browserUploadKey": {
+            "configured": browser_upload_key["ready"],
+            "required": browser_upload_key["required"],
+            "valid": browser_upload_key["valid"],
+            "errorCode": browser_upload_key["errorCode"],
+            "containsKey": False,
+            "value": (
+                "不適用"
+                if not browser_upload_key["required"]
+                else "已設定"
+                if browser_upload_key["valid"]
+                else "未設定或無效"
             ),
         },
         "objectEndpoint": {
@@ -9970,6 +10980,7 @@ def storage_service_status() -> Dict[str, Any]:
             "objectEndpoint": endpoint or "未設定",
             "objectEndpointDerived": bool(endpoint) and not env_present("EDOC_OBJECT_STORAGE_URL"),
             "separateSupabaseProject": EDOC_STORAGE_PROVIDER == "supabase" and not storage_uses_database_supabase_project(),
+            "browserUploadKey": browser_upload_key,
             "accessMode": EDOC_STORAGE_ACCESS_MODE,
             "signedUrlTtlSeconds": EDOC_SIGNED_URL_TTL_SECONDS,
             "maxFileSizeMb": EDOC_MAX_FILE_SIZE_MB,
@@ -10043,9 +11054,18 @@ def signed_url_expiry(seconds: int | None = None) -> str:
 
 
 def parse_time(value: str) -> datetime:
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime((value or "").split(".")[0], fmt)
+            return datetime.strptime(raw.split(".")[0], fmt)
         except ValueError:
             continue
     return datetime.min
@@ -12185,14 +13205,14 @@ def migrate() -> None:
         seed_auth(conn)
         if test_fixture_accounts_enabled():
             ensure_allowed_edoc_users(conn)
+            seed_department_isolation_examples(conn)
+            seed_document_acl_examples(conn)
         else:
             remove_demo_accounts(conn)
         normalize_legacy_document_owners(conn)
         seed_persistent_registries(conn)
         seed_workflow_tasks(conn)
         seed_contracts(conn)
-        seed_department_isolation_examples(conn)
-        seed_document_acl_examples(conn)
         seed_certificate_authorities(conn)
         seed_signing_certificates(conn)
         seed_company_seal_module(conn)
@@ -13586,10 +14606,48 @@ def session_has_any_permission(session: Dict[str, Any] | None, permissions: List
 OPERATIONS_MAINTENANCE_PERMISSIONS = ["settings.system_manage", "settings.manage"]
 
 
+PRODUCTION_OPERATIONS_ARTIFACT_GET_PATHS = {
+    ("production", "supabase-cutover-sql"),
+    ("production", "vercel-env-template"),
+    ("production", "supabase-bootstrap-checklist"),
+    ("production", "first-admin-bootstrap"),
+    ("production", "login-release-decision"),
+    ("production", "environment-unlock-handoff"),
+    ("production", "employee-launch-notice"),
+    ("production", "emergency-manual-intake-template"),
+    ("production", "artifact-index"),
+    ("production", "next-action"),
+    ("production", "day-one-support-brief"),
+    ("production", "handoff-note"),
+    ("production", "company-launch-roster", "template"),
+    ("production", "formal-account-roster", "template"),
+    ("production", "seal-vault-custody-template"),
+    ("production", "unblock-runbook"),
+}
+
+
+def is_production_operations_artifact_endpoint(method: str, parts: List[str]) -> bool:
+    """Protect operator artifacts on every remotely deployed environment."""
+    return (
+        (is_production() or RUNNING_ON_VERCEL)
+        and method == "GET"
+        and tuple(parts) in PRODUCTION_OPERATIONS_ARTIFACT_GET_PATHS
+    )
+
+
 def is_operations_maintenance_endpoint(method: str, parts: List[str]) -> bool:
     """Identify notification/scheduler operations that must be admin-only."""
     if method == "GET":
-        return parts == ["notifications", "gateway-status"]
+        return parts in (
+            ["notifications", "gateway-status"],
+            ["production", "deployment"],
+            ["production", "monitoring"],
+            ["production", "smoke-test-pdf"],
+            ["production", "dispatch-proof-template"],
+            ["files", "storage-health"],
+            ["certificates", "health"],
+            ["schema"],
+        )
     if method != "POST":
         return False
     if parts in (
@@ -14261,7 +15319,17 @@ def record_login_event(
         INSERT INTO login_events (id, user_id, email, provider, ip, device, status, reason, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (f"LOGIN-{int(time.time() * 1000)}", user_id, email, provider, ip, device, status, reason, now()),
+        (
+            f"LOGIN-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}",
+            user_id,
+            email,
+            provider,
+            ip,
+            device,
+            status,
+            reason,
+            now(),
+        ),
     )
 
 
@@ -14273,7 +15341,16 @@ def create_session(conn: sqlite3.Connection, user: sqlite3.Row, provider: str, i
         INSERT INTO auth_sessions (id, user_id, token_hash, provider, ip, device, expires_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (f"SES-{int(time.time() * 1000)}", user["id"], hash_token(token), provider, ip, device, expires.strftime("%Y-%m-%d %H:%M:%S"), now()),
+        (
+            f"SES-{int(time.time() * 1000)}-{secrets.token_hex(6).upper()}",
+            user["id"],
+            hash_token(token),
+            provider,
+            ip,
+            device,
+            expires.strftime("%Y-%m-%d %H:%M:%S"),
+            now(),
+        ),
     )
     conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now(), user["id"]))
     record_login_event(conn, user["email"], provider, "成功", "帳密驗證通過", user["id"], ip, device)
@@ -14366,7 +15443,10 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
     }
     if is_production():
         try:
-            snapshot = current_finance_bridge_snapshot(user["email"])
+            snapshot = current_finance_bridge_snapshot(
+                user["email"],
+                portal_authenticated=True,
+            )
             refreshed, _ = sync_sqlite_finance_snapshot(
                 conn,
                 snapshot,
@@ -14467,6 +15547,7 @@ def assert_formal_exchange_allowed(payload: Dict[str, Any] | None = None) -> Non
 
 
 def exchange_queue_document(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    assert_formal_exchange_allowed(payload)
     gateway = create_exchange_gateway(conn)
     result = gateway.queueOfficialDocument(payload)
     log_audit(conn, "Exchange Gateway", "加入交換待發佇列", "exchange_outbox", result.get("id", ""), json.dumps(redact_sensitive(payload), ensure_ascii=False))
@@ -14498,6 +15579,7 @@ def exchange_query_status(conn: sqlite3.Connection, payload: Dict[str, Any]) -> 
 
 
 def exchange_acknowledge_received(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    assert_formal_exchange_allowed(payload)
     gateway = create_exchange_gateway(conn)
     result = gateway.acknowledgeReceived(payload)
     log_audit(conn, "Exchange Gateway", "確認收文入案", "exchange_inbox", result.get("item", {}).get("id", ""), json.dumps(redact_sensitive(result), ensure_ascii=False))
@@ -14894,12 +15976,17 @@ def _https_hmac_scan_bytes(
     )
     timeout = max(2, min(120, EDOC_AV_TIMEOUT_SECONDS))
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _urlopen_no_redirect(request, timeout=timeout) as response:
             raw = response.read(16 * 1024)
             response_timestamp = str(response.headers.get("X-EDOC-AV-Response-Timestamp") or "")
             response_signature = str(response.headers.get("X-EDOC-AV-Response-Signature") or "")
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        raise ValueError("editor_antivirus_scan_failed") from exc
+    except urllib.error.HTTPError as exc:
+        _consume_http_error(exc)
+        raise ValueError("editor_antivirus_scan_failed") from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        raise ValueError("editor_antivirus_scan_failed") from None
+    except Exception:
+        raise ValueError("editor_antivirus_scan_failed") from None
     if (
         not response_timestamp.isdigit()
         or abs(int(time.time()) - int(response_timestamp)) > EDOC_AV_HMAC_MAX_AGE_SECONDS
@@ -14915,8 +16002,8 @@ def _https_hmac_scan_bytes(
         raise ValueError("editor_antivirus_response_invalid")
     try:
         result = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("editor_antivirus_response_invalid") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("editor_antivirus_response_invalid") from None
     if not isinstance(result, dict) or set(result) != {
         "schemaVersion", "status", "engine", "signature", "sha256", "sizeBytes", "scannedAt"
     }:
@@ -14971,8 +16058,8 @@ def editor_scan_bytes_for_threats(
                 timeout_seconds=EDOC_AV_TIMEOUT_SECONDS,
                 max_file_size_bytes=EDOC_MAX_FILE_SIZE_MB * 1024 * 1024,
             )
-        except SandboxAntivirusError as exc:
-            raise ValueError("editor_antivirus_scan_failed") from exc
+        except SandboxAntivirusError:
+            raise ValueError("editor_antivirus_scan_failed") from None
         if result.status == "clean":
             return "已通過", "ClamAV-Clean"
         if result.status == "infected":
@@ -15005,8 +16092,8 @@ def editor_scan_bytes_for_threats(
                 response.extend(block)
                 if b"\0" in block or b"\n" in block:
                     break
-    except (OSError, TimeoutError, ValueError) as exc:
-        raise ValueError("editor_antivirus_scan_failed") from exc
+    except (OSError, TimeoutError, ValueError):
+        raise ValueError("editor_antivirus_scan_failed") from None
     result = bytes(response).split(b"\0", 1)[0].decode("utf-8", "replace").strip()
     if result.endswith(" OK") or result == "OK":
         return "已通過", "ClamAV-Clean"
@@ -17124,19 +18211,68 @@ def authoritative_finance_unit(
     external = parse_json_any(user.get("external_account_payload_json"), {}) or {}
     profile = external.get("financeProfile") if isinstance(external, dict) else {}
     profile = profile if isinstance(profile, dict) else {}
+    projected_unit_names = {
+        value
+        for value in (
+            roster_text(user.get("unit")),
+            roster_text(profile.get("departmentName")),
+        )
+        if value
+    }
     unit_name = roster_text(user.get("unit") or profile.get("departmentName"))
     unit_code = roster_text(profile.get("departmentCode"))
+
+    # In production the Finance organization mirror is the current authority
+    # for a department's display name.  Personnel snapshots deliberately keep
+    # their stable department code, so a Finance rename can be reflected here
+    # without trusting a browser value or manually rewriting a user row.
+    if is_production() and USE_SUPABASE:
+        tenant_id = roster_text(user.get("finance_tenant_id"))
+        canonical_code = unit_code.upper()
+        if not tenant_id or not canonical_code:
+            raise PermissionError("finance_unit_projection_unavailable")
+        rows = supabase_filter_rows(
+            "finance_organization_units",
+            {
+                "finance_tenant_id": tenant_id,
+                "code": canonical_code,
+                "status": "active",
+            },
+            order="id.asc",
+            limit=2,
+        )
+        if len(rows) != 1:
+            raise PermissionError("finance_unit_projection_unavailable")
+        canonical = rows[0]
+        canonical_name = roster_text(canonical.get("name"))
+        if (
+            roster_text(canonical.get("finance_tenant_id")) != tenant_id
+            or roster_text(canonical.get("code")).upper() != canonical_code
+            or roster_text(canonical.get("status")).lower() not in {"active", "啟用"}
+            or not canonical_name
+        ):
+            raise PermissionError("finance_unit_projection_unavailable")
+        unit_code = canonical_code
+        unit_name = canonical_name
+        projected_unit_names.add(canonical_name)
+
     if not unit_name:
         raise PermissionError("finance_unit_required")
     payload = payload or {}
-    allowed = {value for value in (unit_name, unit_code) if value}
     for key in name_keys:
         requested = roster_text(payload.get(key))
-        if requested and requested not in allowed:
+        # During a Finance rename an already-open form can still carry the old
+        # personnel snapshot name.  Both old and canonical names identify the
+        # same server-owned code; the returned value is always canonical.
+        if requested and requested not in projected_unit_names:
             raise PermissionError("finance_unit_payload_mismatch")
     for key in id_keys:
         requested = roster_text(payload.get(key))
-        if requested and requested not in allowed:
+        if is_production() and USE_SUPABASE:
+            matches = bool(requested and requested.upper() == unit_code)
+        else:
+            matches = requested in {value for value in (unit_name, unit_code) if value}
+        if requested and not matches:
             raise PermissionError("finance_unit_payload_mismatch")
     return {"id": unit_code or unit_name, "name": unit_name}
 
@@ -20467,7 +21603,7 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
         "workflow_template": workflow_template_key,
         "future_rule_inputs": {
             "company_id": company_id,
-            "department": user.get("unit"),
+            "department": applicant_department["name"],
             "document_type": payload.get("document_type"),
             "seal_id": payload.get("seal_id"),
             "dispatch_method": dispatch_method,
@@ -20505,7 +21641,7 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
         "description": payload.get("description") or payload.get("body") or "",
         "method": payload.get("method") or payload.get("辦法") or "",
         "recipient": payload.get("recipient") or payload.get("agency_name") or "",
-        "dispatch_unit": payload.get("dispatch_unit") or user.get("unit") or "",
+        "dispatch_unit": applicant_department["name"],
         "handler_name": payload.get("handler_name") or user.get("name") or "",
         "applicant_id": user["id"],
         "applicant_name": user.get("name") or user.get("email"),
@@ -21205,7 +22341,10 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
     actor_plan: Dict[str, Dict[str, Any]] | None = None
     workflow_lock_metadata: Dict[str, Any] | None = None
     if is_production():
-        snapshot = current_finance_bridge_snapshot(user.get("email") or "")
+        snapshot = current_finance_bridge_snapshot(
+            user.get("email") or "",
+            portal_authenticated=True,
+        )
         finance_role = strict_finance_role_profile(
             (snapshot.get("identity") or {}).get("role")
         )["logging_role_key"]
@@ -24110,7 +25249,7 @@ def create_official_editor_draft(conn: sqlite3.Connection, payload: Dict[str, An
         "description": payload.get("description") or "",
         "method": payload.get("method") or "",
         "recipient": payload.get("recipient") or "",
-        "dispatch_unit": payload.get("dispatch_unit") or user.get("unit") or "",
+        "dispatch_unit": applicant_department["name"],
         "handler_name": payload.get("handler_name") or user.get("name") or "",
         "applicant_id": user["id"],
         "applicant_name": user.get("name") or user.get("email") or "",
@@ -24168,6 +25307,7 @@ def _validate_editor_upload_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
 def create_official_editor_upload_intent(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     document = official_document_row(conn, document_id)
     user = _editor_assert_document_access(conn, document, session, write=True)
+    cleanup_stale_official_editor_uploads(conn, document_id=document_id)
     meta = _validate_editor_upload_metadata(payload)
     latest = _editor_latest_revision_row(conn, document_id)
     if not latest:
@@ -24252,6 +25392,80 @@ def _local_editor_asset_failure(
     # commit the terminal asset state before raising so a failed upload cannot
     # silently return to pending and be reused.
     conn.commit()
+
+
+def normalized_editor_upload_failure_code(value: Any) -> str:
+    code = str(value or "").strip().lower()
+    return code if code in EDOC_EDITOR_CLIENT_FAILURE_CODES else "editor_upload_failed"
+
+
+def fail_official_editor_upload(
+    conn: sqlite3.Connection,
+    document_id: str,
+    upload_id: str,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    document = official_document_row(conn, document_id)
+    user = _editor_assert_document_access(conn, document, session, write=True)
+    row = conn.execute(
+        "SELECT * FROM official_document_editor_assets WHERE id = ? AND document_id = ?",
+        (upload_id, document_id),
+    ).fetchone()
+    if not row:
+        raise ValueError("editor_upload_not_found")
+    asset = row_to_dict(row)
+    if asset.get("upload_status") == "finalized":
+        return {"ok": True, "idempotent": True, "asset": _editor_asset_public(asset)}
+    if asset.get("upload_status") in {"failed", "quarantined"}:
+        return {"ok": True, "idempotent": True, "asset": _editor_asset_public(asset)}
+    error_code = normalized_editor_upload_failure_code(payload.get("error_code"))
+    _local_editor_asset_failure(conn, asset, error_code)
+    insert_official_log(
+        conn,
+        document_id,
+        "editor_upload_failed",
+        user,
+        f"asset_id={upload_id};error_code={error_code}",
+    )
+    refreshed = conn.execute(
+        "SELECT * FROM official_document_editor_assets WHERE id = ? AND document_id = ?",
+        (upload_id, document_id),
+    ).fetchone()
+    return {"ok": True, "idempotent": False, "asset": _editor_asset_public(refreshed)}
+
+
+def cleanup_stale_official_editor_uploads(
+    conn: sqlite3.Connection,
+    *,
+    document_id: str = "",
+) -> Dict[str, Any]:
+    where = "WHERE upload_status IN ('pending', 'uploaded')"
+    params: List[Any] = []
+    if document_id:
+        where += " AND document_id = ?"
+        params.append(document_id)
+    rows = conn.execute(
+        f"SELECT * FROM official_document_editor_assets {where} ORDER BY created_at LIMIT 500",
+        params,
+    ).fetchall()
+    expired: List[str] = []
+    for raw in rows:
+        asset = row_to_dict(raw)
+        metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
+        expires_at = parse_time(str(metadata.get("expires_at") or ""))
+        if expires_at == datetime.min or expires_at >= datetime.now():
+            continue
+        _local_editor_asset_failure(conn, asset, "editor_upload_expired")
+        insert_official_log(
+            conn,
+            str(asset.get("document_id") or ""),
+            "editor_upload_expired",
+            {"id": "system", "name": "Upload Cleanup", "role": "system"},
+            f"asset_id={asset['id']};error_code=editor_upload_expired",
+        )
+        expired.append(str(asset["id"]))
+    return {"count": len(expired), "asset_ids": expired}
 
 
 def store_official_editor_local_upload(
@@ -24517,23 +25731,23 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
         "metadata_json": json.dumps({**metadata, "inspection_flags": (inspection or {}).get("flags") or {}, "renderer_version": EDOC_EDITOR_RENDERER_VERSION}, ensure_ascii=False),
         "finalized_at": now(),
     })
+    new_state = _editor_state_with_asset(latest, asset, inspection)
+    revision = _insert_editor_revision(conn, document_id, new_state, user, latest["id"])
+    asset["editor_revision_id"] = revision["id"]
     conn.execute(
         """
         UPDATE official_document_editor_assets
         SET file_object_id = ?, official_file_id = ?, sha256 = ?, upload_status = ?, scan_status = ?,
-            preflight_status = ?, page_count = ?, metadata_json = ?, finalized_at = ?
+            preflight_status = ?, page_count = ?, metadata_json = ?, finalized_at = ?, editor_revision_id = ?
         WHERE id = ?
         """,
-        (asset["file_object_id"], asset["official_file_id"], digest, asset["upload_status"], asset["scan_status"], asset["preflight_status"], asset["page_count"], asset["metadata_json"], asset["finalized_at"], upload_id),
+        (asset["file_object_id"], asset["official_file_id"], digest, asset["upload_status"], asset["scan_status"], asset["preflight_status"], asset["page_count"], asset["metadata_json"], asset["finalized_at"], revision["id"], upload_id),
     )
-    new_state = _editor_state_with_asset(latest, asset, inspection)
-    revision = _insert_editor_revision(conn, document_id, new_state, user, latest["id"])
-    conn.execute("UPDATE official_document_editor_assets SET editor_revision_id = ? WHERE id = ?", (revision["id"], upload_id))
     if target.exists():
         target.unlink()
     insert_official_log(conn, document_id, "finalize_editor_upload", user, f"asset_id={upload_id};sha256={digest};pages={asset['page_count']};scan=passed")
     public_revision = _editor_revision_public(revision)
-    return {"asset": _editor_asset_public({**asset, "editor_revision_id": revision["id"]}), "pages": inspection.get("pages") if inspection else [], "editor_state": public_revision["state"], "editor_revision": public_revision}
+    return {"asset": _editor_asset_public(asset), "pages": inspection.get("pages") if inspection else [], "editor_state": public_revision["state"], "editor_revision": public_revision}
 
 
 def get_official_editor_state(conn: sqlite3.Connection, document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -25843,6 +27057,103 @@ def internal_dispatch_log(conn: sqlite3.Connection, dispatch_id: str, user: Dict
     return row
 
 
+def _same_finance_user_scope(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    left_company = roster_text(left.get("company_id"))
+    right_company = roster_text(right.get("company_id"))
+    left_tenant = roster_text(left.get("finance_tenant_id"))
+    right_tenant = roster_text(right.get("finance_tenant_id"))
+    if left_company and right_company and left_company != right_company:
+        return False
+    if left_tenant and right_tenant and left_tenant != right_tenant:
+        return False
+    if is_production() and (not left_company or not right_company or not left_tenant or not right_tenant):
+        return False
+    return True
+
+
+def _assert_local_internal_dispatch_scope(
+    conn: sqlite3.Connection,
+    dispatch: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> None:
+    user = official_session_user(session)
+    inbound_id = str(dispatch.get("inbound_document_id") or "")
+    if inbound_id:
+        inbound_document_detail(conn, inbound_id, session)
+        return
+    official_id = str(dispatch.get("official_document_id") or "")
+    if official_id:
+        document = official_document_row(conn, official_id)
+        company_row = conn.execute(
+            "SELECT id, finance_tenant_id FROM companies WHERE id = ?",
+            (document.get("company_id"),),
+        ).fetchone()
+        company_scope = {
+            "company_id": document.get("company_id"),
+            "finance_tenant_id": company_row["finance_tenant_id"] if company_row else "",
+        }
+        if not _same_finance_user_scope(user, company_scope):
+            raise PermissionError("internal_dispatch_company_forbidden")
+        return
+    sender = active_user_by_id(conn, str(dispatch.get("sender_user_id") or ""))
+    if not sender or not _same_finance_user_scope(user, sender):
+        raise PermissionError("internal_dispatch_company_forbidden")
+
+
+def _validated_local_internal_dispatch_recipients(
+    conn: sqlite3.Connection,
+    sender: Dict[str, Any],
+    recipients: List[Dict[str, Any]],
+) -> List[Tuple[Dict[str, Any], Dict[str, Any] | None]]:
+    company = conn.execute(
+        "SELECT id, name, finance_tenant_id FROM companies WHERE id = ?",
+        (sender.get("company_id"),),
+    ).fetchone()
+    if is_production() and (
+        not company
+        or not _same_finance_user_scope(
+            sender,
+            {
+                "company_id": company["id"],
+                "finance_tenant_id": company["finance_tenant_id"],
+            },
+        )
+    ):
+        raise PermissionError("internal_dispatch_company_forbidden")
+    validated: List[Tuple[Dict[str, Any], Dict[str, Any] | None]] = []
+    for recipient in recipients:
+        recipient_user_id = str(
+            recipient.get("user_id") or recipient.get("recipient_user_id") or ""
+        )
+        department_id = str(
+            recipient.get("department_id")
+            or recipient.get("recipient_department_id")
+            or ""
+        )
+        if recipient_user_id:
+            recipient_user = active_user_by_id(conn, recipient_user_id)
+            if not recipient_user:
+                raise ValueError("internal_dispatch_recipient_not_found")
+            if not _same_finance_user_scope(sender, recipient_user):
+                raise PermissionError("internal_dispatch_recipient_company_forbidden")
+            validated.append((recipient, recipient_user))
+            continue
+        if not department_id:
+            raise ValueError("internal_dispatch_recipient_required")
+        department = conn.execute(
+            """
+            SELECT id FROM department_registry
+            WHERE id = ? AND company_name = ? AND status = '啟用'
+            LIMIT 1
+            """,
+            (department_id, company["name"] if company else ""),
+        ).fetchone()
+        if not department:
+            raise PermissionError("internal_dispatch_recipient_company_forbidden")
+        validated.append((recipient, None))
+    return validated
+
+
 def internal_dispatch_detail(conn: sqlite3.Connection, dispatch_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
     row = conn.execute("SELECT * FROM internal_dispatches WHERE id = ?", (dispatch_id,)).fetchone()
     if not row:
@@ -25851,6 +27162,7 @@ def internal_dispatch_detail(conn: sqlite3.Connection, dispatch_id: str, session
     recipients = [row_to_dict(item) for item in conn.execute("SELECT * FROM internal_dispatch_recipients WHERE dispatch_id = ? ORDER BY created_at", (dispatch_id,)).fetchall()]
     if session is not None:
         user = official_session_user(session)
+        _assert_local_internal_dispatch_scope(conn, data, session)
         allowed = (
             data.get("sender_user_id") == user.get("id")
             or any(item.get("recipient_user_id") == user.get("id") for item in recipients)
@@ -25880,15 +27192,27 @@ def internal_dispatch_detail(conn: sqlite3.Connection, dispatch_id: str, session
     data["recipients"] = recipients
     data["replies"] = replies
     data["logs"] = logs
-    data["inbound_document"] = inbound_document_detail(conn, data["inbound_document_id"]) if data.get("inbound_document_id") else None
+    data["inbound_document"] = inbound_document_detail(conn, data["inbound_document_id"], session) if data.get("inbound_document_id") else None
     return data
 
 
 def internal_dispatch_recipient_directory(conn: sqlite3.Connection, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    require_internal_dispatch_creator(session)
-    rows = conn.execute(
-        "SELECT id, name, unit, role FROM users WHERE status = '啟用' ORDER BY unit, name"
-    ).fetchall()
+    user = require_internal_dispatch_creator(session)
+    if user.get("company_id") and user.get("finance_tenant_id"):
+        rows = conn.execute(
+            """
+            SELECT id, name, unit, role FROM users
+            WHERE status = '啟用' AND company_id = ? AND finance_tenant_id = ?
+            ORDER BY unit, name
+            """,
+            (user["company_id"], user["finance_tenant_id"]),
+        ).fetchall()
+    elif is_production():
+        raise PermissionError("internal_dispatch_company_forbidden")
+    else:
+        rows = conn.execute(
+            "SELECT id, name, unit, role FROM users WHERE status = '啟用' ORDER BY unit, name"
+        ).fetchall()
     return [
         {"id": row["id"], "name": row["name"], "unit": row["unit"], "role": row["role"]}
         for row in rows
@@ -25910,7 +27234,16 @@ def list_internal_dispatches(conn: sqlite3.Connection, query: Dict[str, List[str
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY d.created_at DESC LIMIT 300"
-    return [internal_dispatch_detail(conn, row["id"], session) for row in conn.execute(sql, params).fetchall()]
+    result: List[Dict[str, Any]] = []
+    for row in conn.execute(sql, params).fetchall():
+        try:
+            result.append(internal_dispatch_detail(conn, row["id"], session))
+        except PermissionError:
+            # Global work-list permissions apply only inside the caller's
+            # Finance company/tenant.  Silently omit foreign-tenant rows so a
+            # single inaccessible dispatch cannot break the entire list.
+            continue
+    return result
 
 
 def create_internal_dispatch(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -25920,18 +27253,30 @@ def create_internal_dispatch(conn: sqlite3.Connection, payload: Dict[str, Any], 
         raise ValueError("internal_dispatch_recipients_required")
     if not all(isinstance(recipient, dict) for recipient in recipients):
         raise ValueError("invalid_internal_dispatch_recipient")
+    validated_recipients = _validated_local_internal_dispatch_recipients(
+        conn,
+        user,
+        recipients,
+    )
     default_action_required = bool(payload.get("reply_required", False))
     recipient_actions = [bool(recipient.get("action_required", default_action_required)) for recipient in recipients]
     dispatch_id = payload.get("id") or f"IDISP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     inbound_document_id = payload.get("inbound_document_id") or ""
     if inbound_document_id:
-        inbound_document_detail(conn, inbound_document_id)
+        inbound_document_detail(conn, inbound_document_id, session)
+    official_document_id = payload.get("official_document_id") or payload.get("document_id") or ""
+    if official_document_id:
+        _assert_local_internal_dispatch_scope(
+            conn,
+            {"official_document_id": official_document_id},
+            session,
+        )
     reply_required = any(recipient_actions)
     due_days = int(pdf_safe_float(payload.get("reply_due_days"), 0)) if reply_required else 0
     due_at = payload.get("due_at") or ((datetime.now() + timedelta(days=due_days)).strftime("%Y-%m-%d %H:%M:%S") if due_days else "")
     row = {
         "id": dispatch_id,
-        "official_document_id": payload.get("official_document_id") or payload.get("document_id") or None,
+        "official_document_id": official_document_id or None,
         "inbound_document_id": inbound_document_id or None,
         "title": payload.get("title") or payload.get("subject") or "內部派文",
         "subject": payload.get("subject") or payload.get("title") or "內部派文",
@@ -25950,10 +27295,9 @@ def create_internal_dispatch(conn: sqlite3.Connection, payload: Dict[str, Any], 
         "closed_at": "",
     }
     insert_row(conn, "internal_dispatches", row)
-    for index, recipient in enumerate(recipients, start=1):
+    for index, (recipient, recipient_user) in enumerate(validated_recipients, start=1):
         action_required = recipient_actions[index - 1]
         recipient_user_id = recipient.get("user_id") or recipient.get("recipient_user_id") or ""
-        recipient_user = active_user_by_id(conn, recipient_user_id) if recipient_user_id else None
         rec = {
             "id": f"IDREC-{int(time.time() * 1000)}-{index}-{secrets.token_hex(2).upper()}",
             "dispatch_id": dispatch_id,
@@ -27223,7 +28567,7 @@ def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeo
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout or EDOC_SIGNATURE_TIMEOUT_SECONDS) as response:
+            with _urlopen_no_redirect(request, timeout=timeout or EDOC_SIGNATURE_TIMEOUT_SECONDS) as response:
                 raw = response.read().decode("utf-8")
                 data = json.loads(raw) if raw else {}
                 return {
@@ -27242,7 +28586,8 @@ def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeo
                     },
                 }
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")
+            code = int(getattr(exc, "code", 0) or 0)
+            _consume_http_error(exc)
             last_event = {
                 "provider": EDOC_SIGNATURE_PROVIDER,
                 "operation": operation,
@@ -27250,14 +28595,14 @@ def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeo
                 "endpoint": url,
                 "request_digest_sha256": request_digest,
                 "status": "失敗",
-                "http_status": exc.code,
-                "error": detail[:500],
+                "http_status": code,
+                "error": f"provider_http_{code}",
                 "attempt_count": attempt,
                 "duration_ms": int((time.time() - started) * 1000),
             }
-            if exc.code not in {408, 425, 429, 500, 502, 503, 504} or attempt == attempts:
-                raise SignatureProviderError(f"provider_http_{exc.code}:{detail}", last_event) from exc
-        except Exception as exc:
+            if code not in {408, 425, 429, 500, 502, 503, 504} or attempt == attempts:
+                raise SignatureProviderError(f"provider_http_{code}", last_event) from None
+        except Exception:
             last_event = {
                 "provider": EDOC_SIGNATURE_PROVIDER,
                 "operation": operation,
@@ -27265,12 +28610,12 @@ def provider_json_request(url: str, payload: Dict[str, Any], api_key: str, timeo
                 "endpoint": url,
                 "request_digest_sha256": request_digest,
                 "status": "失敗",
-                "error": str(exc)[:500],
+                "error": "provider_transport_failed",
                 "attempt_count": attempt,
                 "duration_ms": int((time.time() - started) * 1000),
             }
             if attempt == attempts:
-                raise SignatureProviderError(f"provider_request_failed:{exc}", last_event) from exc
+                raise SignatureProviderError("provider_request_failed", last_event) from None
         time.sleep(min(1.5, 0.25 * attempt))
     raise SignatureProviderError("provider_request_failed", last_event)
 
@@ -28166,12 +29511,13 @@ def run_background_job(conn: sqlite3.Connection, job_id: str) -> Dict[str, Any]:
 
 
 def run_due_background_jobs(conn: sqlite3.Connection, all_enabled: bool = False) -> Dict[str, Any]:
+    upload_cleanup = cleanup_stale_official_editor_uploads(conn)
     if all_enabled:
         rows = conn.execute("SELECT id FROM background_jobs WHERE status = '啟用' ORDER BY next_run_at").fetchall()
     else:
         rows = conn.execute("SELECT id FROM background_jobs WHERE status = '啟用' AND next_run_at <= ? ORDER BY next_run_at", (now(),)).fetchall()
     results = [run_background_job(conn, row["id"]) for row in rows]
-    return {"count": len(results), "results": results}
+    return {"count": len(results), "results": results, "editorUploadCleanup": upload_cleanup}
 
 
 def notification_channels(channel: str | None) -> List[str]:
@@ -28322,14 +29668,16 @@ def notification_credential_display_metadata(credential: Dict[str, Any]) -> Dict
 
 
 def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
-    readiness = production_readiness()
+    internal_mode = launch_scope() == "internal_official"
+    readiness = internal_readiness() if internal_mode else production_readiness()
+    formal_readiness = production_readiness()
     alerts: List[Dict[str, str]] = []
     for name in readiness["missing"]:
-        append_alert(alerts, "critical" if is_production() else "warning", "ENV-MISSING", f"缺少正式環境變數 {name}", "到 Vercel Project Settings 補齊後重新部署。")
+        append_alert(alerts, "critical" if is_production() else "warning", "ENV-MISSING", f"缺少目前上線範圍所需環境變數 {name}", "到 Vercel Project Settings 補齊後重新部署。")
     for item in readiness["blockers"]:
-        append_alert(alerts, "critical", "READINESS-BLOCKER", item, "先處理 production readiness blocker，再開放正式交換。")
+        append_alert(alerts, "critical", "READINESS-BLOCKER", item, "先處理目前上線範圍的 readiness blocker。")
     for item in readiness["warnings"]:
-        append_alert(alerts, "warning", "READINESS-WARNING", item, "排入上線前檢核清單，避免正式營運缺口。")
+        append_alert(alerts, "warning", "READINESS-WARNING", item, "排入上線前檢核清單，避免營運缺口。")
 
     counts = {
         "documents": conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0],
@@ -28338,7 +29686,7 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
         "notification_failed": conn.execute("SELECT COUNT(*) FROM notification_deliveries WHERE status IN ('失敗','未設定','憑證異常')").fetchone()[0],
         "job_failed": conn.execute("SELECT COUNT(*) FROM job_runs WHERE status IN ('失敗','錯誤')").fetchone()[0],
     }
-    if counts["exchange_failed"]:
+    if counts["exchange_failed"] and not internal_mode:
         append_alert(alerts, "critical", "EXCHANGE-FAILED", f"{counts['exchange_failed']} 筆交換任務失敗或逾期。", "由總務工作台重送或執行翌日查核。")
     if counts["notification_failed"]:
         append_alert(alerts, "warning", "NOTIFICATION-FAILED", f"{counts['notification_failed']} 筆通知派送失敗。", "到通知中心重送，並檢查 Email/Line 憑證。")
@@ -28348,20 +29696,21 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
     last_job_row = conn.execute("SELECT * FROM job_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
     last_job = row_to_dict(last_job_row) if last_job_row else None
     last_job_age = age_minutes(last_job.get("finished_at") if last_job else None)
-    if is_production() and (last_job_age is None or last_job_age > EDOC_MONITORING_EXPECTED_CRON_MINUTES + 120):
+    if cron_run_is_stalled(last_job_age):
         append_alert(alerts, "critical", "CRON-STALLED", "正式環境背景排程超過預期時間未執行。", "檢查 Vercel Cron、CRON_SECRET 與 /api/cron/run-due 執行紀錄。")
 
     credentials = [notification_credential_status_for_channel(conn, channel) for channel in ["Email", "Line 工作群組", "系統站內通知"]]
     for credential in credentials:
         if credential.get("status") in {"缺少環境憑證", "已到期", "未設定"}:
-            append_alert(alerts, "critical" if is_production() else "warning", "CREDENTIAL-INVALID", f"{credential['channel']} 憑證狀態：{credential.get('status')}", "補齊正式憑證、有效期限與環境變數後重新驗證。")
+            append_alert(alerts, "warning" if internal_mode else "critical" if is_production() else "warning", "CREDENTIAL-INVALID", f"{credential['channel']} 憑證狀態：{credential.get('status')}", "補齊正式憑證、有效期限與環境變數後重新驗證。")
         elif credential.get("status") == "即將到期":
             append_alert(alerts, "warning", "CREDENTIAL-EXPIRING", f"{credential['channel']} 憑證即將到期。", "在到期前完成換證與驗證。")
     signing_service = signing_service_status()
-    if signing_service["productionBlocked"]:
-        append_alert(alerts, "critical", "SIGNING-SERVICE-INCOMPLETE", f"正式簽章服務尚未設定：{', '.join(signing_service['missing'])}", "設定 HSM/KMS、信任根憑證、TSA、OCSP、CRL 與 EDOC_SIGNING_SECRET 後重新部署。")
-    elif not signing_service["ready"]:
-        append_alert(alerts, "warning", "SIGNING-SERVICE-SIMULATION", f"簽章服務仍為模擬或不完整：{', '.join(signing_service['missing'])}", "正式上線前完成外部簽章服務接入。")
+    if not internal_mode:
+        if signing_service["productionBlocked"]:
+            append_alert(alerts, "critical", "SIGNING-SERVICE-INCOMPLETE", f"正式簽章服務尚未設定：{', '.join(signing_service['missing'])}", "設定 HSM/KMS、信任根憑證、TSA、OCSP、CRL 與 EDOC_SIGNING_SECRET 後重新部署。")
+        elif not signing_service["ready"]:
+            append_alert(alerts, "warning", "SIGNING-SERVICE-SIMULATION", f"簽章服務仍為模擬或不完整：{', '.join(signing_service['missing'])}", "正式上線前完成外部簽章服務接入。")
     storage_service = storage_service_status()
     if storage_service["productionBlocked"]:
         append_alert(alerts, "critical", "STORAGE-SERVICE-INCOMPLETE", f"正式檔案儲存與防毒尚未設定：{', '.join(storage_service['missing'])}", "設定 Supabase Storage private bucket、檔案加密、短效 URL、正式 AV endpoint/API key 後重新部署。")
@@ -28370,12 +29719,18 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
 
     checks = {
         "database": {"status": "ok", "mode": "sqlite", "detail": str(DB_PATH)},
-        "readiness": {"status": "ok" if readiness["ready"] else "needs_action", "missing": readiness["missing"], "blockers": readiness["blockers"]},
+        "readiness": {"scope": "internal" if internal_mode else "formal", "status": "ok" if readiness["ready"] else "needs_action", "missing": readiness["missing"], "blockers": readiness["blockers"]},
+        "formalReadiness": {"status": "disabled" if internal_mode else "ok" if formal_readiness["ready"] else "needs_action", "ready": bool(formal_readiness["ready"]), "affectsCurrentScope": not internal_mode},
         "storage": {"status": "ok" if storage_service["ready"] else "needs_action", **storage_service},
-        "cron": {"status": "ok" if last_job_age is not None else "not_yet_run", "lastRun": last_job, "ageMinutes": last_job_age},
+        "cron": {
+            "status": cron_monitoring_status(last_job_age),
+            "lastRun": last_job,
+            "ageMinutes": last_job_age,
+            "stalledAfterMinutes": EDOC_MONITORING_EXPECTED_CRON_MINUTES,
+        },
         "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials},
-        "signing": {"status": "ok" if signing_service["ready"] else "needs_action", **signing_service},
-        "jAgent": {"status": "needs_action" if counts["exchange_failed"] else "ok", "failedTasks": counts["exchange_failed"]},
+        "signing": {"status": "disabled" if internal_mode else "ok" if signing_service["ready"] else "needs_action", "affectsCurrentScope": not internal_mode, **signing_service},
+        "jAgent": {"status": "disabled" if internal_mode else "needs_action" if counts["exchange_failed"] else "ok", "affectsCurrentScope": not internal_mode, "failedTasks": counts["exchange_failed"]},
     }
     status = monitoring_status(alerts)
     return {
@@ -28406,10 +29761,16 @@ def post_monitoring_webhook(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with _urlopen_no_redirect(request, timeout=8) as response:
             return {"sent": True, "status": response.status}
-    except Exception as exc:
-        return {"sent": False, "error": str(exc)}
+    except urllib.error.HTTPError as exc:
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        return {"sent": False, "error": f"monitoring_webhook_http_{code}"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {"sent": False, "error": "monitoring_webhook_transport_failed"}
+    except Exception:
+        return {"sent": False, "error": "monitoring_webhook_transport_failed"}
 
 
 def run_local_monitoring_check(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -28644,15 +30005,6 @@ def resend_idempotency_key(notification_id: str) -> str:
     return f"edoc-notification/{safe or secrets.token_hex(8)}"[:256]
 
 
-def resend_error_detail(exc: urllib.error.HTTPError) -> str:
-    raw = exc.read().decode("utf-8", "replace")[:1000]
-    try:
-        payload = json.loads(raw)
-        return str(payload.get("message") or payload.get("name") or f"HTTP {exc.code}")[:500]
-    except (TypeError, ValueError):
-        return raw or f"HTTP {exc.code}"
-
-
 def send_resend_email_notification(to_email: str, subject: str, body: str, notification_id: str = "") -> Dict[str, str]:
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     sender = notification_email_sender()
@@ -28683,16 +30035,20 @@ def send_resend_email_notification(to_email: str, subject: str, body: str, notif
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             result = json.loads(response.read().decode("utf-8", "replace") or "{}")
             receipt = str(result.get("id") or response.headers.get("X-Request-Id") or "")
             if not receipt:
                 return {"status": "失敗", "receipt": "", "error": "Resend 未回傳寄送識別碼"}
             return {"status": "成功", "receipt": receipt, "error": ""}
     except urllib.error.HTTPError as exc:
-        return {"status": "失敗", "receipt": "", "error": f"Resend HTTP {exc.code}: {resend_error_detail(exc)}"}
-    except Exception as exc:
-        return {"status": "失敗", "receipt": "", "error": f"Resend 連線失敗：{str(exc)[:500]}"}
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        return {"status": "失敗", "receipt": "", "error": f"Resend HTTP {code}"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return {"status": "失敗", "receipt": "", "error": "Resend 連線失敗"}
+    except Exception:
+        return {"status": "失敗", "receipt": "", "error": "Resend 連線失敗"}
 
 
 def send_smtp_email_notification(to_email: str, subject: str, body: str, notification_id: str = "") -> Dict[str, str]:
@@ -28756,14 +30112,17 @@ def send_line_notification(message: str) -> Dict[str, str]:
     else:
         return {"status": "未設定", "receipt": "", "error": "LINE_WEBHOOK_URL 或 LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID 未設定"}
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             receipt = response.headers.get("X-Line-Request-Id") or response.headers.get("X-Request-Id") or f"LINE-{int(time.time() * 1000)}"
             return {"status": "成功" if 200 <= response.status < 300 else "失敗", "receipt": receipt, "error": ""}
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        return {"status": "失敗", "receipt": "", "error": f"HTTP {exc.code}: {detail}"}
-    except Exception as exc:
-        return {"status": "失敗", "receipt": "", "error": str(exc)}
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        return {"status": "失敗", "receipt": "", "error": f"HTTP {code}"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {"status": "失敗", "receipt": "", "error": "LINE 連線失敗"}
+    except Exception:
+        return {"status": "失敗", "receipt": "", "error": "LINE 連線失敗"}
 
 
 def push_system_notification(conn: sqlite3.Connection, item: Dict[str, Any]) -> Dict[str, str]:
@@ -29155,7 +30514,7 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
         method="POST"
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen_no_redirect(request, timeout=30) as response:
             response_data = json.loads(response.read().decode("utf-8"))
         text = extract_openai_text(response_data)
         parsed = parse_ai_compose_json(text)
@@ -29188,10 +30547,29 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
         }
         record_ai_compose_audit(conn, context["role"], "AI 公文助理產生函稿", OPENAI_MODEL, f"recipient={context['recipient']}")
         return result
-    except Exception as exc:
+    except urllib.error.HTTPError as exc:
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
         result = fallback_ai_compose({**payload, **context})
         result["notice"] = "OpenAI 暫時無法產生，已改用本機公文模板。"
-        record_ai_compose_audit(conn, context["role"], "AI 公文助理備援產生函稿", "local-template", str(exc))
+        record_ai_compose_audit(
+            conn,
+            context["role"],
+            "AI 公文助理備援產生函稿",
+            "local-template",
+            f"openai_http_{code}",
+        )
+        return result
+    except Exception:
+        result = fallback_ai_compose({**payload, **context})
+        result["notice"] = "OpenAI 暫時無法產生，已改用本機公文模板。"
+        record_ai_compose_audit(
+            conn,
+            context["role"],
+            "AI 公文助理備援產生函稿",
+            "local-template",
+            "openai_request_failed",
+        )
         return result
 def sync_notifications_from_business_state(conn: sqlite3.Connection) -> Dict[str, Any]:
     created = 0
@@ -29982,10 +31360,16 @@ def supabase_revoke_official_workflow_delegation(delegation_id: str, session: Di
 
 
 def supabase_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
+    endpoint_issue = _supabase_database_endpoint_issue()
+    if endpoint_issue:
+        raise SupabaseConfigurationError(endpoint_issue)
     headers = {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Content-Type": "application/json",
     }
+    if EDOC_SUPABASE_SCHEMA != "public":
+        headers["Accept-Profile"] = EDOC_SUPABASE_SCHEMA
+        headers["Content-Profile"] = EDOC_SUPABASE_SCHEMA
     # Modern Supabase ``sb_secret_`` API keys are not JWTs.  Sending one as a
     # Bearer token makes the gateway reject an otherwise valid server key with
     # HTTP 401.  Legacy service_role JWTs still require the Authorization
@@ -29998,6 +31382,11 @@ def supabase_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
 
 
 def supabase_storage_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
+    if EDOC_STORAGE_PROVIDER != "supabase":
+        raise SupabaseConfigurationError("supabase_storage_provider_required")
+    endpoint_issue = _supabase_storage_endpoint_issue()
+    if endpoint_issue:
+        raise SupabaseConfigurationError(endpoint_issue)
     key = storage_service_role_key()
     if not key:
         raise SupabaseConfigurationError("supabase_storage_server_credential_missing")
@@ -30022,12 +31411,19 @@ def supabase_request(method: str, path: str, body: Any = None, prefer: str = "re
     headers = supabase_headers({"Prefer": prefer})
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else []
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8")
-        raise RuntimeError(f"Supabase {exc.code}: {detail}") from exc
+        marker, business_conflict = _safe_http_error_contract(
+            exc,
+            "supabase_request_failed",
+        )
+        if business_conflict:
+            raise ValueError(business_conflict) from None
+        raise RuntimeError(marker) from None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("supabase_response_invalid") from None
 
 
 def supabase_list(table: str, query: Dict[str, List[str]]) -> List[Dict[str, Any]]:
@@ -30406,14 +31802,17 @@ def supabase_storage_object_url(storage_key: str, bucket: str | None = None) -> 
 
 def supabase_storage_upload(storage_key: str, data: bytes, mime_type: str, bucket: str | None = None) -> None:
     url = supabase_storage_object_url(storage_key, bucket)
-    headers = supabase_storage_headers({"Content-Type": mime_type, "x-upsert": "false"})
+    # Supabase defines overwrite as an explicit `x-upsert: true` opt-in.  EDOC
+    # assets are create-only, so the header must be absent.
+    headers = supabase_storage_headers({"Content-Type": mime_type})
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen_no_redirect(request, timeout=30) as response:
             response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "ignore")
-        raise ValueError(f"supabase_storage_upload_failed:{exc.code}:{redact_text(detail)}") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_storage_upload_failed:{code}") from None
 
 
 def supabase_storage_delete(storage_key: str, bucket: str | None = None) -> None:
@@ -30430,22 +31829,24 @@ def supabase_storage_delete(storage_key: str, bucket: str | None = None) -> None
         method="DELETE",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen_no_redirect(request, timeout=30) as response:
             response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "ignore")
-        raise ValueError(f"supabase_storage_delete_failed:{exc.code}:{redact_text(detail)}") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_storage_delete_failed:{code}") from None
 
 
 def supabase_storage_download(storage_key: str, bucket: str | None = None) -> bytes:
     url = supabase_storage_object_url(storage_key, bucket)
     request = urllib.request.Request(url, headers=supabase_storage_headers(), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen_no_redirect(request, timeout=30) as response:
             return response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "ignore")
-        raise ValueError(f"supabase_storage_download_failed:{exc.code}:{redact_text(detail)}") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_storage_download_failed:{code}") from None
 
 
 def supabase_storage_create_signed_download_url(
@@ -30490,13 +31891,14 @@ def supabase_storage_create_signed_download_url(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
-        detail = redact_text(exc.read().decode("utf-8", "ignore"))
-        raise ValueError(f"supabase_signed_download_failed:{exc.code}:{detail[:160]}") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ValueError("supabase_signed_download_unavailable") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_signed_download_failed:{code}") from None
+    except (urllib.error.URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("supabase_signed_download_unavailable") from None
     signed_path = str(payload.get("signedURL") or payload.get("signedUrl") or "").strip()
     if not signed_path:
         raise ValueError("supabase_signed_download_url_missing")
@@ -30563,13 +31965,14 @@ def supabase_storage_create_signed_scan_url(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read(4096).decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
-        exc.read(4096)
-        raise ValueError(f"supabase_scan_url_failed:{exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise ValueError("supabase_scan_url_unavailable") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"supabase_scan_url_failed:{code}") from None
+    except (urllib.error.URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("supabase_scan_url_unavailable") from None
     signed_path = str(payload.get("signedURL") or payload.get("signedUrl") or "").strip()
     if not signed_path:
         raise ValueError("supabase_scan_url_missing")
@@ -30615,9 +32018,9 @@ def supabase_store_file_object(document_id: str, file_name: str, data: bytes, pu
         "scan_status": "待掃描",
         "scan_engine": EDOC_SCAN_ENGINE,
         "quarantine_reason": "",
-        "signed_url_expires_at": "",
-        "last_scan_at": "",
-        "last_download_at": "",
+        "signed_url_expires_at": None,
+        "last_scan_at": None,
+        "last_download_at": None,
         "version_label": version_label,
         "purpose": purpose,
         "created_by": actor,
@@ -32178,21 +33581,27 @@ def supabase_official_document_stamp_request(document_id: str) -> Dict[str, Any]
     return data
 
 
-def supabase_lock_official_stamp_seal_versions(
+def supabase_plan_official_stamp_seal_versions(
     document: Dict[str, Any],
     stamp_request: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Freeze every Supabase seal placement at submission time."""
     positions = stamp_request.get("stamp_positions") or []
     if not positions:
         raise ValueError("official_document_seal_position_required")
-    for position in positions:
+    timestamp = now()
+    locked_positions: List[Dict[str, Any]] = []
+    for index, raw_position in enumerate(positions, start=1):
+        position = dict(raw_position)
         seal_id = str(position.get("seal_id") or stamp_request.get("seal_id") or "")
         selected_file_id = str(position.get("locked_seal_file_id") or "")
         selected_hash = str(position.get("locked_seal_sha256") or "")
         if bool(selected_file_id) != bool(selected_hash):
             raise ValueError("official_seal_file_binding_required")
-        seal = supabase_validate_official_document_seal(seal_id, str(document.get("company_id") or ""), require_current=False)
+        seal = supabase_validate_official_document_seal(
+            seal_id,
+            str(document.get("company_id") or ""),
+            require_current=False,
+        )
         seal_file = (
             supabase_official_seal_file_by_id(selected_file_id, seal_id)
             if selected_file_id
@@ -32211,17 +33620,60 @@ def supabase_lock_official_stamp_seal_versions(
             render_height_mm=profile["height_mm"],
             allow_unspecified=not selected_file_id,
         )
+        position.update({
+            "id": str(position.get("id") or f"ODPOS-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"),
+            "request_id": stamp_request["id"],
+            "seal_id": seal_id,
+            "width": width,
+            "height": height,
+            "locked_seal_file_id": seal_file["id"],
+            "locked_seal_sha256": seal_file["file_hash"],
+            "locked_render_width_pt": profile["width_pt"],
+            "locked_render_height_pt": profile["height_pt"],
+            "locked_dimension_policy_version": profile["dimension_policy_version"],
+            "order_index": int(position.get("order_index") or index),
+            "created_at": position.get("created_at") or timestamp,
+            "updated_at": timestamp,
+        })
+        locked_positions.append(position)
+    first = locked_positions[0]
+    request_row = {
+        key: value
+        for key, value in stamp_request.items()
+        if key not in {"stamp_positions", "text_overlays"}
+    }
+    request_row.update({
+        "seal_id": first["seal_id"],
+        "stamp_page": first.get("page") or 1,
+        "stamp_x": first.get("x") or 0,
+        "stamp_y": first.get("y") or 0,
+        "stamp_width": first["width"],
+        "stamp_height": first["height"],
+        "status": "pending",
+        "error_message": "",
+        "updated_at": timestamp,
+    })
+    return {"request_row": request_row, "position_rows": locked_positions}
+
+
+def supabase_lock_official_stamp_seal_versions(
+    document: Dict[str, Any],
+    stamp_request: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Freeze every Supabase seal placement at submission time."""
+    plan = supabase_plan_official_stamp_seal_versions(document, stamp_request)
+    for position in plan["position_rows"]:
         supabase_patch(
             "official_document_stamp_positions",
             str(position.get("id") or ""),
             {
-                "width": width,
-                "height": height,
-                "locked_seal_file_id": seal_file["id"],
-                "locked_seal_sha256": seal_file["file_hash"],
-                "locked_render_width_pt": profile["width_pt"],
-                "locked_render_height_pt": profile["height_pt"],
-                "locked_dimension_policy_version": profile["dimension_policy_version"],
+                "width": position["width"],
+                "height": position["height"],
+                "locked_seal_file_id": position["locked_seal_file_id"],
+                "locked_seal_sha256": position["locked_seal_sha256"],
+                "locked_render_width_pt": position["locked_render_width_pt"],
+                "locked_render_height_pt": position["locked_render_height_pt"],
+                "locked_dimension_policy_version": position["locked_dimension_policy_version"],
                 "updated_at": now(),
             },
         )
@@ -32971,6 +34423,102 @@ def supabase_create_official_workflow_steps(
     return created
 
 
+def supabase_plan_official_workflow_submission(
+    document: Dict[str, Any],
+    applicant: Dict[str, Any],
+    *,
+    actor_plan: Dict[str, Dict[str, Any]] | None = None,
+    workflow_steps: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    """Resolve a complete immutable workflow without writing a prefix.
+
+    The returned rows are committed by one database RPC together with the
+    document state transition.  Any prior pending generation is superseded in
+    that same transaction, so a retry can never create a shortened chain.
+    """
+    seal_context = official_seal_context_from_document(document)
+    selected = workflow_steps or (
+        official_seal_workflow_steps(seal_context["approval_route_code"])
+        if seal_context
+        else supabase_official_workflow_config()["steps"]
+    )
+    all_existing = supabase_official_document_steps(document["id"])
+    current_generation = max(
+        (int(step.get("workflow_generation") or 1) for step in all_existing),
+        default=0,
+    )
+    target_generation = current_generation + 1 if current_generation else 1
+    # A correction resubmission supersedes the whole previous generation, not
+    # merely whichever rows remain pending after the rejection transaction.
+    # The database RPC uses this value as an optimistic generation witness and
+    # only changes rows that are still pending.
+    supersede_generation = current_generation
+    company = supabase_official_company_row(document["company_id"])
+    resolved_steps: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    for step in selected:
+        approver = (
+            actor_plan.get(step["key"])
+            if actor_plan is not None
+            else supabase_resolve_official_step_approver(step, applicant, company)
+        )
+        require_valid_finance_workflow_step_actor(
+            step,
+            applicant,
+            approver,
+            seal_context=seal_context,
+        )
+        if not approver:
+            error = "official_seal_route_actor_unresolved" if seal_context else "official_workflow_actor_unresolved"
+            raise ValueError(f"{error}:{step['key']}")
+        resolved_steps.append((step, approver))
+    timestamp = now()
+    rows: List[Dict[str, Any]] = []
+    for step, approver in resolved_steps:
+        step_digest = hashlib.sha256(
+            f"{document['id']}\n{target_generation}\n{step['key']}\n{approver['id']}".encode("utf-8")
+        ).hexdigest().upper()
+        rows.append({
+            "id": f"ODSTEP-{step_digest[:32]}",
+            "document_id": document["id"],
+            "workflow_generation": target_generation,
+            "step_order": int(step["order"]),
+            "step_key": step["key"],
+            "step_name": step["name"],
+            "approver_user_id": approver["id"],
+            "approver_name": approver.get("name") or step["role"],
+            "approver_role": approver.get("role") or step["role"],
+            "status": "pending",
+            "comment": "",
+            "approved_at": "",
+            "review_started_at": None,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        })
+    snapshots: List[Dict[str, Any]] = []
+    for step in rows:
+        snapshot = official_document_actor_snapshot_payload(
+            document["id"],
+            step,
+            timestamp,
+        )
+        if not snapshot:
+            continue
+        # Supabase stores this column as jsonb.  The shared snapshot builder
+        # emits text for SQLite compatibility, so the RPC payload must restore
+        # the object type before jsonb_populate_recordset validates it.
+        snapshot["snapshot_json"] = parse_json_any(
+            snapshot.get("snapshot_json"),
+            {},
+        ) or {}
+        snapshots.append(snapshot)
+    return {
+        "workflow_generation": target_generation,
+        "supersede_generation": supersede_generation,
+        "steps": rows,
+        "actor_snapshots": snapshots,
+    }
+
+
 def supabase_official_document_detail(document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
     document = supabase_official_document_row(document_id)
     all_steps = supabase_official_document_steps(document_id)
@@ -33165,14 +34713,22 @@ def _supabase_editor_assert_document_access(document: Dict[str, Any], session: D
     return user
 
 
-def _supabase_insert_editor_revision(document_id: str, state: Dict[str, Any], actor: Dict[str, Any], parent_revision_id: str = "") -> Dict[str, Any]:
-    latest = _supabase_editor_latest_revision(document_id)
+def _supabase_editor_revision_payload(
+    document_id: str,
+    state: Dict[str, Any],
+    actor: Dict[str, Any],
+    *,
+    latest: Dict[str, Any] | None = None,
+    parent_revision_id: str = "",
+    revision_id: str = "",
+) -> Dict[str, Any]:
+    latest = latest if latest is not None else _supabase_editor_latest_revision(document_id)
     revision_no = int(latest.get("revision_no") or 0) + 1 if latest else 1
     normalized = validate_editor_state(json.loads(json.dumps(state, ensure_ascii=False)))
     normalized["revisionNo"] = revision_no
     normalized["manifestSha256"] = canonical_editor_manifest(normalized)
-    return supabase_insert("official_document_editor_revisions", {
-        "id": f"ODREV-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}",
+    return {
+        "id": revision_id or f"ODREV-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}",
         "document_id": document_id,
         "revision_no": revision_no,
         "parent_revision_id": parent_revision_id or (latest.get("id") if latest else None),
@@ -33182,10 +34738,23 @@ def _supabase_insert_editor_revision(document_id: str, state: Dict[str, Any], ac
         "renderer_version": EDOC_EDITOR_RENDERER_VERSION,
         "created_by": actor.get("id") or actor.get("email") or "system",
         "created_at": now(),
-    })
+    }
+
+
+def _supabase_insert_editor_revision(document_id: str, state: Dict[str, Any], actor: Dict[str, Any], parent_revision_id: str = "") -> Dict[str, Any]:
+    return supabase_insert(
+        "official_document_editor_revisions",
+        _supabase_editor_revision_payload(
+            document_id,
+            state,
+            actor,
+            parent_revision_id=parent_revision_id,
+        ),
+    )
 
 
 def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
     user = supabase_official_session_user(session)
     if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
         raise PermissionError("official_document_create_forbidden")
@@ -33215,7 +34784,7 @@ def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict
         "description": payload.get("description") or "",
         "method": payload.get("method") or "",
         "recipient": payload.get("recipient") or "",
-        "dispatch_unit": payload.get("dispatch_unit") or user.get("unit") or "",
+        "dispatch_unit": applicant_department["name"],
         "handler_name": payload.get("handler_name") or user.get("name") or "",
         "applicant_id": user["id"],
         "applicant_name": user.get("name") or user.get("email") or "",
@@ -33239,10 +34808,24 @@ def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict
 
 
 def _supabase_storage_direct_tus_url() -> str:
+    """Return Supabase's signed resumable-upload endpoint.
+
+    Object-scoped upload tokens are accepted only by the ``/sign`` TUS route.
+    The unsuffixed route requires a user Authorization bearer token and must
+    never be paired with the short-lived ``x-signature`` capability returned
+    to this editor.
+    """
+    if EDOC_STORAGE_PROVIDER != "supabase":
+        raise SupabaseConfigurationError("supabase_storage_provider_required")
+    endpoint_issue = _supabase_storage_endpoint_issue()
+    if endpoint_issue:
+        raise SupabaseConfigurationError(endpoint_issue)
     base = object_storage_endpoint()
-    parsed = urllib.parse.urlparse(EDOC_STORAGE_SUPABASE_URL or base)
-    hostname = parsed.hostname or ""
-    if hostname.endswith(".supabase.co") and not hostname.endswith(".storage.supabase.co"):
+    project_origin = _supabase_cloud_project_origin(
+        EDOC_STORAGE_SUPABASE_URL or SUPABASE_URL
+    )
+    if project_origin:
+        hostname = urllib.parse.urlparse(project_origin).hostname or ""
         project_ref = hostname.split(".", 1)[0]
         return f"https://{project_ref}.storage.supabase.co/storage/v1/upload/resumable/sign"
     if not base:
@@ -33250,18 +34833,41 @@ def _supabase_storage_direct_tus_url() -> str:
     return f"{base.rstrip('/')}/upload/resumable/sign"
 
 
+def _supabase_storage_public_upload_key() -> str:
+    """Return only a browser-safe Storage API key.
+
+    Supabase signed upload tokens scope the object path, while the public API
+    key identifies the project.  A service-role/secret key must never be sent
+    to the browser, even when an operator accidentally puts it in the public
+    key environment variable.
+    """
+    key = EDOC_STORAGE_PUBLISHABLE_KEY.strip()
+    if not key:
+        raise ValueError("editor_storage_publishable_key_required")
+    if not _browser_safe_supabase_public_key(key):
+        raise ValueError("editor_storage_publishable_key_invalid")
+    return key
+
+
 def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
     base = object_storage_endpoint()
     if not base:
         raise ValueError("supabase_storage_endpoint_required")
     url = f"{base.rstrip('/')}/object/upload/sign/{urllib.parse.quote(bucket, safe='')}/{urllib.parse.quote(storage_path, safe='/')}"
-    request = urllib.request.Request(url, data=json.dumps({"allowOverwrite": False}).encode("utf-8"), headers=supabase_storage_headers({"Content-Type": "application/json"}), method="POST")
+    # Supabase's SDK represents create-only uploads by omitting the overwrite
+    # header; the signed-token endpoint does not consume an `upsert: false`
+    # JSON option.  Keep the request body empty JSON and never opt in via a
+    # header.
+    request = urllib.request.Request(url, data=b"{}", headers=supabase_storage_headers({"Content-Type": "application/json"}), method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _urlopen_no_redirect(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
-        detail = redact_text(exc.read().decode("utf-8", "ignore"))
-        raise ValueError(f"editor_signed_upload_failed:{exc.code}:{detail[:160]}") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _consume_http_error(exc)
+        raise ValueError(f"editor_signed_upload_failed:{code}") from None
+    except (urllib.error.URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("editor_signed_upload_unavailable") from None
     token = str(payload.get("token") or "")
     if not token:
         raise ValueError("editor_signed_upload_token_missing")
@@ -33269,8 +34875,10 @@ def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
 
 
 def supabase_create_official_editor_upload_intent(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
+    supabase_cleanup_stale_official_editor_uploads(document_id=document_id)
     meta = _validate_editor_upload_metadata(payload)
     latest = _supabase_editor_latest_revision(document_id)
     if not latest:
@@ -33278,6 +34886,8 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
     asset_id = f"ODASSET-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}"
     storage_path = f"editor/{document_id}/{asset_id}-{meta['file_name']}"
     expires_at = (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")
+    upload_url = _supabase_storage_direct_tus_url()
+    storage_publishable_key = _supabase_storage_public_upload_key()
     row = supabase_insert("official_document_editor_assets", {
         "id": asset_id,
         "document_id": document_id,
@@ -33301,13 +34911,59 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
         "created_at": now(),
         "finalized_at": None,
     })
-    token = _supabase_create_signed_upload_token(storage_path, EDOC_STORAGE_BUCKET)
+    final_path = _supabase_editor_immutable_storage_path(
+        document_id,
+        row,
+        meta["expected_sha256"],
+    )
+    try:
+        supabase_insert("official_document_editor_storage_jobs", {
+            "id": f"EDOC-STORAGE-{asset_id}",
+            "asset_id": asset_id,
+            "document_id": document_id,
+            "staging_bucket": EDOC_STORAGE_BUCKET,
+            "staging_path": storage_path,
+            "final_bucket": EDOC_STORAGE_BUCKET,
+            "final_path": final_path,
+            "expected_sha256": meta["expected_sha256"].upper(),
+            "expected_size_bytes": meta["size_bytes"],
+            "token_expires_at": expires_at,
+            "status": "pending",
+            "lease_token": "",
+            "lease_expires_at": "",
+            "final_file_object_id": None,
+            "attempt_count": 0,
+            "last_error_code": "",
+            "created_at": now(),
+            "updated_at": now(),
+            "cleaned_at": None,
+        })
+    except Exception:
+        _supabase_editor_asset_failure(row, "editor_storage_job_create_failed")
+        raise RuntimeError("editor_storage_job_create_failed") from None
+    # Issue the browser capability only after its durable lifecycle job exists.
+    # If token creation is unavailable, no caller ever receives a writable
+    # staging capability and the existing job can still clean the empty paths.
+    try:
+        token = _supabase_create_signed_upload_token(
+            storage_path,
+            EDOC_STORAGE_BUCKET,
+        )
+    except Exception:
+        _supabase_editor_asset_failure(row, "editor_signed_upload_failed")
+        raise
     return {
         "upload_id": asset_id,
         "asset_id": asset_id,
         "protocol": "tus",
-        "upload_url": _supabase_storage_direct_tus_url(),
-        "headers": {"x-signature": token, "x-upsert": "false", "Cache-Control": "no-store"},
+        "upload_url": upload_url,
+        "upload_token": token,
+        "storage_publishable_key": storage_publishable_key,
+        "bucket": EDOC_STORAGE_BUCKET,
+        "path": storage_path,
+        "content_type": meta["mime_type"],
+        "cache_control": "0",
+        "headers": {"x-signature": token, "Cache-Control": "no-store"},
         "metadata": {"bucketName": EDOC_STORAGE_BUCKET, "objectName": storage_path, "contentType": meta["mime_type"], "cacheControl": "0"},
         "error_contract": {
             "create_rejected": "editor_tus_create_failed",
@@ -33323,46 +34979,519 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
     }
 
 
-def _supabase_editor_asset_failure(asset: Dict[str, Any], error_code: str, *, quarantine: bool = False) -> None:
+def _supabase_editor_asset_failure(
+    asset: Dict[str, Any],
+    error_code: str,
+    *,
+    quarantine: bool = False,
+) -> Dict[str, Any]:
+    """Fail an upload only while it is still mutable.
+
+    Finalize and failure requests can race.  The status predicate makes the
+    transition compare-and-set so a stale request can never downgrade an
+    already finalized asset.
+    """
     metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
     metadata["error_code"] = error_code
-    supabase_patch("official_document_editor_assets", asset["id"], {
+    current_status = str(asset.get("upload_status") or "pending")
+    mutable_statuses = {"pending", "uploading", "uploaded"}
+    if current_status not in mutable_statuses:
+        rows = supabase_filter_rows(
+            "official_document_editor_assets",
+            {"id": asset["id"]},
+            limit=1,
+        )
+        return rows[0] if rows else dict(asset)
+    rows = supabase_update_many("official_document_editor_assets", {
+        "id": asset["id"],
+        "upload_status": current_status,
+    }, {
         "upload_status": "quarantined" if quarantine else "failed",
         "scan_status": "failed" if quarantine else "pending",
         "preflight_status": "blocked" if quarantine else "failed",
         "metadata_json": json.dumps(metadata, ensure_ascii=False),
         "finalized_at": now(),
     })
+    if rows:
+        return rows[0]
+    refreshed = supabase_filter_rows(
+        "official_document_editor_assets",
+        {"id": asset["id"]},
+        limit=1,
+    )
+    if refreshed and str(refreshed[0].get("upload_status") or "") in {
+        "finalized",
+        "failed",
+        "quarantined",
+    }:
+        return refreshed[0]
+    raise RuntimeError("editor_asset_failure_state_conflict")
+
+
+def _supabase_editor_immutable_storage_path(
+    document_id: str,
+    asset: Dict[str, Any],
+    digest: str,
+) -> str:
+    safe_name = Path(str(asset.get("file_name") or "asset.bin")).name
+    return (
+        f"editor-final/{document_id}/{asset['id']}/"
+        f"{digest.upper()}-{safe_name}"
+    )
+
+
+def _supabase_editor_storage_job(
+    document_id: str,
+    asset: Dict[str, Any],
+    digest: str,
+) -> Dict[str, Any]:
+    rows = supabase_filter_rows(
+        "official_document_editor_storage_jobs",
+        {"asset_id": asset.get("id"), "document_id": document_id},
+        limit=1,
+    )
+    if not rows:
+        raise ValueError("editor_storage_job_missing")
+    job = rows[0]
+    expected_final_path = _supabase_editor_immutable_storage_path(
+        document_id,
+        asset,
+        digest,
+    )
+    if (
+        str(job.get("staging_bucket") or "") != str(asset.get("storage_bucket") or EDOC_STORAGE_BUCKET)
+        or str(job.get("staging_path") or "") != str(asset.get("storage_path") or "")
+        or str(job.get("final_bucket") or "") != EDOC_STORAGE_BUCKET
+        or str(job.get("final_path") or "") != expected_final_path
+        or str(job.get("expected_sha256") or "").upper() != digest.upper()
+        or int(job.get("expected_size_bytes") or 0) != int(asset.get("size_bytes") or 0)
+        or str(job.get("status") or "")
+        not in {
+            "pending",
+            "promoting",
+            "committed",
+            "cleaning",
+            "cleanup_failed",
+        }
+    ):
+        raise ValueError("editor_storage_job_mismatch")
+    return job
+
+
+def _supabase_claim_editor_storage_job(
+    job: Dict[str, Any],
+    target_status: str,
+) -> Dict[str, Any] | None:
+    """CAS-claim one promotion or cleanup lease.
+
+    The object store and PostgreSQL cannot share one transaction. A durable,
+    short lease prevents cleanup from declaring a job complete while an
+    uploader is still creating the deterministic final object.
+    """
+    if target_status not in {"promoting", "cleaning"}:
+        raise ValueError("editor_storage_job_lease_target_invalid")
+    current_status = str(job.get("status") or "")
+    current_lease = str(job.get("lease_token") or "")
+    lease_expiry = parse_time(str(job.get("lease_expires_at") or ""))
+    active_lease = (
+        current_status in {"promoting", "cleaning"}
+        and current_lease
+        and lease_expiry != datetime.min
+        and lease_expiry > datetime.now()
+    )
+    if active_lease:
+        return None
+    allowed_sources = (
+        {"pending", "promoting"}
+        if target_status == "promoting"
+        else {"pending", "promoting", "committed", "cleaning", "cleanup_failed"}
+    )
+    if current_status not in allowed_sources:
+        return None
+    lease_token = secrets.token_hex(16).upper()
+    expires_at = (datetime.now() + timedelta(minutes=5)).isoformat(
+        timespec="seconds"
+    )
+    filters: Dict[str, Any] = {
+        "id": job.get("id"),
+        "status": current_status,
+    }
+    if current_status in {"promoting", "cleaning"}:
+        filters["lease_token"] = current_lease
+    rows = supabase_update_many(
+        "official_document_editor_storage_jobs",
+        filters,
+        {
+            "status": target_status,
+            "lease_token": lease_token,
+            "lease_expires_at": expires_at,
+            "attempt_count": int(job.get("attempt_count") or 0) + 1,
+            "last_error_code": "",
+            "updated_at": now(),
+            "cleaned_at": None,
+        },
+    )
+    return rows[0] if rows else None
+
+
+def _supabase_release_editor_storage_promotion(
+    job_id: str,
+    lease_token: str,
+    error_code: str,
+) -> None:
+    if not job_id or not lease_token:
+        return
+    supabase_update_many(
+        "official_document_editor_storage_jobs",
+        {
+            "id": job_id,
+            "status": "promoting",
+            "lease_token": lease_token,
+        },
+        {
+            "status": "pending",
+            "lease_token": "",
+            "lease_expires_at": "",
+            "last_error_code": error_code,
+            "updated_at": now(),
+            "cleaned_at": None,
+        },
+    )
+
+
+def _supabase_promote_editor_asset_to_immutable_storage(
+    document_id: str,
+    asset: Dict[str, Any],
+    data: bytes,
+    digest: str,
+) -> tuple[str, str, str]:
+    """Copy verified staging bytes to a server-only immutable object path.
+
+    Signed TUS capabilities remain valid for a short period and cannot be
+    individually revoked by Storage.  The business record must therefore
+    never keep referring to the capability-writable staging path after
+    finalize.  A deterministic digest path also makes retries idempotent: an
+    existing object is accepted only when its bytes are exactly identical.
+    """
+    job = _supabase_editor_storage_job(document_id, asset, digest)
+    claimed = _supabase_claim_editor_storage_job(job, "promoting")
+    if not claimed:
+        raise ValueError("editor_asset_promotion_in_progress")
+    lease_token = str(claimed.get("lease_token") or "")
+    bucket = str(claimed.get("final_bucket") or "")
+    final_path = str(claimed.get("final_path") or "")
+    try:
+        try:
+            supabase_storage_upload(
+                final_path,
+                data,
+                str(asset.get("mime_type") or "application/octet-stream"),
+                bucket,
+            )
+        except Exception as upload_error:
+            try:
+                existing = supabase_storage_download(final_path, bucket)
+            except Exception:
+                raise ValueError("editor_asset_promotion_failed") from upload_error
+            if len(existing) != len(data) or sha256_bytes(existing) != digest.upper():
+                raise ValueError("editor_immutable_asset_conflict") from None
+
+        promoted = supabase_storage_download(final_path, bucket)
+        if len(promoted) != len(data) or sha256_bytes(promoted) != digest.upper():
+            raise ValueError("editor_immutable_asset_verification_failed")
+        return final_path, str(claimed.get("id") or ""), lease_token
+    except Exception as promotion_error:
+        _supabase_release_editor_storage_promotion(
+            str(claimed.get("id") or ""),
+            lease_token,
+            _editor_storage_cleanup_error_code(promotion_error),
+        )
+        raise
+
+
+def _supabase_assert_finalized_editor_asset_immutable(
+    document_id: str,
+    asset: Dict[str, Any],
+) -> Dict[str, Any]:
+    expected_prefix = f"editor-final/{document_id}/{asset.get('id') or ''}/"
+    storage_path = str(asset.get("storage_path") or "")
+    file_object_id = str(asset.get("file_object_id") or "")
+    if (
+        asset.get("upload_status") != "finalized"
+        or not storage_path.startswith(expected_prefix)
+        or not file_object_id
+    ):
+        raise RuntimeError("editor_asset_immutable_path_not_committed")
+    file_object = supabase_get("file_objects", file_object_id)
+    if not file_object:
+        raise RuntimeError("editor_asset_immutable_path_not_committed")
+    try:
+        verify_private_storage_file_metadata(
+            asset,
+            file_object,
+            expected_document_id=document_id,
+            expected_storage_key=storage_path,
+            expected_bucket=str(asset.get("storage_bucket") or EDOC_STORAGE_BUCKET),
+        )
+    except (ValueError, PermissionError) as exc:
+        raise RuntimeError("editor_asset_immutable_path_not_committed") from exc
+    return file_object
+
+
+def _supabase_finalized_editor_upload_result(
+    document_id: str,
+    asset: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    _supabase_assert_finalized_editor_asset_immutable(document_id, asset)
+    latest_public = supabase_get_official_editor_state(document_id, session)
+    return {
+        "asset": _editor_asset_public(asset),
+        "pages": latest_public["state"].get("pages") or [],
+        "editor_state": latest_public["state"],
+        "editor_revision": latest_public,
+    }
+
+
+def _editor_storage_cleanup_error_code(error: BaseException) -> str:
+    """Return only a bounded machine code; never persist object paths or PII."""
+    match = re.search(
+        r"\b(?:editor|supabase_storage)_[a-z0-9_]+(?::[0-9]{3})?\b",
+        str(error).lower(),
+    )
+    return match.group(0)[:96] if match else "editor_storage_cleanup_failed"
+
+
+def supabase_fail_official_editor_upload(
+    document_id: str,
+    upload_id: str,
+    payload: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    document = supabase_official_document_row(document_id)
+    user = _supabase_editor_assert_document_access(document, session, write=True)
+    rows = supabase_filter_rows(
+        "official_document_editor_assets",
+        {"id": upload_id, "document_id": document_id},
+        limit=1,
+    )
+    if not rows:
+        raise ValueError("editor_upload_not_found")
+    asset = rows[0]
+    if asset.get("upload_status") in {"finalized", "failed", "quarantined"}:
+        return {"ok": True, "idempotent": True, "asset": _editor_asset_public(asset)}
+    error_code = normalized_editor_upload_failure_code(payload.get("error_code"))
+    failed_asset = _supabase_editor_asset_failure(asset, error_code)
+    if failed_asset.get("upload_status") == "finalized":
+        return {"ok": True, "idempotent": True, "asset": _editor_asset_public(failed_asset)}
+    try:
+        supabase_storage_delete(
+            str(asset.get("storage_path") or ""),
+            asset.get("storage_bucket") or EDOC_STORAGE_BUCKET,
+        )
+    except Exception as cleanup_error:
+        log_structured(
+            "warning",
+            "editor_upload_storage_cleanup_failed",
+            document_id=document_id,
+            asset_id=upload_id,
+            error=redact_text(str(cleanup_error)),
+        )
+    supabase_insert_official_log(
+        document_id,
+        "editor_upload_failed",
+        user,
+        f"asset_id={upload_id};error_code={error_code}",
+    )
+    refreshed = supabase_filter_rows(
+        "official_document_editor_assets",
+        {"id": upload_id, "document_id": document_id},
+        limit=1,
+    )[0]
+    return {"ok": True, "idempotent": False, "asset": _editor_asset_public(refreshed)}
+
+
+def supabase_cleanup_stale_official_editor_uploads(*, document_id: str = "") -> Dict[str, Any]:
+    jobs: List[Dict[str, Any]] = []
+    for status in (
+        "pending",
+        "promoting",
+        "committed",
+        "cleaning",
+        "cleanup_failed",
+    ):
+        filters: Dict[str, Any] = {"status": status}
+        if document_id:
+            filters["document_id"] = document_id
+        jobs.extend(
+            supabase_filter_rows(
+                "official_document_editor_storage_jobs",
+                filters,
+                order="token_expires_at.asc",
+                limit=500,
+            )
+        )
+
+    cleaned: List[str] = []
+    failed: List[str] = []
+    grace = timedelta(minutes=5)
+    for job in jobs:
+        expires_at = parse_time(str(job.get("token_expires_at") or ""))
+        if expires_at == datetime.min or expires_at + grace >= datetime.now():
+            continue
+        lease_expiry = parse_time(str(job.get("lease_expires_at") or ""))
+        if (
+            str(job.get("status") or "") in {"promoting", "cleaning"}
+            and lease_expiry != datetime.min
+            and lease_expiry > datetime.now()
+        ):
+            continue
+        claimed = _supabase_claim_editor_storage_job(job, "cleaning")
+        if not claimed:
+            continue
+        job = claimed
+        asset_rows = supabase_filter_rows(
+            "official_document_editor_assets",
+            {"id": job.get("asset_id"), "document_id": job.get("document_id")},
+            limit=1,
+        )
+        asset = asset_rows[0] if asset_rows else {}
+        errors: List[str] = []
+        finalized = str(asset.get("upload_status") or "") == "finalized"
+
+        if finalized:
+            try:
+                file_object = _supabase_assert_finalized_editor_asset_immutable(
+                    str(job.get("document_id") or ""),
+                    asset,
+                )
+                if (
+                    str(job.get("final_bucket") or "") != str(asset.get("storage_bucket") or "")
+                    or str(job.get("final_path") or "") != str(asset.get("storage_path") or "")
+                    or str(job.get("final_file_object_id") or "") != str(file_object.get("id") or "")
+                    or str(job.get("expected_sha256") or "").upper() != str(asset.get("sha256") or "").upper()
+                    or int(job.get("expected_size_bytes") or 0) != int(asset.get("size_bytes") or 0)
+                ):
+                    raise ValueError("editor_storage_job_commit_mismatch")
+                supabase_storage_delete(
+                    str(job.get("staging_path") or ""),
+                    str(job.get("staging_bucket") or EDOC_STORAGE_BUCKET),
+                )
+            except Exception as cleanup_error:
+                errors.append(_editor_storage_cleanup_error_code(cleanup_error))
+        else:
+            if asset and str(asset.get("upload_status") or "") in {"pending", "uploading", "uploaded"}:
+                asset = _supabase_editor_asset_failure(asset, "editor_upload_expired")
+                finalized = str(asset.get("upload_status") or "") == "finalized"
+            if finalized:
+                errors.append("editor_storage_cleanup_finalize_race")
+            final_refs = supabase_filter_rows(
+                "file_objects",
+                {"storage_key": job.get("final_path")},
+                limit=1,
+            )
+            if finalized:
+                pass
+            elif final_refs:
+                errors.append("editor_orphan_cleanup_file_object_present")
+            else:
+                for bucket_key, path_key in (
+                    ("staging_bucket", "staging_path"),
+                    ("final_bucket", "final_path"),
+                ):
+                    try:
+                        supabase_storage_delete(
+                            str(job.get(path_key) or ""),
+                            str(job.get(bucket_key) or EDOC_STORAGE_BUCKET),
+                        )
+                    except Exception as cleanup_error:
+                        errors.append(_editor_storage_cleanup_error_code(cleanup_error))
+
+        next_status = "cleanup_failed" if errors else "cleaned"
+        updated = supabase_update_many(
+            "official_document_editor_storage_jobs",
+            {
+                "id": job.get("id"),
+                "status": "cleaning",
+                "lease_token": job.get("lease_token"),
+            },
+            {
+                "status": next_status,
+                "lease_token": "",
+                "lease_expires_at": "",
+                "attempt_count": int(job.get("attempt_count") or 0),
+                "last_error_code": errors[0] if errors else "",
+                "updated_at": now(),
+                "cleaned_at": None if errors else now(),
+            },
+        )
+        if not updated:
+            continue
+        if errors:
+            failed.append(str(job.get("asset_id") or ""))
+            log_structured(
+                "warning",
+                "editor_upload_storage_cleanup_failed",
+                document_id=job.get("document_id") or "",
+                asset_id=job.get("asset_id") or "",
+                error=errors[0],
+            )
+            continue
+        cleaned.append(str(job.get("asset_id") or ""))
+        if asset and not finalized:
+            supabase_insert_official_log(
+                str(job.get("document_id") or ""),
+                "editor_upload_expired",
+                {"id": "system", "name": "Upload Cleanup", "role": "system"},
+                f"asset_id={job.get('asset_id')};error_code=editor_upload_expired",
+            )
+    return {
+        "count": len(cleaned),
+        "asset_ids": cleaned,
+        "failure_count": len(failed),
+        "failed_asset_ids": failed,
+    }
 
 
 def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
     rows = supabase_filter_rows("official_document_editor_assets", {"id": upload_id, "document_id": document_id}, limit=1)
     if not rows:
         raise ValueError("editor_upload_not_found")
     asset = rows[0]
+    staging_storage_path = str(asset.get("storage_path") or "")
+    storage_bucket = str(asset.get("storage_bucket") or EDOC_STORAGE_BUCKET)
+    expected_asset_status = str(asset.get("upload_status") or "pending")
     if asset.get("upload_status") == "finalized":
-        latest_public = supabase_get_official_editor_state(document_id, session)
-        return {"asset": _editor_asset_public(asset), "pages": latest_public["state"].get("pages") or [], "editor_state": latest_public["state"], "editor_revision": latest_public}
+        return _supabase_finalized_editor_upload_result(document_id, asset, session)
     if asset.get("upload_status") in {"failed", "quarantined"}:
         raise ValueError("editor_upload_new_intent_required")
     try:
         data = supabase_storage_download(asset["storage_path"], asset.get("storage_bucket") or EDOC_STORAGE_BUCKET)
     except Exception:
-        _supabase_editor_asset_failure(asset, "editor_upload_incomplete")
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_upload_incomplete")
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_upload_incomplete")
     if len(data) != int(asset["size_bytes"]):
-        _supabase_editor_asset_failure(asset, "editor_upload_size_mismatch")
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_upload_size_mismatch")
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_upload_size_mismatch")
     digest = sha256_bytes(data)
     if digest != str(asset["expected_sha256"]).upper() or (payload.get("sha256") and str(payload["sha256"]).upper() != digest):
-        _supabase_editor_asset_failure(asset, "editor_upload_hash_mismatch")
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_upload_hash_mismatch")
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_upload_hash_mismatch")
     latest = _supabase_editor_latest_revision(document_id)
     metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
     if not latest or int(metadata.get("base_revision_no") or 0) != int(latest.get("revision_no") or 0):
-        _supabase_editor_asset_failure(asset, "editor_revision_conflict")
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_revision_conflict")
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_revision_conflict")
     try:
         scan_status, signature = editor_scan_bytes_for_threats(
@@ -33373,23 +35502,64 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
             expected_sha256=digest,
         )
     except ValueError as exc:
-        _supabase_editor_asset_failure(asset, str(exc), quarantine=True)
+        failed_asset = _supabase_editor_asset_failure(asset, str(exc), quarantine=True)
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise
     if scan_status != "已通過":
-        _supabase_editor_asset_failure(asset, "editor_asset_quarantined", quarantine=True)
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_asset_quarantined", quarantine=True)
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_asset_quarantined")
     try:
         inspection = inspect_editor_pdf(data) if asset["asset_kind"] in {"source_pdf", "import_pdf"} else inspect_editor_image(data, asset["mime_type"])
     except Exception:
-        _supabase_editor_asset_failure(asset, "editor_asset_preflight_failed", quarantine=True)
+        failed_asset = _supabase_editor_asset_failure(asset, "editor_asset_preflight_failed", quarantine=True)
+        if failed_asset.get("upload_status") == "finalized":
+            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise
-    file_id = f"FILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
-    file_row = supabase_insert("file_objects", {
+    try:
+        (
+            final_storage_path,
+            promotion_job_id,
+            promotion_lease_token,
+        ) = _supabase_promote_editor_asset_to_immutable_storage(
+            document_id,
+            asset,
+            data,
+            digest,
+        )
+    except ValueError as promotion_error:
+        if str(promotion_error) in {
+            "editor_immutable_asset_conflict",
+            "editor_immutable_asset_verification_failed",
+        }:
+            failed_asset = _supabase_editor_asset_failure(
+                asset,
+                str(promotion_error),
+                quarantine=True,
+            )
+            if failed_asset.get("upload_status") == "finalized":
+                return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
+        raise
+    operation_digest = hashlib.sha256(
+        f"{document_id}\n{upload_id}\n{digest}\n{latest['id']}".encode("utf-8")
+    ).hexdigest().upper()
+    operation_id = f"ODEFIN-{operation_digest[:32]}"
+    file_id = f"FILE-EFIN-{operation_digest[:32]}"
+    revision_id = f"ODREV-EFIN-{operation_digest[:32]}"
+    official_file_id = (
+        f"ODFILE-EFIN-{operation_digest[:32]}"
+        if asset["asset_kind"] == "source_pdf"
+        else ""
+    )
+    timestamp = now()
+    file_row = {
         "id": file_id,
         "document_id": document_id,
         "file_name": asset["file_name"],
-        "storage_key": asset["storage_path"],
-        "bucket": asset.get("storage_bucket") or EDOC_STORAGE_BUCKET,
+        "storage_key": final_storage_path,
+        "bucket": storage_bucket,
         "storage_provider": "supabase",
         "mime_type": asset["mime_type"],
         "size_bytes": len(data),
@@ -33401,33 +35571,192 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         "scan_status": "已通過",
         "scan_engine": EDOC_SCAN_ENGINE,
         "quarantine_reason": "",
-        "signed_url_expires_at": "",
+        "signed_url_expires_at": None,
         "last_scan_at": now(),
-        "last_download_at": "",
+        "last_download_at": None,
         "version_label": f"editor-asset-{asset['asset_kind']}",
         "purpose": "official-editor",
-        "created_by": official_actor_name(user),
-        "created_at": now(),
-    })
-    official_file = supabase_insert_official_document_file(document_id, "original_pdf", file_row, official_actor_name(user)) if asset["asset_kind"] == "source_pdf" else None
+        "created_by": user.get("id") or "system",
+        "created_at": timestamp,
+    }
+    official_file = None
+    if official_file_id:
+        versions = supabase_official_raw_document_files(document_id, "original_pdf")
+        official_file = {
+            "id": official_file_id,
+            "document_id": document_id,
+            "file_object_id": file_id,
+            "file_type": "original_pdf",
+            "file_name": asset["file_name"],
+            "file_storage_key": final_storage_path,
+            "file_mime_type": asset["mime_type"],
+            "file_size": len(data),
+            "file_hash": digest,
+            "version": max([int(item.get("version") or 0) for item in versions] or [0]) + 1,
+            "uploaded_by": official_actor_name(user),
+            "created_at": timestamp,
+        }
     update = {
         "file_object_id": file_id,
-        "official_file_id": official_file.get("id") if official_file else None,
+        "official_file_id": official_file_id or None,
         "sha256": digest,
         "upload_status": "finalized",
         "scan_status": "passed",
         "preflight_status": "passed",
         "page_count": int((inspection or {}).get("pageCount") or 0),
-        "metadata_json": json.dumps({**metadata, "inspection_flags": (inspection or {}).get("flags") or {}, "renderer_version": EDOC_EDITOR_RENDERER_VERSION}, ensure_ascii=False),
-        "finalized_at": now(),
+        "storage_bucket": storage_bucket,
+        "storage_path": final_storage_path,
+        "metadata_json": json.dumps({
+            **metadata,
+            "inspection_flags": (inspection or {}).get("flags") or {},
+            "renderer_version": EDOC_EDITOR_RENDERER_VERSION,
+            "promoted_at": timestamp,
+            "staging_storage_path_sha256": sha256_bytes(staging_storage_path.encode("utf-8")),
+        }, ensure_ascii=False),
+        "finalized_at": timestamp,
     }
     asset = {**asset, **update}
-    supabase_patch("official_document_editor_assets", upload_id, update)
-    revision = _supabase_insert_editor_revision(document_id, _editor_state_with_asset(latest, asset, inspection), user, latest["id"])
-    supabase_patch("official_document_editor_assets", upload_id, {"editor_revision_id": revision["id"]})
-    supabase_insert_official_log(document_id, "finalize_editor_upload", user, f"asset_id={upload_id};sha256={digest};pages={update['page_count']};scan=passed")
+    revision = _supabase_editor_revision_payload(
+        document_id,
+        _editor_state_with_asset(latest, asset, inspection),
+        user,
+        latest=latest,
+        parent_revision_id=latest["id"],
+        revision_id=revision_id,
+    )
+    update["editor_revision_id"] = revision_id
+    comment = f"asset_id={upload_id};sha256={digest};pages={update['page_count']};scan=passed"
+    approval_log = {
+        "id": operation_id,
+        "document_id": document_id,
+        "step_id": None,
+        "file_id": official_file_id or None,
+        "actor_id": user.get("id") or "system",
+        "actor_name": official_actor_name(user),
+        "principal_actor_id": None,
+        "action": "finalize_editor_upload",
+        "comment": comment,
+        "decision_evidence_json": {
+            "operation_id": operation_id,
+            "asset_id": upload_id,
+            "revision_id": revision_id,
+        },
+        "ip_address": "",
+        "user_agent": "",
+        "created_at": timestamp,
+    }
+    audit_log = {
+        "id": f"AUD-EFIN-{operation_digest[:32]}",
+        "actor": official_actor_name(user),
+        "action": "finalize_editor_upload",
+        "target_type": "official_documents",
+        "target_id": document_id,
+        "detail": comment,
+        "event_type": "submit",
+        "module_code": "official_documents",
+        "resource_type": "official_documents",
+        "resource_id": document_id,
+        "result": "success",
+        "severity": "info",
+        "actor_user_id": user.get("id") or "system",
+        "request_id": operation_id,
+        "metadata_json": {
+            "operation_id": operation_id,
+            "asset_id": upload_id,
+            "revision_id": revision_id,
+        },
+        "created_at": timestamp,
+    }
+    request_payload = {
+        "operation_id": operation_id,
+        "document_id": document_id,
+        "applicant_id": user["id"],
+        "company_id": document["company_id"],
+        "asset_id": upload_id,
+        "expected_asset_status": expected_asset_status,
+        "expected_asset_sha256": digest,
+        "expected_asset_size_bytes": len(data),
+        "expected_base_revision_id": latest["id"],
+        "expected_base_revision_no": int(latest["revision_no"]),
+        "file_object": file_row,
+        "official_file": official_file,
+        "asset_patch": update,
+        "revision": revision,
+        "approval_log": approval_log,
+        "audit_log": audit_log,
+    }
+    try:
+        raw = supabase_request(
+            "POST",
+            "rpc/edoc_finalize_editor_asset_v2",
+            {"p_request": request_payload},
+        )
+        result = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+        expected_result = {
+            "document_id": document_id,
+            "asset_id": upload_id,
+            "operation_id": operation_id,
+            "revision_id": revision_id,
+            "file_object_id": file_id,
+            "official_file_id": official_file_id,
+        }
+        if not isinstance(result, dict) or result.get("committed") is not True or any(
+            str(result.get(key) or "") != str(value or "")
+            for key, value in expected_result.items()
+        ):
+            raise RuntimeError("editor_finalize_invalid_response")
+    except Exception as finalize_error:
+        refreshed_rows = supabase_filter_rows(
+            "official_document_editor_assets",
+            {"id": upload_id, "document_id": document_id},
+            limit=1,
+        )
+        refreshed = refreshed_rows[0] if refreshed_rows else {}
+        if (
+            refreshed.get("upload_status") == "finalized"
+            and str(refreshed.get("editor_revision_id") or "") == revision_id
+            and str(refreshed.get("file_object_id") or "") == file_id
+            and str(refreshed.get("sha256") or "") == digest
+        ):
+            asset = refreshed
+        elif str(refreshed.get("upload_status") or "") in {"pending", "uploaded"}:
+            _supabase_release_editor_storage_promotion(
+                promotion_job_id,
+                promotion_lease_token,
+                _editor_storage_cleanup_error_code(finalize_error),
+            )
+            raise
+        else:
+            raise RuntimeError("editor_finalize_commit_state_unknown") from finalize_error
+    committed_rows = supabase_filter_rows(
+        "official_document_editor_assets",
+        {"id": upload_id, "document_id": document_id},
+        limit=1,
+    )
+    committed_asset = committed_rows[0] if committed_rows else {}
+    if (
+        committed_asset.get("upload_status") != "finalized"
+        or str(committed_asset.get("file_object_id") or "") != file_id
+        or str(committed_asset.get("sha256") or "").upper() != digest
+        or str(committed_asset.get("storage_bucket") or "") != storage_bucket
+        or str(committed_asset.get("storage_path") or "") != final_storage_path
+    ):
+        raise RuntimeError("editor_asset_immutable_path_not_committed")
+    _supabase_assert_finalized_editor_asset_immutable(document_id, committed_asset)
+    asset = committed_asset
+    if staging_storage_path and staging_storage_path != final_storage_path:
+        try:
+            supabase_storage_delete(staging_storage_path, storage_bucket)
+        except Exception as cleanup_error:
+            log_structured(
+                "warning",
+                "editor_upload_staging_cleanup_failed",
+                document_id=document_id,
+                asset_id=upload_id,
+                error=redact_text(str(cleanup_error)),
+            )
     public = _editor_revision_public(revision)
-    return {"asset": _editor_asset_public({**asset, "editor_revision_id": revision["id"]}), "pages": inspection.get("pages") if inspection else [], "editor_state": public["state"], "editor_revision": public}
+    return {"asset": _editor_asset_public(asset), "pages": inspection.get("pages") if inspection else [], "editor_state": public["state"], "editor_revision": public}
 
 
 def supabase_get_official_editor_state(document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -33499,7 +35828,21 @@ def _supabase_editor_asset_bytes(document_id: str, state: Dict[str, Any]) -> Tup
         asset = rows[0]
         if asset.get("upload_status") != "finalized" or asset.get("scan_status") != "passed" or asset.get("preflight_status") != "passed":
             raise ValueError("editor_asset_not_ready")
-        data = supabase_storage_download(asset["storage_path"], asset.get("storage_bucket") or EDOC_STORAGE_BUCKET)
+        file_object_id = str(asset.get("file_object_id") or "")
+        file_object = supabase_get("file_objects", file_object_id) if file_object_id else None
+        if not file_object:
+            raise ValueError("editor_asset_file_object_missing")
+        verify_private_storage_file_metadata(
+            asset,
+            file_object,
+            expected_document_id=document_id,
+            expected_storage_key=str(asset.get("storage_path") or ""),
+            expected_bucket=str(asset.get("storage_bucket") or EDOC_STORAGE_BUCKET),
+        )
+        data = supabase_storage_download(
+            str(file_object.get("storage_key") or ""),
+            str(file_object.get("bucket") or EDOC_STORAGE_BUCKET),
+        )
         if sha256_bytes(data) != asset["sha256"]:
             raise ValueError("editor_asset_hash_mismatch")
         result[asset_id] = data
@@ -33508,6 +35851,7 @@ def _supabase_editor_asset_bytes(document_id: str, state: Dict[str, Any]) -> Tup
 
 
 def supabase_preflight_official_editor(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
     latest = _supabase_editor_latest_revision(document_id)
@@ -33704,7 +36048,13 @@ def _supabase_editor_source_bundle_sha256(document_id: str, state: Dict[str, Any
     return sha256_bytes(json.dumps(sorted(hashes, key=lambda item: item["assetId"]), sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
-def supabase_lock_official_editor_submission(document: Dict[str, Any], payload: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
+def supabase_lock_official_editor_submission(
+    document: Dict[str, Any],
+    payload: Dict[str, Any],
+    user: Dict[str, Any],
+    *,
+    persist: bool = True,
+) -> Dict[str, Any]:
     metadata = parse_json_field(document.get("metadata_json"))
     if not metadata.get("pdf_editor_v2"):
         return {}
@@ -33767,20 +36117,87 @@ def supabase_lock_official_editor_submission(document: Dict[str, Any], payload: 
     timestamp = now()
     request = supabase_official_document_stamp_request(document["id"])
     lock_fields = {"seal_id": first["seal_id"], "stamp_page": first["page"], "stamp_x": first["x"], "stamp_y": first["y"], "stamp_width": first["width"], "stamp_height": first["height"], "locked_editor_revision_id": revision_id, "locked_source_sha256": source_hash, "prepared_file_id": prepared_file_id, "prepared_sha256": prepared_sha256, "editor_manifest_sha256": manifest, "editor_schema_version": EDOC_EDITOR_SCHEMA_VERSION, "renderer_version": EDOC_EDITOR_RENDERER_VERSION, "editor_locked_at": timestamp, "status": "pending", "error_message": "", "updated_at": timestamp}
-    if request:
-        supabase_patch("official_document_stamp_requests", request["id"], lock_fields)
-        request_id = request["id"]
-    else:
-        request_id = f"ODSTAMP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
-        supabase_insert("official_document_stamp_requests", {"id": request_id, "document_id": document["id"], "company_id": document["company_id"], "requested_by": user.get("id") or "", "stamped_file_id": None, "stamped_at": "", "created_at": timestamp, **lock_fields})
-    supabase_replace_official_stamp_positions(
-        request_id,
-        first["seal_id"],
-        {"stamp_positions": positions},
-        allow_persisted_bindings=True,
-    )
-    supabase_insert_official_log(document["id"], "lock_editor_revision", user, f"revision_id={revision_id};manifest={manifest};source_sha256={source_hash};prepared_file_id={prepared_file_id};prepared_sha256={prepared_sha256};seal_positions={len(positions)};renderer={EDOC_EDITOR_RENDERER_VERSION}", file_id=prepared_file_id)
-    return {"revision_id": revision_id, "manifest_sha256": manifest, "source_sha256": source_hash, "prepared_file_id": prepared_file_id, "prepared_sha256": prepared_sha256, "seal_positions": len(positions)}
+    request_id = str((request or {}).get("id") or "") or f"ODSTAMP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    request_row = {
+        "id": request_id,
+        "document_id": document["id"],
+        "company_id": document["company_id"],
+        "seal_id": first["seal_id"],
+        "requested_by": (request or {}).get("requested_by") or user.get("id") or "",
+        "stamp_page": first["page"],
+        "stamp_x": first["x"],
+        "stamp_y": first["y"],
+        "stamp_width": first["width"],
+        "stamp_height": first["height"],
+        "status": "pending",
+        "stamped_file_id": (request or {}).get("stamped_file_id"),
+        "locked_editor_revision_id": revision_id,
+        "locked_source_sha256": source_hash,
+        "prepared_file_id": prepared_file_id,
+        "prepared_sha256": prepared_sha256,
+        "editor_manifest_sha256": manifest,
+        "editor_schema_version": EDOC_EDITOR_SCHEMA_VERSION,
+        "renderer_version": EDOC_EDITOR_RENDERER_VERSION,
+        "editor_locked_at": timestamp,
+        "claim_token": None,
+        "claim_owner_id": None,
+        "claim_started_at": None,
+        "claim_expires_at": None,
+        "claim_attempt_count": int((request or {}).get("claim_attempt_count") or 0),
+        "error_message": "",
+        "created_at": (request or {}).get("created_at") or timestamp,
+        "stamped_at": (request or {}).get("stamped_at") or "",
+        "updated_at": timestamp,
+    }
+    position_rows: List[Dict[str, Any]] = []
+    for index, position in enumerate(positions, start=1):
+        position_digest = hashlib.sha256(
+            f"{request_id}\n{revision_id}\n{position.get('page_ref') or position.get('page')}\n{index}".encode("utf-8")
+        ).hexdigest().upper()
+        position_rows.append({
+            "id": f"ODPOS-{position_digest[:32]}",
+            "request_id": request_id,
+            "seal_id": position["seal_id"],
+            "page": position["page"],
+            "x": position["x"],
+            "y": position["y"],
+            "width": position["width"],
+            "height": position["height"],
+            "page_ref": position.get("page_ref") or "",
+            "rotation": position.get("rotation") or 0,
+            "opacity": position.get("opacity") if position.get("opacity") is not None else 1,
+            "z_index": position.get("z_index") or index,
+            "locked_seal_file_id": position.get("locked_seal_file_id") or None,
+            "locked_seal_sha256": position.get("locked_seal_sha256") or "",
+            "locked_render_width_pt": position.get("locked_render_width_pt"),
+            "locked_render_height_pt": position.get("locked_render_height_pt"),
+            "locked_dimension_policy_version": position.get("locked_dimension_policy_version") or "",
+            "order_index": index,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        })
+    if persist:
+        if request:
+            supabase_patch("official_document_stamp_requests", request_id, lock_fields)
+        else:
+            supabase_insert("official_document_stamp_requests", request_row)
+        supabase_replace_official_stamp_positions(
+            request_id,
+            first["seal_id"],
+            {"stamp_positions": positions},
+            allow_persisted_bindings=True,
+        )
+        supabase_insert_official_log(document["id"], "lock_editor_revision", user, f"revision_id={revision_id};manifest={manifest};source_sha256={source_hash};prepared_file_id={prepared_file_id};prepared_sha256={prepared_sha256};seal_positions={len(positions)};renderer={EDOC_EDITOR_RENDERER_VERSION}", file_id=prepared_file_id)
+    return {
+        "revision_id": revision_id,
+        "manifest_sha256": manifest,
+        "source_sha256": source_hash,
+        "prepared_file_id": prepared_file_id,
+        "prepared_sha256": prepared_sha256,
+        "seal_positions": len(positions),
+        "request_row": request_row,
+        "position_rows": position_rows,
+    }
 
 
 def supabase_clone_official_editor_revision_after_reject(document_id: str, actor: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -33942,7 +36359,7 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
         "workflow_template": workflow_template_key,
         "future_rule_inputs": {
             "company_id": company_id,
-            "department": user.get("unit"),
+            "department": applicant_department["name"],
             "document_type": payload.get("document_type"),
             "seal_id": payload.get("seal_id"),
             "dispatch_method": dispatch_method,
@@ -33980,7 +36397,7 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
         "description": payload.get("description") or payload.get("body") or "",
         "method": payload.get("method") or payload.get("辦法") or "",
         "recipient": payload.get("recipient") or payload.get("agency_name") or "",
-        "dispatch_unit": payload.get("dispatch_unit") or user.get("unit") or "",
+        "dispatch_unit": applicant_department["name"],
         "handler_name": payload.get("handler_name") or user.get("name") or "",
         "applicant_id": user["id"],
         "applicant_name": user.get("name") or user.get("email"),
@@ -34487,19 +36904,13 @@ def supabase_resubmit_official_document(
     if document.get("applicant_id") != user.get("id"):
         raise PermissionError("only_applicant_can_resubmit")
     require_official_creation_company(user, document.get("company_id"))
+    if document.get("current_status") != "rejected":
+        if _supabase_committed_resubmit_operation_id(document_id, user["id"]):
+            return supabase_official_document_detail(document_id, session)
+        raise ValueError("official_document_not_rejected")
     requested_at = str(document.get("correction_requested_at") or "")
     if not requested_at:
-        raise ValueError("official_document_not_rejected")
-    log_id, _ = _supabase_official_resubmit_operation_ids(document_id, user["id"], requested_at)
-    if document.get("current_status") != "rejected":
-        state = _supabase_official_resubmit_finalize_state(document_id, user["id"], requested_at, log_id)
-        if state == "committed":
-            return supabase_official_document_detail(document_id, session)
-        if state == "unknown":
-            raise RuntimeError("official_document_resubmit_commit_state_unknown")
-        if not str(document.get("current_status") or "").startswith("pending_") or not document.get("current_step"):
-            raise ValueError("official_document_not_rejected")
-        return _supabase_finalize_official_document_resubmit(document, user, payload, session)
+        raise ValueError("official_document_resubmit_generation_missing")
     rejection_jobs = supabase_filter_rows(
         "official_document_rejection_jobs",
         {"document_id": document_id},
@@ -34508,9 +36919,141 @@ def supabase_resubmit_official_document(
     )
     if rejection_jobs and rejection_jobs[0].get("status") != "completed":
         raise ValueError("official_document_rejection_revision_pending")
-    supabase_submit_official_document(document_id, payload, session)
-    submitted_document = supabase_official_document_row(document_id)
-    return _supabase_finalize_official_document_resubmit(submitted_document, user, payload, session)
+    # Submission and correction-field finalization share one database
+    # transaction.  The old two-RPC sequence could leave a pending workflow
+    # whose correction fields still looked rejected after a timeout.
+    return supabase_submit_official_document(document_id, payload, session)
+
+
+def _supabase_official_submission_operation_ids(
+    document: Dict[str, Any],
+    applicant_id: str,
+) -> Tuple[str, str, str, str]:
+    generation_key = (
+        str(document.get("correction_requested_at") or "")
+        if document.get("current_status") == "rejected" or document.get("correction_requested_at")
+        else str(document.get("created_at") or document.get("id") or "")
+    )
+    digest = hashlib.sha256(
+        f"{document['id']}\n{applicant_id}\n{generation_key}".encode("utf-8")
+    ).hexdigest().upper()
+    return (
+        f"ODSUB-{digest[:32]}",
+        f"AUDSUB-{digest[:32]}",
+        f"ODRS-{digest[:32]}",
+        f"AUDRS-{digest[:32]}",
+    )
+
+
+def _supabase_official_submission_commit_state(
+    document_id: str,
+    applicant_id: str,
+    operation_id: str,
+) -> str:
+    try:
+        document = supabase_official_document_row(document_id)
+        logs = supabase_filter_rows(
+            "official_document_approval_logs",
+            {"id": operation_id, "document_id": document_id, "action": "submit"},
+            limit=2,
+        )
+        steps = supabase_current_official_document_steps(document_id)
+    except Exception:
+        return "unknown"
+    if len(logs) > 1:
+        return "unknown"
+    if logs:
+        evidence = parse_json_any(logs[0].get("decision_evidence_json"), {}) or {}
+        first_step_id = str(evidence.get("first_step_id") or "")
+        workflow_generation = int(evidence.get("workflow_generation") or 0)
+        committed_first = next(
+            (
+                step for step in steps
+                if str(step.get("id") or "") == first_step_id
+                and (
+                    not workflow_generation
+                    or int(step.get("workflow_generation") or 1) == workflow_generation
+                )
+            ),
+            None,
+        )
+        if (
+            str(logs[0].get("actor_id") or "") == applicant_id
+            and document.get("current_status") not in {"draft", "rejected"}
+            and committed_first
+        ):
+            return "committed"
+        return "unknown"
+    if document.get("current_status") in {"draft", "rejected"}:
+        return "not_committed"
+    return "unknown"
+
+
+def _supabase_committed_resubmit_operation_id(
+    document_id: str,
+    applicant_id: str,
+) -> str:
+    """Return a database-backed resubmit witness after correction fields clear."""
+    logs = supabase_filter_rows(
+        "official_document_approval_logs",
+        {"document_id": document_id, "actor_id": applicant_id, "action": "submit"},
+        order="created_at.desc,id.desc",
+        limit=20,
+    )
+    for item in logs:
+        evidence = parse_json_any(item.get("decision_evidence_json"), {}) or {}
+        if evidence.get("resubmitted") is True:
+            operation_id = str(evidence.get("operation_id") or item.get("id") or "")
+            if operation_id and _supabase_official_submission_commit_state(
+                document_id,
+                applicant_id,
+                operation_id,
+            ) == "committed":
+                return operation_id
+    return ""
+
+
+def _supabase_atomic_audit_row(
+    *,
+    audit_id: str,
+    operation_id: str,
+    document: Dict[str, Any],
+    actor: Dict[str, Any],
+    action: str,
+    detail: str,
+    timestamp: str,
+    before_status: str,
+    after_status: str,
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "id": audit_id,
+        "actor": official_actor_name(actor),
+        "action": action,
+        "target_type": "official_documents",
+        "target_id": document["id"],
+        "ip": "",
+        "device": "backend",
+        "detail": redact_text(detail),
+        "event_type": "submit",
+        "severity": "info",
+        "result": "success",
+        "module_code": "official_documents",
+        "resource_type": "official_documents",
+        "resource_id": document["id"],
+        "data_scope": "internal",
+        "actor_user_id": actor.get("id") or "",
+        "actor_email": actor.get("email") or "",
+        "actor_roles_json": [actor.get("role")] if actor.get("role") else [],
+        "target_user_id": "",
+        "target_email": "",
+        "reason": "",
+        "request_id": operation_id,
+        "before_snapshot_json": {"status": before_status},
+        "after_snapshot_json": {"status": after_status},
+        "metadata_json": redact_sensitive(metadata),
+        "created_at": timestamp,
+    }
 
 
 def supabase_submit_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -34519,9 +37062,22 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
     if document["applicant_id"] != user["id"]:
         raise PermissionError("only_applicant_can_submit")
     if document["current_status"] not in {"draft", "rejected"}:
+        operation_id, _, _, _ = _supabase_official_submission_operation_ids(document, user["id"])
+        if _supabase_official_submission_commit_state(
+            document_id,
+            user["id"],
+            operation_id,
+        ) == "committed":
+            return supabase_official_document_detail(document_id, session)
         raise ValueError("official_document_not_submittable")
     if not bool(document.get("requires_stamp", True)):
         raise PermissionError("official_document_stamp_required")
+    expected_status = str(document["current_status"])
+    expected_updated_at = str(document.get("updated_at") or "")
+    is_resubmit = expected_status == "rejected"
+    correction_requested_at = str(document.get("correction_requested_at") or "")
+    if is_resubmit and not correction_requested_at:
+        raise ValueError("official_document_resubmit_generation_missing")
     seal_context = official_seal_context_from_document(document)
     if not seal_context:
         raise ValueError("official_seal_document_category_required")
@@ -34529,7 +37085,10 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
     actor_plan: Dict[str, Dict[str, Any]] | None = None
     workflow_lock_metadata: Dict[str, Any] | None = None
     if is_production():
-        snapshot = current_finance_bridge_snapshot(user.get("email") or "")
+        snapshot = current_finance_bridge_snapshot(
+            user.get("email") or "",
+            portal_authenticated=True,
+        )
         finance_role = strict_finance_role_profile(
             (snapshot.get("identity") or {}).get("role")
         )["logging_role_key"]
@@ -34552,57 +37111,234 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         )
         session = {**(session or {}), "user": user}
     require_official_creation_company(user, document.get("company_id"))
-    # Resolve the live Finance identity and full exact actor chain before any
-    # AV/editor/seal mutation. PostgREST must never guess a global role holder.
+    # Resolve and validate every external witness before entering the database
+    # transaction.  From the first workflow row through the document status
+    # transition, only the service-role RPC below is allowed to mutate state.
     supabase_assert_official_document_uploads_av_clean(document)
-    supabase_lock_official_editor_submission(document, payload, user)
-    stamp_request = supabase_official_document_stamp_request(document_id)
-    if not stamp_request:
-        raise ValueError("official_document_seal_required")
-    stamp_request = supabase_lock_official_stamp_seal_versions(document, stamp_request)
-    supabase_validate_official_document_seal(stamp_request["seal_id"], document["company_id"], require_current=True)
+    editor_plan = supabase_lock_official_editor_submission(
+        document,
+        payload,
+        user,
+        persist=False,
+    )
+    if editor_plan:
+        stamp_request_row = dict(editor_plan["request_row"])
+        stamp_position_rows = [dict(row) for row in editor_plan["position_rows"]]
+        editor_lock_evidence = {
+            key: editor_plan[key]
+            for key in (
+                "revision_id",
+                "manifest_sha256",
+                "source_sha256",
+                "prepared_file_id",
+                "prepared_sha256",
+                "seal_positions",
+            )
+        }
+    else:
+        stamp_request = supabase_official_document_stamp_request(document_id)
+        if not stamp_request:
+            raise ValueError("official_document_seal_required")
+        stamp_plan = supabase_plan_official_stamp_seal_versions(document, stamp_request)
+        stamp_request_row = dict(stamp_plan["request_row"])
+        stamp_position_rows = [dict(row) for row in stamp_plan["position_rows"]]
+        editor_lock_evidence = {}
+    stamp_request_row.update({
+        "document_id": document_id,
+        "company_id": document["company_id"],
+        "requested_by": user["id"],
+        "status": "pending",
+        "error_message": "",
+    })
     if document["source_type"] == "blank_editor":
         supabase_ensure_official_generated_pdf(document, official_actor_name(user))
-    if workflow_lock_metadata is not None:
-        document = supabase_patch(
-            "official_documents",
-            document_id,
-            {"metadata_json": workflow_lock_metadata, "updated_at": now()},
-        )
-        workflow_lock = workflow_lock_metadata["official_seal"]
-        supabase_insert_official_log(
-            document_id,
-            "lock_finance_workflow",
-            user,
-            (
-                f"policy={workflow_lock['conditional_policy_version']};"
-                f"role={workflow_lock['applicant_finance_role']};"
-                f"steps={','.join(workflow_lock['approval_step_keys'])};"
-                f"snapshot={workflow_lock['finance_snapshot_sha256']}"
-            ),
-        )
     applicant = supabase_user_by_id(document["applicant_id"]) or user
-    steps = supabase_create_official_workflow_steps(
+    workflow_plan = supabase_plan_official_workflow_submission(
         document,
         applicant,
         actor_plan=actor_plan,
         workflow_steps=workflow_steps,
     )
+    steps = workflow_plan["steps"]
+    if not steps:
+        raise ValueError("official_workflow_actor_unresolved")
     first = steps[0]
-    review_started_at = now()
-    supabase_patch("official_documents", document_id, {"current_status": OFFICIAL_DOCUMENT_STEP_STATUS[first["step_key"]], "current_step": first["step_key"], "updated_at": review_started_at})
-    supabase_patch("official_document_approval_steps", first["id"], {"review_started_at": review_started_at, "updated_at": review_started_at})
-    supabase_insert_official_log(document_id, "submit", user, payload.get("comment") or "送出發文用印簽核", step_id=first["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    submitted_at = now()
+    first_status = OFFICIAL_DOCUMENT_STEP_STATUS.get(first["step_key"])
+    if not first_status:
+        raise ValueError("official_workflow_existing_steps_invalid")
+    operation_id, audit_id, resubmit_log_id, resubmit_audit_id = (
+        _supabase_official_submission_operation_ids(document, user["id"])
+    )
+    comment = str(payload.get("comment") or "送出發文用印簽核")[:2000]
+    decision_evidence = {
+        "operation_id": operation_id,
+        "first_step_id": first["id"],
+        "first_step_key": first["step_key"],
+        "workflow_generation": workflow_plan["workflow_generation"],
+        "stamp_request_id": stamp_request_row["id"],
+        "resubmitted": is_resubmit,
+        "editor_lock": editor_lock_evidence,
+    }
+    submit_log = {
+        "id": operation_id,
+        "document_id": document_id,
+        "step_id": first["id"],
+        "file_id": editor_lock_evidence.get("prepared_file_id") or None,
+        "actor_id": user["id"],
+        "actor_name": official_actor_name(user),
+        "principal_actor_id": None,
+        "action": "submit",
+        "comment": comment,
+        "decision_evidence_json": decision_evidence,
+        "ip_address": str(payload.get("ip_address") or "")[:120],
+        "user_agent": str(payload.get("user_agent") or "")[:180],
+        "created_at": submitted_at,
+    }
+    submit_audit = _supabase_atomic_audit_row(
+        audit_id=audit_id,
+        operation_id=operation_id,
+        document=document,
+        actor=user,
+        action="submit",
+        detail=comment,
+        timestamp=submitted_at,
+        before_status=expected_status,
+        after_status=first_status,
+        metadata=decision_evidence,
+    )
+    document_patch: Dict[str, Any] = {}
+    if workflow_lock_metadata is not None:
+        document_patch["metadata_json"] = json.dumps(
+            workflow_lock_metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    resubmit_payload: Dict[str, Any] = {"enabled": False}
+    if is_resubmit:
+        resubmit_comment = str(
+            payload.get("comment") or "補正完成，重新由第一關送簽"
+        )[:2000]
+        resubmit_evidence = {
+            **decision_evidence,
+            "expected_correction_requested_at": correction_requested_at,
+            "submit_operation_id": operation_id,
+        }
+        resubmit_log = {
+            **submit_log,
+            "id": resubmit_log_id,
+            "action": "resubmit",
+            "comment": resubmit_comment,
+            "decision_evidence_json": resubmit_evidence,
+        }
+        resubmit_audit = _supabase_atomic_audit_row(
+            audit_id=resubmit_audit_id,
+            operation_id=operation_id,
+            document=document,
+            actor=user,
+            action="resubmit",
+            detail=resubmit_comment,
+            timestamp=submitted_at,
+            before_status="rejected",
+            after_status=first_status,
+            metadata=resubmit_evidence,
+        )
+        resubmit_payload = {
+            "enabled": True,
+            "expected_correction_requested_at": correction_requested_at,
+            "correction_resubmitted_at": submitted_at,
+            "log": resubmit_log,
+            "audit": resubmit_audit,
+        }
+    request_payload = {
+        "operation_id": operation_id,
+        "document_id": document_id,
+        "applicant_id": user["id"],
+        "company_id": document["company_id"],
+        "expected_status": expected_status,
+        "expected_updated_at": expected_updated_at,
+        "submitted_at": submitted_at,
+        "document_patch": document_patch,
+        "stamp_request": stamp_request_row,
+        "stamp_positions": stamp_position_rows,
+        "workflow_generation": workflow_plan["workflow_generation"],
+        "supersede_generation": workflow_plan["supersede_generation"],
+        "steps": steps,
+        "actor_snapshots": [
+            {
+                **snapshot,
+                "snapshot_json": parse_json_any(
+                    snapshot.get("snapshot_json"),
+                    {},
+                ) or {},
+            }
+            for snapshot in workflow_plan["actor_snapshots"]
+        ],
+        "first_step_id": first["id"],
+        "first_step_key": first["step_key"],
+        "first_status": first_status,
+        "submit_log": submit_log,
+        "submit_audit": submit_audit,
+        "resubmit": resubmit_payload,
+    }
+    try:
+        raw = supabase_request(
+            "POST",
+            "rpc/edoc_commit_official_document_submission",
+            {"p_request": request_payload},
+        )
+        result = (
+            raw[0]
+            if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], dict)
+            else raw
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("committed") is not True
+            or str(result.get("document_id") or "") != document_id
+            or str(result.get("operation_id") or "") != operation_id
+            or str(result.get("first_step_id") or "") != str(first["id"])
+            or str(result.get("current_status") or "") != first_status
+            or str(result.get("current_step") or "") != str(first["step_key"])
+            or int(result.get("workflow_generation") or 0)
+            != int(workflow_plan["workflow_generation"])
+        ):
+            raise RuntimeError("official_document_submit_invalid_response")
+    except Exception as submit_error:
+        state = _supabase_official_submission_commit_state(
+            document_id,
+            user["id"],
+            operation_id,
+        )
+        if state != "committed":
+            if state == "unknown":
+                raise RuntimeError(
+                    "official_document_submit_commit_state_unknown"
+                ) from submit_error
+            raise
     if first.get("approver_role"):
-        approver = supabase_user_by_id(first.get("approver_user_id") or "") or {}
-        supabase_create_and_deliver_notification({
-            "type": "發文簽核",
-            "title": f"{document['title']} 待{first['step_name']}簽核",
-            **exact_notification_target_payload(approver, document.get("company_id") or ""),
-            "source": document_id,
-            "priority": "高",
-            "body": f"{document.get('applicant_name') or '申請人'} 已送出發文用印申請。",
-        })
+        try:
+            approver = supabase_user_by_id(first.get("approver_user_id") or "") or {}
+            supabase_create_and_deliver_notification({
+                "type": "發文簽核",
+                "title": f"{document['title']} 待{first['step_name']}簽核",
+                **exact_notification_target_payload(
+                    approver,
+                    document.get("company_id") or "",
+                ),
+                "source": document_id,
+                "priority": "高",
+                "body": f"{document.get('applicant_name') or '申請人'} 已送出發文用印申請。",
+            })
+        except Exception as notification_error:
+            log_structured(
+                "warning",
+                "official_document_submit_notification_failed",
+                document_id=document_id,
+                step_id=first["id"],
+                error=redact_text(str(notification_error)),
+            )
     return supabase_official_document_detail(document_id, session)
 
 
@@ -35978,6 +38714,81 @@ def supabase_close_inbound_document(inbound_id: str, payload: Dict[str, Any], se
     )
 
 
+def _assert_supabase_internal_dispatch_scope(
+    dispatch: Dict[str, Any],
+    session: Dict[str, Any] | None,
+) -> None:
+    user = supabase_official_session_user(session)
+    inbound_id = str(dispatch.get("inbound_document_id") or "")
+    if inbound_id:
+        supabase_inbound_document_detail(inbound_id, session)
+        return
+    official_id = str(dispatch.get("official_document_id") or "")
+    if official_id:
+        document = supabase_official_document_row(official_id)
+        company = supabase_get("companies", str(document.get("company_id") or "")) or {}
+        if not _same_finance_user_scope(
+            user,
+            {
+                "company_id": document.get("company_id"),
+                "finance_tenant_id": company.get("finance_tenant_id"),
+            },
+        ):
+            raise PermissionError("internal_dispatch_company_forbidden")
+        return
+    sender = supabase_user_by_id(str(dispatch.get("sender_user_id") or ""))
+    if not sender or not _same_finance_user_scope(user, sender):
+        raise PermissionError("internal_dispatch_company_forbidden")
+
+
+def _validated_supabase_internal_dispatch_recipients(
+    sender: Dict[str, Any],
+    recipients: List[Dict[str, Any]],
+) -> List[Tuple[Dict[str, Any], Dict[str, Any] | None]]:
+    company = supabase_get("companies", str(sender.get("company_id") or "")) or {}
+    if is_production() and not _same_finance_user_scope(
+        sender,
+        {
+            "company_id": company.get("id"),
+            "finance_tenant_id": company.get("finance_tenant_id"),
+        },
+    ):
+        raise PermissionError("internal_dispatch_company_forbidden")
+    validated: List[Tuple[Dict[str, Any], Dict[str, Any] | None]] = []
+    for recipient in recipients:
+        recipient_user_id = str(
+            recipient.get("user_id") or recipient.get("recipient_user_id") or ""
+        )
+        department_id = str(
+            recipient.get("department_id")
+            or recipient.get("recipient_department_id")
+            or ""
+        )
+        if recipient_user_id:
+            recipient_user = supabase_user_by_id(recipient_user_id)
+            if not recipient_user or recipient_user.get("status") != "啟用":
+                raise ValueError("internal_dispatch_recipient_not_found")
+            if not _same_finance_user_scope(sender, recipient_user):
+                raise PermissionError("internal_dispatch_recipient_company_forbidden")
+            validated.append((recipient, recipient_user))
+            continue
+        if not department_id:
+            raise ValueError("internal_dispatch_recipient_required")
+        departments = supabase_filter_rows(
+            "department_registry",
+            {
+                "id": department_id,
+                "company_name": company.get("name") or "",
+                "status": "啟用",
+            },
+            limit=1,
+        )
+        if not departments:
+            raise PermissionError("internal_dispatch_recipient_company_forbidden")
+        validated.append((recipient, None))
+    return validated
+
+
 def supabase_internal_dispatch_detail(dispatch_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
     row = supabase_get("internal_dispatches", dispatch_id)
     if not row:
@@ -35986,6 +38797,7 @@ def supabase_internal_dispatch_detail(dispatch_id: str, session: Dict[str, Any] 
     row["recipients"] = supabase_filter_rows("internal_dispatch_recipients", {"dispatch_id": dispatch_id}, order="created_at.asc", limit=300)
     if session is not None:
         user = supabase_official_session_user(session)
+        _assert_supabase_internal_dispatch_scope(row, session)
         allowed = (
             row.get("sender_user_id") == user.get("id")
             or any(item.get("recipient_user_id") == user.get("id") for item in row["recipients"])
@@ -36008,13 +38820,21 @@ def supabase_internal_dispatch_detail(dispatch_id: str, session: Dict[str, Any] 
                     "scan_status": attachment.get("scan_status"),
                 }
     row["logs"] = supabase_filter_rows("internal_dispatch_logs", {"dispatch_id": dispatch_id}, order="created_at.desc", limit=300)
-    row["inbound_document"] = supabase_inbound_document_detail(row["inbound_document_id"]) if row.get("inbound_document_id") else None
+    row["inbound_document"] = supabase_inbound_document_detail(row["inbound_document_id"], session) if row.get("inbound_document_id") else None
     return row
 
 
 def supabase_internal_dispatch_recipient_directory(session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    require_internal_dispatch_creator(session)
-    users = supabase_filter_rows("users", {"status": "啟用"}, order="unit.asc,name.asc", limit=500)
+    user = require_internal_dispatch_creator(session)
+    filters: Dict[str, Any] = {"status": "啟用"}
+    if user.get("company_id") and user.get("finance_tenant_id"):
+        filters.update({
+            "company_id": user["company_id"],
+            "finance_tenant_id": user["finance_tenant_id"],
+        })
+    elif is_production():
+        raise PermissionError("internal_dispatch_company_forbidden")
+    users = supabase_filter_rows("users", filters, order="unit.asc,name.asc", limit=500)
     return [
         {"id": user.get("id"), "name": user.get("name"), "unit": user.get("unit"), "role": user.get("role")}
         for user in users
@@ -36048,7 +38868,11 @@ def supabase_list_internal_dispatches(query: Dict[str, List[str]] | None, sessio
         if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
             if row.get("sender_user_id") != user.get("id") and not any(item.get("recipient_user_id") == user.get("id") for item in recipients):
                 continue
-        detail = supabase_internal_dispatch_detail(row["id"], session)
+        try:
+            detail = supabase_internal_dispatch_detail(row["id"], session)
+        except PermissionError:
+            # `all_records` is company-scoped, never tenant-global.
+            continue
         result.append(detail)
     return result
 
@@ -36060,18 +38884,28 @@ def supabase_create_internal_dispatch(payload: Dict[str, Any], session: Dict[str
         raise ValueError("internal_dispatch_recipients_required")
     if not all(isinstance(recipient, dict) for recipient in recipients):
         raise ValueError("invalid_internal_dispatch_recipient")
+    validated_recipients = _validated_supabase_internal_dispatch_recipients(
+        user,
+        recipients,
+    )
     default_action_required = bool(payload.get("reply_required", False))
     recipient_actions = [bool(recipient.get("action_required", default_action_required)) for recipient in recipients]
     dispatch_id = payload.get("id") or f"IDISP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     inbound_document_id = payload.get("inbound_document_id") or ""
     if inbound_document_id:
-        supabase_inbound_document_detail(inbound_document_id)
+        supabase_inbound_document_detail(inbound_document_id, session)
+    official_document_id = payload.get("official_document_id") or payload.get("document_id") or ""
+    if official_document_id:
+        _assert_supabase_internal_dispatch_scope(
+            {"official_document_id": official_document_id},
+            session,
+        )
     reply_required = any(recipient_actions)
     due_days = int(pdf_safe_float(payload.get("reply_due_days"), 0)) if reply_required else 0
     due_at = payload.get("due_at") or ((datetime.now() + timedelta(days=due_days)).strftime("%Y-%m-%d %H:%M:%S") if due_days else "")
     row = supabase_insert("internal_dispatches", {
         "id": dispatch_id,
-        "official_document_id": payload.get("official_document_id") or payload.get("document_id") or None,
+        "official_document_id": official_document_id or None,
         "inbound_document_id": inbound_document_id or None,
         "title": payload.get("title") or payload.get("subject") or "內部派文",
         "subject": payload.get("subject") or payload.get("title") or "內部派文",
@@ -36089,10 +38923,9 @@ def supabase_create_internal_dispatch(payload: Dict[str, Any], session: Dict[str
         "updated_at": now(),
         "closed_at": "",
     })
-    for index, recipient in enumerate(recipients, start=1):
+    for index, (recipient, recipient_user) in enumerate(validated_recipients, start=1):
         action_required = recipient_actions[index - 1]
         recipient_user_id = recipient.get("user_id") or recipient.get("recipient_user_id") or ""
-        recipient_user = supabase_user_by_id(recipient_user_id) if recipient_user_id else None
         rec = supabase_insert("internal_dispatch_recipients", {
             "id": f"IDREC-{int(time.time() * 1000)}-{index}-{secrets.token_hex(2).upper()}",
             "dispatch_id": dispatch_id,
@@ -37077,16 +39910,31 @@ def supabase_recover_legacy_finance_snapshot_tenant_scope(
 def _finance_login_authorization_binding(
     projection_binding: Dict[str, str],
     applicant: Dict[str, Any],
+    *,
+    projected_user: Dict[str, Any] | None = None,
 ) -> Dict[str, str]:
     """Bind signed Finance authorization fields to one exact eDoc projection."""
     profile = applicant.get("profile") or {}
+    projected = projected_user or {}
     binding = {
         **projection_binding,
         "role": roster_text(profile.get("role")),
         "logging_role_key": roster_text(profile.get("logging_role_key")),
         "job_level": roster_text(profile.get("job_level")),
-        "unit": roster_text(applicant.get("department_name") or applicant.get("department_code")),
-        "title": roster_text(applicant.get("job_title") or applicant.get("role_label")),
+        # A legacy v1 login snapshot does not carry the enriched department
+        # name or job title that the durable Finance outbox already projected.
+        # Reuse those server-owned display/scope fields from the exact bound
+        # row instead of treating the richer outbox projection as tampering.
+        "unit": roster_text(
+            projected.get("unit")
+            or applicant.get("department_name")
+            or applicant.get("department_code")
+        ),
+        "title": roster_text(
+            projected.get("title")
+            or applicant.get("job_title")
+            or applicant.get("role_label")
+        ),
         "status": "啟用" if applicant.get("projection_state") == "active" else "",
         "projection_state": roster_text(applicant.get("projection_state")),
     }
@@ -37100,6 +39948,116 @@ def _finance_login_authorization_binding(
     if binding["projection_state"] != "active":
         raise FinanceBridgeDenied("finance_identity_inactive")
     return binding
+
+
+def _supabase_require_legacy_finance_user_identity_binding(
+    binding: Dict[str, str],
+    applicant: Dict[str, Any],
+    user: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Revalidate immutable v1 identity/authority before any Portal promotion."""
+    profile = applicant.get("profile") or {}
+    try:
+        external_payload = user.get("external_account_payload_json") if isinstance(user, dict) else {}
+        if isinstance(external_payload, str):
+            external_payload = json.loads(external_payload)
+    except (TypeError, json.JSONDecodeError):
+        external_payload = {}
+    finance_profile = (
+        external_payload.get("financeProfile")
+        if isinstance(external_payload, dict)
+        and isinstance(external_payload.get("financeProfile"), dict)
+        else {}
+    )
+    projected_department_code = roster_text(finance_profile.get("departmentCode"))
+    projected_unit = roster_text(
+        finance_profile.get("departmentName") or projected_department_code
+    )
+    projected_title = roster_text(
+        finance_profile.get("jobTitle") or applicant.get("role_label")
+    )
+    state_pair = (
+        roster_text((user or {}).get("status")),
+        roster_text((user or {}).get("finance_source_status")),
+    )
+    if not isinstance(user, dict) or (
+        roster_text(user.get("id")) != binding["user_id"]
+        or roster_text(user.get("account_source")).lower() != "finance"
+        or roster_text(user.get("email")).lower() != binding["email"]
+        or roster_text(user.get("logging_account_id")) != binding["finance_user_id"]
+        or roster_text(user.get("finance_employee_id")) != binding["finance_user_id"]
+        or roster_text(user.get("company_id")) != binding["company_id"]
+        or roster_text(user.get("finance_tenant_id")) != binding["tenant_id"]
+        or roster_text(user.get("role")) != roster_text(profile.get("role"))
+        or roster_text(user.get("logging_role_key")) != roster_text(profile.get("logging_role_key"))
+        or roster_text(user.get("job_level")) != roster_text(profile.get("job_level"))
+        or projected_department_code != roster_text(applicant.get("department_code"))
+        or roster_text(user.get("unit")) != projected_unit
+        or roster_text(user.get("title")) != projected_title
+        or state_pair not in {("啟用", "active"), ("待啟用", "pending")}
+    ):
+        raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
+    return user
+
+
+def _supabase_promote_portal_verified_legacy_finance_user(
+    binding: Dict[str, str],
+    applicant: Dict[str, Any],
+    user: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Atomically activate one pending Finance projection after signed Portal SSO."""
+    user = _supabase_require_legacy_finance_user_identity_binding(
+        binding,
+        applicant,
+        user,
+    )
+    if (
+        roster_text(user.get("status")) == "啟用"
+        and roster_text(user.get("finance_source_status")) == "active"
+    ):
+        return user
+
+    query = urllib.parse.urlencode({
+        "id": f"eq.{binding['user_id']}",
+        "account_source": "eq.finance",
+        "email": f"eq.{binding['email']}",
+        "logging_account_id": f"eq.{binding['finance_user_id']}",
+        "finance_employee_id": f"eq.{binding['finance_user_id']}",
+        "company_id": f"eq.{binding['company_id']}",
+        "finance_tenant_id": f"eq.{binding['tenant_id']}",
+        "role": f"eq.{roster_text((applicant.get('profile') or {}).get('role'))}",
+        "logging_role_key": f"eq.{roster_text((applicant.get('profile') or {}).get('logging_role_key'))}",
+        "job_level": f"eq.{roster_text((applicant.get('profile') or {}).get('job_level'))}",
+        "status": "eq.待啟用",
+        "finance_source_status": "eq.pending",
+    })
+    rows = supabase_request(
+        "PATCH",
+        f"users?{query}",
+        {
+            "status": "啟用",
+            "finance_source_status": "active",
+            "last_synced_from_logging_at": now(),
+        },
+    )
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
+    promoted = _supabase_require_legacy_finance_user_identity_binding(
+        binding,
+        {**applicant, "projection_state": "active"},
+        rows[0],
+    )
+    supabase_insert("audit_logs", {
+        "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "actor": "Finance Google SSO",
+        "action": "Portal 驗證啟用",
+        "target_type": "finance_user_projection",
+        "target_id": binding["user_id"],
+        "ip": "vercel",
+        "detail": "已由公司 Portal 的確認 Google 身分啟用既有 Finance 投影。",
+        "created_at": now(),
+    })
+    return promoted
 
 
 def _supabase_require_legacy_finance_user_binding(
@@ -37446,31 +40404,26 @@ def sync_supabase_finance_login_snapshot(
             raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
         legacy_projection_binding = legacy_bindings["applicant"]
     applicant = normalized["applicant"]
-    legacy_applicant_binding = (
-        _finance_login_authorization_binding(legacy_projection_binding, applicant)
-        if legacy_projection_binding is not None
-        else None
-    )
     # The common Portal and Finance use separate Supabase Auth namespaces.
     # A signed Portal handoff is the Google authentication evidence for eDoc;
     # an otherwise active Finance employee must not be forced to pre-bind a
     # second Auth UUID before their first eDoc visit.
     if (
-        legacy_applicant_binding is None
-        and portal_authenticated
+        portal_authenticated
         and applicant["projection_state"] == "pending"
     ):
         applicant["projection_state"] = "active"
     actor_sources = normalized["actors"]
     existing = _supabase_finance_snapshot_user_candidate(applicant)
-    if legacy_applicant_binding is not None:
-        existing = _supabase_require_legacy_finance_user_binding(
-            legacy_applicant_binding,
+    if legacy_projection_binding is not None:
+        existing = _supabase_require_legacy_finance_user_identity_binding(
+            legacy_projection_binding,
+            applicant,
             existing,
         )
         company = _supabase_require_legacy_finance_company_binding(
-            legacy_applicant_binding,
-            supabase_get("companies", legacy_applicant_binding["company_id"]),
+            legacy_projection_binding,
+            supabase_get("companies", legacy_projection_binding["company_id"]),
         )
     else:
         company, _ = supabase_upsert_finance_company_snapshot(
@@ -37490,18 +40443,34 @@ def sync_supabase_finance_login_snapshot(
     if not launch_company_in_scope(roster_text(company.get("id"))):
         raise FinanceBridgeDenied("finance_company_outside_launch_scope")
 
-    if legacy_applicant_binding is not None:
+    if legacy_projection_binding is not None:
         # v1 is a compatibility read-through for projections already delivered
         # by Finance. It may neither insert nor adopt an account/company during
         # login. Re-read both bindings immediately before returning so a row
         # deleted or rebound after the recovery lookup fails closed.
-        current_user = _supabase_require_legacy_finance_user_binding(
-            legacy_applicant_binding,
-            supabase_get("users", legacy_applicant_binding["user_id"]),
+        current_user = _supabase_require_legacy_finance_user_identity_binding(
+            legacy_projection_binding,
+            applicant,
+            supabase_get("users", legacy_projection_binding["user_id"]),
         )
         current_company = _supabase_require_legacy_finance_company_binding(
+            legacy_projection_binding,
+            supabase_get("companies", legacy_projection_binding["company_id"]),
+        )
+        if portal_authenticated:
+            current_user = _supabase_promote_portal_verified_legacy_finance_user(
+                legacy_projection_binding,
+                applicant,
+                current_user,
+            )
+        legacy_applicant_binding = _finance_login_authorization_binding(
+            legacy_projection_binding,
+            applicant,
+            projected_user=current_user,
+        )
+        current_user = _supabase_require_legacy_finance_user_binding(
             legacy_applicant_binding,
-            supabase_get("companies", legacy_applicant_binding["company_id"]),
+            current_user,
         )
         if (
             applicant["projection_state"] != "active"
@@ -37815,9 +40784,12 @@ def supabase_apply_finance_organization_sync_event(
                 "p_organization": organization,
             },
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         error_text = str(exc)
-        if "finance_organization_revision_conflict" in error_text or "finance_member_sync_event_id_conflict" in error_text:
+        if error_text in {
+            "finance_organization_revision_conflict",
+            "finance_member_sync_event_id_conflict",
+        }:
             raise FinanceBridgeDenied("finance_organization_revision_conflict") from exc
         raise
     if isinstance(raw, list):
@@ -38228,7 +41200,10 @@ def supabase_authenticate_preprovisioned_logging_bridge(
 ) -> Tuple[Dict[str, Any], int]:
     """Create a session from signed Portal identity plus live Finance authority."""
     _portal_auth_user_id, email = portal_finance_identity(source_user)
-    snapshot = current_finance_bridge_snapshot(email)
+    snapshot = current_finance_bridge_snapshot(
+        email,
+        portal_authenticated=True,
+    )
     user = sync_supabase_finance_login_snapshot(
         snapshot,
         portal_authenticated=True,
@@ -38532,7 +41507,10 @@ def supabase_current_session(token: str) -> Dict[str, Any] | None:
         return None
     if is_production() and finance_session_revalidation_due(user):
         try:
-            snapshot = current_finance_bridge_snapshot(user.get("email") or "")
+            snapshot = current_finance_bridge_snapshot(
+                user.get("email") or "",
+                portal_authenticated=True,
+            )
             refreshed = sync_supabase_finance_login_snapshot(
                 snapshot,
                 portal_authenticated=True,
@@ -38650,6 +41628,7 @@ def supabase_exchange_outboxes(filters: Dict[str, str]) -> List[Dict[str, Any]]:
 
 
 def supabase_exchange_queue_document(payload: Dict[str, Any]) -> Dict[str, Any]:
+    assert_formal_exchange_allowed(payload)
     document_id = payload.get("document_id")
     if not document_id:
         raise ValueError("document_id is required")
@@ -38797,6 +41776,7 @@ def supabase_exchange_receive_documents(payload: Dict[str, Any]) -> Dict[str, An
 
 
 def supabase_exchange_acknowledge_received(payload: Dict[str, Any]) -> Dict[str, Any]:
+    assert_formal_exchange_allowed(payload)
     inbox = supabase_get("exchange_inbox", payload.get("inbox_id") or payload.get("id") or "")
     if not inbox:
         return {"ok": False, "error": "inbox_not_found"}
@@ -38995,6 +41975,7 @@ def supabase_run_background_job(job_id: str) -> Dict[str, Any]:
 
 
 def supabase_run_due_background_jobs(all_enabled: bool = False) -> Dict[str, Any]:
+    upload_cleanup = supabase_cleanup_stale_official_editor_uploads()
     jobs = supabase_list("background_jobs", {})
     if not all_enabled:
         jobs = [job for job in jobs if job.get("status") == "啟用" and (job.get("next_run_at") or "") <= now()]
@@ -39002,7 +41983,7 @@ def supabase_run_due_background_jobs(all_enabled: bool = False) -> Dict[str, Any
         jobs = [job for job in jobs if job.get("status") == "啟用"]
     jobs.sort(key=lambda item: item.get("next_run_at") or "")
     results = [supabase_run_background_job(job["id"]) for job in jobs]
-    return {"count": len(results), "results": results}
+    return {"count": len(results), "results": results, "editorUploadCleanup": upload_cleanup}
 
 
 def supabase_notification_credential_status(channel: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -39027,14 +42008,16 @@ def supabase_notification_credential_status(channel: str, rows: List[Dict[str, A
 
 
 def supabase_monitoring_snapshot() -> Dict[str, Any]:
-    readiness = production_readiness()
+    internal_mode = launch_scope() == "internal_official"
+    readiness = internal_readiness() if internal_mode else production_readiness()
+    formal_readiness = production_readiness()
     alerts: List[Dict[str, str]] = []
     for name in readiness["missing"]:
-        append_alert(alerts, "critical" if is_production() else "warning", "ENV-MISSING", f"缺少正式環境變數 {name}", "到 Vercel Project Settings 補齊後重新部署。")
+        append_alert(alerts, "critical" if is_production() else "warning", "ENV-MISSING", f"缺少目前上線範圍所需環境變數 {name}", "到 Vercel Project Settings 補齊後重新部署。")
     for item in readiness["blockers"]:
-        append_alert(alerts, "critical", "READINESS-BLOCKER", item, "先處理 production readiness blocker，再開放正式交換。")
+        append_alert(alerts, "critical", "READINESS-BLOCKER", item, "先處理目前上線範圍的 readiness blocker。")
     for item in readiness["warnings"]:
-        append_alert(alerts, "warning", "READINESS-WARNING", item, "排入上線前檢核清單，避免正式營運缺口。")
+        append_alert(alerts, "warning", "READINESS-WARNING", item, "排入上線前檢核清單，避免營運缺口。")
 
     exchange_tasks = supabase_list("exchange_tasks", {})
     deliveries = supabase_list("notification_deliveries", {})
@@ -39051,7 +42034,7 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
         "notification_failed": len([item for item in deliveries if item.get("status") in {"失敗", "未設定", "憑證異常"}]),
         "job_failed": len([item for item in job_runs if item.get("status") in {"失敗", "錯誤"}]),
     }
-    if counts["exchange_failed"]:
+    if counts["exchange_failed"] and not internal_mode:
         append_alert(alerts, "critical", "EXCHANGE-FAILED", f"{counts['exchange_failed']} 筆交換任務失敗或逾期。", "由總務工作台重送或執行翌日查核。")
     if counts["notification_failed"]:
         append_alert(alerts, "warning", "NOTIFICATION-FAILED", f"{counts['notification_failed']} 筆通知派送失敗。", "到通知中心重送，並檢查 Email/Line 憑證。")
@@ -39060,19 +42043,20 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
 
     last_job = job_runs[0] if job_runs else None
     last_job_age = age_minutes(last_job.get("finished_at") if last_job else None)
-    if is_production() and (last_job_age is None or last_job_age > EDOC_MONITORING_EXPECTED_CRON_MINUTES + 120):
+    if cron_run_is_stalled(last_job_age):
         append_alert(alerts, "critical", "CRON-STALLED", "正式環境背景排程超過預期時間未執行。", "檢查 Vercel Cron、CRON_SECRET 與 /api/cron/run-due 執行紀錄。")
 
     for credential in credentials:
         if credential.get("status") in {"缺少環境憑證", "已到期", "未設定"}:
-            append_alert(alerts, "critical" if is_production() else "warning", "CREDENTIAL-INVALID", f"{credential['channel']} 憑證狀態：{credential.get('status')}", "補齊正式憑證、有效期限與環境變數後重新驗證。")
+            append_alert(alerts, "warning" if internal_mode else "critical" if is_production() else "warning", "CREDENTIAL-INVALID", f"{credential['channel']} 憑證狀態：{credential.get('status')}", "補齊正式憑證、有效期限與環境變數後重新驗證。")
         elif credential.get("status") == "即將到期":
             append_alert(alerts, "warning", "CREDENTIAL-EXPIRING", f"{credential['channel']} 憑證即將到期。", "在到期前完成換證與驗證。")
     signing_service = signing_service_status()
-    if signing_service["productionBlocked"]:
-        append_alert(alerts, "critical", "SIGNING-SERVICE-INCOMPLETE", f"正式簽章服務尚未設定：{', '.join(signing_service['missing'])}", "設定 HSM/KMS、信任根憑證、TSA、OCSP、CRL 與 EDOC_SIGNING_SECRET 後重新部署。")
-    elif not signing_service["ready"]:
-        append_alert(alerts, "warning", "SIGNING-SERVICE-SIMULATION", f"簽章服務仍為模擬或不完整：{', '.join(signing_service['missing'])}", "正式上線前完成外部簽章服務接入。")
+    if not internal_mode:
+        if signing_service["productionBlocked"]:
+            append_alert(alerts, "critical", "SIGNING-SERVICE-INCOMPLETE", f"正式簽章服務尚未設定：{', '.join(signing_service['missing'])}", "設定 HSM/KMS、信任根憑證、TSA、OCSP、CRL 與 EDOC_SIGNING_SECRET 後重新部署。")
+        elif not signing_service["ready"]:
+            append_alert(alerts, "warning", "SIGNING-SERVICE-SIMULATION", f"簽章服務仍為模擬或不完整：{', '.join(signing_service['missing'])}", "正式上線前完成外部簽章服務接入。")
     storage_service = storage_service_status()
     if storage_service["productionBlocked"]:
         append_alert(alerts, "critical", "STORAGE-SERVICE-INCOMPLETE", f"正式檔案儲存與防毒尚未設定：{', '.join(storage_service['missing'])}", "設定 Supabase Storage private bucket、檔案加密、短效 URL、正式 AV endpoint/API key 後重新部署。")
@@ -39081,12 +42065,18 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
 
     checks = {
         "database": {"status": "ok", "mode": "supabase", "detail": SUPABASE_URL},
-        "readiness": {"status": "ok" if readiness["ready"] else "needs_action", "missing": readiness["missing"], "blockers": readiness["blockers"]},
+        "readiness": {"scope": "internal" if internal_mode else "formal", "status": "ok" if readiness["ready"] else "needs_action", "missing": readiness["missing"], "blockers": readiness["blockers"]},
+        "formalReadiness": {"status": "disabled" if internal_mode else "ok" if formal_readiness["ready"] else "needs_action", "ready": bool(formal_readiness["ready"]), "affectsCurrentScope": not internal_mode},
         "storage": {"status": "ok" if storage_service["ready"] else "needs_action", **storage_service},
-        "cron": {"status": "ok" if last_job_age is not None else "not_yet_run", "lastRun": last_job, "ageMinutes": last_job_age},
+        "cron": {
+            "status": cron_monitoring_status(last_job_age),
+            "lastRun": last_job,
+            "ageMinutes": last_job_age,
+            "stalledAfterMinutes": EDOC_MONITORING_EXPECTED_CRON_MINUTES,
+        },
         "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials},
-        "signing": {"status": "ok" if signing_service["ready"] else "needs_action", **signing_service},
-        "jAgent": {"status": "needs_action" if counts["exchange_failed"] else "ok", "failedTasks": counts["exchange_failed"]},
+        "signing": {"status": "disabled" if internal_mode else "ok" if signing_service["ready"] else "needs_action", "affectsCurrentScope": not internal_mode, **signing_service},
+        "jAgent": {"status": "disabled" if internal_mode else "needs_action" if counts["exchange_failed"] else "ok", "affectsCurrentScope": not internal_mode, "failedTasks": counts["exchange_failed"]},
     }
     status = monitoring_status(alerts)
     return {
@@ -39341,13 +42331,25 @@ def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=EDOC_RESTORE_DRILL_TIMEOUT_SECONDS) as response:
+        with _urlopen_no_redirect(request, timeout=EDOC_RESTORE_DRILL_TIMEOUT_SECONDS) as response:
             evidence = json.loads(response.read().decode("utf-8") or "{}")
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+        error_code = type(exc).__name__
+        if isinstance(exc, urllib.error.HTTPError):
+            code = int(getattr(exc, "code", 0) or 0)
+            _consume_http_error(exc)
+            error_code = f"restore_runner_http_{code}"
         return record({
             "id": drill_id, "ok": False, "blocked": True, "result": "blocked",
             "created_at": now(), "scope": scope, "target_env": target_env,
-            "detail": "isolated_restore_runner_failed", "error_code": type(exc).__name__,
+            "detail": "isolated_restore_runner_failed", "error_code": error_code,
+            "checks": {"database_restored": False, "storage_restored": False, "hash_match": False, "target_isolated": False},
+        })
+    except Exception:
+        return record({
+            "id": drill_id, "ok": False, "blocked": True, "result": "blocked",
+            "created_at": now(), "scope": scope, "target_env": target_env,
+            "detail": "isolated_restore_runner_failed", "error_code": "restore_runner_transport_failed",
             "checks": {"database_restored": False, "storage_restored": False, "hash_match": False, "target_isolated": False},
         })
 
@@ -41190,6 +44192,12 @@ class Handler(SimpleHTTPRequestHandler):
                 pass
             self.send_json({"error": code}, 422, response_headers)
         except (FinanceBridgeUnavailable, RuntimeError) as exc:
+            log_structured(
+                "error",
+                "finance_member_sync_backend_unavailable",
+                diagnostic=safe_runtime_diagnostic_code(exc),
+                exceptionType=type(exc).__name__,
+            )
             try:
                 supabase_record_finance_sync_receipt(
                     payload,
@@ -41213,6 +44221,32 @@ class Handler(SimpleHTTPRequestHandler):
             return True
         self.send_json(
             {"error": "forbidden", "detail": "operations_maintenance_forbidden"},
+            403,
+        )
+        return False
+
+    def current_request_session(self) -> Dict[str, Any] | None:
+        """Resolve one authenticated session before database-mode branching."""
+        token = self.bearer_token()
+        if USE_SUPABASE:
+            return supabase_current_session(token)
+        with connect() as conn:
+            session = current_session(conn, token)
+            conn.commit()
+            return session
+
+    def require_production_operations_artifact_access(self) -> bool:
+        session = self.current_request_session()
+        if not session:
+            self.send_json({"error": "unauthorized"}, 401)
+            return False
+        return self.require_operations_maintenance_access(session)
+
+    def require_exchange_mutation_access(self, session: Dict[str, Any] | None) -> bool:
+        if session_has_any_permission(session, ["exchange.manage"]):
+            return True
+        self.send_json(
+            {"error": "forbidden", "detail": "exchange_manage_forbidden"},
             403,
         )
         return False
@@ -41260,6 +44294,9 @@ class Handler(SimpleHTTPRequestHandler):
                 )
                 self.send_json(result, 200 if result["ok"] else 503)
                 return
+            if is_production_operations_artifact_endpoint(method, parts):
+                if not self.require_production_operations_artifact_access():
+                    return
             if method == "GET" and parts == ["production", "supabase-cutover-sql"]:
                 self.send_production_cutover_sql()
                 return
@@ -41629,6 +44666,12 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["schema"]:
                     self.send_json({"tables": TABLES})
                     return
+                if method == "POST" and (
+                    (parts and parts[0] == "exchange")
+                    or parts == ["actions", "pull-inbound"]
+                ):
+                    if not self.require_exchange_mutation_access(session):
+                        return
                 if method == "GET" and parts == ["exchange", "gateway-status"]:
                     self.send_json(exchange_gateway_status())
                     return
@@ -41899,6 +44942,9 @@ class Handler(SimpleHTTPRequestHandler):
                         return
                     if method == "POST" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "finalize":
                         self.send_json(supabase_finalize_official_editor_upload(document_id, parts[3], self.read_json(), session))
+                        return
+                    if method == "POST" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "fail":
+                        self.send_json(supabase_fail_official_editor_upload(document_id, parts[3], self.read_json(), session))
                         return
                     if method == "GET" and len(parts) == 5 and parts[2] == "editor-assets" and parts[4] == "download":
                         self.send_editor_asset(document_id, parts[3], supabase_mode=True)
@@ -42484,6 +45530,13 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["schema"]:
                     self.send_json({"tables": TABLES})
                     return
+                if method == "POST" and (
+                    (parts and parts[0] == "exchange")
+                    or parts == ["actions", "pull-inbound"]
+                ):
+                    session = current_session(conn, self.bearer_token())
+                    if not self.require_exchange_mutation_access(session):
+                        return
                 if method == "GET" and parts == ["exchange", "gateway-status"]:
                     self.send_json(exchange_gateway_status())
                     return
@@ -42926,6 +45979,11 @@ class Handler(SimpleHTTPRequestHandler):
                         conn.commit()
                         self.send_json(result)
                         return
+                    if method == "POST" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "fail":
+                        result = fail_official_editor_upload(conn, document_id, parts[3], self.read_json(), session)
+                        conn.commit()
+                        self.send_json(result)
+                        return
                     if method == "GET" and len(parts) == 5 and parts[2] == "editor-assets" and parts[4] == "download":
                         self.send_editor_asset(document_id, parts[3], supabase_mode=False)
                         return
@@ -43283,14 +46341,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "not_found", "path": path}, 404)
         except ValueError as exc:
             detail = str(exc)
-            status = 503 if detail.startswith(("formal_signing_service_not_ready", "formal_signature_provider", "formal_tsa", "editor_antivirus_not_ready", "editor_antivirus_scan_failed")) else 409 if detail in {
-                "editor_revision_conflict",
-                "editor_locked_after_submit",
-                "inbound_version_conflict",
-                "inbound_idempotency_conflict",
-                "inbound_registration_state_conflict",
-                "inbound_mutation_state_conflict",
-            } else 422
+            status = api_value_error_status(detail)
             log_structured("warning", "api_request_rejected", path=path, method=method, error=detail)
             self.send_json({"error": "request_rejected", "detail": detail}, status)
         except PermissionError as exc:

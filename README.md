@@ -62,7 +62,7 @@ python3 backend.py --host 127.0.0.1 --port 5174
 
 - GitHub：本地 Git repo 已建立，Codex GitHub connector 已授權到 `Suiyuecare/Electronic-Document-Exchange`；本機 Git HTTPS credential 仍需更新後才能直接 push。
 - Vercel：`vercel.json` 與 `api/index.py` 已建立，可部署靜態前端與 Python API。
-- Supabase：`supabase/migrations/202605220001_edoc_core.sql`、`supabase/migrations/202605230001_auth_rbac.sql` 與 `supabase/seed.sql` 已建立；後端在 `SUPABASE_URL` 與 `SUPABASE_SERVICE_ROLE_KEY` 存在時會自動改走 Supabase REST API。
+- Supabase：`supabase/migrations/202605220001_edoc_core.sql`、`supabase/migrations/202605230001_auth_rbac.sql` 與 `supabase/seed.sql` 已建立；後端在 `SUPABASE_URL` 與 `SUPABASE_SERVICE_ROLE_KEY` 存在時會自動改走 Supabase REST API。正式環境可採獨立 eDoc project，或採已核准的共享專案隔離模式：HR 保留在 `public`，eDoc 僅位於 `edoc`／`edoc_private`，runtime 使用 `edoc_backend` custom secret，且 Storage policy 只允許兩個 eDoc bucket。
 
 Vercel 需要設定的環境變數：
 
@@ -109,7 +109,7 @@ PDF 與檔案儲存：
 - `pdf_versions` 保存押章前、押章後、用印申請 PDF 的版本、座標、章戳序號與前版關聯。
 - `seal_applications` 保存用印申請、核准人、章戳序號、押章前後 PDF 版本 id。
 
-Supabase 專案建議建立獨立的 `Suiyuecare eDoc` project，不要混用 Finance / Website / HR 的正式資料庫。Supabase 正式檔案實體可接 Storage bucket，現有 migration 已先建立 metadata tables 與 RLS。
+新部署優先採獨立 `Suiyuecare eDoc` project；若經資料擁有者核准與完整隔離驗收，也可使用同專案不同 schema 的共享模式。共享模式必須由 `tools/shared_supabase_bootstrap.py` 建立、通過 `supabase/verification/shared_project_cutover_checks.sql`，並以 custom role identity RPC 證明 runtime 不是 `service_role`，不得把歷史 public migration chain 直接套入 HR schema。
 
 背景任務：
 
