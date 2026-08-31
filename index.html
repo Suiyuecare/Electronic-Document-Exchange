@@ -12,10 +12,10 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260826-finance-sso-edukai-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260831-finance-shell-r1" />
   </head>
   <body>
-    <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
+    <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
       <section class="module-entry-card">
         <img class="module-entry-logo" src="assets/suiyue-logo-transparent.png" alt="" width="54" height="54" />
         <p class="eyebrow">歲悅長照集團 · 電子公文</p>
@@ -50,12 +50,30 @@
         </div>
 
         <nav class="nav-list" aria-label="公文收發電子用印系統功能">
-          <button class="nav-item active" data-target="dashboard" data-icon="首">首頁</button>
-          <button class="nav-item" data-target="compose" data-icon="寫">撰寫公文</button>
-          <button class="nav-item" data-target="electronicSeal" data-icon="章">電子用印</button>
-          <button class="nav-item" data-target="approvalLog" data-icon="簽">簽核紀錄</button>
-          <button class="nav-item" data-target="inbound" data-icon="收">收發管理</button>
-          <button class="nav-item" data-target="settings" data-icon="設">系統設定</button>
+          <button class="nav-item active" data-target="dashboard" data-icon="首" aria-current="page">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zM14 20h6V4h-6zM4 20h6v-3H4z"></path></svg></span>
+            <span class="nav-label">首頁</span>
+          </button>
+          <button class="nav-item" data-target="compose" data-icon="寫">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7zM14 3v5h5M10 13h6M10 17h6"></path></svg></span>
+            <span class="nav-label">撰寫公文</span>
+          </button>
+          <button class="nav-item" data-target="electronicSeal" data-icon="章">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 13h8M9 13V9a3 3 0 0 1 6 0v4M6 13h12v4H6zM5 20h14"></path></svg></span>
+            <span class="nav-label">電子用印</span>
+          </button>
+          <button class="nav-item" data-target="approvalLog" data-icon="簽">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"></path></svg></span>
+            <span class="nav-label">簽核紀錄</span>
+          </button>
+          <button class="nav-item" data-target="inbound" data-icon="收">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 14h5l2 2h2l2-2h5M8 9h8"></path></svg></span>
+            <span class="nav-label">收發管理</span>
+          </button>
+          <button class="nav-item" data-target="settings" data-icon="設">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 12h2M18 12h2M12 4v2M12 18v2M6.6 6.6 8 8M16 16l1.4 1.4M17.4 6.6 16 8M8 16l-1.4 1.4"></path></svg></span>
+            <span class="nav-label">系統設定</span>
+          </button>
         </nav>
 
         <section class="profile-card">
@@ -4162,6 +4180,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260826-finance-sso-edukai-r1"></script>
+    <script src="app.js?v=20260831-finance-shell-r1"></script>
   </body>
 </html>

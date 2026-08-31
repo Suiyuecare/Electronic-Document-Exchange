@@ -3316,7 +3316,10 @@ function applyRoleNavigation() {
     const routeIndex = primary.indexOf(item.dataset.target);
     item.hidden = routeIndex === -1;
     item.style.order = String(routeIndex === -1 ? 999 : routeIndex);
-    if (labels[item.dataset.target]) item.textContent = labels[item.dataset.target];
+    const label = labels[item.dataset.target];
+    const labelElement = item.querySelector(".nav-label");
+    if (label && labelElement) labelElement.textContent = label;
+    else if (label) item.textContent = label;
   });
   const companyWide = ["行政部主任", "總務", "執行長"].includes(activeRole());
   document.querySelector("#pullInboundBtn")?.toggleAttribute("hidden", !companyWide);
@@ -5220,9 +5223,11 @@ function setModuleEntryProgress(percent, title, detail) {
   const description = document.querySelector("#moduleEntryProgressDetail");
   const bar = document.querySelector("#moduleEntryProgressBar");
   const label = document.querySelector("#moduleEntryProgressPercent");
+  screen.dataset.progressState = normalized >= 100 ? "complete" : "loading";
+  screen.setAttribute("aria-busy", normalized < 100 ? "true" : "false");
   if (heading && title) heading.textContent = title;
   if (description && detail) description.textContent = detail;
-  if (bar) bar.style.width = `${normalized}%`;
+  if (bar) bar.style.removeProperty("width");
   if (label) label.textContent = `${Math.round(normalized)}%`;
 }
 

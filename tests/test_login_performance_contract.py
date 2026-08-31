@@ -442,6 +442,19 @@ class EntryExperienceContractTest(unittest.TestCase):
         self.assertIn("function setModuleEntryProgress", self.js)
         self.assertIn("finishModuleEntryProgress", self.js)
 
+    def test_entry_screen_matches_finance_indeterminate_loading_motion(self) -> None:
+        for marker in (
+            "@keyframes moduleEntryLoading",
+            "width: 44%;",
+            "animation: moduleEntryLoading 1.1s ease-in-out infinite alternate;",
+            'data-progress-state="complete"',
+            "@media (prefers-reduced-motion: reduce)",
+        ):
+            self.assertIn(marker, self.css)
+        self.assertIn('screen.dataset.progressState = normalized >= 100 ? "complete" : "loading";', self.js)
+        self.assertIn('screen.setAttribute("aria-busy", normalized < 100 ? "true" : "false");', self.js)
+        self.assertIn('bar.style.removeProperty("width")', self.js)
+
     def test_startup_sync_loads_only_dashboard_sources(self) -> None:
         start = self.js.index("function runAuthenticatedStartupSyncs")
         end = self.js.index("\nconst routeBackendDataLoaded", start)

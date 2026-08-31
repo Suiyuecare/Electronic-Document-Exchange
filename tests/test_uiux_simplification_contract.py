@@ -194,7 +194,12 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         nav_start = self.html.index('<nav class="nav-list"')
         nav_end = self.html.index("</nav>", nav_start)
         navigation = self.html[nav_start:nav_end]
-        routes_and_labels = re.findall(r'class="nav-item(?: active)?" data-target="([^"]+)" data-icon="[^"]+">([^<]+)</button>', navigation)
+        routes_and_labels = re.findall(
+            r'class="nav-item(?: active)?" data-target="([^"]+)" data-icon="[^"]+"[^>]*>.*?'
+            r'<span class="nav-label">([^<]+)</span>\s*</button>',
+            navigation,
+            flags=re.DOTALL,
+        )
         self.assertEqual(routes_and_labels, [
             ("dashboard", "首頁"),
             ("compose", "撰寫公文"),
@@ -204,6 +209,12 @@ class UiUxSimplificationContractTest(unittest.TestCase):
             ("settings", "系統設定"),
         ])
         self.assertEqual(navigation.count('class="nav-item'), 6)
+        self.assertEqual(navigation.count('class="nav-ico"'), 6)
+        self.assertEqual(navigation.count('class="nav-label"'), 6)
+        normalized_css = re.sub(r"\s+", " ", self.css)
+        self.assertIn(".nav-list { display: grid; grid-auto-rows: max-content; gap: 0; align-content: start;", normalized_css)
+        self.assertIn(".nav-ico svg { width: 18px; height: 18px; fill: none; stroke: currentColor;", normalized_css)
+        self.assertIn('const labelElement = item.querySelector(".nav-label");', self.js)
         self.assertNotIn('id="workspaceSubnav"', self.html)
         self.assertNotIn('id="navMoreBtn"', self.html)
         self.assertNotIn('id="navMoreDialog"', self.html)
