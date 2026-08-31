@@ -10829,6 +10829,30 @@ def log_structured(level: str, message: str, **fields: Any) -> None:
     print(json.dumps({"level": level, "message": message, "time": now(), **fields}, ensure_ascii=False), flush=True)
 
 
+def safe_runtime_diagnostic_code(error: BaseException) -> str:
+    """Return a non-sensitive infrastructure code for production logs.
+
+    Supabase/PostgREST failures may include row values or upstream response
+    bodies in their exception text. Finance synchronization logs therefore
+    retain only a protocol status or machine error code and never the original
+    message.
+    """
+    detail = str(error or "")
+    direct = detail.strip().lower()
+    if re.fullmatch(r"[a-z][a-z0-9_]{2,79}", direct):
+        return direct
+    postgrest = re.search(r"\b(PGRST\d{3})\b", detail, re.IGNORECASE)
+    if postgrest:
+        return postgrest.group(1).upper()
+    postgres = re.search(r'["\']code["\']\s*:\s*["\']([0-9A-Z]{5})["\']', detail, re.IGNORECASE)
+    if postgres:
+        return f"postgres_{postgres.group(1).lower()}"
+    status = re.search(r"\bSupabase\s+(\d{3})\s*:", detail, re.IGNORECASE)
+    if status:
+        return f"supabase_http_{status.group(1)}"
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", type(error).__name__).lower()[:80] or "runtime_error"
+
+
 def signing_service_status() -> Dict[str, Any]:
     services = {
         "provider": {"configured": EDOC_SIGNATURE_PROVIDER != "local-simulation", "value": EDOC_SIGNATURE_PROVIDER},
@@ -44006,6 +44030,12 @@ class Handler(SimpleHTTPRequestHandler):
                 pass
             self.send_json({"error": code}, 422, response_headers)
         except (FinanceBridgeUnavailable, RuntimeError) as exc:
+            log_structured(
+                "error",
+                "finance_member_sync_backend_unavailable",
+                diagnostic=safe_runtime_diagnostic_code(exc),
+                exceptionType=type(exc).__name__,
+            )
             try:
                 supabase_record_finance_sync_receipt(
                     payload,
