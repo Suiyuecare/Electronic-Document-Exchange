@@ -15,7 +15,7 @@
 
 | 項目 | 狀態 |
 |---|---|
-| 獨立 eDoc Supabase project 已建立 | 待確認 |
+| eDoc Supabase 隔離拓撲已建立（獨立 project，或核准的 edoc schema／edoc_backend 共享模式） | 待確認 |
 | 所有 migration 已套用 | 待確認 |
 | Vercel production env 已設定 | 待確認 |
 | PDF Editor 維護窗口內 `editor_storage_promotion_preflight.sql` 通過 | 待確認 |

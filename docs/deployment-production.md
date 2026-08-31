@@ -4,12 +4,25 @@
 
 ## 1. 資料庫與檔案儲存分工
 
-- 主 eDoc Supabase：獨立的 Postgres、Auth 對應資料與應用資料；不得與官網 CMS、會計或其他模組共用 public schema。
-- 專用 Storage Supabase：只存放 `edoc-private`、`edoc-seal-vault` 私有 bucket 與物件。
+- 主 eDoc Supabase 支援兩種核准拓撲：獨立 project，或共享 project 內的 `edoc`／`edoc_private` 隔離 schema。共享模式不得把 eDoc 物件放入既有 HR `public` schema。
+- Storage 可使用專用 project；共享模式則以 `edoc_backend` custom role 的 RLS 精確限制在 `edoc-private`、`edoc-seal-vault`，不得存取 `hr-documents`。
 - Finance／會計系統：人員、公司與組織的唯一主資料來源；eDoc 不手動建立正式人員。
-- 前端不得取得任一 project 的 `service_role`，也不得列舉 bucket 或接受任意 storage path。
+- 前端不得取得任一 project 的 backend secret／`service_role`，也不得列舉 bucket 或接受任意 storage path。
 
 正式發布前先在隔離環境完整重建一次；不可直接把未驗證 migration 套到正式資料庫。
+
+### 已核准的共享 project 隔離模式
+
+共享模式只適用於資料擁有者已明確同意保留既有 HR 資料、另建 eDoc namespace 的 project：
+
+1. 先以唯讀方式確認 `public.users`、`public.employees`、`public.companies`、`public.departments` 存在，且 `edoc`、`edoc_private`、`edoc_backend` 尚未存在，兩個 eDoc bucket 沒有既有物件。
+2. 執行 `python3 tools/shared_supabase_bootstrap.py apply --project-ref <project-ref>`。預設一定以 `ROLLBACK` 結束，並在前後比對 HR 人員、公司、部門與 `hr-documents` 物件筆數。
+3. 回滾預演與人工審核通過後，才執行相同命令並加上 `--commit --acknowledge-shared-project`。工具會在單一 transaction 內轉換 immutable migration chain、建立 93 個 eDoc relation、52 筆來源雜湊 ledger、非登入且不 bypass RLS 的 `edoc_backend`，並保留 PostgREST 原有 exposed schemas。
+4. 執行 `supabase/shared-project-migrations/20260831093000_harden_shared_edoc_bucket_limits.sql`，將文件 bucket 鎖在 100 MiB、Seal Vault 鎖在 3 MiB，移除 SVG 與舊的 authenticated 直連 policy。
+5. 執行 `supabase/verification/shared_project_cutover_checks.sql`；`__all_shared_project_checks__` 必須為 true，任何一項 false 都不得建立 runtime key 或部署。
+6. 透過 Supabase Management API 建立 `type=secret` 且 `secret_jwt_template.role=edoc_backend` 的專用 key。先呼叫 `edoc.edoc_runtime_identity()` 證明 `databaseRole=edoc_backend`，再實測 public HR API 與 `hr-documents` 均拒絕、Storage 只列出兩個 eDoc bucket，才可寫入 Vercel server-side environment。普通 default secret 會解析成 `service_role` 並 bypass RLS，不可用於共享模式 runtime。
+
+歷史 `supabase/migrations` 仍維持獨立 project 的 immutable public-schema 路徑；不得手動搜尋取代後直接執行，也不得重新執行已完成的共享 bootstrap。共享模式後續變更只能新增專用 forward migration。
 
 新環境執行 `supabase db reset` 時，CLI 會先載入
 `supabase/roles.sql`。該檔補齊歷史 migration 在外鍵指派前漏建的 9 個
@@ -82,19 +95,21 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
 
 ## 2. Vercel 正式環境變數
 
-必要的主資料庫與專用 Storage 設定：
+已核准共享 project 模式的必要設定：
 
 ```text
 EDOC_DEPLOYMENT_ENV=production
 EDOC_DB_MODE=supabase
 EDOC_PUBLIC_BASE_URL=https://edoc.suiyuecare.com
 SUPABASE_URL=https://<main-edoc-project>.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=<server-only>
+SUPABASE_SERVICE_ROLE_KEY=<edoc_backend-custom-secret-only>
+EDOC_SUPABASE_SCHEMA=edoc
+EDOC_SUPABASE_BACKEND_ROLE=edoc_backend
 
 EDOC_STORAGE_PROVIDER=supabase
-EDOC_STORAGE_SUPABASE_MODE=dedicated-project
-EDOC_STORAGE_SUPABASE_URL=https://<dedicated-storage-project>.supabase.co
-EDOC_STORAGE_SERVICE_ROLE_KEY=<server-only>
+EDOC_STORAGE_SUPABASE_MODE=shared-project-schema
+EDOC_STORAGE_SUPABASE_URL=https://<same-project>.supabase.co
+EDOC_STORAGE_SERVICE_ROLE_KEY=<same-edoc_backend-custom-secret>
 EDOC_STORAGE_PUBLISHABLE_KEY=<publishable-key>
 EDOC_STORAGE_BUCKET=edoc-private
 EDOC_STORAGE_ACCESS_MODE=server-signed-url
@@ -117,7 +132,7 @@ CRON_SECRET=<server-only>
 APP_SECRET=<server-only>
 ```
 
-`EDOC_STORAGE_PUBLISHABLE_KEY` 只用於專用 Storage 的可公開 client identification；上傳授權仍須由後端核發。`EDOC_STORAGE_SERVICE_ROLE_KEY` 與主資料庫的 `SUPABASE_SERVICE_ROLE_KEY` 必須分開保存、分開輪替，且只存在 server-side environment。
+`EDOC_STORAGE_PUBLISHABLE_KEY` 只用於 Storage 的公開 client identification；上傳授權仍須由後端核發。共享模式的 `EDOC_STORAGE_SERVICE_ROLE_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 是同一把 `edoc_backend` custom secret，且只存在 server-side environment；獨立 project 模式仍必須使用各 project 自己的 server key 並分開輪替。
 
 PDF Editor 的 signed TUS 只可寫入 `editor/` 暫存路徑。Finalize 完成大小、SHA-256、掃毒與 PDF／圖片解析後，後端必須把已驗證 bytes 以 service role 建立在 `editor-final/<document>/<asset>/` 不可變路徑；migration `20260827194500_promote_editor_tus_staging_to_immutable.sql` 會在同一筆資料庫交易中將 asset 與 file object 綁到正式路徑，成功後才清除暫存。正式驗收不得把短效 Storage token 宣稱為密碼學上的一次性 token，而要用不同內容重播，確認正式檔案的路徑、hash 與下載內容完全不變。
 
@@ -146,6 +161,9 @@ vercel env add EDOC_DB_MODE production
 vercel env add EDOC_PUBLIC_BASE_URL production
 vercel env add SUPABASE_URL production
 vercel env add SUPABASE_SERVICE_ROLE_KEY production --sensitive
+vercel env add EDOC_SUPABASE_SCHEMA production
+vercel env add EDOC_SUPABASE_BACKEND_ROLE production
+vercel env add EDOC_STORAGE_SUPABASE_MODE production
 vercel env add EDOC_STORAGE_SUPABASE_URL production
 vercel env add EDOC_STORAGE_SERVICE_ROLE_KEY production --sensitive
 vercel env add EDOC_STORAGE_PUBLISHABLE_KEY production

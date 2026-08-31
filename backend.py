@@ -81,6 +81,16 @@ DEPLOYMENT_ENV = os.getenv("EDOC_DEPLOYMENT_ENV", os.getenv("VERCEL_ENV", "devel
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 USE_SUPABASE = os.getenv("EDOC_DB_MODE", "").lower() == "supabase" or bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+# The historical deployment uses PostgREST's default ``public`` schema and a
+# service-role credential.  A shared Supabase project must instead isolate all
+# eDoc relations in one dedicated schema and use a secret API key whose JWT
+# template resolves to the non-BYPASSRLS ``edoc_backend`` Postgres role.
+# Keeping these values explicit also prevents a copied shared-project key from
+# silently reaching the HR tables that remain in ``public``.
+EDOC_SUPABASE_SCHEMA = os.getenv("EDOC_SUPABASE_SCHEMA", "public").strip().lower()
+EDOC_SUPABASE_BACKEND_ROLE = os.getenv(
+    "EDOC_SUPABASE_BACKEND_ROLE", "service_role"
+).strip().lower()
 EDOC_STORAGE_PROVIDER = os.getenv("EDOC_STORAGE_PROVIDER", "local").lower()
 EDOC_STORAGE_BUCKET = os.getenv("EDOC_STORAGE_BUCKET", "edoc-private")
 EDOC_SEAL_STORAGE_BUCKET = os.getenv("EDOC_SEAL_STORAGE_BUCKET", "edoc-seal-vault")
@@ -3995,13 +4005,18 @@ def supabase_project_partition_issues() -> List[str]:
     """Return fail-closed configuration errors for DB/Storage project roles.
 
     ``auto`` and ``same-project`` remain backward compatible.  The dedicated
-    mode is the guardrail for the production topology used by eDoc: the main
-    ``SUPABASE_URL`` remains the database/Auth project while
-    ``EDOC_STORAGE_SUPABASE_URL`` names a distinct private Storage project.
+    mode keeps database and Storage in separate projects.  The explicitly
+    approved ``shared-project-schema`` mode keeps HR in ``public`` while eDoc
+    uses the ``edoc`` schema, the ``edoc_backend`` role and bucket-scoped RLS.
     No credential values are ever returned or logged.
     """
     mode = str(EDOC_STORAGE_SUPABASE_MODE or "auto").strip().lower()
-    if mode not in {"auto", "same-project", "dedicated-project"}:
+    if mode not in {
+        "auto",
+        "same-project",
+        "dedicated-project",
+        "shared-project-schema",
+    }:
         return ["storage_supabase_mode_invalid"]
     issues: List[str] = []
     database_endpoint_issue = _supabase_database_endpoint_issue()
@@ -4020,6 +4035,22 @@ def supabase_project_partition_issues() -> List[str]:
             issues.append("dedicated_storage_service_role_key_required")
     if mode == "same-project" and storage_origin[0] and storage_origin != database_origin:
         issues.append("same_project_storage_url_mismatch")
+    if mode == "shared-project-schema":
+        if EDOC_SUPABASE_SCHEMA != "edoc":
+            issues.append("shared_project_edoc_schema_required")
+        if EDOC_SUPABASE_BACKEND_ROLE != "edoc_backend":
+            issues.append("shared_project_backend_role_required")
+        if not str(SUPABASE_SERVICE_ROLE_KEY or "").startswith("sb_secret_"):
+            issues.append("shared_project_custom_role_secret_required")
+        if storage_origin[0] and storage_origin != database_origin:
+            issues.append("shared_project_storage_url_mismatch")
+        explicit_storage_key = str(EDOC_STORAGE_SERVICE_ROLE_KEY or "").strip()
+        if explicit_storage_key and explicit_storage_key != str(
+            SUPABASE_SERVICE_ROLE_KEY or ""
+        ).strip():
+            issues.append("shared_project_storage_key_mismatch")
+    elif EDOC_SUPABASE_SCHEMA != "public" or EDOC_SUPABASE_BACKEND_ROLE != "service_role":
+        issues.append("supabase_schema_role_mode_mismatch")
 
     endpoint_issue = _supabase_storage_endpoint_issue()
     if endpoint_issue:
@@ -4299,12 +4330,15 @@ def _readiness_http_json(
     timeout: float,
     max_bytes: int = 8 * 1024 * 1024,
     allow_redirects: bool = True,
+    method: str = "GET",
+    body: bytes | None = None,
 ) -> Any:
     """Fetch a small readiness response without returning transport details."""
     request = urllib.request.Request(
         url,
+        data=body,
         headers=headers or {"Accept": "application/json"},
-        method="GET",
+        method=method,
     )
     opener = urllib.request.urlopen if allow_redirects else _urlopen_no_redirect
     try:
@@ -4396,6 +4430,46 @@ def _probe_main_supabase_rpcs(timeout: float) -> Dict[str, Any]:
             "missingEditorTableCount": None,
             "missingEditorTableNames": [],
             "errorCode": "database_rpc_inventory_unavailable",
+        }
+
+
+def _probe_shared_supabase_identity(timeout: float) -> Dict[str, Any]:
+    """Prove the shared-project key resolves to the isolated backend role."""
+    if EDOC_STORAGE_SUPABASE_MODE != "shared-project-schema":
+        return {"ready": True, "checked": False, "errorCode": ""}
+    try:
+        payload = _readiness_http_json(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/edoc_runtime_identity",
+            headers=supabase_headers(
+                {
+                    "Accept": "application/json",
+                    "Prefer": "return=representation",
+                }
+            ),
+            timeout=timeout,
+            max_bytes=64 * 1024,
+            allow_redirects=False,
+            method="POST",
+            body=b"{}",
+        )
+        if isinstance(payload, list) and len(payload) == 1:
+            payload = payload[0]
+        ready = bool(
+            isinstance(payload, dict)
+            and payload.get("databaseRole") == "edoc_backend"
+            and payload.get("schemaName") == "edoc"
+            and payload.get("storageMode") == "shared-project-schema"
+        )
+        return {
+            "ready": ready,
+            "checked": True,
+            "errorCode": "" if ready else "shared_project_identity_mismatch",
+        }
+    except Exception:
+        return {
+            "ready": False,
+            "checked": True,
+            "errorCode": "shared_project_identity_unavailable",
         }
 
 
@@ -4634,6 +4708,10 @@ def production_runtime_dependency_readiness() -> Dict[str, Any]:
         "storagePublicKeyAffinity": lambda: _probe_supabase_publishable_key_affinity(timeout),
         "antivirus": lambda: _probe_antivirus_runtime(timeout),
     }
+    if EDOC_STORAGE_SUPABASE_MODE == "shared-project-schema":
+        probes["sharedProjectIdentity"] = lambda: _probe_shared_supabase_identity(
+            timeout
+        )
     results: Dict[str, Dict[str, Any]] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
         pending = {name: executor.submit(probe) for name, probe in probes.items()}
@@ -31248,6 +31326,9 @@ def supabase_headers(extra: Dict[str, str] | None = None) -> Dict[str, str]:
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Content-Type": "application/json",
     }
+    if EDOC_SUPABASE_SCHEMA != "public":
+        headers["Accept-Profile"] = EDOC_SUPABASE_SCHEMA
+        headers["Content-Profile"] = EDOC_SUPABASE_SCHEMA
     # Modern Supabase ``sb_secret_`` API keys are not JWTs.  Sending one as a
     # Bearer token makes the gateway reject an otherwise valid server key with
     # HTTP 401.  Legacy service_role JWTs still require the Authorization
