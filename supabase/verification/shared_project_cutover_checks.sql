@@ -90,8 +90,43 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 52,
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 53,
       (select count(*)::text from edoc_private.shared_project_migration_ledger)
+    ),
+    (
+      'finance_user_company_cache_ready',
+      exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'edoc'
+          and table_name = 'users'
+          and column_name = 'company_name'
+          and data_type = 'text'
+          and is_nullable = 'NO'
+      )
+      and not exists (
+        select 1
+        from edoc.users user_row
+        join edoc.companies company_row on company_row.id = user_row.company_id
+        where user_row.company_name is distinct from company_row.name
+      ),
+      pg_catalog.json_build_object(
+        'columnExists', exists (
+          select 1
+          from information_schema.columns
+          where table_schema = 'edoc'
+            and table_name = 'users'
+            and column_name = 'company_name'
+            and data_type = 'text'
+            and is_nullable = 'NO'
+        ),
+        'mismatchedRows', (
+          select count(*)
+          from edoc.users user_row
+          join edoc.companies company_row on company_row.id = user_row.company_id
+          where user_row.company_name is distinct from company_row.name
+        )
+      )::text
     ),
     (
       'all_edoc_tables_have_rls',

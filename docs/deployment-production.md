@@ -17,10 +17,11 @@
 
 1. 先以唯讀方式確認 `public.users`、`public.employees`、`public.companies`、`public.departments` 存在，且 `edoc`、`edoc_private`、`edoc_backend` 尚未存在，兩個 eDoc bucket 沒有既有物件。
 2. 執行 `python3 tools/shared_supabase_bootstrap.py apply --project-ref <project-ref>`。預設一定以 `ROLLBACK` 結束，並在前後比對 HR 人員、公司、部門與 `hr-documents` 物件筆數。
-3. 回滾預演與人工審核通過後，才執行相同命令並加上 `--commit --acknowledge-shared-project`。工具會在單一 transaction 內轉換 immutable migration chain、建立 93 個 eDoc relation、52 筆來源雜湊 ledger、非登入且不 bypass RLS 的 `edoc_backend`，並保留 PostgREST 原有 exposed schemas。
+3. 回滾預演與人工審核通過後，才執行相同命令並加上 `--commit --acknowledge-shared-project`。工具會在單一 transaction 內轉換 immutable migration chain、建立 93 個 eDoc relation、53 筆來源雜湊 ledger、非登入且不 bypass RLS 的 `edoc_backend`，並保留 PostgREST 原有 exposed schemas。
 4. 執行 `supabase/shared-project-migrations/20260831093000_harden_shared_edoc_bucket_limits.sql`，將文件 bucket 鎖在 100 MiB、Seal Vault 鎖在 3 MiB，移除 SVG 與舊的 authenticated 直連 policy。
-5. 執行 `supabase/verification/shared_project_cutover_checks.sql`；`__all_shared_project_checks__` 必須為 true，任何一項 false 都不得建立 runtime key 或部署。
-6. 透過 Supabase Management API 建立 `type=secret` 且 `secret_jwt_template.role=edoc_backend` 的專用 key。先呼叫 `edoc.edoc_runtime_identity()` 證明 `databaseRole=edoc_backend`，再實測 public HR API 與 `hr-documents` 均拒絕、Storage 只列出兩個 eDoc bucket，才可寫入 Vercel server-side environment。普通 default secret 會解析成 `service_role` 並 bypass RLS，不可用於共享模式 runtime。
+5. 若 namespace 已在 2026-08-31 建立，執行 `supabase/shared-project-migrations/20260831102500_add_shared_user_company_name_cache.sql`，補齊 Finance 人員投影需要的公司名稱快取並將來源雜湊 ledger 擴充至 53 筆。
+6. 執行 `supabase/verification/shared_project_cutover_checks.sql`；`__all_shared_project_checks__` 必須為 true，任何一項 false 都不得建立 runtime key 或部署。
+7. 透過 Supabase Management API 建立 `type=secret` 且 `secret_jwt_template.role=edoc_backend` 的專用 key。先呼叫 `edoc.edoc_runtime_identity()` 證明 `databaseRole=edoc_backend`，再實測 public HR API 與 `hr-documents` 均拒絕、Storage 只列出兩個 eDoc bucket，才可寫入 Vercel server-side environment。普通 default secret 會解析成 `service_role` 並 bypass RLS，不可用於共享模式 runtime。
 
 歷史 `supabase/migrations` 仍維持獨立 project 的 immutable public-schema 路徑；不得手動搜尋取代後直接執行，也不得重新執行已完成的共享 bootstrap。共享模式後續變更只能新增專用 forward migration。
 

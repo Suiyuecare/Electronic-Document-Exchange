@@ -13,6 +13,15 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools" / "shared_supabase_bootstrap.py"
+USER_COMPANY_CACHE = (
+    ROOT / "supabase" / "migrations" / "20260831102000_add_user_company_name_cache.sql"
+)
+SHARED_USER_COMPANY_CACHE = (
+    ROOT
+    / "supabase"
+    / "shared-project-migrations"
+    / "20260831102500_add_shared_user_company_name_cache.sql"
+)
 
 
 def load_tool_module():
@@ -125,6 +134,18 @@ commit;
         )
         for name in manifest:
             self.assertIn(f"-- BEGIN TRANSFORMED SOURCE: {name}", bundle)
+
+    def test_user_company_cache_forward_migration_matches_shared_ledger(self) -> None:
+        source = USER_COMPANY_CACHE.read_text(encoding="utf-8")
+        transformed = self.tool.transform_sql(source)
+        shared = SHARED_USER_COMPANY_CACHE.read_text(encoding="utf-8")
+
+        self.assertIn("add column if not exists company_name", source.lower())
+        self.assertIn("alter table edoc.users", transformed.lower())
+        self.assertIn(self.tool.sha256_text(source), shared)
+        self.assertIn(self.tool.sha256_text(transformed), shared)
+        self.assertIn("migration_ledger) <> 53", shared)
+        self.assertIn("notify pgrst, 'reload schema'", shared.lower())
 
     def test_commit_bundle_requires_explicit_render_choice(self) -> None:
         bundle = self.tool.render_bundle(commit=True)

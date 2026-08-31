@@ -1050,7 +1050,11 @@ def strict_finance_role_profile(role: Any) -> Dict[str, str]:
     return {"logging_role_key": canonical, **profile}
 
 
-def current_finance_bridge_snapshot(email: str) -> Dict[str, Any]:
+def current_finance_bridge_snapshot(
+    email: str,
+    *,
+    portal_authenticated: bool = False,
+) -> Dict[str, Any]:
     """Fetch one live snapshot; request ids are random and never include PII."""
     return fetch_finance_bridge_snapshot(
         url=EDOC_FINANCE_BRIDGE_URL,
@@ -1059,6 +1063,7 @@ def current_finance_bridge_snapshot(email: str) -> Dict[str, Any]:
         email=str(email or "").strip().lower(),
         request_id=f"edoc-{secrets.token_hex(12)}",
         require_https=is_production(),
+        allow_portal_authenticated_identity=portal_authenticated,
     )
 
 
@@ -1554,7 +1559,10 @@ def upsert_logging_bridge_user(conn: sqlite3.Connection, payload: Dict[str, Any]
         raise ValueError(error)
     if is_production():
         auth_user_id, email = portal_finance_identity(source_user)
-        snapshot = current_finance_bridge_snapshot(email)
+        snapshot = current_finance_bridge_snapshot(
+            email,
+            portal_authenticated=True,
+        )
         user, _ = sync_sqlite_finance_snapshot(
             conn,
             snapshot,
@@ -1792,7 +1800,10 @@ def authenticate_verified_portal_handoff_sqlite(
     try:
         if is_production():
             auth_user_id, email = portal_finance_identity(source_user)
-            snapshot = current_finance_bridge_snapshot(email)
+            snapshot = current_finance_bridge_snapshot(
+                email,
+                portal_authenticated=True,
+            )
             synced_user, _ = sync_sqlite_finance_snapshot(conn, snapshot, auth_user_id=auth_user_id)
             user = conn.execute("SELECT * FROM users WHERE id = ?", (synced_user["id"],)).fetchone()
             if not user:
@@ -15432,7 +15443,10 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
     }
     if is_production():
         try:
-            snapshot = current_finance_bridge_snapshot(user["email"])
+            snapshot = current_finance_bridge_snapshot(
+                user["email"],
+                portal_authenticated=True,
+            )
             refreshed, _ = sync_sqlite_finance_snapshot(
                 conn,
                 snapshot,
@@ -22327,7 +22341,10 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
     actor_plan: Dict[str, Dict[str, Any]] | None = None
     workflow_lock_metadata: Dict[str, Any] | None = None
     if is_production():
-        snapshot = current_finance_bridge_snapshot(user.get("email") or "")
+        snapshot = current_finance_bridge_snapshot(
+            user.get("email") or "",
+            portal_authenticated=True,
+        )
         finance_role = strict_finance_role_profile(
             (snapshot.get("identity") or {}).get("role")
         )["logging_role_key"]
@@ -37068,7 +37085,10 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
     actor_plan: Dict[str, Dict[str, Any]] | None = None
     workflow_lock_metadata: Dict[str, Any] | None = None
     if is_production():
-        snapshot = current_finance_bridge_snapshot(user.get("email") or "")
+        snapshot = current_finance_bridge_snapshot(
+            user.get("email") or "",
+            portal_authenticated=True,
+        )
         finance_role = strict_finance_role_profile(
             (snapshot.get("identity") or {}).get("role")
         )["logging_role_key"]
@@ -39890,16 +39910,31 @@ def supabase_recover_legacy_finance_snapshot_tenant_scope(
 def _finance_login_authorization_binding(
     projection_binding: Dict[str, str],
     applicant: Dict[str, Any],
+    *,
+    projected_user: Dict[str, Any] | None = None,
 ) -> Dict[str, str]:
     """Bind signed Finance authorization fields to one exact eDoc projection."""
     profile = applicant.get("profile") or {}
+    projected = projected_user or {}
     binding = {
         **projection_binding,
         "role": roster_text(profile.get("role")),
         "logging_role_key": roster_text(profile.get("logging_role_key")),
         "job_level": roster_text(profile.get("job_level")),
-        "unit": roster_text(applicant.get("department_name") or applicant.get("department_code")),
-        "title": roster_text(applicant.get("job_title") or applicant.get("role_label")),
+        # A legacy v1 login snapshot does not carry the enriched department
+        # name or job title that the durable Finance outbox already projected.
+        # Reuse those server-owned display/scope fields from the exact bound
+        # row instead of treating the richer outbox projection as tampering.
+        "unit": roster_text(
+            projected.get("unit")
+            or applicant.get("department_name")
+            or applicant.get("department_code")
+        ),
+        "title": roster_text(
+            projected.get("title")
+            or applicant.get("job_title")
+            or applicant.get("role_label")
+        ),
         "status": "啟用" if applicant.get("projection_state") == "active" else "",
         "projection_state": roster_text(applicant.get("projection_state")),
     }
@@ -39913,6 +39948,116 @@ def _finance_login_authorization_binding(
     if binding["projection_state"] != "active":
         raise FinanceBridgeDenied("finance_identity_inactive")
     return binding
+
+
+def _supabase_require_legacy_finance_user_identity_binding(
+    binding: Dict[str, str],
+    applicant: Dict[str, Any],
+    user: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Revalidate immutable v1 identity/authority before any Portal promotion."""
+    profile = applicant.get("profile") or {}
+    try:
+        external_payload = user.get("external_account_payload_json") if isinstance(user, dict) else {}
+        if isinstance(external_payload, str):
+            external_payload = json.loads(external_payload)
+    except (TypeError, json.JSONDecodeError):
+        external_payload = {}
+    finance_profile = (
+        external_payload.get("financeProfile")
+        if isinstance(external_payload, dict)
+        and isinstance(external_payload.get("financeProfile"), dict)
+        else {}
+    )
+    projected_department_code = roster_text(finance_profile.get("departmentCode"))
+    projected_unit = roster_text(
+        finance_profile.get("departmentName") or projected_department_code
+    )
+    projected_title = roster_text(
+        finance_profile.get("jobTitle") or applicant.get("role_label")
+    )
+    state_pair = (
+        roster_text((user or {}).get("status")),
+        roster_text((user or {}).get("finance_source_status")),
+    )
+    if not isinstance(user, dict) or (
+        roster_text(user.get("id")) != binding["user_id"]
+        or roster_text(user.get("account_source")).lower() != "finance"
+        or roster_text(user.get("email")).lower() != binding["email"]
+        or roster_text(user.get("logging_account_id")) != binding["finance_user_id"]
+        or roster_text(user.get("finance_employee_id")) != binding["finance_user_id"]
+        or roster_text(user.get("company_id")) != binding["company_id"]
+        or roster_text(user.get("finance_tenant_id")) != binding["tenant_id"]
+        or roster_text(user.get("role")) != roster_text(profile.get("role"))
+        or roster_text(user.get("logging_role_key")) != roster_text(profile.get("logging_role_key"))
+        or roster_text(user.get("job_level")) != roster_text(profile.get("job_level"))
+        or projected_department_code != roster_text(applicant.get("department_code"))
+        or roster_text(user.get("unit")) != projected_unit
+        or roster_text(user.get("title")) != projected_title
+        or state_pair not in {("啟用", "active"), ("待啟用", "pending")}
+    ):
+        raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
+    return user
+
+
+def _supabase_promote_portal_verified_legacy_finance_user(
+    binding: Dict[str, str],
+    applicant: Dict[str, Any],
+    user: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Atomically activate one pending Finance projection after signed Portal SSO."""
+    user = _supabase_require_legacy_finance_user_identity_binding(
+        binding,
+        applicant,
+        user,
+    )
+    if (
+        roster_text(user.get("status")) == "啟用"
+        and roster_text(user.get("finance_source_status")) == "active"
+    ):
+        return user
+
+    query = urllib.parse.urlencode({
+        "id": f"eq.{binding['user_id']}",
+        "account_source": "eq.finance",
+        "email": f"eq.{binding['email']}",
+        "logging_account_id": f"eq.{binding['finance_user_id']}",
+        "finance_employee_id": f"eq.{binding['finance_user_id']}",
+        "company_id": f"eq.{binding['company_id']}",
+        "finance_tenant_id": f"eq.{binding['tenant_id']}",
+        "role": f"eq.{roster_text((applicant.get('profile') or {}).get('role'))}",
+        "logging_role_key": f"eq.{roster_text((applicant.get('profile') or {}).get('logging_role_key'))}",
+        "job_level": f"eq.{roster_text((applicant.get('profile') or {}).get('job_level'))}",
+        "status": "eq.待啟用",
+        "finance_source_status": "eq.pending",
+    })
+    rows = supabase_request(
+        "PATCH",
+        f"users?{query}",
+        {
+            "status": "啟用",
+            "finance_source_status": "active",
+            "last_synced_from_logging_at": now(),
+        },
+    )
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
+    promoted = _supabase_require_legacy_finance_user_identity_binding(
+        binding,
+        {**applicant, "projection_state": "active"},
+        rows[0],
+    )
+    supabase_insert("audit_logs", {
+        "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "actor": "Finance Google SSO",
+        "action": "Portal 驗證啟用",
+        "target_type": "finance_user_projection",
+        "target_id": binding["user_id"],
+        "ip": "vercel",
+        "detail": "已由公司 Portal 的確認 Google 身分啟用既有 Finance 投影。",
+        "created_at": now(),
+    })
+    return promoted
 
 
 def _supabase_require_legacy_finance_user_binding(
@@ -40259,31 +40404,26 @@ def sync_supabase_finance_login_snapshot(
             raise FinanceBridgeContractError("finance_bridge_legacy_projection_changed")
         legacy_projection_binding = legacy_bindings["applicant"]
     applicant = normalized["applicant"]
-    legacy_applicant_binding = (
-        _finance_login_authorization_binding(legacy_projection_binding, applicant)
-        if legacy_projection_binding is not None
-        else None
-    )
     # The common Portal and Finance use separate Supabase Auth namespaces.
     # A signed Portal handoff is the Google authentication evidence for eDoc;
     # an otherwise active Finance employee must not be forced to pre-bind a
     # second Auth UUID before their first eDoc visit.
     if (
-        legacy_applicant_binding is None
-        and portal_authenticated
+        portal_authenticated
         and applicant["projection_state"] == "pending"
     ):
         applicant["projection_state"] = "active"
     actor_sources = normalized["actors"]
     existing = _supabase_finance_snapshot_user_candidate(applicant)
-    if legacy_applicant_binding is not None:
-        existing = _supabase_require_legacy_finance_user_binding(
-            legacy_applicant_binding,
+    if legacy_projection_binding is not None:
+        existing = _supabase_require_legacy_finance_user_identity_binding(
+            legacy_projection_binding,
+            applicant,
             existing,
         )
         company = _supabase_require_legacy_finance_company_binding(
-            legacy_applicant_binding,
-            supabase_get("companies", legacy_applicant_binding["company_id"]),
+            legacy_projection_binding,
+            supabase_get("companies", legacy_projection_binding["company_id"]),
         )
     else:
         company, _ = supabase_upsert_finance_company_snapshot(
@@ -40303,18 +40443,34 @@ def sync_supabase_finance_login_snapshot(
     if not launch_company_in_scope(roster_text(company.get("id"))):
         raise FinanceBridgeDenied("finance_company_outside_launch_scope")
 
-    if legacy_applicant_binding is not None:
+    if legacy_projection_binding is not None:
         # v1 is a compatibility read-through for projections already delivered
         # by Finance. It may neither insert nor adopt an account/company during
         # login. Re-read both bindings immediately before returning so a row
         # deleted or rebound after the recovery lookup fails closed.
-        current_user = _supabase_require_legacy_finance_user_binding(
-            legacy_applicant_binding,
-            supabase_get("users", legacy_applicant_binding["user_id"]),
+        current_user = _supabase_require_legacy_finance_user_identity_binding(
+            legacy_projection_binding,
+            applicant,
+            supabase_get("users", legacy_projection_binding["user_id"]),
         )
         current_company = _supabase_require_legacy_finance_company_binding(
+            legacy_projection_binding,
+            supabase_get("companies", legacy_projection_binding["company_id"]),
+        )
+        if portal_authenticated:
+            current_user = _supabase_promote_portal_verified_legacy_finance_user(
+                legacy_projection_binding,
+                applicant,
+                current_user,
+            )
+        legacy_applicant_binding = _finance_login_authorization_binding(
+            legacy_projection_binding,
+            applicant,
+            projected_user=current_user,
+        )
+        current_user = _supabase_require_legacy_finance_user_binding(
             legacy_applicant_binding,
-            supabase_get("companies", legacy_applicant_binding["company_id"]),
+            current_user,
         )
         if (
             applicant["projection_state"] != "active"
@@ -41044,7 +41200,10 @@ def supabase_authenticate_preprovisioned_logging_bridge(
 ) -> Tuple[Dict[str, Any], int]:
     """Create a session from signed Portal identity plus live Finance authority."""
     _portal_auth_user_id, email = portal_finance_identity(source_user)
-    snapshot = current_finance_bridge_snapshot(email)
+    snapshot = current_finance_bridge_snapshot(
+        email,
+        portal_authenticated=True,
+    )
     user = sync_supabase_finance_login_snapshot(
         snapshot,
         portal_authenticated=True,
@@ -41348,7 +41507,10 @@ def supabase_current_session(token: str) -> Dict[str, Any] | None:
         return None
     if is_production() and finance_session_revalidation_due(user):
         try:
-            snapshot = current_finance_bridge_snapshot(user.get("email") or "")
+            snapshot = current_finance_bridge_snapshot(
+                user.get("email") or "",
+                portal_authenticated=True,
+            )
             refreshed = sync_supabase_finance_login_snapshot(
                 snapshot,
                 portal_authenticated=True,

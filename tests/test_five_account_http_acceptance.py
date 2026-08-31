@@ -168,7 +168,9 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         cls.finance_patch = mock.patch.object(
             backend,
             "current_finance_bridge_snapshot",
-            side_effect=lambda email: copy.deepcopy(cls.snapshots_by_email[str(email).lower()]),
+            side_effect=lambda email, **_kwargs: copy.deepcopy(
+                cls.snapshots_by_email[str(email).lower()]
+            ),
         )
         cls.finance_patch.start()
         original_local_upload = backend.store_official_editor_local_upload

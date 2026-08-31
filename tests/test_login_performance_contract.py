@@ -126,7 +126,10 @@ class FinanceSessionFastPathTest(unittest.TestCase):
         self.assertIsNotNone(current)
         self.assertEqual(current["user"]["role"], "員工")
         self.assertNotIn(backend.FINANCE_LOGIN_EXPECTED_BINDING_KEY, current["user"])
-        bridge.assert_called_once_with(self.user["email"])
+        bridge.assert_called_once_with(
+            self.user["email"],
+            portal_authenticated=True,
+        )
         sync.assert_called_once()
         self.assertEqual(request.call_count, 2)
         update.assert_not_called()

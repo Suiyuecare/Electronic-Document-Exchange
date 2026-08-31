@@ -52,6 +52,7 @@
     "20260827133432_add_company_seal_file_dimension_metadata.sql",
     "20260827133545_fix_official_document_function_type_resolution.sql",
     "20260827133700_add_finance_delegation_profile_helpers.sql",
-    "20260827194500_promote_editor_tus_staging_to_immutable.sql"
+    "20260827194500_promote_editor_tus_staging_to_immutable.sql",
+    "20260831102000_add_user_company_name_cache.sql"
   ]
 }
