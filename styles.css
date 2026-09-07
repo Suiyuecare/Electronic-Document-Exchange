@@ -11296,7 +11296,7 @@ body[data-session-state="revalidating"] .workspace::after {
     z-index: 90;
     display: grid;
     grid-template-areas: "title bell menu";
-    grid-template-columns: minmax(0, 1fr) 40px 40px;
+    grid-template-columns: minmax(0, 1fr) 44px 44px;
     gap: 5px;
     align-items: center;
     min-height: 56px;
@@ -11357,10 +11357,10 @@ body[data-session-state="revalidating"] .workspace::after {
   .topbar-notification-button {
     grid-area: bell;
     display: inline-grid;
-    width: 40px;
-    min-width: 40px;
-    min-height: 40px;
-    height: 40px;
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    height: 44px;
     padding: 0;
     border-color: var(--mobile-line);
     border-radius: 15px;
@@ -11374,10 +11374,10 @@ body[data-session-state="revalidating"] .workspace::after {
   .mobile-menu-button {
     grid-area: menu;
     display: flex;
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
-    min-height: 40px;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
     padding: 0;
     align-items: center;
     justify-content: center;
@@ -11514,8 +11514,8 @@ body[data-session-state="revalidating"] .workspace::after {
 
   .mobile-drawer-close {
     display: grid;
-    width: 42px;
-    height: 42px;
+    width: 44px;
+    height: 44px;
     margin-left: auto;
     padding: 0;
     place-items: center;

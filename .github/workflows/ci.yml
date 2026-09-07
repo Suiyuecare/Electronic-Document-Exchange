@@ -178,6 +178,9 @@ jobs:
       - name: Compile Python backend
         run: python -m py_compile backend.py api/index.py
 
+      - name: Reject embedded private credentials without printing their values
+        run: python tools/verify_no_embedded_credentials.py
+
       - name: Check frontend JavaScript
         run: node --check app.js
 

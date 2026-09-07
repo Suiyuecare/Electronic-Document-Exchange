@@ -22,6 +22,9 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"RESEND_API_KEY": "test-only-key", "RESEND_FROM": "notify@example.test", "APP_SECRET": "test-only-signing"}, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.network = mock.patch.object(backend, "_urlopen_no_redirect", side_effect=AssertionError("live_network_not_permitted"))
+        self.network.start()
+        self.addCleanup(self.network.stop)
 
     def user(self, user_id="OPS-1", **overrides):
         return {"id": user_id, "name": "測試人員", "email": f"{user_id.lower()}@example.test", "role": "行政部主任", "company_id": "CO-1", "account_source": "finance", "logging_role_key": "admin_director", "status": "啟用", **overrides}
@@ -149,7 +152,7 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
         def patch(table, row_id, payload):
             # Mirrors the deployed backend role: deliveries allow INSERT only.
             self.assertEqual(table, "notifications")
-        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", return_value=notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_patch", side_effect=patch), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
+        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", return_value=notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_patch", side_effect=patch), mock.patch.object(backend, "supabase_update_many", return_value=[notice]), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
             first = backend.retry_monitoring_delivery_test()
             second = backend.retry_monitoring_delivery_test()
         send.assert_called_once()
@@ -234,15 +237,193 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
         def patch(table, *args):
             self.assertEqual(table, "notifications")
             raise RuntimeError("summary unavailable")
-        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", return_value=notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_patch", side_effect=patch), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
-            with self.assertRaisesRegex(RuntimeError, "summary unavailable"):
-                backend.retry_monitoring_delivery_test()
+        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", return_value=notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_update_many", side_effect=patch), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
+            first = backend.retry_monitoring_delivery_test()
             second = backend.retry_monitoring_delivery_test()
         send.assert_called_once()
+        self.assertTrue(first["receipts"][0]["serviceAccepted"])
+        self.assertTrue(first["receipts"][0]["durableReceipt"])
+        self.assertEqual(first["receipts"][0]["receipt"], "accepted")
+        self.assertEqual(first["receipts"][0]["summaryErrorCode"], "notification_summary_update_failed")
+        self.assertFalse(first["receipts"][0]["resendAllowed"])
+        self.assertNotIn("summary unavailable", json.dumps(first))
         self.assertEqual(second["attempted"], 0)
         self.assertEqual(len(rows), 3)
         self.assertEqual(backend.unresolved_notification_failure_count(list(rows.values())), 0)
         self.assertEqual(backend.notification_runtime_readiness(list(rows.values()))["email_validation"], "provider_accepted")
+
+    def summary_fixture(self):
+        user = self.user()
+        notice = {**backend.fixed_monitoring_test_payload(user, "2026-09-07"), "created_at": "2026-09-07 12:00:00", "sent_at": "2026-09-07 12:00:00", "status": "部分派送", "delivery_receipt": "original-attempt-summary"}
+        suffix = backend.stable_json_hash({"notificationId": notice["id"]})[:32]
+        base = {"notification_id": notice["id"], "channel": "Email", "target": user["email"], "receipt": "", "error": "", "attempt_count": 1}
+        original = {**base, "id": "ORIGINAL", "status": "失敗", "error": "Resend HTTP 400", "created_at": "2026-09-07 12:00:00"}
+        claim = {**base, "id": "NDEL-MONRETRY-" + suffix, "status": "重試中", "created_at": "2026-09-07 12:00:01"}
+        outcome = {**base, "id": "NDEL-MONRESULT-" + suffix, "status": "成功", "receipt": "accepted", "attempt_count": 0, "created_at": "2026-09-07 12:00:01"}
+        return notice, [original, claim, outcome]
+
+    def insert_summary_fixture(self):
+        notice, rows = self.summary_fixture()
+        columns = ",".join(notice)
+        self.conn.execute(f"INSERT INTO notifications ({columns}) VALUES ({','.join('?' for _ in notice)})", tuple(notice.values()))
+        for row in rows:
+            columns = ",".join(row)
+            self.conn.execute(f"INSERT INTO notification_deliveries ({columns}) VALUES ({','.join('?' for _ in row)})", tuple(row.values()))
+        self.conn.commit()
+        return notice, rows
+
+    def test_summary_reconciliation_updates_once_without_sending_or_mutating_ledger(self):
+        notice, rows = self.insert_summary_fixture()
+        self.conn.executescript("""
+            CREATE TRIGGER no_ledger_update BEFORE UPDATE ON notification_deliveries BEGIN SELECT RAISE(ABORT, 'immutable'); END;
+            CREATE TRIGGER no_ledger_delete BEFORE DELETE ON notification_deliveries BEGIN SELECT RAISE(ABORT, 'immutable'); END;
+            CREATE TRIGGER no_ledger_insert BEFORE INSERT ON notification_deliveries BEGIN SELECT RAISE(ABORT, 'immutable'); END;
+        """)
+        sql = []
+        self.conn.set_trace_callback(sql.append)
+        with mock.patch.object(backend, "send_resend_email_notification") as send, mock.patch.object(backend, "push_system_notification") as inbox:
+            first = backend.reconcile_fixed_monitoring_notification(notice["id"], self.conn)
+            second = backend.reconcile_fixed_monitoring_notification(notice["id"], self.conn)
+        send.assert_not_called()
+        inbox.assert_not_called()
+        self.assertEqual(first["summaryStatus"], "updated")
+        self.assertEqual(second["summaryStatus"], "up_to_date")
+        self.assertEqual(sum(statement.startswith("UPDATE notifications") for statement in sql), 1)
+        self.assertEqual([dict(row) for row in self.conn.execute("SELECT * FROM notification_deliveries ORDER BY created_at,id")], sorted(rows, key=lambda row: (row["created_at"], row["id"])))
+        self.assertEqual(first["receipt"], "accepted")
+        self.assertFalse(first["resendAllowed"])
+
+    def test_summary_proof_rejects_mutated_targets_ids_statuses_or_extra_outcomes(self):
+        notice, rows = self.summary_fixture()
+        changes = [("notice", "target_email", "other@example.test"), ("notice", "id", "NTF-MONTEST-" + "A" * 32), ("notice", "target_user_id", "OTHER"), ("notice", "body", "modified"), ("notice", "created_at", "2026-09-06 12:00:00"), (0, "id", "NDEL-MONRESULT-wrong"), (0, "error", "Resend HTTP 403"), (1, "status", "成功"), (1, "id", "NDEL-MONRETRY-wrong"), (2, "id", "NDEL-MONRESULT-wrong"), (2, "target", "other@example.test"), (2, "notification_id", "OTHER"), (2, "attempt_count", 1), (2, "status", "失敗"), (2, "receipt", ""), (2, "error", "private error"), (2, "created_at", "2026-09-07 11:59:59")]
+        for target, key, value in changes:
+            changed_notice = dict(notice)
+            changed_rows = [dict(row) for row in rows]
+            (changed_notice if target == "notice" else changed_rows[target])[key] = value
+            with self.subTest(target=target, key=key), mock.patch.object(backend, "supabase_update_many") as update, mock.patch.object(backend, "send_resend_email_notification") as send:
+                result = backend.reconcile_monitoring_summary_snapshot(changed_notice, changed_rows)
+            self.assertEqual(result["summaryStatus"], "rejected")
+            self.assertFalse(result["durableReceipt"])
+            update.assert_not_called()
+            send.assert_not_called()
+        for invalid_rows in (rows[:2], rows + [{**rows[-1], "id": "CONFLICTING-OUTCOME"}], [rows[0], rows[-1], rows[-1]]):
+            with mock.patch.object(backend, "supabase_update_many") as update:
+                result = backend.reconcile_monitoring_summary_snapshot(notice, invalid_rows)
+            self.assertEqual(result["summaryStatus"], "rejected")
+            update.assert_not_called()
+
+    def test_supabase_summary_cas_is_single_write_under_stale_concurrent_snapshots(self):
+        notice, rows = self.summary_fixture()
+        current = dict(notice)
+        writes = []
+        def update(table, filters, patch):
+            self.assertEqual(table, "notifications")
+            self.assertEqual(filters["target_email"], notice["target_email"])
+            self.assertEqual(filters["body"], notice["body"])
+            self.assertEqual(filters["target_company_id"], notice["target_company_id"])
+            if any(current.get(key) != (None if value == "__is_null__" else value) for key, value in filters.items()):
+                return []
+            current.update(patch)
+            writes.append(dict(patch))
+            return [dict(current)]
+        with mock.patch.object(backend, "supabase_update_many", side_effect=update), mock.patch.object(backend, "supabase_get", side_effect=lambda *_args: dict(current)), mock.patch.object(backend, "supabase_insert") as insert, mock.patch.object(backend, "supabase_patch") as patch, mock.patch.object(backend, "send_resend_email_notification") as send:
+            first = backend.reconcile_monitoring_summary_snapshot(notice, rows)
+            second = backend.reconcile_monitoring_summary_snapshot(notice, list(reversed(rows)))
+        self.assertEqual(first["summaryStatus"], "updated")
+        self.assertEqual(second["summaryStatus"], "up_to_date")
+        self.assertEqual(len(writes), 1)
+        insert.assert_not_called()
+        patch.assert_not_called()
+        send.assert_not_called()
+
+    def test_summary_lost_update_ack_is_read_back_and_identity_conflict_is_not_overwritten(self):
+        notice, rows = self.summary_fixture()
+        desired = backend.monitoring_summary_proof(notice, rows)["patch"]
+        for current, expected in (({**notice, **desired}, "up_to_date"), ({**notice, "target_email": "changed@example.test"}, "conflict"), (dict(notice), "pending")):
+            with self.subTest(expected=expected), mock.patch.object(backend, "supabase_update_many", side_effect=RuntimeError("secret provider@example.test error")) as update, mock.patch.object(backend, "supabase_get", return_value=current):
+                result = backend.reconcile_monitoring_summary_snapshot(notice, rows)
+            self.assertEqual(result["summaryStatus"], expected)
+            self.assertTrue(result["durableReceipt"])
+            self.assertEqual(result["receipt"], "accepted")
+            self.assertFalse(result["resendAllowed"])
+            self.assertNotIn("provider@example.test", json.dumps(result))
+            update.assert_called_once()
+
+    def test_monitoring_recovers_summary_but_dry_run_remains_read_only(self):
+        notice, _rows = self.insert_summary_fixture()
+        healthy = {"status": "healthy", "alerts": []}
+        with mock.patch.object(backend, "local_monitoring_snapshot", return_value=healthy), mock.patch.object(backend, "log_audit"), mock.patch.object(backend, "log_structured"), mock.patch.object(backend, "send_resend_email_notification") as send:
+            dry = backend.execute_monitoring_mode("dryRun", self.conn)
+            self.assertFalse(dry["writesPerformed"])
+            self.assertEqual(self.conn.execute("SELECT status FROM notifications WHERE id=?", (notice["id"],)).fetchone()[0], "部分派送")
+            result = backend.run_local_monitoring_check(self.conn)
+            again = backend.run_local_monitoring_check(self.conn)
+        self.assertEqual(result["summaryReconciliation"]["updated"], 1)
+        self.assertEqual(again["summaryReconciliation"]["updated"], 0)
+        self.assertEqual(self.conn.execute("SELECT status FROM notifications WHERE id=?", (notice["id"],)).fetchone()[0], "已派送")
+        send.assert_not_called()
+
+    def test_summary_batch_scope_excludes_business_mail_and_keeps_query_bounded(self):
+        notice, _rows = self.summary_fixture()
+        paths = []
+        def request(method, path, *_args):
+            self.assertEqual(method, "GET")
+            paths.append(path)
+            return [{"notification_id": notice["id"]}]
+        with mock.patch.object(backend, "supabase_request", side_effect=request), mock.patch.object(backend, "reconcile_fixed_monitoring_notification", return_value={"summaryStatus": "up_to_date"}) as reconcile:
+            result = backend.reconcile_fixed_monitoring_summaries()
+        query = parse_qs(urlparse(paths[0]).query)
+        self.assertEqual(query["id"], ["like.NDEL-MONRESULT-*"])
+        self.assertEqual(query["channel"], ["eq.Email"])
+        self.assertEqual(query["limit"], ["100"])
+        self.assertEqual(result["checked"], 1)
+        reconcile.assert_called_once_with(notice["id"], None)
+        with mock.patch.object(backend, "supabase_get") as read, mock.patch.object(backend, "supabase_update_many") as update:
+            rejected = backend.reconcile_fixed_monitoring_notification("NTF-BUSINESS")
+        self.assertEqual(rejected["summaryStatus"], "rejected")
+        read.assert_not_called()
+        update.assert_not_called()
+
+    def test_summary_failed_outcome_updates_truthfully_without_sending(self):
+        notice, rows = self.summary_fixture()
+        rows[-1].update(status="失敗", receipt="", error="Resend HTTP 403")
+        with mock.patch.object(backend, "supabase_update_many", return_value=[notice]) as update, mock.patch.object(backend, "send_resend_email_notification") as send:
+            result = backend.reconcile_monitoring_summary_snapshot(notice, rows)
+        self.assertEqual(result["summaryStatus"], "updated")
+        self.assertTrue(result["durableOutcome"])
+        self.assertFalse(result["durableReceipt"])
+        self.assertFalse(result["serviceAccepted"])
+        self.assertFalse(result["resendAllowed"])
+        self.assertEqual(update.call_args.args[2], {"status": "部分派送", "sent_at": rows[-1]["created_at"], "delivery_receipt": "Email:失敗 / Resend HTTP 403"})
+        send.assert_not_called()
+
+    def test_summary_batch_defers_after_time_budget_without_unbounded_requests(self):
+        ids = ["NTF-MONTEST-" + "A" * 32, "NTF-MONTEST-" + "B" * 32]
+        with mock.patch.object(backend, "supabase_request", return_value=[{"notification_id": value} for value in ids]), mock.patch.object(backend.time, "monotonic", side_effect=[0, 1, 21]), mock.patch.object(backend, "reconcile_fixed_monitoring_notification", return_value={"summaryStatus": "up_to_date"}) as reconcile:
+            result = backend.reconcile_fixed_monitoring_summaries()
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["deferred"], 1)
+        self.assertTrue(result["bounded"])
+        reconcile.assert_called_once_with(ids[0], None)
+
+    def test_supabase_monitoring_reconciles_before_snapshot_and_dry_run_does_not(self):
+        events = []
+        reconciliation = {"checked": 1, "updated": 1, "pending": 0}
+        def reconcile():
+            events.append("reconcile")
+            return reconciliation
+        def snapshot():
+            events.append("snapshot")
+            return {"status": "healthy", "alerts": []}
+        with mock.patch.object(backend, "reconcile_fixed_monitoring_summaries", side_effect=reconcile), mock.patch.object(backend, "supabase_monitoring_snapshot", side_effect=snapshot), mock.patch.object(backend, "supabase_insert"), mock.patch.object(backend, "log_structured"), mock.patch.object(backend, "send_resend_email_notification") as send:
+            dry = backend.execute_monitoring_mode("dryRun")
+            self.assertEqual(events, ["snapshot"])
+            self.assertFalse(dry["writesPerformed"])
+            events.clear()
+            result = backend.run_supabase_monitoring_check()
+        self.assertEqual(events, ["reconcile", "snapshot"])
+        self.assertEqual(result["summaryReconciliation"], reconciliation)
+        send.assert_not_called()
 
     def test_same_timestamp_outcome_resolves_claim_and_receipt_preview_in_any_order(self):
         claim = self.retry_claim()

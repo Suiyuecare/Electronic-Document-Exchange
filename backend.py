@@ -13,6 +13,7 @@ import argparse
 import base64
 import binascii
 import concurrent.futures
+import contextvars
 import copy
 import csv
 import html
@@ -46,6 +47,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
+from runtime_observability import capture_runtime_error, error_tracking_status
 
 from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
 from finance_bridge import (
@@ -1040,6 +1042,27 @@ FINANCE_BRIDGE_ACTOR_ALLOWED_ROLES = {
     "generalAffairs": {"ga_chief"},
 }
 FINANCE_LOGIN_EXPECTED_BINDING_KEY = "_edocFinanceLoginExpectedBinding"
+_HANDOFF_STAGE_TIMINGS = contextvars.ContextVar("edoc_handoff_stage_timings", default=None)
+_HANDOFF_TIMING_STAGES = ("nonce", "finance", "projection", "session")
+
+
+def timed_finance_login_stage(stage: str, operation):
+    timings = _HANDOFF_STAGE_TIMINGS.get()
+    if timings is None or stage not in _HANDOFF_TIMING_STAGES:
+        return operation()
+    started = time.monotonic()
+    try:
+        return operation()
+    finally:
+        timings[stage] = round(max(0.0, time.monotonic() - started) * 1000, 1)
+
+
+def parallel_finance_projection_reads(first, second):
+    """Overlap two independent Supabase reads; never pass SQLite connections."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        left = pool.submit(first)
+        right = pool.submit(second)
+        return left.result(), right.result()
 
 
 def strict_finance_role_profile(role: Any) -> Dict[str, str]:
@@ -4834,8 +4857,7 @@ def production_readiness() -> Dict[str, Any]:
         warnings.append(f"正式檔案儲存與防毒服務尚未完整：{', '.join(storage_service['missing'])}。")
     if not env_present("MONITORING_WEBHOOK_URL") and not notification_email_configured():
         warnings.append("監控告警尚未設定外部通道；請設定 Email 或 MONITORING_WEBHOOK_URL。")
-    if not env_present("SENTRY_DSN"):
-        warnings.append("未設定 SENTRY_DSN，正式錯誤追蹤需依賴 Vercel runtime logs 與系統 audit log。")
+    warnings.append("錯誤已提供追蹤編號並寫入遮罩後 runtime logs；尚未啟用外部長期錯誤封存。")
     if is_production() and EDOC_SIGNATURE_PROVIDER == "local-simulation":
         blockers.append("production 必須接正式電子簽章服務；不可使用 local-simulation 簽章。")
     if is_production() and not env_present("EDOC_TSA_URL"):
@@ -4877,7 +4899,8 @@ def production_readiness() -> Dict[str, Any]:
             "scanner": EDOC_SCAN_ENGINE,
             "publicBaseUrl": EDOC_PUBLIC_BASE_URL,
             "monitoringWebhook": env_present("MONITORING_WEBHOOK_URL"),
-            "sentry": env_present("SENTRY_DSN"),
+            "sentry": False,
+            "errorTracking": error_tracking_status(),
             "signatureProvider": EDOC_SIGNATURE_PROVIDER,
             "signatureApi": bool(EDOC_SIGNATURE_API_URL and EDOC_SIGNATURE_API_KEY),
             "signatureProfile": EDOC_SIGNATURE_PROFILE,
@@ -29822,19 +29845,24 @@ def monitoring_actionable_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return {**snapshot, "alerts": alerts, "status": status}
 
 
+def fixed_monitoring_test_payload(user: Dict[str, Any], test_date: str) -> Dict[str, Any]:
+    datetime.strptime(test_date, "%Y-%m-%d")
+    fingerprint = stable_json_hash({"purpose": "launch_acceptance_test", "date": test_date, "user": user["id"]})[:32]
+    return {
+        "id": f"NTF-MONTEST-{fingerprint}", "type": "上線驗收測試", "title": "【上線驗收測試】公文系統通知通道確認",
+        **exact_notification_target_payload(user, str(user["company_id"])),
+        "channel": "Email + 系統通知", "priority": "中", "source": f"MONTEST-{fingerprint}", "action_url": "/#settings",
+        "body": "這是公文系統上線前的通知通道驗收測試，沒有待簽公文或需要用印的案件。請確認您可看到本信及系統內通知。郵件服務接受寄送不等於已實收，實際收信請另外向行政部門主任確認。同日重試不重複寄送。",
+    }
+
+
 def monitoring_alert_notification_payload(snapshot: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
     codes = sorted({str(alert.get("code") or "UNKNOWN") for alert in snapshot.get("alerts", [])})
     level = str(snapshot.get("status") or "warning")
     window = str(int(time.time() // 3600)) if level == "critical" else datetime.now().strftime("%Y-%m-%d")
     fingerprint = stable_json_hash({"codes": codes, "level": level, "window": window, "user": user["id"]})[:32]
     if snapshot.get("deliveryTest"):
-        fingerprint = stable_json_hash({"purpose": "launch_acceptance_test", "date": datetime.now().strftime("%Y-%m-%d"), "user": user["id"]})[:32]
-        return {
-            "id": f"NTF-MONTEST-{fingerprint}", "type": "上線驗收測試", "title": "【上線驗收測試】公文系統通知通道確認",
-            **exact_notification_target_payload(user, str(user["company_id"])),
-            "channel": "Email + 系統通知", "priority": "中", "source": f"MONTEST-{fingerprint}", "action_url": "/#settings",
-            "body": "這是公文系統上線前的通知通道驗收測試，沒有待簽公文或需要用印的案件。請確認您可看到本信及系統內通知。郵件服務接受寄送不等於已實收，實際收信請另外向行政部門主任確認。同日重試不重複寄送。",
-        }
+        return fixed_monitoring_test_payload(user, datetime.now().strftime("%Y-%m-%d"))
     return {
         "id": f"NTF-MON-{fingerprint}", "type": "維運告警", "title": "公文系統需要處理維運異常",
         **exact_notification_target_payload(user, str(user["company_id"])),
@@ -29973,9 +30001,132 @@ def append_monitoring_retry_outcome(claim: Dict[str, Any], outcome: Dict[str, An
     return row
 
 
+def monitoring_summary_proof(notice: Dict[str, Any], deliveries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Validate immutable, fixed-test evidence; this never authorizes a send."""
+    def timestamp(value: Any) -> datetime:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        offset = parsed.utcoffset() or timedelta()
+        return parsed.replace(tzinfo=None) - offset
+
+    user = {"id": notice.get("target_user_id"), "company_id": notice.get("target_company_id"), "email": notice.get("target_email"), "role": notice.get("target_role")}
+    expected = fixed_monitoring_test_payload(user, str(notice.get("created_at") or "")[:10])
+    if not valid_formal_email(str(user["email"] or "")) or not user["role"] or any(notice.get(key) != value for key, value in expected.items()):
+        raise ValueError("notification_summary_proof_invalid")
+    if len(deliveries) != 3 or len({row.get("id") for row in deliveries}) != 3:
+        raise ValueError("notification_summary_proof_invalid")
+    fingerprint = stable_json_hash({"notificationId": notice["id"]})[:32]
+    rows = {row["id"]: row for row in deliveries}
+    claim = rows.get("NDEL-MONRETRY-" + fingerprint)
+    outcome = rows.get("NDEL-MONRESULT-" + fingerprint)
+    if not claim or not outcome:
+        raise ValueError("notification_summary_proof_invalid")
+    original = next(row for row in deliveries if row["id"] not in {claim["id"], outcome["id"]})
+    if any(row.get("notification_id") != notice["id"] or row.get("channel") != "Email" or row.get("target") != notice["target_email"] for row in deliveries):
+        raise ValueError("notification_summary_proof_invalid")
+    if (str(original.get("id") or "").startswith(("NDEL-MONRETRY-", "NDEL-MONRESULT-"))
+            or original.get("status") != "失敗" or original.get("error") != "Resend HTTP 400" or original.get("receipt") or original.get("attempt_count") != 1
+            or claim.get("status") != "重試中" or claim.get("receipt") or claim.get("error") or claim.get("attempt_count") != 1
+            or outcome.get("attempt_count") != 0 or outcome.get("status") not in {"成功", "失敗", "未設定", "憑證異常"}):
+        raise ValueError("notification_summary_proof_invalid")
+    receipt = str(outcome.get("receipt") or "")
+    error = str(outcome.get("error") or "")
+    accepted = outcome["status"] == "成功"
+    if accepted != bool(receipt) or (receipt and not re.fullmatch(r"[A-Za-z0-9._/-]{1,256}", receipt)) or (accepted and error) or notification_safe_email_error(error) != error:
+        raise ValueError("notification_summary_proof_invalid")
+    if not (timestamp(notice["created_at"]) <= timestamp(original["created_at"]) <= timestamp(claim["created_at"]) <= timestamp(outcome["created_at"])):
+        raise ValueError("notification_summary_proof_invalid")
+    identity = {**expected, "created_at": notice["created_at"]}
+    return {
+        "identity": identity, "identityHash": stable_json_hash(identity), "outcomeId": outcome["id"],
+        "serviceAccepted": accepted, "receipt": receipt,
+        "patch": {"status": "已派送" if accepted else "部分派送", "sent_at": outcome["created_at"], "delivery_receipt": "Email:" + outcome["status"] + (" / " + error if error else "")},
+    }
+
+
+def reconcile_monitoring_summary_snapshot(notice: Dict[str, Any], deliveries: List[Dict[str, Any]], conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    result = {"notificationId": str(notice.get("id") or ""), "summaryStatus": "rejected", "safeErrorCode": "notification_summary_proof_invalid", "durableOutcome": False, "durableReceipt": False, "serviceAccepted": False, "receipt": "", "resendAllowed": False}
+    try:
+        proof = monitoring_summary_proof(notice, deliveries)
+    except (ValueError, TypeError, KeyError, StopIteration):
+        return result
+    result.update({"durableOutcome": True, "durableReceipt": bool(proof["receipt"]), "serviceAccepted": proof["serviceAccepted"], "receipt": proof["receipt"], "outcomeId": proof["outcomeId"], "identityHash": proof["identityHash"]})
+    patch = proof["patch"]
+    if all(notice.get(key) == value for key, value in patch.items()):
+        return {**result, "summaryStatus": "up_to_date", "safeErrorCode": ""}
+    # Compare all validated identity and prior summary fields in the UPDATE.
+    # Only one worker can change this exact snapshot. No ledger row is modified.
+    before = {**proof["identity"], **{key: notice.get(key) for key in patch}}
+    try:
+        if conn is not None:
+            assignments = ",".join(f"{key}=?" for key in patch)
+            predicate = " AND ".join(f"{key} IS ?" for key in before)
+            changed = conn.execute(f"UPDATE notifications SET {assignments} WHERE {predicate}", (*patch.values(), *before.values())).rowcount
+            conn.commit()
+        else:
+            changed = len(supabase_update_many("notifications", {key: "__is_null__" if value is None else value for key, value in before.items()}, patch))
+        if changed == 1:
+            return {**result, "summaryStatus": "updated", "safeErrorCode": ""}
+    except Exception:
+        # The conditional write may have committed before its response was lost.
+        # A read-back can confirm it, but can never trigger another email.
+        pass
+    try:
+        if conn is not None:
+            row = conn.execute("SELECT * FROM notifications WHERE id=?", (notice["id"],)).fetchone()
+            current = row_to_dict(row) if row else None
+        else:
+            current = supabase_get("notifications", notice["id"])
+        if current and all(current.get(key) == value for key, value in proof["identity"].items()):
+            if all(current.get(key) == value for key, value in patch.items()):
+                return {**result, "summaryStatus": "up_to_date", "safeErrorCode": ""}
+        elif current:
+            return {**result, "summaryStatus": "conflict", "safeErrorCode": "notification_summary_conflict"}
+    except Exception:
+        pass
+    return {**result, "summaryStatus": "pending", "safeErrorCode": "notification_summary_update_failed"}
+
+
+def reconcile_fixed_monitoring_notification(notification_id: str, conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    if not re.fullmatch(r"NTF-MONTEST-[A-F0-9]{32}", str(notification_id)):
+        return {"summaryStatus": "rejected", "safeErrorCode": "notification_summary_proof_invalid", "resendAllowed": False}
+    try:
+        if conn is not None:
+            row = conn.execute("SELECT * FROM notifications WHERE id=?", (notification_id,)).fetchone()
+            notice = row_to_dict(row) if row else None
+            deliveries = [row_to_dict(row) for row in conn.execute("SELECT * FROM notification_deliveries WHERE notification_id=? AND channel='Email' ORDER BY created_at DESC LIMIT 4", (notification_id,)).fetchall()]
+        else:
+            notice = supabase_get("notifications", notification_id)
+            deliveries = supabase_filter_rows("notification_deliveries", {"notification_id": notification_id, "channel": "Email"}, order="created_at.desc", limit=4)
+        return reconcile_monitoring_summary_snapshot(notice or {"id": notification_id}, deliveries, conn)
+    except Exception:
+        return {"notificationId": notification_id, "summaryStatus": "pending", "safeErrorCode": "notification_summary_read_failed", "resendAllowed": False}
+
+
+def reconcile_fixed_monitoring_summaries(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    # Private scheduled work only. The dry-run snapshot never calls this helper.
+    # Bound each run to the most recent 100 fixed-test outcomes, not business mail.
+    deadline = time.monotonic() + 20
+    try:
+        if conn is not None:
+            rows = [row_to_dict(row) for row in conn.execute("SELECT notification_id FROM notification_deliveries WHERE id LIKE 'NDEL-MONRESULT-%' AND channel='Email' ORDER BY created_at DESC LIMIT 100").fetchall()]
+        else:
+            query = urllib.parse.urlencode({"select": "notification_id", "id": "like.NDEL-MONRESULT-*", "channel": "eq.Email", "order": "created_at.desc", "limit": "100"})
+            rows = supabase_request("GET", f"notification_deliveries?{query}")
+        notification_ids = list(dict.fromkeys(str(row.get("notification_id") or "") for row in rows))
+        results = []
+        for notification_id in notification_ids:
+            if time.monotonic() >= deadline:
+                break
+            results.append(reconcile_fixed_monitoring_notification(notification_id, conn))
+        remaining = len(notification_ids) - len(results)
+        return {"checked": len(results), "updated": sum(row["summaryStatus"] == "updated" for row in results), "pending": sum(row["summaryStatus"] in {"pending", "rejected", "conflict"} for row in results), "results": results, "bounded": len(rows) == 100 or bool(remaining), "deferred": remaining}
+    except Exception:
+        return {"checked": 0, "updated": 0, "pending": 1, "safeErrorCode": "notification_summary_scan_failed"}
+
+
 def retry_monitoring_delivery_test(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
     """One claimed Email-only retry of today's original fixed failed test IDs."""
-    result = {"mode": "deliveryTestRetry", "attempted": 0, "receipts": [], "skipped": [], "humanReceiptConfirmed": False}
+    result = {"mode": "deliveryTestRetry", "attempted": 0, "receipts": [], "skipped": [], "summaryReconciliation": [], "humanReceiptConfirmed": False}
     if notification_email_provider() != "Resend":
         return {**result, "reason": "original_provider_required"}
     users = [row_to_dict(row) for row in conn.execute("SELECT * FROM users WHERE status = '啟用'").fetchall()] if conn is not None else supabase_filter_rows("users", {"status": "啟用", "account_source": "finance"}, limit=1000)
@@ -30011,14 +30162,10 @@ def retry_monitoring_delivery_test(conn: sqlite3.Connection | None = None) -> Di
             raise RuntimeError("monitoring_retry_delivery_unknown") from None
         patch = append_monitoring_retry_outcome(claim, outcome, conn)
         accepted = patch["status"] == "成功" and bool(patch["receipt"])
-        notice_patch = {"status": "已派送" if accepted else "部分派送", "sent_at": now(), "delivery_receipt": "Email:" + patch["status"] + (" / " + patch["error"] if patch["error"] else "")}
-        if conn is not None:
-            conn.execute("UPDATE notifications SET status=:status,sent_at=:sent_at,delivery_receipt=:delivery_receipt WHERE id=:id", {**notice_patch, "id": notification_id})
-            conn.commit()
-        else:
-            supabase_patch("notifications", notification_id, notice_patch)
+        summary = reconcile_monitoring_summary_snapshot(notice, [attempts[0], claim, patch], conn)
+        result["summaryReconciliation"].append(summary)
         result["attempted"] += 1
-        result["receipts"].append({"notificationId": notification_id, "serviceAccepted": accepted, "receipt": patch["receipt"], "safeErrorCode": patch["error"]})
+        result["receipts"].append({"notificationId": notification_id, "serviceAccepted": accepted, "receipt": patch["receipt"], "safeErrorCode": patch["error"], "durableOutcome": True, "durableReceipt": bool(patch["receipt"]), "summaryStatus": summary["summaryStatus"], "summaryErrorCode": summary["safeErrorCode"], "resendAllowed": False})
     return result
 
 
@@ -30133,13 +30280,14 @@ def post_monitoring_webhook(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def run_local_monitoring_check(conn: sqlite3.Connection) -> Dict[str, Any]:
+    reconciliation = reconcile_fixed_monitoring_summaries(conn)
     snapshot = local_monitoring_snapshot(conn)
     actionable = monitoring_actionable_snapshot(snapshot)
     webhook = post_monitoring_webhook(actionable) if actionable["alerts"] else {"sent": False, "reason": "無須派送的告警"}
     fallback = deliver_local_monitoring_alerts(conn, actionable) if actionable["alerts"] and not webhook.get("sent") else {"attempted": 0, "reason": "webhook_sent_or_no_actionable_alerts"}
     log_structured("info", "production_monitoring_check", status=snapshot["status"], alerts=len(snapshot["alerts"]), webhook_sent=bool(webhook.get("sent")), runtime="local")
     log_audit(conn, "Ops Monitor", "正式部署監控檢查", "production_monitoring", snapshot["status"], json.dumps({"alerts": snapshot["alerts"], "webhook": webhook, "fallback": fallback}, ensure_ascii=False))
-    return {**snapshot, "webhook": webhook, "alertDelivery": fallback}
+    return {**snapshot, "webhook": webhook, "alertDelivery": fallback, "summaryReconciliation": reconciliation}
 
 
 def notification_target_email(conn: sqlite3.Connection, role: str, explicit: str = "") -> str:
@@ -40147,7 +40295,10 @@ def _supabase_exact_legacy_finance_projection_binding(
         ),
         "limit": "2",
     })
-    rows = supabase_request("GET", f"users?{query}")
+    rows, company_rows = parallel_finance_projection_reads(
+        lambda: supabase_request("GET", f"users?{query}"),
+        lambda: supabase_filter_rows("companies", {"finance_entity_id": entity_id}, order="id.asc", limit=2),
+    )
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
     user = rows[0]
@@ -40163,12 +40314,6 @@ def _supabase_exact_legacy_finance_projection_binding(
     ):
         raise FinanceBridgeContractError("finance_bridge_legacy_tenant_projection_invalid")
 
-    company_rows = supabase_filter_rows(
-        "companies",
-        {"finance_entity_id": entity_id},
-        order="id.asc",
-        limit=2,
-    )
     if (
         not isinstance(company_rows, list)
         or len(company_rows) != 1
@@ -40797,18 +40942,19 @@ def sync_supabase_finance_login_snapshot(
     ):
         applicant["projection_state"] = "active"
     actor_sources = normalized["actors"]
-    existing = _supabase_finance_snapshot_user_candidate(applicant)
     if legacy_projection_binding is not None:
-        existing = _supabase_require_legacy_finance_user_identity_binding(
-            legacy_projection_binding,
-            applicant,
-            existing,
+        existing, company_row = parallel_finance_projection_reads(
+            lambda: _supabase_require_legacy_finance_user_identity_binding(
+                legacy_projection_binding, applicant, _supabase_finance_snapshot_user_candidate(applicant),
+            ),
+            lambda: supabase_get("companies", legacy_projection_binding["company_id"]),
         )
         company = _supabase_require_legacy_finance_company_binding(
             legacy_projection_binding,
-            supabase_get("companies", legacy_projection_binding["company_id"]),
+            company_row,
         )
     else:
+        existing = _supabase_finance_snapshot_user_candidate(applicant)
         company, _ = supabase_upsert_finance_company_snapshot(
             snapshot["company"],
             update_existing=False,
@@ -40831,14 +40977,18 @@ def sync_supabase_finance_login_snapshot(
         # by Finance. It may neither insert nor adopt an account/company during
         # login. Re-read both bindings immediately before returning so a row
         # deleted or rebound after the recovery lookup fails closed.
+        user_row, company_row = parallel_finance_projection_reads(
+            lambda: supabase_get("users", legacy_projection_binding["user_id"]),
+            lambda: supabase_get("companies", legacy_projection_binding["company_id"]),
+        )
         current_user = _supabase_require_legacy_finance_user_identity_binding(
             legacy_projection_binding,
             applicant,
-            supabase_get("users", legacy_projection_binding["user_id"]),
+            user_row,
         )
         current_company = _supabase_require_legacy_finance_company_binding(
             legacy_projection_binding,
-            supabase_get("companies", legacy_projection_binding["company_id"]),
+            company_row,
         )
         if portal_authenticated:
             current_user = _supabase_promote_portal_verified_legacy_finance_user(
@@ -41583,14 +41733,12 @@ def supabase_authenticate_preprovisioned_logging_bridge(
 ) -> Tuple[Dict[str, Any], int]:
     """Create a session from signed Portal identity plus live Finance authority."""
     _portal_auth_user_id, email = portal_finance_identity(source_user)
-    snapshot = current_finance_bridge_snapshot(
-        email,
-        portal_authenticated=True,
-    )
-    user = sync_supabase_finance_login_snapshot(
-        snapshot,
-        portal_authenticated=True,
-    )
+    snapshot = timed_finance_login_stage("finance", lambda: current_finance_bridge_snapshot(
+        email, portal_authenticated=True,
+    ))
+    user = timed_finance_login_stage("projection", lambda: sync_supabase_finance_login_snapshot(
+        snapshot, portal_authenticated=True,
+    ))
     if user.get("role") not in ALLOWED_EDOC_ROLES:
         return {"error": "role_forbidden", "detail": "此 Finance 帳號未授權使用公文收發電子用印系統。"}, 403
     expected_binding = user.get(FINANCE_LOGIN_EXPECTED_BINDING_KEY)
@@ -41604,12 +41752,12 @@ def supabase_authenticate_preprovisioned_logging_bridge(
     # One service-only RPC creates the session, updates verification time,
     # records the login event and returns exact RBAC permissions atomically.
     # The former four sequential Data API calls dominated cold-login latency.
-    session = supabase_create_finance_login_session(
+    session = timed_finance_login_stage("session", lambda: supabase_create_finance_login_session(
         user,
         ip,
         device,
         expected_binding=expected_binding,
-    )
+    ))
     public_profile = session["user"]
     return {
         **session,
@@ -42477,6 +42625,7 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
 
 
 def run_supabase_monitoring_check() -> Dict[str, Any]:
+    reconciliation = reconcile_fixed_monitoring_summaries()
     snapshot = supabase_monitoring_snapshot()
     actionable = monitoring_actionable_snapshot(snapshot)
     webhook = post_monitoring_webhook(actionable) if actionable["alerts"] else {"sent": False, "reason": "無須派送的告警"}
@@ -42493,7 +42642,7 @@ def run_supabase_monitoring_check() -> Dict[str, Any]:
         "detail": json.dumps({"alerts": snapshot["alerts"], "webhook": webhook, "fallback": fallback}, ensure_ascii=False),
         "created_at": now(),
     })
-    return {**snapshot, "webhook": webhook, "alertDelivery": fallback}
+    return {**snapshot, "webhook": webhook, "alertDelivery": fallback, "summaryReconciliation": reconciliation}
 
 
 def stable_json_hash(value: Any) -> str:
@@ -43742,6 +43891,15 @@ class Handler(SimpleHTTPRequestHandler):
         status: int = 200,
         extra_headers: Iterable[Tuple[str, str]] | None = None,
     ) -> None:
+        if status >= 500:
+            error_id = capture_runtime_error(
+                method=getattr(self, "command", "OTHER"),
+                path=getattr(self, "path", "/api/other"),
+                status=status, exception=sys.exc_info()[1],
+            )
+            if isinstance(data, dict):
+                data = {**data, "errorId": error_id}
+            extra_headers = [*(extra_headers or ()), ("X-EDOC-Error-ID", error_id)]
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -44344,11 +44502,32 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("Referrer-Policy", "no-referrer")
+        stage_timings = getattr(self, "_handoff_stage_timings", None)
+        if isinstance(stage_timings, dict):
+            timings = {key: value for key, value in stage_timings.items() if key in _HANDOFF_TIMING_STAGES and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0}
+            started = getattr(self, "_handoff_started", None)
+            if isinstance(started, (int, float)):
+                timings["total"] = round(max(0.0, time.monotonic() - started) * 1000, 1)
+            if timings:
+                self.send_header("Server-Timing", ", ".join(f"{key};dur={value:.1f}" for key, value in timings.items()))
+                try:
+                    log_structured("info", "portal_handoff_timing", timingVersion=1, timingsMs=timings, accepted=bool(token), failureStatus=int(failure_status or 0))
+                except Exception:
+                    pass  # Observability must not interrupt cookie/redirect delivery.
         for name, value in cookie_headers:
             self.send_header(name, value)
         self.end_headers()
 
     def handle_portal_handoff(self) -> None:
+        self._handoff_stage_timings = {}
+        self._handoff_started = time.monotonic()
+        timing_context = _HANDOFF_STAGE_TIMINGS.set(self._handoff_stage_timings)
+        try:
+            self._handle_portal_handoff()
+        finally:
+            _HANDOFF_STAGE_TIMINGS.reset(timing_context)
+
+    def _handle_portal_handoff(self) -> None:
         if not self.portal_handoff_origin_allowed():
             self.log_handoff_failure("origin_not_allowed", 403)
             self.send_handoff_redirect(failure_status=403)
@@ -44367,7 +44546,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         try:
             if USE_SUPABASE:
-                if not claim_supabase_portal_handoff_jti(source_user):
+                if not timed_finance_login_stage("nonce", lambda: claim_supabase_portal_handoff_jti(source_user)):
                     self.log_handoff_failure("portal_handoff_replayed", 409)
                     self.send_handoff_redirect(failure_status=409)
                     return
@@ -46780,7 +46959,8 @@ class Handler(SimpleHTTPRequestHandler):
             )
         except Exception as exc:
             internal_detail = redact_text(str(exc))[:500]
-            log_structured("error", "api_request_failed", path=path, method=method, error=internal_detail)
+            # send_json emits a correlated, allowlisted event without upstream
+            # exception text, document ids, SQL row values or request payloads.
             self.send_json(
                 {
                     "error": "server_error",

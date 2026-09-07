@@ -58,8 +58,8 @@ class OfficialFontScopeContractTest(unittest.TestCase):
         self.assertIn("font-display: block", css)
         self.assertIn("official_pdf_font_missing_glyphs", javascript)
         self.assertIn("內容含教育部標準楷書不支援的罕見字元", javascript)
-        self.assertIn("styles.css?v=20260907-launch-readiness-r1", html)
-        self.assertIn("app.js?v=20260907-launch-readiness-r1", html)
+        for asset in ("entry-bootstrap.js", "styles.css", "app.js"):
+            self.assertTrue(asset + "?v=20260908-launch-six-items-r1" in html, f"{asset}: shared release tag missing")
 
         editor_rule = css[css.index("#uploadedSealTextInput") : css.index(".draft-preview-heading-actions")]
         self.assertIn("EDoc LXGW WenKai TC", editor_rule)

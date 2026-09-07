@@ -13,7 +13,7 @@
 6. 啟動全新本機 PostgreSQL。禁止 TCP，只允許 `0700` 私密目錄中的 Unix socket；無法指定正式資料庫為目標。
 7. 從解密後備份執行 `pg_restore`，逐表核對筆數、完整資料雜湊、RLS、政策與 ACL，任一差異即失敗。
 8. 將還原的 Storage bytes 複製到私密隔離目錄，逐檔核對 hash、大小與數量。
-9. 關閉並刪除隔離 PostgreSQL 及未加密暫存，只留下加密備份與不含內容的 receipt。
+9. 正常完成、可處理的逾時或中止時，關閉並刪除隔離 PostgreSQL 及未加密暫存，只留下加密備份與不含內容的 receipt。強制 `SIGKILL`、作業系統崩潰或斷電無法執行清理；此時必須依中斷紀錄檢查私密暫存，不得視為成功。
 
 這個流程沒有 JSON sandbox 假還原，也不會覆寫正式資料庫或正式檔案。
 
@@ -42,7 +42,8 @@ python scripts/backup_restore_drill.py \
 `--source-project-ref` 必須與 CLI linked project 完全一致。
 若已有私密且被忽略的 operator env 檔，也可用 `--env-file` 載入 Storage 設定，不使用 `--storage-project-ref`。
 Vercel 的 sensitive env 無法 pull；內容為 placeholder 時不得當成有效憑證。
-不要同時啟動多個會刷新 Supabase CLI 登入的工作，避免同名登入在 dump 開始前失效。
+本工具以來源 project 的跨程序 `flock` 避免同時刷新登入或執行備份；鎖位於 repo 外的私密狀態目錄，且不刪除鎖檔 inode。其他不使用本工具的 CLI 維運工作仍需人工協調，避免同名登入在 dump 開始前失效。
+`--timeout-seconds` 預設 900 秒，涵蓋取得資格、來源讀取及隔離還原；`--require-existing-key` 可禁止金鑰遺失時自動建立新金鑰。
 
 來源系統無法連線時，可用同一工具完全離線重驗既有備份，不需要 Supabase 或 Storage 憑證：
 
@@ -106,19 +107,75 @@ receipt JSON 內的 `receipt_sha256` 是**移除該欄位後**、依工具 `cano
 在沒有另行核准雲端 runner 的情況下，可使用既有主機與已授權 connector 執行「主機輔助異地備份」，但它依賴主機開機、登入與網路連線，並非無人值守雲端 DR。
 
 - 先將 Python、鎖版套件與 PostgreSQL tools 安裝到持久 operator runtime；不能讓正式排程依賴 `/tmp` 或臨時 DMG 掛載。
-- 同一來源只允許一個備份工作，與其他刷新 Supabase CLI 短效資料庫登入的維運工作互斥。目前 CLI 工具本身尚未提供跨程序排程鎖。
+- 同一來源只允許一個備份工作，CLI 與下述 host wrapper 共用跨程序來源鎖；其他直接刷新 Supabase CLI 登入的維運工作仍需協調。
 - 排程每次執行新備份、隔離還原、私密上傳與異地讀回驗證；未完成的步驟保留失敗／未驗證狀態，不覆寫前次成功證據。
 - 解密金鑰另存經公司核准的密碼保管庫；只在同一台主機的不同目錄存放，仍不能承受整台設備遺失。
 - 設定「最後一次已驗證異地快照」的過期告警；只有排程多次成功且中斷／補跑驗證完成後，才能宣稱持續達成指定 RPO。
 - 例行排程及保留政策需另外啟用並驗證。本文件與一次成功備份不代表排程已存在。
 
+## 持久主機 runtime 與 prepare-only 排程
+
+`scripts/backup_host.py` 提供 `check`、`status`、`run` 及 `prepare-launch-agent` 四個模式。它沒有 Drive 上傳、寄信或啟用排程的程式碼，不是無人值守雲端備援服務。
+
+- `check` 僅檢查持久 Python／PostgreSQL／Supabase CLI、linked project 和金鑰檔權限及大小；不讀取金鑰 bytes、不連線、不刷新資格。
+- `status` 唯讀驗證前次成功 receipt、加密檔大小及 hash、來源快照年齡。回報 `missing`、`healthy`、`running`、`degraded`、`stale` 或 `invalid`，不自動跑備份。
+- `run` 取得來源鎖後先留下去識別化開始紀錄，再執行新備份與真正隔離還原。成功證據使用 atomic write；失敗或競爭鎖不會覆蓋前次成功。中斷而未完成的開始紀錄會被判定為未確認，不補造成功。
+- `prepare-launch-agent` 只在 `stateDir/pending` 建立 `0600` 候選 plist，`RunAtLoad=false`，不放入 `~/Library/LaunchAgents`，也不呼叫 `launchctl`。重複準備不覆蓋既有已審查候選檔。
+
+設定檔須在 repo 外、`0600`，只允許下列欄位。下方是格式範例，project ref／路徑由維運人員填入私密設定檔；範例每小時一次不代表達成 15 分鐘的持續 RPO。
+
+```json
+{
+  "schemaVersion": 1,
+  "sourceProjectRef": "operator-linked-project-ref",
+  "storageProjectRef": "operator-storage-project-ref",
+  "supabaseWorkdir": "/persistent/operator/linked-workdir",
+  "supabaseExecutable": "/persistent/operator/bin/supabase",
+  "pythonExecutable": "/persistent/operator/runtime/venv/bin/python",
+  "pgBinDir": "/persistent/operator/runtime/postgresql/bin",
+  "outputDir": "/persistent/operator/encrypted-backups",
+  "stateDir": "/persistent/operator/backup-state",
+  "encryptionKeyFile": "/separate/private-key-location/backup.key",
+  "intervalSeconds": 3600,
+  "timeoutSeconds": 600,
+  "maximumSnapshotAgeMinutes": 90,
+  "rtoTargetMinutes": 30,
+  "rpoTargetMinutes": 15
+}
+```
+
+排程版強制沿用既有金鑰，若遺失即失敗，不會自動更換。金鑰路徑不得在備份輸出目錄內；這項分離不等於異地金鑰保管已完成。執行環境不得位於 `/tmp`、系統暫存、cache 或 `/Volumes` 臨時掛載；runtime 不包含金鑰。套件只安裝於維運專用 venv，不加入 Vercel Function 依賴。
+
+準備與唯讀驗證：
+
+```sh
+"$EDOC_HOST_PYTHON" "$EDOC_HOST_SCRIPT" --config "$EDOC_HOST_CONFIG" check
+"$EDOC_HOST_PYTHON" "$EDOC_HOST_SCRIPT" --config "$EDOC_HOST_CONFIG" prepare-launch-agent
+plutil -lint "$EDOC_HOST_STATE/pending/com.suiyuecare.edoc.backup-host.plist"
+"$EDOC_HOST_PYTHON" "$EDOC_HOST_SCRIPT" --config "$EDOC_HOST_CONFIG" status
+```
+
+`run` 透過設定的固定 Supabase CLI、既有正常登入狀態取得資格：`projects api-keys` 的 Storage key 與 `db dump --linked --dry-run` 的短效連線參數只在 process 內解析，不儲存至設定檔、命令列或 log，也不讀取任意 OAuth／瀏覽器 cookie。這是可執行路徑，**不代表已驗證 launchd 非互動登入、鎖定 Keychain、重新開機或斷線後補跑**；這些情境須在核准受控新備份後逐項驗收，才能啟用排程。`check` 通過不能取代此驗收。
+
+啟用候選排程前另需：
+
+1. 核對持久 runtime 的版本、簽章和部署腳本 hash；以去識別化資料通過實際 PostgreSQL 測試。
+2. 受控執行一次 `run`，確認上述非互動資格可用、來源鎖互斥、成功與逾時／中斷狀態，以及前次成功不受影響。
+3. 確認排程頻率、資料保留政策、主機可用性及狀態告警的真正接收方式。wrapper 僅輸出安全 JSON，不宣稱已建立告警收件。
+4. 完成異地檔案 bytes 取回、取回副本還原及異地金鑰保管，分別保留證據；不能拿本機 archive 代替雲端取回檔。
+5. 由維運人員另外安裝並啟用候選 plist；本工具不執行此動作。
+
+`last-success.json` 是最後完成的本機驗證證據，`last-attempt.json` 是最近一次執行状态，`history/` 為不可覆蓋的每次開始與結束紀錄。沒有成功的排程執行時，狀態必須是 `missing`，不能把先前手動 receipt 匯入冒充排程成功。所有狀態明確標記 `unattendedCloudDR: false`；異地狀態仍是未驗證／本 worker 未執行。
+
+一般 SIGTERM、SIGINT 或整體逾時會終止外部命令的 process group、停止本機 PostgreSQL 並清除本次私密暫存。若被 SIGKILL 或斷電，應先確定沒有執行中工作，再由維運人員檢查本次 `edoc-restore-*` 私密目錄與孤兒 PostgreSQL；不可自動大量刪除未知暫存或隱藏中斷。備份與 receipt 沒有自動清除功能，因此保留政策尚需另行核准。
+
 ## 測試
 
 ```sh
-EDOC_TEST_PG_BIN="$EDOC_PG_BIN_DIR" python -m unittest tests.test_backup_restore_runner -v
+EDOC_TEST_PG_BIN="$EDOC_PG_BIN_DIR" python -m unittest tests.test_backup_restore_runner tests.test_backup_host -v
 ```
 
-涵蓋真正 PostgreSQL dump/restore、RLS/ACL、AES-GCM 往返與竄改拒絕、Storage bytes 還原、空 bucket 明示、金鑰權限和 archive 路徑攻擊。
+涵蓋真正 PostgreSQL dump/restore、RLS/ACL、AES-GCM 往返與竄改拒絕、Storage bytes 還原、空 bucket 明示、金鑰權限和 archive 路徑攻擊，以及跨程序互斥、整體逾時清理、不可覆蓋 receipt、前次成功保留、過期／中斷／竄改狀態、唯讀健康檢查和未啟用的候選 plist。
 測試只使用去識別化 fixture，不連正式交換 provider。
 
 ## 與系統上還原按鈕的差別

@@ -111,7 +111,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
     def test_mobile_primary_controls_have_44px_touch_targets(self) -> None:
         normalized = re.sub(r"\s+", " ", self.css)
         self.assertIn(".mobile-primary-item { display: flex; min-width: 0; min-height: 54px;", normalized)
-        self.assertIn(".mobile-menu-button { grid-area: menu; display: flex; width: 40px; min-width: 40px; height: 40px; min-height: 40px;", normalized)
+        self.assertTrue(".mobile-menu-button { grid-area: menu; display: flex; width: 44px; min-width: 44px; height: 44px; min-height: 44px;" in normalized, "mobile menu must retain a 44px touch target")
         self.assertIn(".sidebar .nav-item { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 12px; min-width: 0; min-height: 54px;", normalized)
         self.assertIn(".flow-step-chip, .segment, .page-arrow, .text-button, .unified-flow-row-button, .contract-link, .pdf-editor-v2 button { min-height: 44px;", normalized)
         self.assertIn(".page-arrow { min-width: 44px;", normalized)

@@ -351,13 +351,10 @@ class SensitiveTransportHardeningTests(unittest.TestCase):
                 )
             ],
         )
-        log.assert_called_once_with(
-            "error",
-            "api_request_failed",
-            path="/api/official-documents/OD-DEIDENTIFIED/editor-uploads/UP-DEIDENTIFIED/finalize",
-            method="POST",
-            error=opaque_marker,
-        )
+        # Unknown upstream errors no longer use the arbitrary-text logger.
+        # The real send_json correlation/header/log contract is covered by
+        # test_runtime_observability; this stub intentionally captures payloads.
+        log.assert_not_called()
         self.assertNotIn(SECRET_TEXT, repr(log.call_args))
 
     def test_large_storage_error_is_closed_without_body_or_cause(self):

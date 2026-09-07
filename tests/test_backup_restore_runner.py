@@ -2,8 +2,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 
 SPEC = importlib.util.spec_from_file_location("backup_restore_drill", Path(__file__).resolve().parents[1] / "scripts/backup_restore_drill.py")
@@ -59,6 +63,66 @@ class BackupRestoreRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(runner.DrillError, "private_0600"):
                 runner.load_key(key)
 
+    def test_scheduled_missing_key_never_silently_creates_a_new_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "missing-parent/key"
+            with self.assertRaisesRegex(runner.DrillError, "scheduled_encryption_key_missing"):
+                runner.load_key(key, require_existing=True)
+            self.assertFalse(key.parent.exists())
+
+    def test_source_lock_is_cross_process_and_survives_release_without_unlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = "a" * 20
+            code = """import importlib.util,sys
+from pathlib import Path
+s=importlib.util.spec_from_file_location('runner',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+try:
+    with m.SourceLock('a'*20,Path(sys.argv[2])): pass
+except m.DrillError as exc:
+    sys.exit(42 if str(exc)=='source_backup_already_running' else 43)
+"""
+            with runner.SourceLock(source, directory) as lock:
+                result = subprocess.run([sys.executable, "-c", code, str(Path(runner.__file__)), directory], capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 42)
+                inode = lock.path.stat().st_ino
+            self.assertTrue(lock.path.exists())
+            with runner.SourceLock(source, directory) as later:
+                self.assertEqual(later.path.stat().st_ino, inode)
+
+    def test_command_timeout_is_fixed_code_and_reaps_child(self):
+        children = []
+        original = subprocess.Popen
+        def capture(*args, **kwargs):
+            child = original(*args, **kwargs)
+            children.append(child)
+            return child
+        with mock.patch.object(runner.subprocess, "Popen", side_effect=capture):
+            with self.assertRaisesRegex(runner.DrillError, "fixture_timeout") as error:
+                runner.checked_run([sys.executable, "-c", "import time; print('private-fixture-secret',flush=True);time.sleep(20)"], timeout=0.1, code="fixture")
+        self.assertNotIn("private-fixture-secret", str(error.exception))
+        self.assertIsNotNone(children[0].returncode)
+
+    def test_whole_operation_deadline_cleans_private_scratch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            started = time.monotonic()
+            with self.assertRaisesRegex(runner.DrillError, "backup_operation_timed_out"):
+                with runner.bounded_operation(1):
+                    with tempfile.TemporaryDirectory(dir=directory) as scratch:
+                        Path(scratch, "plaintext-fixture").write_bytes(b"synthetic fixture")
+                        runner.checked_run([sys.executable, "-c", "import time;time.sleep(20)"], timeout=30)
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_atomic_evidence_never_overwrites_immutable_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "receipt.json"
+            runner.atomic_private_json(target, {"version": 1}, replace=False)
+            with self.assertRaisesRegex(runner.DrillError, "evidence_path_conflict"):
+                runner.atomic_private_json(target, {"version": 2}, replace=False)
+            self.assertEqual(json.loads(target.read_bytes()), {"version": 1})
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(list(Path(directory).glob(".evidence-*")))
+
     def test_archive_path_traversal_is_rejected(self):
         import io
         import tarfile
@@ -74,6 +138,18 @@ class BackupRestoreRunnerTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("EDOC_TEST_PG_BIN"), "isolated PostgreSQL runtime not configured")
 class ActualPostgresRestoreTest(unittest.TestCase):
+    def test_timeout_stops_isolated_postgres_and_cleans_scratch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(runner.DrillError, "backup_operation_timed_out"):
+                with runner.bounded_operation(2):
+                    with tempfile.TemporaryDirectory(dir=root) as private:
+                        with runner.LocalPostgres(os.environ["EDOC_TEST_PG_BIN"], Path(private)) as database:
+                            socket = database.socket
+                            time.sleep(5)
+            self.assertFalse(socket.exists())
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_real_database_restore_preserves_rows_constraints_and_permissions(self):
         pg_bin = Path(os.environ["EDOC_TEST_PG_BIN"])
         with tempfile.TemporaryDirectory(prefix="edoc-pg-test-") as directory:

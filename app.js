@@ -1,3 +1,12 @@
+// The interface webfont must not block the initial module loading screen.
+// The official-document EduKai font is configured separately and unchanged.
+const interfaceFontStylesheet = document.querySelector("#interfaceFontStylesheet");
+if (interfaceFontStylesheet) {
+  const applyInterfaceFont = () => { interfaceFontStylesheet.media = "all"; };
+  if (interfaceFontStylesheet.sheet) applyInterfaceFont();
+  else interfaceFontStylesheet.addEventListener("load", applyInterfaceFont, { once: true });
+}
+
 const queueItems = [
   ["EX-1140522-018", "收文", "衛生福利部", "長照服務品質稽核資料補件通知", "待登錄", "wait"],
   ["EX-1140522-013", "收文", "臺北市政府社會局", "北區長照服務協調會議", "待分派", "wait"],
@@ -19310,7 +19319,9 @@ async function backendRequest(path, options = {}) {
   }
   if (!response.ok) {
     const rawMessage = data.detail || data.error || `HTTP ${response.status}`;
-    const error = new Error(friendlyBackendErrorMessage(rawMessage, response.status));
+    const errorId = /^ERR-[A-F0-9]{24}$/.test(data.errorId || "") ? data.errorId : "";
+    const error = new Error(`${friendlyBackendErrorMessage(rawMessage, response.status)}${errorId ? `（問題編號：${errorId}）` : ""}`);
+    error.errorId = errorId;
     error.status = response.status;
     error.code = data.error || "";
     error.detail = data.detail || "";

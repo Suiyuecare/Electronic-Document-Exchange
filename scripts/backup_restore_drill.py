@@ -8,7 +8,9 @@ accepted. Output is aggregate evidence only, never rows, object names or keys.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import math
@@ -18,6 +20,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tarfile
@@ -32,6 +35,98 @@ SCHEMAS = ("edoc", "edoc_private")
 
 class DrillError(RuntimeError):
     """Messages are fixed error codes safe for operator logs."""
+
+
+class SourceLock:
+    """One cooperative operator process per source, independent of output path.
+
+    The lock inode is never deleted: unlinking it could admit a second lock.
+    No credentials or personal data are stored in the lock file.
+    """
+
+    def __init__(self, source_ref, directory=None):
+        if not re.fullmatch(r"[a-z0-9]{20}", str(source_ref)):
+            raise DrillError("source_project_ref_invalid")
+        root = directory or Path.home() / ".local/state/edoc-backup/locks"
+        self.directory = private_directory(root)
+        self.path = self.directory / (hashlib.sha256(source_ref.encode()).hexdigest() + ".lock")
+        self.fd = None
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        metadata = os.fstat(self.fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or metadata.st_uid != os.getuid():
+            os.close(self.fd)
+            self.fd = None
+            raise DrillError("source_lock_permissions_invalid")
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(self.fd)
+            self.fd = None
+            raise DrillError("source_backup_already_running") from None
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            os.close(self.fd)
+            self.fd = None
+
+
+@contextmanager
+def bounded_operation(timeout_seconds):
+    """Bound the whole operation and unwind private temporary files on signals.
+
+    Requires the main thread on a POSIX host. SIGKILL/power loss cannot be
+    handled; those cases must remain visible in the operator's stale status.
+    """
+    if not 1 <= timeout_seconds <= 7200:
+        raise DrillError("backup_timeout_invalid")
+    old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGALRM, signal.SIGTERM, signal.SIGINT)}
+    old_timer = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+
+    def interrupted(signum, frame):
+        raise DrillError("backup_operation_timed_out" if signum == signal.SIGALRM else "backup_operation_interrupted")
+
+    try:
+        for sig in old_handlers:
+            signal.signal(sig, interrupted)
+        signal.setitimer(signal.ITIMER_REAL, min(timeout_seconds, old_timer[0]) if old_timer[0] else timeout_seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
+        if old_timer[0]:
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, old_timer[0] - (time.monotonic() - started)), old_timer[1])
+
+
+def atomic_private_json(path, data, *, replace=True):
+    """Publish complete safe evidence atomically; never follow a destination link."""
+    path = Path(path)
+    parent = private_directory(path.parent)
+    if path.is_symlink() or (path.exists() and not replace):
+        raise DrillError("evidence_path_conflict")
+    fd, temporary = tempfile.mkstemp(prefix=".evidence-", dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(canonical(data))
+            stream.flush()
+            os.fsync(stream.fileno())
+        if replace:
+            os.replace(temporary, path)
+        else:
+            os.link(temporary, path)  # Atomic fail-if-present; no immutable overwrite.
+            os.unlink(temporary)
+        directory_fd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def canonical(value):
@@ -81,10 +176,12 @@ def private_directory(path):
     return path
 
 
-def load_key(path):
+def load_key(path, *, require_existing=False):
     path = Path(path).expanduser().absolute()
     if path.is_symlink() or path.resolve() == ROOT or ROOT in path.resolve().parents:
         raise DrillError("encryption_key_path_invalid")
+    if require_existing and not path.exists():
+        raise DrillError("scheduled_encryption_key_missing")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not path.exists():
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -152,10 +249,29 @@ def unpack_archive(archive, destination):
 
 
 def checked_run(args, *, env=None, cwd=None, timeout=900, code="operator_command_failed"):
-    result = subprocess.run(args, env=env, cwd=cwd, capture_output=True, timeout=timeout)
-    if result.returncode:
-        raise DrillError(code)
-    return result.stdout
+    # No shell, no inherited pipes and no stdout/stderr logging. On timeout or
+    # cancellation terminate the command's process group before unwinding files.
+    child = subprocess.Popen(args, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    completed = False
+    try:
+        stdout, _ = child.communicate(timeout=timeout)
+        completed = True
+        if child.returncode:
+            raise DrillError(code)
+        return stdout
+    except subprocess.TimeoutExpired:
+        raise DrillError(code + "_timeout") from None
+    finally:
+        if not completed:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+                child.communicate(timeout=3)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.communicate(timeout=3)
 
 
 def linked_source_environment(workdir):
@@ -374,13 +490,20 @@ class LocalPostgres:
         self.env = {**os.environ, "PGHOST": str(self.socket), "PGPORT": "5432", "PGUSER": "postgres", "PGDATABASE": "postgres", "PGPASSWORD": "", "PGSSLMODE": "disable", "PGOPTIONS": ""}
 
     def __enter__(self):
-        checked_run([str(self.bin / "initdb"), "-D", str(self.data), "-U", "postgres", "--auth-local=trust", "--auth-host=reject", "--encoding=UTF8", "--locale=C"], code="isolated_postgres_init_failed")
-        checked_run([str(self.bin / "pg_ctl"), "-D", str(self.data), "-l", str(self.data / "private-startup.log"), "-o", "-c listen_addresses='' -c unix_socket_directories=" + str(self.socket), "-w", "start"], code="isolated_postgres_start_failed")
+        try:
+            checked_run([str(self.bin / "initdb"), "-D", str(self.data), "-U", "postgres", "--auth-local=trust", "--auth-host=reject", "--encoding=UTF8", "--locale=C"], timeout=60, code="isolated_postgres_init_failed")
+            checked_run([str(self.bin / "pg_ctl"), "-D", str(self.data), "-l", str(self.data / "private-startup.log"), "-o", "-c listen_addresses='' -c unix_socket_directories=" + str(self.socket), "-w", "start"], timeout=60, code="isolated_postgres_start_failed")
+        except BaseException:
+            self.__exit__()
+            raise
         return self
 
     def __exit__(self, *exc):
-        checked_run([str(self.bin / "pg_ctl"), "-D", str(self.data), "-m", "immediate", "-w", "stop"], code="isolated_postgres_stop_failed")
-        shutil.rmtree(self.socket)
+        try:
+            if (self.data / "postmaster.pid").exists():
+                checked_run([str(self.bin / "pg_ctl"), "-D", str(self.data), "-m", "immediate", "-w", "stop"], timeout=20, code="isolated_postgres_stop_failed")
+        finally:
+            shutil.rmtree(self.socket)
 
     def prepare(self, roles, extensions, dependencies=None):
         from psycopg import sql
@@ -454,7 +577,7 @@ def save_receipt(manifest, encrypted, storage, duration, drill_id, args, output)
         ],
     }
     report["receipt_sha256"] = hashlib.sha256(canonical(report)).hexdigest()
-    (output / (drill_id + ".receipt.json")).write_bytes(canonical(report))
+    atomic_private_json(output / (drill_id + ".receipt.json"), report, replace=False)
     return report
 
 
@@ -463,7 +586,7 @@ def restore_existing_backup(args):
     started = time.monotonic()
     os.umask(0o077)
     output = private_directory(args.output_dir)
-    key = load_key(args.encryption_key_file)
+    key = load_key(args.encryption_key_file, require_existing=getattr(args, "require_existing_key", False))
     encrypted = Path(args.restore_backup).resolve()
     with tempfile.TemporaryDirectory(prefix="edoc-restore-offline-") as temporary:
         work = Path(temporary)
@@ -482,7 +605,7 @@ def run_drill(args):
     started = time.monotonic()
     os.umask(0o077)
     output = private_directory(args.output_dir)
-    key = load_key(args.encryption_key_file)
+    key = load_key(args.encryption_key_file, require_existing=getattr(args, "require_existing_key", False))
     for command in ("pg_dump", "pg_restore", "pg_ctl", "initdb"):
         if not (Path(args.pg_bin_dir) / command).is_file():
             raise DrillError("postgres_tools_missing")
@@ -532,6 +655,22 @@ def run_drill(args):
         return save_receipt(manifest, encrypted, storage, duration, drill_id, args, output)
 
 
+def execute(args, *, held_lock=None):
+    """Shared guarded entry point for interactive and scheduled host runs."""
+    os.umask(0o077)
+    if held_lock is None:
+        with SourceLock(args.source_project_ref) as lock:
+            return execute(args, held_lock=lock)
+    expected_lock_name = hashlib.sha256(args.source_project_ref.encode()).hexdigest() + ".lock"
+    if not isinstance(held_lock, SourceLock) or held_lock.fd is None or held_lock.path.name != expected_lock_name:
+        raise DrillError("source_lock_required")
+    with bounded_operation(getattr(args, "timeout_seconds", 900)):
+        load_operator_environment(args.env_file)
+        if args.storage_project_ref and not args.restore_backup:
+            configure_storage_from_cli(args.storage_project_ref, args.supabase_workdir)
+        return restore_existing_backup(args) if args.restore_backup else run_drill(args)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pg-bin-dir", required=True)
@@ -544,12 +683,11 @@ def main():
     parser.add_argument("--restore-backup", help="Restore an existing encrypted archive completely offline, without accessing the source")
     parser.add_argument("--env-file", help="Existing private/ignored operator env file; values are never printed")
     parser.add_argument("--storage-project-ref", help="Obtain storage service role in-process from the operator's existing Supabase CLI authorization")
+    parser.add_argument("--timeout-seconds", type=int, default=900, help="Whole-operation deadline, including network reads and isolated restore")
+    parser.add_argument("--require-existing-key", action="store_true", help="Fail closed when the operator key is missing; never silently rotate a scheduled key")
     args = parser.parse_args()
     try:
-        load_operator_environment(args.env_file)
-        if args.storage_project_ref and not args.restore_backup:
-            configure_storage_from_cli(args.storage_project_ref, args.supabase_workdir)
-        result = restore_existing_backup(args) if args.restore_backup else run_drill(args)
+        result = execute(args)
     except DrillError as exc:
         result = {"ok": False, "blocked": True, "error_code": str(exc)}
     except Exception as exc:
