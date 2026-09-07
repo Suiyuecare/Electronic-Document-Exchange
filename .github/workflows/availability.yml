@@ -1,0 +1,41 @@
+name: eDoc independent availability
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edoc-independent-availability
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: vars.EDOC_INDEPENDENT_MONITOR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .monitor-state/availability.json
+          key: edoc-availability-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: edoc-availability-v1-
+      - name: Check from an independent runner
+        id: availability
+        continue-on-error: true
+        env:
+          EDOC_MONITOR_BASE_URL: ${{ secrets.EDOC_MONITOR_BASE_URL }}
+        run: python3 scripts/independent_availability_monitor.py
+      - name: Preserve incident transition state even when a new outage is detected
+        if: always() && steps.availability.outcome != 'cancelled'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .monitor-state/availability.json
+          key: edoc-availability-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Notify only a new outage or runner failure
+        if: steps.availability.outcome == 'failure'
+        run: exit 1

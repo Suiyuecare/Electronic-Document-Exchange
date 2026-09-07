@@ -22,6 +22,19 @@ PACKAGED_SUPABASE_FILES = {
 
 
 class VercelPackagingTestCase(unittest.TestCase):
+    def test_production_env_template_includes_dedicated_app_secret(self) -> None:
+        values = {}
+        template = (ROOT / ".env.production.example").read_text(encoding="utf-8")
+        for line in template.splitlines():
+            if not line or line.lstrip().startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            values[name] = value
+
+        self.assertTrue(values.get("APP_SECRET"))
+        self.assertNotEqual(values["APP_SECRET"], values.get("CRON_SECRET"))
+        self.assertNotEqual(values["APP_SECRET"], values.get("EDOC_FILE_ENCRYPTION_KEY"))
+
     def test_vercel_function_includes_only_safe_supabase_artifacts(self) -> None:
         config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
         python_build = next(item for item in config["builds"] if item.get("src") == "api/index.py")

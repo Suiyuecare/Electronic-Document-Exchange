@@ -4,18 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>公文收發電子用印系統</title>
-    <script src="entry-bootstrap.js?v=20260824-sso-recovery-r1"></script>
+    <script src="entry-bootstrap.js?v=20260908-launch-six-items-r1"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png?v=20260713" />
     <link rel="icon" type="image/png" sizes="48x48" href="assets/favicon-48.png?v=20260713" />
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260826-finance-sso-edukai-r1" />
+    <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
+    <link rel="stylesheet" href="styles.css?v=20260908-launch-six-items-r1" />
   </head>
   <body>
-    <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-label="正在進入公文收發電子用印系統">
+    <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
       <section class="module-entry-card">
         <img class="module-entry-logo" src="assets/suiyue-logo-transparent.png" alt="" width="54" height="54" />
         <p class="eyebrow">歲悅長照集團 · 電子公文</p>
@@ -50,21 +50,43 @@
         </div>
 
         <nav class="nav-list" aria-label="公文收發電子用印系統功能">
-          <button class="nav-item active" data-target="dashboard" data-icon="首">首頁</button>
-          <button class="nav-item" data-target="compose" data-icon="寫">撰寫公文</button>
-          <button class="nav-item" data-target="electronicSeal" data-icon="章">電子用印</button>
-          <button class="nav-item" data-target="approvalLog" data-icon="簽">簽核紀錄</button>
-          <button class="nav-item" data-target="inbound" data-icon="收">收發管理</button>
-          <button class="nav-item" data-target="settings" data-icon="設">系統設定</button>
+          <p class="nav-section-label">總覽</p>
+          <button class="nav-item active" data-target="dashboard" data-icon="首" aria-current="page">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zM14 20h6V4h-6zM4 20h6v-3H4z"></path></svg></span>
+            <span class="nav-label">首頁</span>
+          </button>
+          <p class="nav-section-label">公文作業</p>
+          <button class="nav-item" data-target="compose" data-icon="寫">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7zM14 3v5h5M10 13h6M10 17h6"></path></svg></span>
+            <span class="nav-label">撰寫公文</span>
+          </button>
+          <button class="nav-item" data-target="electronicSeal" data-icon="章">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 13h8M9 13V9a3 3 0 0 1 6 0v4M6 13h12v4H6zM5 20h14"></path></svg></span>
+            <span class="nav-label">電子用印</span>
+          </button>
+          <p class="nav-section-label">流程管理</p>
+          <button class="nav-item" data-target="approvalLog" data-icon="簽">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"></path></svg></span>
+            <span class="nav-label">簽核紀錄</span>
+          </button>
+          <button class="nav-item" data-target="inbound" data-icon="收">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 14h5l2 2h2l2-2h5M8 9h8"></path></svg></span>
+            <span class="nav-label">收發管理</span>
+          </button>
+          <p class="nav-section-label">系統</p>
+          <button class="nav-item" data-target="settings" data-icon="設">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 12h2M18 12h2M12 4v2M12 18v2M6.6 6.6 8 8M16 16l1.4 1.4M17.4 6.6 16 8M8 16l-1.4 1.4"></path></svg></span>
+            <span class="nav-label">系統設定</span>
+          </button>
         </nav>
 
         <section class="profile-card">
           <div class="profile-avatar" id="currentUserAvatar" aria-hidden="true">帳</div>
           <div class="profile-copy">
-            <p class="eyebrow">目前角色</p>
             <strong id="currentRoleLabel">依 Finance 帳號載入</strong>
-            <div class="role-note" id="roleNote">目前為內部正式使用；政府電子交換未啟用。</div>
+            <div class="role-note" id="roleNote">正在同步職稱與員工編號</div>
           </div>
+          <button class="profile-logout-button" id="profileLogoutBtn" type="button" title="登出並回到模組登入" aria-label="登出並回到模組登入">&#9167;</button>
           <select class="hidden" id="roleSelect" aria-hidden="true" tabindex="-1">
             <option>員工</option>
             <option>主管</option>
@@ -93,25 +115,25 @@
             <span class="mobile-topbar-divider" aria-hidden="true">／</span>
             <h2 id="pageTitle">交換總覽</h2>
           </div>
-          <div class="quick-actions module-switch-actions" role="group" aria-label="頁首操作">
-            <button class="topbar-notification-button" id="headerNotificationBtn" type="button" aria-label="通知中心">
-              <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
-                <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path>
-                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
-              </svg>
-              <span class="header-notification-dot" id="headerNotificationBadge" hidden></span>
-            </button>
+          <button class="topbar-notification-button" id="headerNotificationBtn" type="button" aria-label="通知中心">
+            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path>
+              <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+            </svg>
+            <span class="header-notification-dot" id="headerNotificationBadge" hidden></span>
+          </button>
+          <button class="mobile-menu-button" id="mobileMenuButton" type="button" aria-label="開啟功能選單" aria-controls="primarySidebar" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+          </button>
+          <div class="module-switch-actions" role="group" aria-label="頁首操作">
             <button class="module-switch-button" id="headerRefreshBtn" type="button">重新整理</button>
             <button class="module-switch-button" id="returnPortalBtn" type="button">
               回模組頁
               <span class="module-todo-badge" id="moduleTodoBadge" hidden></span>
             </button>
             <button class="module-switch-button primary" id="logoutBtn" type="button">登出</button>
-            <span class="top-info" id="topInfo">即時同步</span>
           </div>
-          <button class="mobile-menu-button" id="mobileMenuButton" type="button" aria-label="開啟功能選單" aria-controls="primarySidebar" aria-expanded="false">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
-          </button>
+          <span class="top-info" id="topInfo" role="status" aria-live="polite" aria-atomic="true">即時同步</span>
         </header>
 
         <section class="view active" id="dashboard">
@@ -1628,6 +1650,16 @@
                 <span>支援多頁，且每一頁都必須是 A4；上限 50 MB／300 頁。</span>
                 <em id="uploadedPdfA4Status" role="status" aria-live="polite">尚未檢查 PDF 頁面尺寸。</em>
               </div>
+              <div class="pdf-editor-upload-error" id="uploadedEditorUploadError" role="alert" aria-live="assertive" hidden>
+                <div>
+                  <strong>檔案上傳未完成</strong>
+                  <span id="uploadedEditorUploadErrorMessage">請重新上傳；目前草稿與原檔不會被覆蓋。</span>
+                </div>
+                <div class="pdf-editor-upload-error-actions">
+                  <button class="primary-button" id="uploadedEditorRetryUploadBtn" type="button">重新上傳</button>
+                  <button class="text-button" id="uploadedEditorDismissUploadErrorBtn" type="button">關閉</button>
+                </div>
+              </div>
 
               <div class="pdf-editor-toolbar" id="uploadedEditorToolTray" role="toolbar" aria-label="PDF 編輯工具">
                 <div class="pdf-editor-tool-group" role="group" aria-label="物件工具">
@@ -1652,8 +1684,8 @@
                   <button id="uploadedEditorFitBtn" type="button">符合頁面</button>
                 </div>
                 <div class="pdf-editor-mobile-actions mobile-only" role="group" aria-label="行動版面板">
-                  <button id="uploadedEditorThumbnailToggleBtn" type="button" aria-expanded="false">頁面</button>
-                  <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false">屬性</button>
+                  <button id="uploadedEditorThumbnailToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorThumbnailPane" aria-haspopup="dialog">頁面</button>
+                  <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorProperties" aria-haspopup="dialog">屬性</button>
                 </div>
               </div>
 
@@ -1676,6 +1708,7 @@
                   <div class="pdf-editor-pane-heading">
                     <strong>頁面</strong>
                     <span id="uploadedEditorPageCount">0 頁</span>
+                    <button class="pdf-editor-pane-close mobile-only" id="uploadedEditorThumbnailCloseBtn" type="button" aria-label="關閉頁面面板">×</button>
                   </div>
                   <div class="pdf-editor-thumbnail-list" id="uploadedPdfThumbnailList"></div>
                   <div class="pdf-editor-page-import advanced-only">
@@ -1730,6 +1763,7 @@
                   <div class="pdf-editor-pane-heading">
                     <strong>屬性</strong>
                     <span id="uploadedEditorSelectionCount">未選取</span>
+                    <button class="pdf-editor-pane-close mobile-only" id="uploadedEditorPropertiesCloseBtn" type="button" aria-label="關閉屬性面板">×</button>
                   </div>
                   <div class="pdf-editor-property-empty" id="uploadedEditorPropertyEmpty">未選取物件</div>
                   <form class="pdf-editor-property-form" id="uploadedEditorPropertyForm" hidden>
@@ -1763,6 +1797,7 @@
                   <input id="uploadedEditorImageInput" type="file" accept="image/png,image/jpeg" hidden />
                 </aside>
               </div>
+              <button class="pdf-editor-mobile-backdrop" id="uploadedEditorMobileBackdrop" type="button" aria-label="關閉 PDF 編輯面板" hidden></button>
 
               <div class="uploaded-workspace-actions pdf-editor-footer-actions">
                 <span id="uploadedEditorPreflightStatus" class="pdf-editor-preflight-status">尚未產生送簽確認版</span>
@@ -2824,6 +2859,7 @@
             <div class="segmented" role="group" aria-label="帳號篩選">
               <button class="segment active" data-account-filter="all">全部</button>
               <button class="segment" data-account-filter="啟用">啟用</button>
+              <button class="segment" data-account-filter="待啟用">待首次登入</button>
               <button class="segment" data-account-filter="停用">停用</button>
               <button class="segment" data-account-filter="MFA">MFA</button>
               <button class="segment" data-account-filter="SSO">SSO</button>
@@ -4149,6 +4185,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260826-finance-sso-edukai-r1"></script>
+    <script src="app.js?v=20260908-launch-six-items-r1"></script>
   </body>
 </html>

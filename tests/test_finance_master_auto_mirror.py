@@ -795,6 +795,62 @@ class FinanceProjectionTestCase(unittest.TestCase):
         ):
             self.assertFalse(backend.claim_supabase_finance_member_sync_nonce(verified))
 
+    def test_unrevisioned_bootstrap_cannot_restore_old_company_fields(self) -> None:
+        existing = {
+            "id": "FINCO-TEST", "finance_entity_id": "E-TEST",
+            "finance_tenant_id": "tenant-test", "name": "目前公司名稱",
+            "status": "inactive", "finance_source_revision": 8,
+        }
+        source = {
+            "tenantId": "tenant-test", "entityId": "E-TEST",
+            "name": "舊公司名稱", "active": True,
+        }
+        with (
+            patch.object(backend, "supabase_filter_rows", return_value=[existing]) as lookup,
+            patch.object(backend, "supabase_patch") as patch_company,
+            patch.object(backend, "supabase_insert") as insert_company,
+        ):
+            company, disposition = backend.supabase_upsert_finance_company_snapshot(source)
+        self.assertEqual(company, existing)
+        self.assertEqual(disposition, "stale")
+        lookup.assert_called_once_with("companies", {"finance_entity_id": "E-TEST"}, order="id.asc", limit=2)
+        patch_company.assert_not_called()
+        insert_company.assert_not_called()
+
+    def test_concurrent_revisioned_company_wins_over_unrevisioned_bootstrap(self) -> None:
+        existing = {
+            "id": "FINCO-TEST", "finance_entity_id": "E-TEST",
+            "finance_tenant_id": "tenant-test", "name": "目前公司名稱",
+            "status": "inactive", "finance_source_revision": 8,
+        }
+        source = {
+            "tenantId": "tenant-test", "entityId": "E-TEST",
+            "name": "舊公司名稱", "active": True,
+        }
+        with (
+            patch.object(backend, "supabase_filter_rows", side_effect=[[], [], [existing]]),
+            patch.object(backend, "supabase_insert", side_effect=RuntimeError("conflict")),
+            patch.object(backend, "supabase_patch") as patch_company,
+        ):
+            company, disposition = backend.supabase_upsert_finance_company_snapshot(source)
+        self.assertEqual(company, existing)
+        self.assertEqual(disposition, "stale")
+        patch_company.assert_not_called()
+
+    def test_retired_legacy_row_is_never_adopted_by_name(self) -> None:
+        legacy = {
+            "id": "CO-LEGACY", "name": "去識別化舊公司",
+            "status": "inactive", "source_system": "legacy_superseded",
+        }
+        source = {"tenantId": "tenant-test", "entityId": "E-TEST", "name": legacy["name"]}
+        with (
+            patch.object(backend, "supabase_filter_rows", side_effect=[[], [legacy]]),
+            patch.object(backend, "supabase_patch") as patch_company,
+        ):
+            with self.assertRaisesRegex(backend.FinanceBridgeDenied, "finance_company_identity_conflict"):
+                backend.supabase_upsert_finance_company_snapshot(source, source_revision=1)
+        patch_company.assert_not_called()
+
 
 class FinanceMemberSyncHandlerTestCase(unittest.TestCase):
     def test_handler_returns_enum_and_exact_matching_boolean(self) -> None:

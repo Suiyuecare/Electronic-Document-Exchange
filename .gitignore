@@ -10,5 +10,7 @@ data/
 backups/
 storage/
 supabase/.temp/
+tests/.artifacts/
+.monitor-state/
 .vercel
 .env*

@@ -360,6 +360,30 @@ class FinanceOrganizationRevisionApplyTest(unittest.TestCase):
     def test_older_organization_revision_is_stale_and_does_not_replace_current(self) -> None:
         self.run_apply(current_version=15, rpc_status="stale")
 
+    def test_allowlisted_projection_conflict_is_denied_without_transport_leak(self) -> None:
+        payload = organization_event()
+        payload_sha256 = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        for conflict in (
+            "finance_member_sync_event_id_conflict",
+            "finance_organization_revision_conflict",
+        ):
+            with self.subTest(conflict=conflict), patch.object(
+                backend,
+                "supabase_request",
+                side_effect=ValueError(conflict),
+            ):
+                with self.assertRaises(backend.FinanceBridgeDenied) as raised:
+                    backend.supabase_apply_finance_organization_sync_event(
+                        payload,
+                        payload_sha256,
+                    )
+            self.assertEqual(
+                str(raised.exception),
+                "finance_organization_revision_conflict",
+            )
+
 
 class FinanceOrganizationMigrationAndRouteSecurityTest(unittest.TestCase):
     @classmethod

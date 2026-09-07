@@ -126,7 +126,10 @@ class FinanceSessionFastPathTest(unittest.TestCase):
         self.assertIsNotNone(current)
         self.assertEqual(current["user"]["role"], "員工")
         self.assertNotIn(backend.FINANCE_LOGIN_EXPECTED_BINDING_KEY, current["user"])
-        bridge.assert_called_once_with(self.user["email"])
+        bridge.assert_called_once_with(
+            self.user["email"],
+            portal_authenticated=True,
+        )
         sync.assert_called_once()
         self.assertEqual(request.call_count, 2)
         update.assert_not_called()
@@ -427,6 +430,7 @@ class EntryExperienceContractTest(unittest.TestCase):
         cls.html = (ROOT / "index.html").read_text(encoding="utf-8")
         cls.js = (ROOT / "app.js").read_text(encoding="utf-8")
         cls.css = (ROOT / "styles.css").read_text(encoding="utf-8")
+        cls.entry_bootstrap = (ROOT / "entry-bootstrap.js").read_text(encoding="utf-8")
 
     def test_entry_screen_has_named_determinate_progress(self) -> None:
         for marker in (
@@ -438,6 +442,34 @@ class EntryExperienceContractTest(unittest.TestCase):
             self.assertIn(marker, self.html)
         self.assertIn("function setModuleEntryProgress", self.js)
         self.assertIn("finishModuleEntryProgress", self.js)
+
+    def test_entry_screen_matches_finance_indeterminate_loading_motion(self) -> None:
+        for marker in (
+            "@keyframes moduleEntryLoading",
+            "width: 44%;",
+            "animation: moduleEntryLoading 1.1s ease-in-out infinite alternate;",
+            'data-progress-state="complete"',
+            "@media (prefers-reduced-motion: reduce)",
+        ):
+            self.assertIn(marker, self.css)
+        self.assertIn('screen.dataset.progressState = normalized >= 100 ? "complete" : "loading";', self.js)
+        self.assertIn('screen.setAttribute("aria-busy", normalized < 100 ? "true" : "false");', self.js)
+        self.assertIn('bar.style.removeProperty("width")', self.js)
+
+    def test_cached_session_reveals_a_locked_shell_before_network_revalidation(self) -> None:
+        for marker in (
+            "const cachedShellRevealTargetMs = 500;",
+            'document.body.dataset.sessionState = "revalidating";',
+            'appShell.setAttribute("inert", "");',
+            'entryScreen?.classList.add("hidden");',
+            "new MutationObserver",
+            "window.__edocCachedShellRevealedAt",
+        ):
+            self.assertIn(marker, self.entry_bootstrap)
+        self.assertIn('body[data-session-state="revalidating"] .workspace > .view', self.css)
+        self.assertIn("function completeCachedSessionShellReveal()", self.js)
+        self.assertIn('appShell?.removeAttribute("inert")', self.js)
+        self.assertIn('if (document.body?.dataset.sessionState !== "revalidating") screen.classList.remove("hidden");', self.js)
 
     def test_startup_sync_loads_only_dashboard_sources(self) -> None:
         start = self.js.index("function runAuthenticatedStartupSyncs")

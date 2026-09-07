@@ -197,7 +197,7 @@ declare
   v_requested_unit text;
   v_is_privileged boolean := false;
   v_current_version bigint;
-  v_now text := to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS');
+  v_now timestamptz := clock_timestamp();
   v_action text;
   v_event_type text;
 begin
@@ -510,7 +510,7 @@ begin
           'type', left(coalesce(v_payload ->> 'exception_type', v_payload ->> 'exceptionType'), 120),
           'note', left(coalesce(v_payload ->> 'note', v_payload ->> 'comment'), 1000),
           'reported_by', v_actor.id,
-          'reported_at', v_now
+          'reported_at', to_char(v_now, 'YYYY-MM-DD HH24:MI:SS')
         ),
         true
       );
@@ -581,7 +581,7 @@ begin
       'company_id', v_document.company_id,
       'finance_tenant_id', v_document.finance_tenant_id
     )::text,
-    v_now
+    to_char(v_now, 'YYYY-MM-DD HH24:MI:SS')
   );
 
   v_response := jsonb_build_object(

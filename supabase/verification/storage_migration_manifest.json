@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "directory": "supabase/storage-migrations",
+  "target": "dedicated-edoc-storage-project-only",
+  "migrations": [
+    "20260824034730_dedicated_edoc_private_storage_buckets.sql",
+    "20260827042214_harden_edoc_storage_buckets.sql",
+    "20260827050000_enforce_empty_storage_client_policy_allowlist.sql"
+  ]
+}

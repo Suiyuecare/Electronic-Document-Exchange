@@ -23,6 +23,13 @@ class FourRoleUiContractTest(unittest.TestCase):
         self.assertNotIn("WF-008", self.js)
         self.assertNotIn("重大密件核定", self.js)
 
+    def test_frontend_bundle_contains_no_retired_demo_accounts_or_notifications(self) -> None:
+        self.assertNotRegex(self.js, r"USR-00[1-7]")
+        self.assertNotRegex(self.js, r"NTF-00[1-5]")
+        self.assertNotIn("DOC-ADMIN-1140523-001", self.js)
+        self.assertIn("const userAccounts = [];", self.js)
+        self.assertIn("const notificationItems = [];", self.js)
+
     def test_approval_filters_match_human_tasks_and_decision_requires_evidence(self) -> None:
         approval_start = self.html.index('<section class="view" id="approvalLog">')
         approval_end = self.html.index('<section class="view" id="contracts">', approval_start)

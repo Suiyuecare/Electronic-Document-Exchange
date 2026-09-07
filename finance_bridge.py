@@ -64,6 +64,33 @@ class FinanceMemberSyncContractError(FinanceMemberSyncError):
     """The authenticated JSON did not match the pinned member-sync contract."""
 
 
+class _RejectHttpRedirects(urllib.request.HTTPRedirectHandler):
+    """Never forward the Finance bridge secret to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def _urlopen_no_redirect(request: urllib.request.Request, *, timeout: float):
+    return urllib.request.build_opener(_RejectHttpRedirects()).open(
+        request,
+        timeout=timeout,
+    )
+
+
+def _close_http_error(exc: urllib.error.HTTPError) -> None:
+    """Release an upstream error response without exposing its body."""
+    try:
+        exc.read(4096)
+    except Exception:
+        pass
+    finally:
+        try:
+            exc.close()
+        except Exception:
+            pass
+
+
 def compact_finance_bridge_body(email: str, request_id: str) -> bytes:
     """Return the exact bytes covered by the request signature."""
     return json.dumps(
@@ -596,8 +623,20 @@ def _required_text(parent: Dict[str, Any], key: str) -> str:
     return value.strip()
 
 
-def validate_finance_bridge_snapshot(snapshot: Any, expected_email: str) -> Dict[str, Any]:
-    """Validate only the pinned v1 response; do not coerce authorization data."""
+def validate_finance_bridge_snapshot(
+    snapshot: Any,
+    expected_email: str,
+    *,
+    allow_portal_authenticated_identity: bool = False,
+) -> Dict[str, Any]:
+    """Validate the pinned v1 response without trusting browser authorization.
+
+    A signed Portal handoff is independent Google authentication evidence.  In
+    that narrowly-scoped path an otherwise active Finance employee may enter
+    even when the Finance project's own Auth UUID has not been bound yet.  The
+    Finance row, organization state, company and workflow actors remain
+    authoritative and are still validated here and by the eDoc projection.
+    """
     if not isinstance(snapshot, dict):
         raise FinanceBridgeContractError("finance_bridge_contract_invalid")
     if snapshot.get("ok") is not True:
@@ -629,7 +668,10 @@ def validate_finance_bridge_snapshot(snapshot: Any, expected_email: str) -> Dict
             raise FinanceBridgeContractError("finance_bridge_contract_invalid")
     if identity["email"].strip().lower() != str(expected_email or "").strip().lower():
         raise FinanceBridgeDenied("finance_identity_mismatch")
-    if not identity["active"] or not identity["authUserBound"] or not identity["googleLoginVerified"]:
+    if not identity["active"]:
+        raise FinanceBridgeDenied("finance_identity_denied")
+    finance_auth_ready = identity["authUserBound"] and identity["googleLoginVerified"]
+    if not finance_auth_ready and not allow_portal_authenticated_identity:
         raise FinanceBridgeDenied("finance_identity_denied")
     if identity["orgStatus"].strip().lower() not in {"active", "enabled", "啟用", "在職"}:
         raise FinanceBridgeDenied("finance_identity_denied")
@@ -659,6 +701,7 @@ def fetch_finance_bridge_snapshot(
     email: str,
     request_id: str,
     require_https: bool = True,
+    allow_portal_authenticated_identity: bool = False,
 ) -> Dict[str, Any]:
     """Fetch one current Finance snapshot without logging request/response PII."""
     endpoint = str(url or "").strip()
@@ -681,18 +724,26 @@ def fetch_finance_bridge_snapshot(
     raw_body, headers = signed_finance_bridge_request(email, request_id, secret)
     request = urllib.request.Request(endpoint, data=raw_body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _urlopen_no_redirect(request, timeout=timeout) as response:
             raw_response = response.read(FINANCE_BRIDGE_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        if exc.code in {401, 403, 404, 409, 422}:
-            raise FinanceBridgeDenied("finance_identity_denied") from exc
-        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from exc
+        code = int(getattr(exc, "code", 0) or 0)
+        _close_http_error(exc)
+        if code in {401, 403, 404, 409, 422}:
+            raise FinanceBridgeDenied("finance_identity_denied") from None
+        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from None
+    except Exception:
+        raise FinanceBridgeUnavailable("finance_bridge_unavailable") from None
     if len(raw_response) > FINANCE_BRIDGE_MAX_RESPONSE_BYTES:
         raise FinanceBridgeContractError("finance_bridge_response_too_large")
     try:
         payload = json.loads(raw_response.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise FinanceBridgeContractError("finance_bridge_contract_invalid") from exc
-    return validate_finance_bridge_snapshot(payload, email)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise FinanceBridgeContractError("finance_bridge_contract_invalid") from None
+    return validate_finance_bridge_snapshot(
+        payload,
+        email,
+        allow_portal_authenticated_identity=allow_portal_authenticated_identity,
+    )

@@ -10,6 +10,7 @@ supabase/seed.sql
 supabase/.temp/
 supabase/.DS_Store
 tests
+.monitor-state
 services
 tmp
 data

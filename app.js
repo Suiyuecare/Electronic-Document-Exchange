@@ -1,3 +1,12 @@
+// The interface webfont must not block the initial module loading screen.
+// The official-document EduKai font is configured separately and unchanged.
+const interfaceFontStylesheet = document.querySelector("#interfaceFontStylesheet");
+if (interfaceFontStylesheet) {
+  const applyInterfaceFont = () => { interfaceFontStylesheet.media = "all"; };
+  if (interfaceFontStylesheet.sheet) applyInterfaceFont();
+  else interfaceFontStylesheet.addEventListener("load", applyInterfaceFont, { once: true });
+}
+
 const queueItems = [
   ["EX-1140522-018", "收文", "衛生福利部", "長照服務品質稽核資料補件通知", "待登錄", "wait"],
   ["EX-1140522-013", "收文", "臺北市政府社會局", "北區長照服務協調會議", "待分派", "wait"],
@@ -420,7 +429,7 @@ const fileAccessLog = [
   ["11:44", "檔案資安初始化", "已載入附件防毒掃描、大小限制、敏感遮罩、密件隔離、下載浮水印、存取紀錄與備份還原。"]
 ];
 
-let selectedAccountId = "USR-001";
+let selectedAccountId = "";
 let accountFilter = "all";
 let accountSearchTerm = "";
 let accountReadinessPackage = null;
@@ -584,16 +593,10 @@ let selectedComplianceDocId = "DOC-COMP-001";
 let complianceLastReview = "";
 let complianceLastDrill = "";
 
-let selectedNotificationId = "NTF-001";
+let selectedNotificationId = "";
 let notificationFilter = "my_unread_overdue";
 let notificationSearchTerm = "";
-const notificationItems = [
-  { id: "NTF-001", type: "收文", title: "衛福部補件通知待登錄", target: "總務", channel: "系統通知", status: "未讀", priority: "高", source: "IN-1140522-00018", body: "jAgent 已拉取新來文，請完成收文登錄與附件檢核。" },
-  { id: "NTF-002", type: "待清稿", title: "日照中心補正資料待清稿", target: "行政部主任", channel: "Email + 系統通知", status: "未讀", priority: "高", source: "OUT-1140522-007", body: "函稿已建立，請進行清稿檢核與附件封裝。" },
-  { id: "NTF-003", type: "交換失敗", title: "新北市政府衛生局交換失敗", target: "總務", channel: "系統通知", status: "未讀", priority: "高", source: "OUT-1140519-006", body: "jAgent 回覆 failed，請確認機關代碼並重送。" },
-  { id: "NTF-004", type: "Token 到期", title: "jAgent Token 即將到期", target: "行政部主任", channel: "Email + 系統通知", status: "未讀", priority: "中", source: "SEC-TOKEN", body: "Token 剩餘時間不足，請刷新或重新憑證登入。" },
-  { id: "NTF-005", type: "逾期查核", title: "收1140522-00013 分派逾期", target: "行政部主任", channel: "Line 工作群組", status: "未讀", priority: "高", source: "TRK-003", body: "收文尚未完成分派，請啟動逾期查核提醒。" }
-];
+const notificationItems = [];
 
 const notificationAuditLog = [
   ["11:02", "通知中心初始化", "已載入收文、待清稿、交換失敗、Token 到期與逾期查核提醒。"]
@@ -648,7 +651,7 @@ const jobAuditLog = [
 ];
 
 let activeDatabaseTable = "documents";
-let selectedDatabaseId = "DOC-IN-1140522-00018";
+let selectedDatabaseId = "";
 let databaseSearchTerm = "";
 let searchResults = [];
 let selectedSearchId = "";
@@ -837,8 +840,6 @@ const documentAclRules = [
   { id: "ACL-005", docId: "OUT-1140522-007", principalType: "role", principal: "總務", view: true, sign: false, download: true, seal: true, delegate: false, reason: "附件封裝、押章與送交 jAgent。", grantedBy: "system" },
   { id: "ACL-006", docId: "OUT-1140519-006", principalType: "role", principal: "總務", view: true, sign: false, download: true, seal: true, delegate: false, reason: "交換失敗重送作業。", grantedBy: "system" },
   { id: "ACL-007", docId: "OUT-1140519-006", principalType: "role", principal: "行政部主任", view: true, sign: true, download: true, seal: true, delegate: true, reason: "異常重送前複核。", grantedBy: "system" },
-  { id: "ACL-008", docId: "DOC-ADMIN-1140523-001", principalType: "role", principal: "行政部主任", view: true, sign: true, download: true, seal: true, delegate: true, reason: "行政部內部清稿與權限管理。", grantedBy: "system" },
-  { id: "ACL-009", docId: "DOC-ADMIN-1140523-001", principalType: "role", principal: "總務", view: false, sign: false, download: false, seal: false, delegate: false, reason: "明確隔離總務收文區與行政部內部公文。", grantedBy: "system" }
 ];
 
 const documentAclEvents = [
@@ -1350,9 +1351,11 @@ function clearUploadedEditorSensitivePreviews() {
     uploadedSealEditorRuntime.savePromise = null;
     uploadedSealEditorRuntime.saveQueued = false;
     uploadedSealEditorRuntime.reviewGeneration += 1;
+    uploadedSealEditorRuntime.uploadRetry = null;
   }
   uploadedSealEditorState = emptyUploadedSealEditorState();
   uploadedSealPdf = null;
+  clearUploadedEditorUploadError();
 }
 
 let uploadedSealEditorState = emptyUploadedSealEditorState();
@@ -1405,7 +1408,8 @@ const uploadedSealEditorRuntime = {
   clipboard: [],
   conflict: null,
   draftCreatePromise: null,
-  offlineDirty: false
+  offlineDirty: false,
+  uploadRetry: null
 };
 
 async function ensurePdfJsLibrary() {
@@ -3311,6 +3315,23 @@ function canViewSystemSettingsBase() {
   return permissionCodes.includes("settings.system_manage") || permissionCodes.includes("settings.manage");
 }
 
+function syncNavigationSectionVisibility() {
+  const nav = document.querySelector("#primarySidebar .nav-list");
+  if (!nav) return;
+  nav.querySelectorAll(".nav-section-label").forEach((label) => {
+    let sibling = label.nextElementSibling;
+    let hasVisibleItem = false;
+    while (sibling && !sibling.classList.contains("nav-section-label")) {
+      if (sibling.classList.contains("nav-item") && !sibling.hidden) {
+        hasVisibleItem = true;
+        break;
+      }
+      sibling = sibling.nextElementSibling;
+    }
+    label.hidden = !hasVisibleItem;
+  });
+}
+
 function applyRoleNavigation() {
   const primary = primaryRoutesForRole();
   const allowed = allowedRoutesForRole();
@@ -3320,8 +3341,11 @@ function applyRoleNavigation() {
   document.querySelectorAll(".nav-item").forEach((item) => {
     const routeIndex = primary.indexOf(item.dataset.target);
     item.hidden = routeIndex === -1;
-    item.style.order = String(routeIndex === -1 ? 999 : routeIndex);
-    if (labels[item.dataset.target]) item.textContent = labels[item.dataset.target];
+    item.style.removeProperty("order");
+    const label = labels[item.dataset.target];
+    const labelElement = item.querySelector(".nav-label");
+    if (label && labelElement) labelElement.textContent = label;
+    else if (label) item.textContent = label;
   });
   const companyWide = ["行政部主任", "總務", "執行長"].includes(activeRole());
   document.querySelector("#pullInboundBtn")?.toggleAttribute("hidden", !companyWide);
@@ -3342,6 +3366,7 @@ function applyRoleNavigation() {
     if (!target || !titles[target]) return;
     control.toggleAttribute("hidden", !allowed.includes(target));
   });
+  syncNavigationSectionVisibility();
   document.querySelectorAll(".integrated-page-section[data-integrated-route]").forEach((section) => {
     const hidden = !allowed.includes(section.dataset.integratedRoute);
     section.hidden = hidden;
@@ -5155,6 +5180,7 @@ async function rejectNonSetupUserDuringLaunchSetup(session = authState, provider
   }
   authState = null;
   localStorage.removeItem(authStorageKey);
+  resetCachedSessionShellReveal();
   applyProductionLoginSafetyState();
   recordLogin(email, provider, "限制");
   addAccountAudit("補件模式登入限制", `${email} 不是行政部主任、總務、執行長或系統補件權限帳號；內部上線未通過前不可進入。`);
@@ -5220,20 +5246,39 @@ function setModuleEntryProgress(percent, title, detail) {
   const screen = document.querySelector("#moduleEntryProgress");
   if (!screen) return;
   const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
-  screen.classList.remove("hidden");
+  if (document.body?.dataset.sessionState !== "revalidating") screen.classList.remove("hidden");
   const heading = document.querySelector("#moduleEntryProgressTitle");
   const description = document.querySelector("#moduleEntryProgressDetail");
   const bar = document.querySelector("#moduleEntryProgressBar");
   const label = document.querySelector("#moduleEntryProgressPercent");
+  screen.dataset.progressState = normalized >= 100 ? "complete" : "loading";
+  screen.setAttribute("aria-busy", normalized < 100 ? "true" : "false");
   if (heading && title) heading.textContent = title;
   if (description && detail) description.textContent = detail;
-  if (bar) bar.style.width = `${normalized}%`;
+  if (bar) bar.style.removeProperty("width");
   if (label) label.textContent = `${Math.round(normalized)}%`;
 }
 
 function finishModuleEntryProgress() {
   setModuleEntryProgress(100, "工作台已準備完成", "正在開啟您的待辦與公文工作區。");
   window.setTimeout(() => document.querySelector("#moduleEntryProgress")?.classList.add("hidden"), 180);
+}
+
+function completeCachedSessionShellReveal() {
+  if (document.body?.dataset.sessionState !== "revalidating") return false;
+  const appShell = document.querySelector("#appShell");
+  delete document.body.dataset.sessionState;
+  appShell?.removeAttribute("inert");
+  appShell?.removeAttribute("aria-busy");
+  return true;
+}
+
+function resetCachedSessionShellReveal() {
+  const appShell = document.querySelector("#appShell");
+  delete document.body.dataset.sessionState;
+  appShell?.removeAttribute("inert");
+  appShell?.removeAttribute("aria-busy");
+  appShell?.classList.add("hidden");
 }
 
 function financeDirectoryEntityCodes(value) {
@@ -5553,7 +5598,10 @@ async function loadFinanceCompanyDirectory() {
 }
 
 function enterApp(message = "登入成功，已進入公文收發電子用印系統。") {
-  setModuleEntryProgress(82, "帳號確認完成", "正在載入您的角色、待辦與可使用功能。");
+  const cachedShellWasVisible = document.body?.dataset.sessionState === "revalidating";
+  if (!cachedShellWasVisible) {
+    setModuleEntryProgress(82, "帳號確認完成", "正在載入您的角色、待辦與可使用功能。");
+  }
   document.querySelector("#loginScreen").classList.add("hidden");
   document.querySelector("#loginScreen").setAttribute("aria-hidden", "true");
   document.querySelector("#appShell").classList.remove("hidden");
@@ -5562,8 +5610,9 @@ function enterApp(message = "登入成功，已進入公文收發電子用印系
   const requestedRoute = location.hash?.slice(1);
   setView(requestedRoute && titles[requestedRoute] && isRouteAllowed(requestedRoute) ? requestedRoute : "dashboard");
   runAuthenticatedStartupSyncs(true);
+  completeCachedSessionShellReveal();
   window.requestAnimationFrame(() => {
-    finishModuleEntryProgress();
+    if (!cachedShellWasVisible) finishModuleEntryProgress();
     scheduleDeferredWorkspaceInitialization();
   });
   showToast(message);
@@ -5598,6 +5647,7 @@ function enterAuthenticatedAppSafely(message) {
     loginScreen?.classList.add("hidden");
     loginScreen?.setAttribute("aria-hidden", "true");
     appShell?.classList.remove("hidden");
+    completeCachedSessionShellReveal();
     document.body?.setAttribute("data-entry-recovery", "true");
     runAuthenticatedEntryStep("apply-auth-user", applyAuthUser);
     runAuthenticatedEntryStep("apply-role-navigation", applyRoleNavigation);
@@ -5624,6 +5674,7 @@ function leaveApp() {
   localStorage.removeItem(authStorageKey);
   cleanPortalHandoffUrl();
   closeMobileNavigation({ restoreFocus: false });
+  resetCachedSessionShellReveal();
   document.querySelector("#appShell").classList.add("hidden");
   if (isProductionEdocHost()) {
     returnToLoggingPortalModulePicker("signed_out", "replace");
@@ -5675,8 +5726,30 @@ function clearFrontendSeedRecordsForAuthenticatedSession() {
     contractAuditLog,
     contractSealAuditLog,
     trackingCases,
-    trackingAuditLog
+    trackingAuditLog,
+    opsApiLogs,
+    opsConfigVersions,
+    opsAuditLog
   ].forEach((records) => records.splice(0, records.length));
+  Object.assign(jagentState, {
+    certificate: "未檢查",
+    certificateNote: "正式交換狀態尚未向後端查詢",
+    token: "",
+    tokenExpiresAt: null,
+    center: "未檢查",
+    latency: "-",
+    addressResults: []
+  });
+  Object.assign(opsState, {
+    health: "未檢查",
+    environment: "",
+    configVersion: "",
+    restoredBackup: "",
+    readiness: null,
+    deployment: null,
+    monitoring: null,
+    lastMonitorCheck: ""
+  });
   officialWorkflowItems = [];
   internalDispatchItems = [];
   internalDispatchRecipientDirectory = [];
@@ -5710,11 +5783,20 @@ function applyAuthUser() {
     roleSelect.value = workflowRole;
   }
   const currentRoleLabel = document.querySelector("#currentRoleLabel");
-  if (currentRoleLabel) currentRoleLabel.textContent = `${user.name} · ${user.role}`;
+  if (currentRoleLabel) currentRoleLabel.textContent = user.name || user.role || "公司帳號";
   const currentUserAvatar = document.querySelector("#currentUserAvatar");
   if (currentUserAvatar) currentUserAvatar.textContent = Array.from(String(user.name || user.email || "帳").trim())[0] || "帳";
-  const managerNote = user.approval_manager_name || user.manager_name ? ` · 主管 ${user.approval_manager_name || user.manager_name}` : "";
-  document.querySelector("#roleNote").textContent = `${user.company_name || "公司未設定"} · ${user.unit || "未設定單位"} · ${user.title || user.role}${managerNote}`;
+  const financeEmployeeId = String(
+    user.finance_employee_id
+      || user.logging_account_id
+      || user.employeeNo
+      || user.employee_id
+      || ""
+  ).trim();
+  document.querySelector("#roleNote").textContent = [
+    user.title || user.role,
+    financeEmployeeId || user.unit || "員工編號未設定"
+  ].filter(Boolean).join(" · ");
   applyRoleNavigation();
   renderIdentityWorkbench();
   renderScopeZone();
@@ -5807,6 +5889,7 @@ async function resumePostedHandoffSession() {
     if (error?.status === 401 && error?.code === "handoff_session_missing") {
       return null;
     }
+    resetCachedSessionShellReveal();
     if (isRetryableAuthError(error)) shouldClearVisibleMarker = false;
     authState = null;
     localStorage.removeItem(authStorageKey);
@@ -5847,6 +5930,7 @@ async function tryResumePlatformSession() {
       });
       return enterAuthenticatedAppSafely(`${authState.user.name} 已沿用既有登入狀態進入公文收發電子用印系統。`);
     } catch (error) {
+      resetCachedSessionShellReveal();
       if (isRetryableAuthError(error)) {
         console.warn("[edoc-entry:sso_unavailable] Finance session revalidation temporarily unavailable");
         if (isProductionEdocHost()) {
@@ -13987,6 +14071,7 @@ function prefillFormalAccountRole(role = "員工") {
 }
 
 function accountRosterTemplateRows() {
+  if (accountReadinessPackage?.rosterImportTemplate?.deprecated) return [];
   if (accountReadinessPackage?.rosterImportTemplate?.rows?.length) {
     return accountReadinessPackage.rosterImportTemplate.rows;
   }
@@ -14015,6 +14100,10 @@ function accountRosterTemplateRows() {
 async function exportFormalAccountRosterTemplate() {
   await ensureAccountLaunchAudit();
   const template = accountReadinessPackage?.rosterImportTemplate || {};
+  if (template.deprecated) {
+    showToast("人員只需在會計系統維護，eDoc 會自動同步，不必另行匯入名冊。");
+    return;
+  }
   const headers = template.headers || ["role", "required", "name", "email", "unit", "title", "job_level", "provider", "mfa_status", "status", "account_source", "done_when", "notes"];
   const rows = accountRosterTemplateRows();
   if (!rows.length) {
@@ -14243,17 +14332,17 @@ function renderAccountLaunchReadiness() {
   } else {
     const requiredMissing = tasks.filter((item) => item.required && !item.hasFormalAccount);
     const optionalMissing = tasks.filter((item) => !item.required && !item.hasFormalAccount);
-    status.textContent = requiredMissing.length ? `${requiredMissing.length} 個角色缺正式帳號` : "正式角色可登入";
+    status.textContent = requiredMissing.length ? `${requiredMissing.length} 個角色待同步` : "角色資料已備齊";
     summary.textContent = requiredMissing.length
-      ? `下週一核心流程尚缺 ${requiredMissing.map((item) => item.role).join("、")} 的正式帳號；demo 帳號 ${counts.demoSeedUserCount || 0} 個，正式站必須關閉測試登入。`
-      : `核心角色皆已有正式帳號；demo 帳號 ${counts.demoSeedUserCount || 0} 個，demo 停用狀態：${counts.demoAccountsDisabled ? "已停用" : "待確認"}。${accountReadinessPackage ? ` 補件包：${accountReadinessPackage.decision}` : ""}`;
+      ? `上線前尚需在會計系統補齊 ${requiredMissing.map((item) => item.role).join("、")} 的人員與組織綁定，再由本人完成 Google 首次登入；eDoc 會自動同步。`
+      : "核心角色資料已由 Finance 同步；這不等於已完成真人登入驗收。待啟用人員請使用公司 Google 帳號從模組頁首次登入，不必在 eDoc 再建帳號。";
     list.innerHTML = [
       accountReadinessPackage ? `
         <article class="account-readiness-card ${accountReadinessPackage.decision === "BLOCKED" ? "issue" : accountReadinessPackage.decision === "WARN" ? "wait" : "pass"}">
           <div>
-            <span>Account Package</span>
-            <strong>正式帳號補件包</strong>
-            <p>角色 ${counts.readyRequiredRoleCount || 0}/${counts.requiredRoleCount || 4} 就緒 · blocker ${counts.blockerCount || 0} · warning ${counts.warningCount || 0} · 匯入範本 ${accountReadinessPackage.rosterImportTemplate?.rows?.length || 0} 筆</p>
+            <span>Finance 自動同步</span>
+            <strong>人員與登入準備</strong>
+            <p>角色資料 ${counts.readyRequiredRoleCount || 0}/${counts.requiredRoleCount || 6} 齊備 · ${userAccounts.filter((account) => account.status === "待啟用").length} 人待首次登入 · ${counts.blockerCount || 0} 項待處理</p>
           </div>
           <button class="secondary-button" type="button" data-account-readiness-refresh="true">重新讀取</button>
         </article>
@@ -14302,10 +14391,12 @@ function renderAccountLaunchReadiness() {
 
 function renderAccountSummary() {
   const enabled = userAccounts.filter((account) => account.status === "啟用").length;
+  const pending = userAccounts.filter((account) => account.status === "待啟用").length;
+  const inactive = userAccounts.filter((account) => account.status === "停用").length;
   const mfaReady = userAccounts.filter((account) => account.mfa === "已啟用").length;
   const ssoUsers = userAccounts.filter((account) => account.provider !== "本機帳號").length;
   document.querySelector("#accountUserCount").textContent = `${enabled}/${userAccounts.length}`;
-  document.querySelector("#accountUserNote").textContent = `${userAccounts.length - enabled} 個停用帳號`;
+  document.querySelector("#accountUserNote").textContent = `${pending} 人待首次登入 · ${inactive} 人停用`;
   document.querySelector("#accountMfaCount").textContent = `${Math.round((mfaReady / Math.max(userAccounts.length, 1)) * 100)}%`;
   document.querySelector("#accountMfaNote").textContent = `${mfaReady} 個帳號已啟用 MFA`;
   document.querySelector("#accountSsoStatus").textContent = authState?.user ? "已沿用登入" : "等待 Finance 登入";
@@ -17647,28 +17738,44 @@ function renderOps() {
 }
 
 async function runOpsHealthCheck() {
-  const latency = `${Math.floor(32 + Math.random() * 45)}ms`;
-  jagentState.center = "已連線";
-  jagentState.latency = latency;
-  if (!jagentState.tokenExpiresAt) {
-    jagentState.token = `tk_${Date.now()}`;
-    jagentState.tokenExpiresAt = Date.now() + 8 * 60 * 60 * 1000;
-  }
   const started = performance.now();
   try {
-    const health = await fetchOpsJson("/health");
+    const [health, gateway] = await Promise.all([
+      fetchOpsJson("/health"),
+      fetchOpsJson("/exchange/gateway-status")
+    ]);
     const duration = `${Math.round(performance.now() - started)}ms`;
     opsState.health = health.ok ? "Healthy" : "API 異常";
     opsState.readiness = health.data.production || opsState.readiness;
     opsApiLogs.unshift({ time: nowTime(), service: "Backend", api: "GET /health", status: health.status, duration, code: health.ok ? "OK" : "HEALTH-FAIL", message: health.ok ? "後端健康檢查通過" : "後端健康檢查未通過" });
+    const exchange = gateway.data || {};
+    const formalExchangeReady = Boolean(exchange.formalConnection) && !exchange.formalExchangeDisabled;
+    jagentState.center = formalExchangeReady ? "已連線" : "未啟用";
+    jagentState.latency = formalExchangeReady ? duration : "-";
+    if (!formalExchangeReady) {
+      jagentState.certificate = "未啟用";
+      jagentState.certificateNote = exchange.formalDisabledReason || "政府電子交換目前維持 Mock／停用。";
+      jagentState.token = "";
+      jagentState.tokenExpiresAt = null;
+    }
+    opsApiLogs.unshift({
+      time: nowTime(),
+      service: "jAgent",
+      api: "GET /exchange/gateway-status",
+      status: gateway.status,
+      duration,
+      code: formalExchangeReady ? "FORMAL-READY" : "FORMAL-DISABLED",
+      message: formalExchangeReady ? "正式交換 provider 已核准並可用" : (exchange.formalDisabledReason || "正式交換維持 Mock／停用")
+    });
   } catch (error) {
     opsState.health = "API 異常";
-    opsApiLogs.unshift({ time: nowTime(), service: "Backend", api: "GET /health", status: 500, duration: latency, code: "HEALTH-ERROR", message: error.message });
+    jagentState.center = "檢查失敗";
+    jagentState.latency = "-";
+    opsApiLogs.unshift({ time: nowTime(), service: "Backend", api: "GET /health", status: 500, duration: "-", code: "HEALTH-ERROR", message: error.message });
   }
-  opsApiLogs.unshift({ time: nowTime(), service: "jAgent", api: "GET /health", status: 200, duration: latency, code: "OK", message: "憑證、Token、交換中心與地址簿健康檢查通過" });
   renderJagentStatus();
   renderOps();
-  addOpsAudit("健康檢查", `Backend ${opsState.health}，jAgent 延遲 ${latency}，Token ${tokenTimeLeft()}。`);
+  addOpsAudit("健康檢查", `Backend ${opsState.health}，正式交換 ${jagentState.center}。`);
   showToast("健康檢查完成。");
 }
 
@@ -19212,7 +19319,9 @@ async function backendRequest(path, options = {}) {
   }
   if (!response.ok) {
     const rawMessage = data.detail || data.error || `HTTP ${response.status}`;
-    const error = new Error(friendlyBackendErrorMessage(rawMessage, response.status));
+    const errorId = /^ERR-[A-F0-9]{24}$/.test(data.errorId || "") ? data.errorId : "";
+    const error = new Error(`${friendlyBackendErrorMessage(rawMessage, response.status)}${errorId ? `（問題編號：${errorId}）` : ""}`);
+    error.errorId = errorId;
     error.status = response.status;
     error.code = data.error || "";
     error.detail = data.detail || "";
@@ -19354,6 +19463,7 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     seal_file_antivirus_rejected: "印章檔案未通過防毒掃描，系統未將它設為可用版本。",
     editor_antivirus_not_ready: "正式防毒服務尚未就緒，系統已阻止檔案上傳。",
     editor_antivirus_scan_failed: "正式防毒掃描失敗，系統未將檔案設為可用版本。",
+    editor_runtime_maintenance: "電子用印正在進行資料庫與檔案庫切換，系統已先停止建立草稿、上傳與產生確認版。登入及既有案件查閱不受影響；請稍後重試，若持續出現請通知系統管理員。",
     official_file_antivirus_required: "公文來源檔或附件尚未通過防毒掃描，不能送簽、預覽用印或下載。",
     official_file_antivirus_rejected: "公文來源檔或附件未通過防毒掃描，系統未保存為可用檔案。",
     official_file_quarantined: "公文來源檔或附件已被防毒系統隔離，不能送簽、用印或下載。",
@@ -23705,12 +23815,29 @@ function renderUploadedSealCompanyOptions() {
 
 function preferredFinanceDepartment(departments = []) {
   const user = authState?.user || {};
+  const externalAccount = parseJsonMaybe(user.external_account_payload_json || user.externalAccountPayloadJson) || {};
+  const financeProfile = externalAccount?.financeProfile && typeof externalAccount.financeProfile === "object"
+    ? externalAccount.financeProfile
+    : {};
+  const departmentCode = String(financeProfile.departmentCode || user.department_code || user.departmentCode || "").trim().toUpperCase();
   const financeUnitId = String(user.finance_unit_id || user.financeUnitId || user.unit_id || user.department_id || "").trim();
   const unitName = String(user.unit || user.department_name || "").trim();
-  return departments.find((department) => (
-    (financeUnitId && [department.id, department.financeUnitId].includes(financeUnitId))
-    || (unitName && department.name === unitName)
-  )) || null;
+  if (departmentCode) {
+    const codeMatches = departments.filter((department) => [
+      department.code,
+      department.financeUnitId,
+      department.id
+    ].some((reference) => String(reference || "").trim().toUpperCase() === departmentCode));
+    // Do not silently select a name match when a stable Finance code is
+    // missing or ambiguous. The backend applies the same fail-closed rule.
+    return codeMatches.length === 1 ? codeMatches[0] : null;
+  }
+  const idMatches = financeUnitId
+    ? departments.filter((department) => [department.id, department.financeUnitId].includes(financeUnitId))
+    : [];
+  if (idMatches.length) return idMatches.length === 1 ? idMatches[0] : null;
+  const nameMatches = unitName ? departments.filter((department) => department.name === unitName) : [];
+  return nameMatches.length === 1 ? nameMatches[0] : null;
 }
 
 function renderUploadedSealDepartmentOptions({ preferAccount = false } = {}) {
@@ -24259,6 +24386,49 @@ function setUploadedEditorSaveStatus(kind, message) {
   status.textContent = message;
 }
 
+function clearUploadedEditorUploadError() {
+  const panel = document.querySelector("#uploadedEditorUploadError");
+  const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
+  if (panel) panel.hidden = true;
+  if (retryButton) {
+    retryButton.hidden = false;
+    retryButton.disabled = false;
+    retryButton.textContent = "重新上傳";
+  }
+  uploadedSealEditorRuntime.uploadRetry = null;
+}
+
+function showUploadedEditorUploadError(error, retry, actionLabel = "重新上傳") {
+  const panel = document.querySelector("#uploadedEditorUploadError");
+  const message = document.querySelector("#uploadedEditorUploadErrorMessage");
+  const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
+  uploadedSealEditorRuntime.uploadRetry = typeof retry === "function" ? retry : null;
+  if (message) message.textContent = pdfA4UiErrorMessage(error);
+  if (retryButton) {
+    retryButton.hidden = !uploadedSealEditorRuntime.uploadRetry;
+    retryButton.disabled = false;
+    retryButton.textContent = actionLabel;
+  }
+  if (panel) panel.hidden = false;
+}
+
+async function retryUploadedEditorUpload() {
+  if (uploadedSealEditorRuntime.uploading) return;
+  const retry = uploadedSealEditorRuntime.uploadRetry;
+  if (typeof retry !== "function") return openUploadedPdfPicker();
+  const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
+  if (retryButton) {
+    retryButton.disabled = true;
+    retryButton.textContent = "準備重新上傳…";
+  }
+  clearUploadedEditorUploadError();
+  try {
+    await retry();
+  } catch (error) {
+    console.warn("PDF editor retry did not complete", error?.code || error?.status || "unknown");
+  }
+}
+
 function currentUploadedEditorPage() {
   return uploadedSealEditorState.pages.find((page) => page.pageId === uploadedSealEditorRuntime.currentPageId)
     || uploadedSealEditorState.pages[0]
@@ -24494,80 +24664,297 @@ function tusMetadataValue(value) {
   return btoa(binary);
 }
 
+function supabasePublishableStorageKey(intent = {}) {
+  const key = String(intent.storage_publishable_key || intent.publishable_key || intent.apikey || "").trim();
+  if (!key) return "";
+  if (key.startsWith("sb_publishable_")) return key;
+  if (key.startsWith("sb_secret_") || key.startsWith("service_role")) return "";
+  const segments = key.split(".");
+  if (segments.length !== 3) return "";
+  try {
+    const base64 = segments[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payload = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")));
+    return payload?.role === "anon" ? key : "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function editorTusIntentHeaders(intent = {}) {
+  const provided = intent.headers && typeof intent.headers === "object" ? intent.headers : {};
+  const headerValue = (name) => Object.entries(provided).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] || "";
+  const signature = String(intent.upload_token || intent.x_signature || headerValue("x-signature") || "").trim();
+  if (!signature) {
+    const error = new Error("上傳資格不完整，請重新取得上傳授權。");
+    error.code = "editor_tus_signature_missing";
+    error.retryable = true;
+    throw error;
+  }
+  // Supabase defines overwrite as an explicit x-upsert:true opt-in.  A
+  // create-only signed upload omits that header entirely.
+  const headers = { "x-signature": signature };
+  const declaredPublicKey = String(intent.storage_publishable_key || intent.publishable_key || intent.apikey || "").trim();
+  const publicKey = supabasePublishableStorageKey(intent);
+  if (declaredPublicKey && !publicKey) {
+    const error = new Error("後端提供的 Storage 公開金鑰不安全，已停止上傳。");
+    error.code = "editor_tus_public_key_invalid";
+    error.retryable = false;
+    throw error;
+  }
+  if (publicKey) headers.apikey = publicKey;
+  return headers;
+}
+
+function validateEditorTusEndpoint(intent = {}) {
+  let url;
+  try {
+    url = new URL(intent.upload_url, window.location.href);
+  } catch (_error) {
+    url = null;
+  }
+  const valid = url
+    && url.protocol === "https:"
+    && url.hostname.endsWith(".storage.supabase.co")
+    && url.pathname.replace(/\/+$/, "") === "/storage/v1/upload/resumable/sign";
+  if (!valid) {
+    const error = new Error("後端提供的 TUS 上傳位置無效，請重新取得上傳授權。");
+    error.code = "editor_tus_endpoint_invalid";
+    error.retryable = true;
+    throw error;
+  }
+  return url.toString();
+}
+
+async function editorTusResponseError(response, phase) {
+  let detail = "";
+  try {
+    const raw = await response.text();
+    const parsed = raw ? JSON.parse(raw) : {};
+    detail = String(parsed.error_code || parsed.code || parsed.error || parsed.message || "");
+  } catch (_error) {
+    detail = "";
+  }
+  const normalized = detail.toLowerCase();
+  let message = `${phase}失敗（${response.status}），請稍後重新上傳。`;
+  let code = "editor_tus_request_failed";
+  let retryable = [408, 409, 423, 425, 429, 500, 502, 503, 504].includes(response.status);
+  if ([401, 403, 404, 410].includes(response.status) || normalized.includes("signature") || normalized.includes("expired")) {
+    message = "上傳資格已失效，請重新上傳以取得新的安全授權。";
+    code = "editor_tus_signature_expired";
+    retryable = true;
+  } else if (response.status === 400 && (normalized.includes("exist") || normalized.includes("duplicate"))) {
+    message = "這次上傳資格已被使用，請重新上傳以建立新版本。";
+    code = "editor_tus_asset_exists";
+    retryable = true;
+  } else if (response.status === 400) {
+    message = "上傳資格或檔案資訊不符，請重新上傳；若仍失敗請通知管理員。";
+    code = "editor_tus_create_rejected";
+    retryable = true;
+  } else if (response.status === 409) {
+    message = "偵測到另一個上傳程序，系統將從伺服器進度繼續。";
+    code = "editor_tus_offset_conflict";
+    retryable = true;
+  } else if (response.status === 413) {
+    message = "PDF 超過 Storage 可接受的大小，請縮小檔案後再上傳。";
+    code = "editor_tus_file_too_large";
+    retryable = false;
+  } else if (response.status === 415) {
+    message = "Storage 不接受此檔案格式，請確認檔案是 PDF。";
+    code = "editor_tus_mime_rejected";
+    retryable = false;
+  } else if (response.status === 429) {
+    message = "上傳服務目前繁忙，系統將稍後重試。";
+    code = "editor_tus_rate_limited";
+    retryable = true;
+  } else if (response.status >= 500) {
+    message = "上傳服務暫時無法使用，系統將保留目前進度並重試。";
+    code = "editor_tus_service_unavailable";
+    retryable = true;
+  }
+  const error = new Error(message);
+  error.code = code;
+  error.status = response.status;
+  error.retryable = retryable;
+  return error;
+}
+
+function waitForTusRetry(delayMs) {
+  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+}
+
+async function editorTusRemoteOffset(uploadUrl, baseHeaders) {
+  let response;
+  try {
+    response = await fetch(uploadUrl, {
+      method: "HEAD",
+      headers: { ...baseHeaders, "Tus-Resumable": "1.0.0" },
+      cache: "no-store",
+      redirect: "error"
+    });
+  } catch (_error) {
+    const error = new Error("網路中斷，暫時無法確認上傳進度。");
+    error.code = "editor_tus_network_error";
+    error.retryable = true;
+    throw error;
+  }
+  if (!response.ok) throw await editorTusResponseError(response, "查詢續傳位置");
+  const offset = Number(response.headers.get("Upload-Offset"));
+  if (!Number.isFinite(offset) || offset < 0) {
+    const error = new Error("Storage 回傳的續傳位置無效，請重新上傳。");
+    error.code = "editor_tus_offset_invalid";
+    error.retryable = true;
+    throw error;
+  }
+  return offset;
+}
+
 async function performTusUpload(file, intent, onProgress = () => {}) {
   if (!intent?.upload_url || !["tus", "local_direct"].includes(intent.protocol)) throw new Error("後端未提供有效的 TUS 直傳資格。");
-  const baseHeaders = { ...(intent.headers || {}) };
-  if (intent.x_signature && !Object.keys(baseHeaders).some((key) => key.toLowerCase() === "x-signature")) baseHeaders["x-signature"] = intent.x_signature;
-  const uploadIsSameOrigin = new URL(intent.upload_url, window.location.href).origin === window.location.origin;
-  if (uploadIsSameOrigin && !Object.keys(baseHeaders).some((key) => key.toLowerCase() === "authorization") && isHeaderSafeToken(authState?.token)) {
-    baseHeaders.Authorization = `Bearer ${authState.token}`;
-  }
   if (intent.protocol === "local_direct") {
+    const baseHeaders = {};
+    const uploadIsSameOrigin = new URL(intent.upload_url, window.location.href).origin === window.location.origin;
+    if (uploadIsSameOrigin && isHeaderSafeToken(authState?.token)) baseHeaders.Authorization = `Bearer ${authState.token}`;
     const response = await fetch(intent.upload_url, {
       method: intent.method || "PUT",
       headers: { ...baseHeaders, "Content-Type": file.type || "application/octet-stream" },
       body: file,
-      cache: "no-store"
+      cache: "no-store",
+      redirect: "error"
     });
-    if (!response.ok) throw new Error(`本機直傳驗收失敗（${response.status}）。`);
+    if (!response.ok) throw await editorTusResponseError(response, "本機直傳驗收");
     onProgress(1);
     return { uploadUrl: intent.upload_url, offset: file.size };
   }
-  const bucketName = intent.bucketName || intent.bucket_name || intent.metadata?.bucketName || intent.metadata?.bucket_name || "";
-  const objectName = intent.objectName || intent.object_name || intent.metadata?.objectName || intent.metadata?.object_name || intent.storage_path || "";
+  const endpoint = validateEditorTusEndpoint(intent);
+  const baseHeaders = editorTusIntentHeaders(intent);
+  const bucketName = intent.bucket || intent.bucketName || intent.bucket_name || intent.metadata?.bucketName || "";
+  const objectName = intent.path || intent.objectName || intent.object_name || intent.storage_path || intent.metadata?.objectName || "";
   const contentType = intent.contentType || intent.content_type || intent.metadata?.contentType || intent.metadata?.content_type || file.type || "application/octet-stream";
+  const cacheControl = intent.cacheControl || intent.cache_control || intent.metadata?.cacheControl || "0";
+  if (!bucketName || !objectName) {
+    const error = new Error("上傳資格缺少 Storage 路徑，請重新取得授權。");
+    error.code = "editor_tus_metadata_missing";
+    error.retryable = true;
+    throw error;
+  }
   const metadata = [
-    `filename ${tusMetadataValue(file.name)}`,
-    `filetype ${tusMetadataValue(contentType)}`,
-    bucketName ? `bucketName ${tusMetadataValue(bucketName)}` : "",
-    objectName ? `objectName ${tusMetadataValue(objectName)}` : "",
-    `contentType ${tusMetadataValue(contentType)}`
-  ].filter(Boolean).join(",");
+    `bucketName ${tusMetadataValue(bucketName)}`,
+    `objectName ${tusMetadataValue(objectName)}`,
+    `contentType ${tusMetadataValue(contentType)}`,
+    `cacheControl ${tusMetadataValue(cacheControl)}`
+  ].join(",");
   const createHeaders = {
     ...baseHeaders,
     "Tus-Resumable": "1.0.0",
     "Upload-Length": String(file.size),
     "Upload-Metadata": metadata
   };
-  let uploadUrl = intent.upload_url;
-  let offset = 0;
-  const createResponse = await fetch(intent.upload_url, { method: "POST", headers: createHeaders, cache: "no-store" });
-  if (createResponse.ok) {
-    const location = createResponse.headers.get("Location");
-    if (location) uploadUrl = new URL(location, intent.upload_url).toString();
-    offset = Number(createResponse.headers.get("Upload-Offset") || 0);
-  } else if (![405, 409].includes(createResponse.status)) {
-    throw new Error(`TUS 建立上傳失敗（${createResponse.status}）。`);
+  let createResponse;
+  try {
+    createResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: createHeaders,
+      cache: "no-store",
+      redirect: "error"
+    });
+  } catch (_error) {
+    const error = new Error("網路中斷，尚未建立上傳；請重新上傳。");
+    error.code = "editor_tus_network_error";
+    error.retryable = true;
+    throw error;
   }
+  if (!createResponse.ok) throw await editorTusResponseError(createResponse, "建立上傳");
+  const location = createResponse.headers.get("Location");
+  if (!location) {
+    const error = new Error("Storage 未回傳續傳位置，請重新上傳。");
+    error.code = "editor_tus_location_missing";
+    error.retryable = true;
+    throw error;
+  }
+  const endpointUrl = new URL(endpoint);
+  const uploadLocation = new URL(location, endpoint);
+  if (
+    uploadLocation.origin !== endpointUrl.origin
+    || !uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/sign/")
+  ) {
+    const error = new Error("Storage 回傳了不安全的續傳位置，已停止上傳。");
+    error.code = "editor_tus_location_invalid";
+    error.retryable = true;
+    throw error;
+  }
+  const uploadUrl = uploadLocation.toString();
+  let offset = 0;
+  const createOffset = Number(createResponse.headers.get("Upload-Offset") || 0);
+  if (Number.isFinite(createOffset) && createOffset >= 0) offset = createOffset;
+  onProgress(Math.min(1, offset / Math.max(1, file.size)));
   const chunkSize = 6 * 1024 * 1024;
   let attempts = 0;
+  const retryDelays = [0, 1000, 3000, 5000];
   while (offset < file.size) {
     const end = Math.min(file.size, offset + chunkSize);
     const chunk = file.slice(offset, end);
-    const response = await fetch(uploadUrl, {
-      method: "PATCH",
-      headers: {
-        ...baseHeaders,
-        "Tus-Resumable": "1.0.0",
-        "Upload-Offset": String(offset),
-        "Content-Type": "application/offset+octet-stream"
-      },
-      body: chunk,
-      cache: "no-store"
-    });
-    if (response.ok) {
+    let response = null;
+    let failure = null;
+    try {
+      response = await fetch(uploadUrl, {
+        method: "PATCH",
+        headers: {
+          ...baseHeaders,
+          "Tus-Resumable": "1.0.0",
+          "Upload-Offset": String(offset),
+          "Content-Type": "application/offset+octet-stream"
+        },
+        body: chunk,
+        cache: "no-store",
+        redirect: "error"
+      });
+      if (!response.ok) failure = await editorTusResponseError(response, "續傳");
+    } catch (_error) {
+      failure = new Error("網路中斷，系統會從已完成的進度續傳。");
+      failure.code = "editor_tus_network_error";
+      failure.retryable = true;
+    }
+    if (response?.ok) {
       offset = Number(response.headers.get("Upload-Offset") || end);
       attempts = 0;
       onProgress(Math.min(1, offset / Math.max(1, file.size)));
       continue;
     }
-    if (attempts >= 2) throw new Error(`TUS 續傳失敗（${response.status}）。`);
+    if (!failure?.retryable || attempts >= retryDelays.length - 1) throw failure;
     attempts += 1;
-    const head = await fetch(uploadUrl, { method: "HEAD", headers: { ...baseHeaders, "Tus-Resumable": "1.0.0" }, cache: "no-store" });
-    if (!head.ok) throw new Error(`TUS 無法查詢續傳位置（${head.status}）。`);
-    offset = Number(head.headers.get("Upload-Offset") || 0);
+    await waitForTusRetry(retryDelays[attempts]);
+    try {
+      offset = await editorTusRemoteOffset(uploadUrl, baseHeaders);
+      onProgress(Math.min(1, offset / Math.max(1, file.size)));
+    } catch (headError) {
+      if (attempts >= retryDelays.length - 1 || !headError.retryable) throw headError;
+    }
   }
   return { uploadUrl, offset };
+}
+
+function editorUploadFailureCode(error) {
+  const code = String(error?.code || "");
+  if (/^editor_[a-z0-9_]{1,80}$/.test(code)) return code;
+  if (error?.status === 409) return "editor_upload_conflict";
+  if ([401, 403, 404, 410].includes(Number(error?.status))) return "editor_upload_authorization_failed";
+  return "editor_upload_client_failed";
+}
+
+async function reportEditorUploadFailure(intent, error) {
+  if (!intent?.documentId || !intent?.upload_id) return;
+  // A production cutover/outage is not an asset validation failure. Preserve
+  // the durable pending lifecycle job so the server can expire or resume it;
+  // do not incorrectly quarantine this upload because readiness closed.
+  if (error?.detail === "editor_runtime_maintenance") return;
+  try {
+    await backendRequest(`/official-documents/${encodeURIComponent(intent.documentId)}/editor-uploads/${encodeURIComponent(intent.upload_id)}/fail`, {
+      method: "POST",
+      body: JSON.stringify({ error_code: editorUploadFailureCode(error) })
+    });
+  } catch (reportError) {
+    console.warn("PDF editor upload failure report was not accepted", reportError?.code || reportError?.status || "unknown");
+  }
 }
 
 async function finalizeEditorUpload(intent, file) {
@@ -25845,13 +26232,28 @@ async function handleUploadedEditorImportPdf(files) {
   for (const file of files) {
     if (!file || (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf"))) return showToast("匯入只接受 PDF。");
     if (file.size > PDF_EDITOR_MAX_FILE_BYTES) return showToast("單一 PDF 不得超過 50 MB。");
-    setUploadedPdfA4Status("checking", `正在檢查 ${file.name} 的每一頁是否為 A4…`);
-    setUploadedEditorSaveStatus("uploading", "合併 PDF 直傳中 0%");
-    const intent = await requestEditorUpload(file, "import_pdf");
-    await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `合併 PDF 直傳中 ${Math.round(progress * 100)}%`));
-    setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
-    const finalized = await finalizeEditorUpload(intent, file);
-    await loadUploadedPdfIntoEditor(file, intent, finalized, { append: true });
+    let intent = null;
+    try {
+      clearUploadedEditorUploadError();
+      setUploadedPdfA4Status("checking", `正在檢查 ${file.name} 的每一頁是否為 A4…`);
+      setUploadedEditorSaveStatus("uploading", "合併 PDF 直傳中 0%");
+      intent = await requestEditorUpload(file, "import_pdf");
+      await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `合併 PDF 直傳中 ${Math.round(progress * 100)}%`));
+      setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
+      const finalized = await finalizeEditorUpload(intent, file);
+      await loadUploadedPdfIntoEditor(file, intent, finalized, { append: true });
+    } catch (error) {
+      await reportEditorUploadFailure(intent, error);
+      const retrySameFile = error?.detail === "editor_runtime_maintenance"
+        || error?.retryable === true
+        || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
+      showUploadedEditorUploadError(
+        error,
+        retrySameFile ? () => handleUploadedEditorImportPdf([file]) : () => document.querySelector("#uploadedEditorImportPdfInput")?.click(),
+        retrySameFile ? "重新上傳" : "選擇其他 PDF"
+      );
+      throw error;
+    }
   }
   ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
 }
@@ -25861,9 +26263,11 @@ async function handleUploadedEditorImage(file) {
   if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再插入圖片。");
   if (!["image/png", "image/jpeg"].includes(file.type)) return showToast("圖片只接受 PNG 或 JPEG。");
   if (file.size > PDF_EDITOR_MAX_IMAGE_BYTES) return showToast("單張圖片不得超過 10 MB。");
+  let intent = null;
   try {
+    clearUploadedEditorUploadError();
     setUploadedEditorSaveStatus("uploading", "圖片直傳中 0%");
-    const intent = await requestEditorUpload(file, "image");
+    intent = await requestEditorUpload(file, "image");
     await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `圖片直傳中 ${Math.round(progress * 100)}%`));
     setUploadedEditorSaveStatus("checking", "圖片掃毒中");
     const finalized = await finalizeEditorUpload(intent, file);
@@ -25887,7 +26291,9 @@ async function handleUploadedEditorImage(file) {
     uploadedSealEditorRuntime.selectedIds = new Set(element ? [element.id] : []);
     renderUploadedSealWorkbench();
   } catch (error) {
+    await reportEditorUploadFailure(intent, error);
     setUploadedEditorSaveStatus("error", "圖片上傳失敗");
+    showUploadedEditorUploadError(error, () => handleUploadedEditorImage(file), "重新上傳圖片");
     showToast(`圖片上傳失敗：${error.message}`);
   } finally {
     const input = document.querySelector("#uploadedEditorImageInput");
@@ -26202,9 +26608,9 @@ function openUploadedPdfPicker() {
   input.click();
 }
 
-async function handleUploadedSealPdfChange() {
+async function handleUploadedSealPdfChange(fileOverride = null) {
   const input = document.querySelector("#uploadedSealPdfInput");
-  const file = input?.files?.[0];
+  const file = fileOverride instanceof File ? fileOverride : input?.files?.[0];
   if (!file) return;
   if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
     input.value = "";
@@ -26219,9 +26625,11 @@ async function handleUploadedSealPdfChange() {
     return showToast("已有 PDF 正在上傳，請等待完成。");
   }
   uploadedSealEditorRuntime.uploading = true;
+  clearUploadedEditorUploadError();
   const fileName = document.querySelector("#uploadedPdfFileName");
   if (fileName) fileName.textContent = `正在檢查 ${file.name}`;
   renderUploadedSealWorkbench();
+  let intent = null;
   try {
     if (
       uploadedSealEditorRuntime.documentId
@@ -26233,7 +26641,7 @@ async function handleUploadedSealPdfChange() {
     }
     setUploadedPdfA4Status("checking", "正在檢查每一頁是否為 A4…");
     setUploadedEditorSaveStatus("uploading", "TUS 私密直傳中 0%");
-    const intent = await requestEditorUpload(file, "source_pdf");
+    intent = await requestEditorUpload(file, "source_pdf");
     await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `TUS 私密直傳中 ${Math.round(progress * 100)}%`));
     setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
     const finalized = await finalizeEditorUpload(intent, file);
@@ -26244,10 +26652,20 @@ async function handleUploadedSealPdfChange() {
     if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
     ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
     addSealAudit("PDF 編輯來源已通過預檢", `asset ${uploadedSealPdf.assetId || "-"} · ${uploadedSealPageCount} 頁 · hash ${intent.sha256.slice(0, 16)}…`);
+    clearUploadedEditorUploadError();
     showToast(`PDF 已安全載入，共 ${uploadedSealPageCount} 頁。`);
   } catch (error) {
+    await reportEditorUploadFailure(intent, error);
     setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
     setUploadedEditorSaveStatus("error", "PDF 未通過上傳或預檢");
+    const retrySameFile = error?.detail === "editor_runtime_maintenance"
+      || error?.retryable === true
+      || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
+    showUploadedEditorUploadError(
+      error,
+      retrySameFile ? () => handleUploadedSealPdfChange(file) : openUploadedPdfPicker,
+      retrySameFile ? "重新上傳" : "選擇其他 PDF"
+    );
     showToast(`PDF 無法開啟：${pdfA4UiErrorMessage(error)}`);
   } finally {
     uploadedSealEditorRuntime.uploading = false;
@@ -28242,6 +28660,67 @@ document.querySelectorAll("[data-seal-vault-tab]").forEach((button) => {
   button.addEventListener("click", () => setCompanySealVaultTab(button.dataset.sealVaultTab));
 });
 document.querySelector("#uploadedSealPdfInput")?.addEventListener("change", handleUploadedSealPdfChange);
+let uploadedEditorMobileDrawerReturnFocus = null;
+
+function uploadedEditorMobileDrawerIsCompact() {
+  return window.matchMedia("(max-width: 820px)").matches;
+}
+
+function closeUploadedEditorMobileDrawer({ restoreFocus = true } = {}) {
+  const editor = document.querySelector("#uploadedPdfEditor");
+  const backdrop = document.querySelector("#uploadedEditorMobileBackdrop");
+  if (editor) {
+    editor.dataset.thumbnailsOpen = "false";
+    editor.dataset.propertiesOpen = "false";
+  }
+  document.querySelector("#uploadedEditorThumbnailToggleBtn")?.setAttribute("aria-expanded", "false");
+  document.querySelector("#uploadedEditorPropertiesToggleBtn")?.setAttribute("aria-expanded", "false");
+  ["#uploadedEditorThumbnailPane", "#uploadedEditorProperties"].forEach((selector) => {
+    const pane = document.querySelector(selector);
+    if (!pane) return;
+    if (uploadedEditorMobileDrawerIsCompact()) pane.setAttribute("aria-hidden", "true");
+    else pane.removeAttribute("aria-hidden");
+    pane.removeAttribute("role");
+    pane.removeAttribute("aria-modal");
+  });
+  if (backdrop) backdrop.hidden = true;
+  document.body.classList.remove("pdf-editor-mobile-drawer-open");
+  if (restoreFocus && uploadedEditorMobileDrawerReturnFocus instanceof HTMLElement) uploadedEditorMobileDrawerReturnFocus.focus();
+  uploadedEditorMobileDrawerReturnFocus = null;
+}
+
+function setUploadedEditorMobileDrawer(kind, open, trigger = null) {
+  if (!uploadedEditorMobileDrawerIsCompact()) return closeUploadedEditorMobileDrawer({ restoreFocus: false });
+  if (!open) return closeUploadedEditorMobileDrawer();
+  const editor = document.querySelector("#uploadedPdfEditor");
+  const backdrop = document.querySelector("#uploadedEditorMobileBackdrop");
+  const thumbnailsOpen = kind === "thumbnails";
+  if (editor) {
+    editor.dataset.thumbnailsOpen = String(thumbnailsOpen);
+    editor.dataset.propertiesOpen = String(!thumbnailsOpen);
+  }
+  document.querySelector("#uploadedEditorThumbnailToggleBtn")?.setAttribute("aria-expanded", String(thumbnailsOpen));
+  document.querySelector("#uploadedEditorPropertiesToggleBtn")?.setAttribute("aria-expanded", String(!thumbnailsOpen));
+  const openPane = document.querySelector(thumbnailsOpen ? "#uploadedEditorThumbnailPane" : "#uploadedEditorProperties");
+  const closedPane = document.querySelector(thumbnailsOpen ? "#uploadedEditorProperties" : "#uploadedEditorThumbnailPane");
+  closedPane?.setAttribute("aria-hidden", "true");
+  closedPane?.removeAttribute("role");
+  closedPane?.removeAttribute("aria-modal");
+  if (openPane) {
+    openPane.setAttribute("aria-hidden", "false");
+    openPane.setAttribute("role", "dialog");
+    openPane.setAttribute("aria-modal", "true");
+  }
+  if (backdrop) backdrop.hidden = false;
+  document.body.classList.add("pdf-editor-mobile-drawer-open");
+  uploadedEditorMobileDrawerReturnFocus = trigger || document.activeElement;
+  window.requestAnimationFrame(() => openPane?.querySelector(".pdf-editor-pane-close")?.focus());
+}
+
+function syncUploadedEditorMobileDrawer() {
+  if (!uploadedEditorMobileDrawerIsCompact()) closeUploadedEditorMobileDrawer({ restoreFocus: false });
+}
+
 document.querySelector("#addSelectedStampBtn")?.addEventListener("click", () => addUploadedStamp(document.querySelector("#uploadedSealStampType")?.value || "current_page"));
 document.querySelector("#addUploadedTextBtn")?.addEventListener("click", () => addUploadedTextAtPoint());
 document.querySelector("#uploadedSealCompany")?.addEventListener("change", async (event) => {
@@ -28279,14 +28758,47 @@ document.querySelector("#uploadedEditorImportPdfBtn")?.addEventListener("click",
 document.querySelector("#uploadedEditorThumbnailToggleBtn")?.addEventListener("click", (event) => {
   const editor = document.querySelector("#uploadedPdfEditor");
   const open = editor?.dataset.thumbnailsOpen !== "true";
-  if (editor) editor.dataset.thumbnailsOpen = String(open);
-  event.currentTarget.setAttribute("aria-expanded", String(open));
+  setUploadedEditorMobileDrawer("thumbnails", open, event.currentTarget);
 });
 document.querySelector("#uploadedEditorPropertiesToggleBtn")?.addEventListener("click", (event) => {
   const editor = document.querySelector("#uploadedPdfEditor");
   const open = editor?.dataset.propertiesOpen !== "true";
-  if (editor) editor.dataset.propertiesOpen = String(open);
-  event.currentTarget.setAttribute("aria-expanded", String(open));
+  setUploadedEditorMobileDrawer("properties", open, event.currentTarget);
+});
+document.querySelector("#uploadedEditorThumbnailCloseBtn")?.addEventListener("click", () => closeUploadedEditorMobileDrawer());
+document.querySelector("#uploadedEditorPropertiesCloseBtn")?.addEventListener("click", () => closeUploadedEditorMobileDrawer());
+document.querySelector("#uploadedEditorMobileBackdrop")?.addEventListener("click", () => closeUploadedEditorMobileDrawer());
+document.querySelector("#uploadedEditorRetryUploadBtn")?.addEventListener("click", () => void retryUploadedEditorUpload());
+document.querySelector("#uploadedEditorDismissUploadErrorBtn")?.addEventListener("click", clearUploadedEditorUploadError);
+window.addEventListener("resize", syncUploadedEditorMobileDrawer);
+syncUploadedEditorMobileDrawer();
+document.addEventListener("keydown", (event) => {
+  const editor = document.querySelector("#uploadedPdfEditor");
+  const drawerOpen = editor?.dataset.thumbnailsOpen === "true" || editor?.dataset.propertiesOpen === "true";
+  if (!drawerOpen || !uploadedEditorMobileDrawerIsCompact()) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeUploadedEditorMobileDrawer();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const openPane = document.querySelector(
+    editor?.dataset.thumbnailsOpen === "true" ? "#uploadedEditorThumbnailPane" : "#uploadedEditorProperties"
+  );
+  const focusable = [...(openPane?.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+  ) || [])].filter((element) => element instanceof HTMLElement && element.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 });
 document.querySelector("#uploadedEditorImportPdfInput")?.addEventListener("change", async (event) => {
   try {
@@ -28951,6 +29463,7 @@ document.querySelector("#returnPortalBtn")?.addEventListener("click", () => {
   returnToLoggingPortalModulePicker();
 });
 document.querySelector("#logoutBtn")?.addEventListener("click", leaveApp);
+document.querySelector("#profileLogoutBtn")?.addEventListener("click", leaveApp);
 document.querySelector("#loginReturnPortalBtn")?.addEventListener("click", () => {
   returnToLoggingPortalModulePicker("module_picker", "replace");
 });

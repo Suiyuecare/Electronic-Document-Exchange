@@ -25,8 +25,20 @@ class FrontendAuthoritativeWorkflowsContractTest(unittest.TestCase):
         clearing = javascript_function(self.js, "clearFrontendSeedRecordsForAuthenticatedSession")
         self.assertIn("hasAuthenticatedBackendSession()", clearing)
         self.assertIn("explicitFrontendFixturesEnabled()", clearing)
-        for collection in ("dispatchDocs", "notificationItems", "contractRecords", "trackingCases"):
+        for collection in (
+            "dispatchDocs",
+            "notificationItems",
+            "contractRecords",
+            "trackingCases",
+            "opsApiLogs",
+            "opsConfigVersions",
+            "opsAuditLog",
+        ):
             self.assertIn(collection, clearing)
+        self.assertIn("Object.assign(jagentState", clearing)
+        self.assertIn('center: "未檢查"', clearing)
+        self.assertIn('token: ""', clearing)
+        self.assertIn("Object.assign(opsState", clearing)
         apply_user = javascript_function(self.js, "applyAuthUser")
         self.assertIn("clearFrontendSeedRecordsForAuthenticatedSession();", apply_user)
 
@@ -68,6 +80,17 @@ class FrontendAuthoritativeWorkflowsContractTest(unittest.TestCase):
     def test_authorized_ui_audit_calls_existing_navigation_function(self) -> None:
         self.assertIn("secondaryRoutesForRole(activeRole())", self.audit)
         self.assertNotIn("moreNavigationRoutesForRole", self.audit)
+
+    def test_ops_health_uses_real_exchange_status_without_fake_jagent_success(self) -> None:
+        health = javascript_function(self.js, "runOpsHealthCheck")
+        self.assertIn('/exchange/gateway-status', health)
+        self.assertIn("exchange.formalConnection", health)
+        self.assertIn("exchange.formalExchangeDisabled", health)
+        self.assertIn('jagentState.center = formalExchangeReady ? "已連線" : "未啟用"', health)
+        self.assertIn('code: formalExchangeReady ? "FORMAL-READY" : "FORMAL-DISABLED"', health)
+        self.assertNotIn("Math.random", health)
+        self.assertNotIn("tk_", health)
+        self.assertNotIn("Token ${tokenTimeLeft()}", health)
 
 
 if __name__ == "__main__":

@@ -83,6 +83,13 @@ class UiUxP1P2ContractTest(unittest.TestCase):
         self.assertIn(".notification-settings-grid,", self.css)
         self.assertIn("grid-template-columns: minmax(0, 1fr);", self.css)
 
+    def test_unified_login_copy_uses_wcag_aa_contrast_color(self) -> None:
+        entry_start = self.css.index(".module-entry-card .eyebrow")
+        entry_end = self.css.index(".module-entry-progress-track", entry_start)
+        entry_styles = self.css[entry_start:entry_end]
+        self.assertGreaterEqual(entry_styles.count("color: #80674f;"), 2)
+        self.assertNotIn("color: #8b7358;", entry_styles)
+
 
 class UiUsageBackendTest(unittest.TestCase):
     def setUp(self) -> None:

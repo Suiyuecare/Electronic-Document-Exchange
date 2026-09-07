@@ -19,6 +19,7 @@ from exchange_gateway import (  # noqa: E402
     OUTBOX_RETURNED,
     OUTBOX_SENT,
     SQLiteExchangeGateway,
+    redact_text,
 )
 
 
@@ -141,6 +142,56 @@ class ExchangeGatewayTestCase(unittest.TestCase):
         self.assertIn("[REDACTED]", log)
         self.assertNotIn("123456", log)
         self.assertNotIn("secret-key", log)
+
+    def test_plain_text_redaction_removes_entire_credential_value(self) -> None:
+        raw = (
+            "apikey=sb_secret_STORAGE&safe=ok\n"
+            "Authorization: Bearer header.payload.signature\n"
+            "token:'short-lived-capability', retry=true\n"
+            "x-api-key: opaque-upstream-key\n"
+            "echo sb_secret_NAKED\n"
+            "echo sk-proj-ABCDEFGHIJKLMNOPQRST\n"
+            "echo eyJabcdefgh.eyJijklmnop.eyJqrstuvwx"
+        )
+        redacted = redact_text(raw)
+
+        self.assertGreaterEqual(redacted.count("[REDACTED]"), 7)
+        for secret in (
+            "sb_secret_STORAGE",
+            "header.payload.signature",
+            "short-lived-capability",
+            "opaque-upstream-key",
+            "sb_secret_NAKED",
+            "sk-proj-ABCDEFGHIJKLMNOPQRST",
+            "eyJabcdefgh.eyJijklmnop.eyJqrstuvwx",
+        ):
+            self.assertNotIn(secret, redacted)
+        self.assertIn("safe=ok", redacted)
+        self.assertIn("retry=true", redacted)
+
+    def test_valid_json_root_strings_lists_and_messages_redact_naked_secrets(self) -> None:
+        secret_samples = (
+            json.dumps("Bearer root.payload.signature"),
+            json.dumps([
+                "sb_secret_JSONLIST",
+                {"message": "upstream used sk-proj-ABCDEFGHIJKLMNOPQRST"},
+            ]),
+            json.dumps({
+                "message": "token leaked as eyJabcdefgh.eyJijklmnop.eyJqrstuvwx",
+                "safe": "kept",
+            }),
+        )
+        for raw in secret_samples:
+            with self.subTest(raw=raw):
+                redacted = redact_text(raw)
+                self.assertIn("[REDACTED]", redacted)
+                for secret in (
+                    "root.payload.signature",
+                    "sb_secret_JSONLIST",
+                    "sk-proj-ABCDEFGHIJKLMNOPQRST",
+                    "eyJabcdefgh.eyJijklmnop.eyJqrstuvwx",
+                ):
+                    self.assertNotIn(secret, redacted)
 
 
 if __name__ == "__main__":

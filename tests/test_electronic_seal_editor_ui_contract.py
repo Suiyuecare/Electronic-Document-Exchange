@@ -314,6 +314,86 @@ class ElectronicSealPageContractTest(unittest.TestCase):
             r"@media\s*\(max-width:\s*820px\)[^@]*?\.pdf-editor-thumbnails,\s*\.pdf-editor-properties\s*\{[^}]*position:\s*fixed",
         )
 
+    def test_signed_tus_upload_uses_only_public_client_credentials_and_official_metadata(self) -> None:
+        upload_start = self.js.index("async function performTusUpload")
+        upload_end = self.js.index("\nasync function finalizeEditorUpload", upload_start)
+        upload = self.js[upload_start:upload_end]
+        headers = javascript_function(self.js, "editorTusIntentHeaders")
+        endpoint = javascript_function(self.js, "validateEditorTusEndpoint")
+        offset_probe = javascript_function(self.js, "editorTusRemoteOffset")
+
+        self.assertIn("validateEditorTusEndpoint(intent)", upload)
+        self.assertIn("editorTusIntentHeaders(intent)", upload)
+        self.assertIn('"x-signature": signature', headers)
+        self.assertNotIn('"x-upsert"', headers.lower())
+        self.assertIn("headers.apikey = publicKey", headers)
+        self.assertIn('key.startsWith("sb_secret_")', self.js)
+        self.assertIn('payload?.role === "anon"', self.js)
+        self.assertNotIn("...intent.headers", upload)
+        self.assertNotIn("Authorization", headers)
+        self.assertIn('url.hostname.endsWith(".storage.supabase.co")', endpoint)
+        self.assertIn('=== "/storage/v1/upload/resumable/sign"', endpoint)
+
+        for metadata_key in ("bucketName", "objectName", "contentType", "cacheControl"):
+            self.assertIn(f"`{metadata_key} ${{tusMetadataValue(", upload)
+        self.assertNotIn("`filename ${tusMetadataValue", upload)
+        self.assertNotIn("`filetype ${tusMetadataValue", upload)
+        self.assertIn("const chunkSize = 6 * 1024 * 1024", upload)
+        self.assertIn("uploadLocation.origin !== endpointUrl.origin", upload)
+        self.assertIn('uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/sign/")', upload)
+        self.assertIn("editorTusRemoteOffset(uploadUrl, baseHeaders)", upload)
+        self.assertIn("onProgress(Math.min(1, offset / Math.max(1, file.size)))", upload)
+        self.assertGreaterEqual(upload.count('redirect: "error"'), 3)
+        self.assertIn('redirect: "error"', offset_probe)
+
+    def test_upload_failure_is_visible_retryable_and_closes_pending_intent(self) -> None:
+        editor = html_element(self.page, "uploadedPdfEditor")
+        failure_panel = html_element(editor, "uploadedEditorUploadError")
+        self.assertIn('role="alert"', failure_panel)
+        self.assertIn('id="uploadedEditorRetryUploadBtn"', failure_panel)
+        self.assertIn('id="uploadedEditorDismissUploadErrorBtn"', failure_panel)
+
+        reporter = javascript_function(self.js, "reportEditorUploadFailure")
+        self.assertIn("/editor-uploads/${encodeURIComponent(intent.upload_id)}/fail", reporter)
+        self.assertIn('JSON.stringify({ error_code: editorUploadFailureCode(error) })', reporter)
+        self.assertIn('error?.detail === "editor_runtime_maintenance"', reporter)
+
+        handler = javascript_function(self.js, "handleUploadedSealPdfChange")
+        self.assertIn("await reportEditorUploadFailure(intent, error)", handler)
+        self.assertIn("showUploadedEditorUploadError(", handler)
+        self.assertIn("handleUploadedSealPdfChange(file)", handler)
+        self.assertIn('error?.detail === "editor_runtime_maintenance"', handler)
+        self.assertIn('clearUploadedEditorUploadError()', handler)
+
+    def test_mobile_editor_drawers_have_close_backdrop_escape_and_safe_bottom_clearance(self) -> None:
+        editor = html_element(self.page, "uploadedPdfEditor")
+        for element_id in (
+            "uploadedEditorThumbnailCloseBtn",
+            "uploadedEditorPropertiesCloseBtn",
+            "uploadedEditorMobileBackdrop",
+        ):
+            self.assertIn(f'id="{element_id}"', editor)
+        self.assertRegex(
+            editor,
+            r'id="uploadedEditorThumbnailToggleBtn"[^>]*aria-controls="uploadedEditorThumbnailPane"[^>]*aria-haspopup="dialog"',
+        )
+        self.assertRegex(
+            editor,
+            r'id="uploadedEditorPropertiesToggleBtn"[^>]*aria-controls="uploadedEditorProperties"[^>]*aria-haspopup="dialog"',
+        )
+
+        normalized = re.sub(r"\s+", " ", self.css)
+        self.assertRegex(
+            normalized,
+            r"\.pdf-editor-thumbnails, \.pdf-editor-properties \{[^}]*bottom: calc\(var\(--mobile-nav-height, 0px\) \+ var\(--mobile-safe-bottom,[^}]*z-index: 220",
+        )
+        self.assertIn(".pdf-editor-mobile-backdrop { position: fixed; inset: 0; z-index: 210;", normalized)
+        self.assertIn(".uploaded-page-chip { width: 44px; min-width: 44px; height: 44px; min-height: 44px;", normalized)
+        self.assertIn('if (event.key === "Escape")', self.js)
+        self.assertIn('closeUploadedEditorMobileDrawer()', self.js)
+        self.assertIn('if (event.key !== "Tab") return', self.js)
+        self.assertIn('document.activeElement === last', self.js)
+
 
 class ElectronicSealA4BackendContractTest(unittest.TestCase):
     @staticmethod
