@@ -29701,13 +29701,21 @@ def notification_credential_display_metadata(credential: Dict[str, Any]) -> Dict
     return result
 
 
+def notification_delivery_order(row: Dict[str, Any]) -> Tuple[str, int]:
+    # A retry claim and its append-only outcome can share a timestamp. The
+    # outcome resolves that claim without changing or deleting the audit row.
+    row_id = str(row.get("id") or "")
+    phase = 2 if row_id.startswith("NDEL-MONRESULT-") else 1 if row_id.startswith("NDEL-MONRETRY-") else 0
+    return str(row.get("created_at") or ""), phase
+
+
 def notification_runtime_readiness(deliveries: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     """Configuration and provider acceptance are separate from human receipt."""
     rows = deliveries or []
     accepted = [row for row in rows if row.get("channel") == "Email" and row.get("status") == "成功" and row.get("receipt")]
-    accepted.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    accepted.sort(key=notification_delivery_order, reverse=True)
     configured = notification_email_configured()
-    attempts = sorted([row for row in rows if row.get("channel") == "Email"], key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    attempts = sorted([row for row in rows if row.get("channel") == "Email"], key=notification_delivery_order, reverse=True)
     latest = attempts[0] if attempts else None
     validation = "not_configured" if not configured else "pending_delivery_test"
     if latest:
@@ -29766,7 +29774,7 @@ def monitored_notification_channels() -> List[str]:
 
 def unresolved_notification_failure_count(deliveries: List[Dict[str, Any]]) -> int:
     latest: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for row in sorted(deliveries, key=lambda item: str(item.get("created_at") or ""), reverse=True):
+    for row in sorted(deliveries, key=notification_delivery_order, reverse=True):
         key = (str(row.get("notification_id") or row.get("id") or ""), str(row.get("channel") or ""))
         latest.setdefault(key, row)
     return sum(row.get("status") in {"失敗", "未設定", "憑證異常", "重試中"} for row in latest.values())
@@ -29902,10 +29910,10 @@ def execute_monitoring_mode(mode: str, conn: sqlite3.Connection | None = None) -
     receipts = []
     for notification_id in delivery.get("notificationIds", []):
         if conn is not None:
-            rows = [row_to_dict(row) for row in conn.execute("SELECT channel,status,receipt FROM notification_deliveries WHERE notification_id = ? AND channel = 'Email' ORDER BY created_at DESC, rowid DESC LIMIT 1", (notification_id,)).fetchall()]
+            rows = [row_to_dict(row) for row in conn.execute("SELECT id,channel,status,receipt,created_at FROM notification_deliveries WHERE notification_id = ? AND channel = 'Email' ORDER BY created_at DESC, rowid DESC LIMIT 3", (notification_id,)).fetchall()]
         else:
-            rows = supabase_filter_rows("notification_deliveries", {"notification_id": notification_id, "channel": "Email"}, order="created_at.desc", limit=1, select="channel,status,receipt")
-        for row in rows:
+            rows = supabase_filter_rows("notification_deliveries", {"notification_id": notification_id, "channel": "Email"}, order="created_at.desc", limit=3, select="id,channel,status,receipt,created_at")
+        for row in sorted(rows, key=notification_delivery_order, reverse=True)[:1]:
             receipts.append({"notificationId": notification_id, "serviceAccepted": row.get("status") == "成功" and bool(row.get("receipt")), "receipt": str(row.get("receipt") or "")})
     return {
         "mode": "deliveryTest", "testDate": datetime.now().strftime("%Y-%m-%d"), "delivery": delivery,
@@ -29921,6 +29929,48 @@ def monitoring_test_retry_eligible(notice: Dict[str, Any] | None, attempts: List
     if any(str(notice.get(field) or "") != str(expected.get(field) or "") for field in fields):
         return False
     return bool(len(attempts) == 1 and attempts[0].get("status") == "失敗" and not attempts[0].get("receipt") and attempts[0].get("error") == "Resend HTTP 400" and str(attempts[0].get("target") or "") == notice.get("target_email") and int(attempts[0].get("attempt_count") or 1) == 1)
+
+
+def append_monitoring_retry_outcome(claim: Dict[str, Any], outcome: Dict[str, Any], conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    """Persist the result of the claimed attempt, never mutate its audit row."""
+    fingerprint = stable_json_hash({"notificationId": claim["notification_id"]})[:32]
+    if claim.get("id") != "NDEL-MONRETRY-" + fingerprint or claim.get("status") != "重試中" or claim.get("channel") != "Email":
+        raise RuntimeError("monitoring_retry_claim_invalid")
+    status = outcome.get("status")
+    receipt = str(outcome.get("receipt") or "")
+    if status not in {"成功", "失敗", "未設定", "憑證異常"} or (status == "成功") != bool(receipt):
+        raise RuntimeError("monitoring_retry_outcome_invalid")
+    row = {
+        **claim, "id": "NDEL-MONRESULT-" + fingerprint,
+        "status": status, "receipt": receipt,
+        "error": notification_safe_email_error(outcome.get("error")),
+        # This is the result of the existing claim, not a third sending attempt.
+        "attempt_count": 0, "created_at": now(),
+    }
+    try:
+        if conn is not None:
+            conn.execute("INSERT INTO notification_deliveries (id,notification_id,channel,target,status,receipt,error,attempt_count,created_at) VALUES (:id,:notification_id,:channel,:target,:status,:receipt,:error,:attempt_count,:created_at)", row)
+            conn.commit()  # Preserve the outcome even if the summary update fails.
+        else:
+            supabase_insert("notification_deliveries", row)
+    except Exception:
+        # A committed INSERT with a lost response may be read back. Never
+        # overwrite a conflicting result, delete a claim, or retry the email.
+        try:
+            if conn is not None:
+                existing_row = conn.execute("SELECT * FROM notification_deliveries WHERE id=?", (row["id"],)).fetchone()
+                existing = row_to_dict(existing_row) if existing_row else None
+            else:
+                existing = supabase_get("notification_deliveries", row["id"])
+        except Exception:
+            raise RuntimeError("monitoring_retry_outcome_unconfirmed") from None
+        if not existing:
+            raise RuntimeError("monitoring_retry_outcome_unconfirmed") from None
+        fields = ("id", "notification_id", "channel", "target", "status", "receipt", "error", "attempt_count")
+        if any(existing.get(field) != row.get(field) for field in fields):
+            raise RuntimeError("monitoring_retry_outcome_conflict") from None
+        return existing
+    return row
 
 
 def retry_monitoring_delivery_test(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
@@ -29953,16 +30003,19 @@ def retry_monitoring_delivery_test(conn: sqlite3.Connection | None = None) -> Di
         except Exception:
             result["skipped"].append({"notificationId": notification_id, "reason": "retry_claim_unavailable"})
             continue
-        outcome = send_resend_email_notification(notice["target_email"], notice["title"], notice["body"], notice["id"])
-        patch = {"status": outcome["status"], "receipt": outcome.get("receipt", ""), "error": notification_safe_email_error(outcome.get("error"))}
-        accepted = outcome.get("status") == "成功" and bool(outcome.get("receipt"))
+        try:
+            outcome = send_resend_email_notification(notice["target_email"], notice["title"], notice["body"], notice["id"])
+        except Exception:
+            # The provider may already have received the request. Keep the
+            # immutable claim unresolved and require operator reconciliation.
+            raise RuntimeError("monitoring_retry_delivery_unknown") from None
+        patch = append_monitoring_retry_outcome(claim, outcome, conn)
+        accepted = patch["status"] == "成功" and bool(patch["receipt"])
         notice_patch = {"status": "已派送" if accepted else "部分派送", "sent_at": now(), "delivery_receipt": "Email:" + patch["status"] + (" / " + patch["error"] if patch["error"] else "")}
         if conn is not None:
-            conn.execute("UPDATE notification_deliveries SET status=:status,receipt=:receipt,error=:error WHERE id=:id", {**patch, "id": claim_id})
             conn.execute("UPDATE notifications SET status=:status,sent_at=:sent_at,delivery_receipt=:delivery_receipt WHERE id=:id", {**notice_patch, "id": notification_id})
             conn.commit()
         else:
-            supabase_patch("notification_deliveries", claim_id, patch)
             supabase_patch("notifications", notification_id, notice_patch)
         result["attempted"] += 1
         result["receipts"].append({"notificationId": notification_id, "serviceAccepted": accepted, "receipt": patch["receipt"], "safeErrorCode": patch["error"]})

@@ -81,6 +81,20 @@ runtime 顯示 `delivery_failed` 及遮罩代碼；舊成功紀錄仍保留，�
 不新增通知也不重發站內通知；固定 delivery PK 先佔位再寄送，並發或中斷後不得第三次自動寄送。
 `重試中` 未決紀錄仍計入待處理失敗，不會被監控誤認成修復。
 
+### 重試紀錄與寄送後中斷
+
+`notification_deliveries` 是追加式紀錄；後端保留 SELECT／INSERT，不能 UPDATE。
+限定重試使用固定 `NDEL-MONRETRY-` claim，在寄信前先提交；結果另以相同摘要的
+`NDEL-MONRESULT-` 固定 ID 追加，`attempt_count=0` 表示這是同一次寄送的結果，
+不是第三次嘗試。同一時間戳記的結果優先於 claim，但原 claim 與舊失敗均保留。
+結果已落庫、通知彙總尚未更新時，也不得重新寄信。
+
+若寄送後程序中斷或收據回寫失敗，先停止重送，從已授權的 provider 管理頁核對
+原收件人、固定主旨／內容、模組標記、時間及實際 receipt。只有證據完全吻合時，
+維護者才能以短交易追加固定結果、更新通知彙總並留下只含 ID／hash 的對帳稽核。
+不能修改或刪除 claim、放寬表格 UPDATE 權限、捏造 receipt，亦不能新建測試通知繞過上限。
+Provider 的 Delivered 表示郵件服務回報已送達，不代表收件者已閱讀或完成人工驗收。
+
 ## 上線門檻
 
 - GitHub Actions `Static checks`、`vercel build --prod`、`Smoke test production` 全數通過。
