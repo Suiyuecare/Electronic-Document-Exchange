@@ -3306,6 +3306,23 @@ function canViewSystemSettingsBase() {
   return permissionCodes.includes("settings.system_manage") || permissionCodes.includes("settings.manage");
 }
 
+function syncNavigationSectionVisibility() {
+  const nav = document.querySelector("#primarySidebar .nav-list");
+  if (!nav) return;
+  nav.querySelectorAll(".nav-section-label").forEach((label) => {
+    let sibling = label.nextElementSibling;
+    let hasVisibleItem = false;
+    while (sibling && !sibling.classList.contains("nav-section-label")) {
+      if (sibling.classList.contains("nav-item") && !sibling.hidden) {
+        hasVisibleItem = true;
+        break;
+      }
+      sibling = sibling.nextElementSibling;
+    }
+    label.hidden = !hasVisibleItem;
+  });
+}
+
 function applyRoleNavigation() {
   const primary = primaryRoutesForRole();
   const allowed = allowedRoutesForRole();
@@ -3315,7 +3332,7 @@ function applyRoleNavigation() {
   document.querySelectorAll(".nav-item").forEach((item) => {
     const routeIndex = primary.indexOf(item.dataset.target);
     item.hidden = routeIndex === -1;
-    item.style.order = String(routeIndex === -1 ? 999 : routeIndex);
+    item.style.removeProperty("order");
     const label = labels[item.dataset.target];
     const labelElement = item.querySelector(".nav-label");
     if (label && labelElement) labelElement.textContent = label;
@@ -3340,6 +3357,7 @@ function applyRoleNavigation() {
     if (!target || !titles[target]) return;
     control.toggleAttribute("hidden", !allowed.includes(target));
   });
+  syncNavigationSectionVisibility();
   document.querySelectorAll(".integrated-page-section[data-integrated-route]").forEach((section) => {
     const hidden = !allowed.includes(section.dataset.integratedRoute);
     section.hidden = hidden;
@@ -5153,6 +5171,7 @@ async function rejectNonSetupUserDuringLaunchSetup(session = authState, provider
   }
   authState = null;
   localStorage.removeItem(authStorageKey);
+  resetCachedSessionShellReveal();
   applyProductionLoginSafetyState();
   recordLogin(email, provider, "限制");
   addAccountAudit("補件模式登入限制", `${email} 不是行政部主任、總務、執行長或系統補件權限帳號；內部上線未通過前不可進入。`);
@@ -5218,7 +5237,7 @@ function setModuleEntryProgress(percent, title, detail) {
   const screen = document.querySelector("#moduleEntryProgress");
   if (!screen) return;
   const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
-  screen.classList.remove("hidden");
+  if (document.body?.dataset.sessionState !== "revalidating") screen.classList.remove("hidden");
   const heading = document.querySelector("#moduleEntryProgressTitle");
   const description = document.querySelector("#moduleEntryProgressDetail");
   const bar = document.querySelector("#moduleEntryProgressBar");
@@ -5234,6 +5253,23 @@ function setModuleEntryProgress(percent, title, detail) {
 function finishModuleEntryProgress() {
   setModuleEntryProgress(100, "工作台已準備完成", "正在開啟您的待辦與公文工作區。");
   window.setTimeout(() => document.querySelector("#moduleEntryProgress")?.classList.add("hidden"), 180);
+}
+
+function completeCachedSessionShellReveal() {
+  if (document.body?.dataset.sessionState !== "revalidating") return false;
+  const appShell = document.querySelector("#appShell");
+  delete document.body.dataset.sessionState;
+  appShell?.removeAttribute("inert");
+  appShell?.removeAttribute("aria-busy");
+  return true;
+}
+
+function resetCachedSessionShellReveal() {
+  const appShell = document.querySelector("#appShell");
+  delete document.body.dataset.sessionState;
+  appShell?.removeAttribute("inert");
+  appShell?.removeAttribute("aria-busy");
+  appShell?.classList.add("hidden");
 }
 
 function financeDirectoryEntityCodes(value) {
@@ -5553,7 +5589,10 @@ async function loadFinanceCompanyDirectory() {
 }
 
 function enterApp(message = "登入成功，已進入公文收發電子用印系統。") {
-  setModuleEntryProgress(82, "帳號確認完成", "正在載入您的角色、待辦與可使用功能。");
+  const cachedShellWasVisible = document.body?.dataset.sessionState === "revalidating";
+  if (!cachedShellWasVisible) {
+    setModuleEntryProgress(82, "帳號確認完成", "正在載入您的角色、待辦與可使用功能。");
+  }
   document.querySelector("#loginScreen").classList.add("hidden");
   document.querySelector("#loginScreen").setAttribute("aria-hidden", "true");
   document.querySelector("#appShell").classList.remove("hidden");
@@ -5562,8 +5601,9 @@ function enterApp(message = "登入成功，已進入公文收發電子用印系
   const requestedRoute = location.hash?.slice(1);
   setView(requestedRoute && titles[requestedRoute] && isRouteAllowed(requestedRoute) ? requestedRoute : "dashboard");
   runAuthenticatedStartupSyncs(true);
+  completeCachedSessionShellReveal();
   window.requestAnimationFrame(() => {
-    finishModuleEntryProgress();
+    if (!cachedShellWasVisible) finishModuleEntryProgress();
     scheduleDeferredWorkspaceInitialization();
   });
   showToast(message);
@@ -5598,6 +5638,7 @@ function enterAuthenticatedAppSafely(message) {
     loginScreen?.classList.add("hidden");
     loginScreen?.setAttribute("aria-hidden", "true");
     appShell?.classList.remove("hidden");
+    completeCachedSessionShellReveal();
     document.body?.setAttribute("data-entry-recovery", "true");
     runAuthenticatedEntryStep("apply-auth-user", applyAuthUser);
     runAuthenticatedEntryStep("apply-role-navigation", applyRoleNavigation);
@@ -5624,6 +5665,7 @@ function leaveApp() {
   localStorage.removeItem(authStorageKey);
   cleanPortalHandoffUrl();
   closeMobileNavigation({ restoreFocus: false });
+  resetCachedSessionShellReveal();
   document.querySelector("#appShell").classList.add("hidden");
   if (isProductionEdocHost()) {
     returnToLoggingPortalModulePicker("signed_out", "replace");
@@ -5732,11 +5774,20 @@ function applyAuthUser() {
     roleSelect.value = workflowRole;
   }
   const currentRoleLabel = document.querySelector("#currentRoleLabel");
-  if (currentRoleLabel) currentRoleLabel.textContent = `${user.name} · ${user.role}`;
+  if (currentRoleLabel) currentRoleLabel.textContent = user.name || user.role || "公司帳號";
   const currentUserAvatar = document.querySelector("#currentUserAvatar");
   if (currentUserAvatar) currentUserAvatar.textContent = Array.from(String(user.name || user.email || "帳").trim())[0] || "帳";
-  const managerNote = user.approval_manager_name || user.manager_name ? ` · 主管 ${user.approval_manager_name || user.manager_name}` : "";
-  document.querySelector("#roleNote").textContent = `${user.company_name || "公司未設定"} · ${user.unit || "未設定單位"} · ${user.title || user.role}${managerNote}`;
+  const financeEmployeeId = String(
+    user.finance_employee_id
+      || user.logging_account_id
+      || user.employeeNo
+      || user.employee_id
+      || ""
+  ).trim();
+  document.querySelector("#roleNote").textContent = [
+    user.title || user.role,
+    financeEmployeeId || user.unit || "員工編號未設定"
+  ].filter(Boolean).join(" · ");
   applyRoleNavigation();
   renderIdentityWorkbench();
   renderScopeZone();
@@ -5829,6 +5880,7 @@ async function resumePostedHandoffSession() {
     if (error?.status === 401 && error?.code === "handoff_session_missing") {
       return null;
     }
+    resetCachedSessionShellReveal();
     if (isRetryableAuthError(error)) shouldClearVisibleMarker = false;
     authState = null;
     localStorage.removeItem(authStorageKey);
@@ -5869,6 +5921,7 @@ async function tryResumePlatformSession() {
       });
       return enterAuthenticatedAppSafely(`${authState.user.name} 已沿用既有登入狀態進入公文收發電子用印系統。`);
     } catch (error) {
+      resetCachedSessionShellReveal();
       if (isRetryableAuthError(error)) {
         console.warn("[edoc-entry:sso_unavailable] Finance session revalidation temporarily unavailable");
         if (isProductionEdocHost()) {
@@ -14009,6 +14062,7 @@ function prefillFormalAccountRole(role = "員工") {
 }
 
 function accountRosterTemplateRows() {
+  if (accountReadinessPackage?.rosterImportTemplate?.deprecated) return [];
   if (accountReadinessPackage?.rosterImportTemplate?.rows?.length) {
     return accountReadinessPackage.rosterImportTemplate.rows;
   }
@@ -14037,6 +14091,10 @@ function accountRosterTemplateRows() {
 async function exportFormalAccountRosterTemplate() {
   await ensureAccountLaunchAudit();
   const template = accountReadinessPackage?.rosterImportTemplate || {};
+  if (template.deprecated) {
+    showToast("人員只需在會計系統維護，eDoc 會自動同步，不必另行匯入名冊。");
+    return;
+  }
   const headers = template.headers || ["role", "required", "name", "email", "unit", "title", "job_level", "provider", "mfa_status", "status", "account_source", "done_when", "notes"];
   const rows = accountRosterTemplateRows();
   if (!rows.length) {
@@ -14265,17 +14323,17 @@ function renderAccountLaunchReadiness() {
   } else {
     const requiredMissing = tasks.filter((item) => item.required && !item.hasFormalAccount);
     const optionalMissing = tasks.filter((item) => !item.required && !item.hasFormalAccount);
-    status.textContent = requiredMissing.length ? `${requiredMissing.length} 個角色缺正式帳號` : "正式角色可登入";
+    status.textContent = requiredMissing.length ? `${requiredMissing.length} 個角色待同步` : "角色資料已備齊";
     summary.textContent = requiredMissing.length
-      ? `下週一核心流程尚缺 ${requiredMissing.map((item) => item.role).join("、")} 的正式帳號；demo 帳號 ${counts.demoSeedUserCount || 0} 個，正式站必須關閉測試登入。`
-      : `核心角色皆已有正式帳號；demo 帳號 ${counts.demoSeedUserCount || 0} 個，demo 停用狀態：${counts.demoAccountsDisabled ? "已停用" : "待確認"}。${accountReadinessPackage ? ` 補件包：${accountReadinessPackage.decision}` : ""}`;
+      ? `上線前尚需在會計系統補齊 ${requiredMissing.map((item) => item.role).join("、")} 的人員與組織綁定，再由本人完成 Google 首次登入；eDoc 會自動同步。`
+      : "核心角色資料已由 Finance 同步；這不等於已完成真人登入驗收。待啟用人員請使用公司 Google 帳號從模組頁首次登入，不必在 eDoc 再建帳號。";
     list.innerHTML = [
       accountReadinessPackage ? `
         <article class="account-readiness-card ${accountReadinessPackage.decision === "BLOCKED" ? "issue" : accountReadinessPackage.decision === "WARN" ? "wait" : "pass"}">
           <div>
-            <span>Account Package</span>
-            <strong>正式帳號補件包</strong>
-            <p>角色 ${counts.readyRequiredRoleCount || 0}/${counts.requiredRoleCount || 4} 就緒 · blocker ${counts.blockerCount || 0} · warning ${counts.warningCount || 0} · 匯入範本 ${accountReadinessPackage.rosterImportTemplate?.rows?.length || 0} 筆</p>
+            <span>Finance 自動同步</span>
+            <strong>人員與登入準備</strong>
+            <p>角色資料 ${counts.readyRequiredRoleCount || 0}/${counts.requiredRoleCount || 6} 齊備 · ${userAccounts.filter((account) => account.status === "待啟用").length} 人待首次登入 · ${counts.blockerCount || 0} 項待處理</p>
           </div>
           <button class="secondary-button" type="button" data-account-readiness-refresh="true">重新讀取</button>
         </article>
@@ -14324,10 +14382,12 @@ function renderAccountLaunchReadiness() {
 
 function renderAccountSummary() {
   const enabled = userAccounts.filter((account) => account.status === "啟用").length;
+  const pending = userAccounts.filter((account) => account.status === "待啟用").length;
+  const inactive = userAccounts.filter((account) => account.status === "停用").length;
   const mfaReady = userAccounts.filter((account) => account.mfa === "已啟用").length;
   const ssoUsers = userAccounts.filter((account) => account.provider !== "本機帳號").length;
   document.querySelector("#accountUserCount").textContent = `${enabled}/${userAccounts.length}`;
-  document.querySelector("#accountUserNote").textContent = `${userAccounts.length - enabled} 個停用帳號`;
+  document.querySelector("#accountUserNote").textContent = `${pending} 人待首次登入 · ${inactive} 人停用`;
   document.querySelector("#accountMfaCount").textContent = `${Math.round((mfaReady / Math.max(userAccounts.length, 1)) * 100)}%`;
   document.querySelector("#accountMfaNote").textContent = `${mfaReady} 個帳號已啟用 MFA`;
   document.querySelector("#accountSsoStatus").textContent = authState?.user ? "已沿用登入" : "等待 Finance 登入";
@@ -29392,6 +29452,7 @@ document.querySelector("#returnPortalBtn")?.addEventListener("click", () => {
   returnToLoggingPortalModulePicker();
 });
 document.querySelector("#logoutBtn")?.addEventListener("click", leaveApp);
+document.querySelector("#profileLogoutBtn")?.addEventListener("click", leaveApp);
 document.querySelector("#loginReturnPortalBtn")?.addEventListener("click", () => {
   returnToLoggingPortalModulePicker("module_picker", "replace");
 });

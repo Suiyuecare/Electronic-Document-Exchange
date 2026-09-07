@@ -278,7 +278,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
         ]))
 
     def test_account_readiness_fails_closed_when_department_head_check_is_missing(self) -> None:
-        checked_roles = ["員工", "主管", "行政部主任", "總務", "業務助理"]
+        checked_roles = ["員工", "主管", "執行長", "行政部主任", "總務", "業務助理"]
         launch_smoke = {
             "accessReadiness": {
                 "counts": {
@@ -315,7 +315,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
         department_head = next(
             item for item in package["roleChecks"] if item["role"] == "主任"
         )
-        self.assertEqual(package["requiredRoleCount"], 5)
+        self.assertEqual(package["requiredRoleCount"], 6)
         self.assertEqual(package["missingFormalRoleCount"], 1)
         self.assertEqual(package["decision"], "BLOCKED")
         self.assertTrue(department_head["required"])
@@ -323,7 +323,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
         self.assertTrue(any("主任" in item for item in package["sourceBlockers"]))
 
     def test_account_readiness_keeps_optional_assistant_as_warning(self) -> None:
-        required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+        required_roles = ["員工", "主管", "主任", "執行長", "行政部主任", "總務"]
         launch_smoke = {
             "accessReadiness": {
                 "counts": {
@@ -360,8 +360,8 @@ class GoLiveAuditTestCase(unittest.TestCase):
         assistant = next(
             item for item in package["roleChecks"] if item["role"] == "業務助理"
         )
-        self.assertEqual(package["requiredRoleCount"], 5)
-        self.assertEqual(package["readyRequiredRoleCount"], 5)
+        self.assertEqual(package["requiredRoleCount"], 6)
+        self.assertEqual(package["readyRequiredRoleCount"], 6)
         self.assertEqual(package["missingFormalRoleCount"], 0)
         self.assertEqual(package["sourceBlockerCount"], 0)
         self.assertEqual(package["blockerCount"], 0)
@@ -378,7 +378,7 @@ class GoLiveAuditTestCase(unittest.TestCase):
                 "hasActiveUser": True,
                 "hasFormalAccount": True,
             }
-            for role in ["員工", "主管", "主任", "行政部主任", "總務", "業務助理"]
+            for role in ["員工", "主管", "主任", "執行長", "行政部主任", "總務", "業務助理"]
         ]
         role_checks.append({
             "role": "主任",
@@ -416,10 +416,10 @@ class GoLiveAuditTestCase(unittest.TestCase):
         self.assertFalse(department_head["hasFormalAccount"])
         self.assertTrue(any("互相矛盾" in item for item in package["sourceBlockers"]))
 
-    def test_cutover_package_requires_all_five_formal_roles(self) -> None:
+    def test_cutover_package_requires_all_six_formal_roles(self) -> None:
         source = inspect.getsource(backend.current_production_cutover_readiness_package)
         self.assertIn(
-            'cutover_required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]',
+            'cutover_required_roles = ["員工", "主管", "主任", "執行長", "行政部主任", "總務"]',
             source,
         )
         self.assertIn("len(signatures) > 1", source)

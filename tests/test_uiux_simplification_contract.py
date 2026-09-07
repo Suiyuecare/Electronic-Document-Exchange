@@ -122,7 +122,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn("--accent: #ea880c;", self.css)
         self.assertIn("--accent-readable: #b45309;", self.css)
         normalized = re.sub(r"\s+", " ", self.css)
-        self.assertIn(".nav-item:hover, .nav-item.active { background: var(--accent-readable);", normalized)
+        self.assertIn(".nav-item:hover, .nav-item.active { background: var(--accent);", normalized)
 
     def test_shell_uses_finance_tokens_logo_and_desktop_frame(self) -> None:
         for token in (
@@ -138,7 +138,29 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         normalized = re.sub(r"\s+", " ", self.css)
         self.assertIn(".app { width: 100%; max-width: none; min-height: 100dvh; height: 100dvh;", normalized)
         self.assertIn(".sidebar { flex: 0 0 300px; width: 300px;", normalized)
-        self.assertIn(".topbar { display: flex; min-height: 82px; height: 82px; max-height: 82px;", normalized)
+        self.assertIn("width: 300px; height: 100%;", normalized)
+        self.assertIn(".nav-list { flex: 1; grid-template-columns: 1fr;", normalized)
+        self.assertIn('.topbar { display: grid; grid-template-areas: "title bell actions status";', normalized)
+        self.assertIn("grid-template-columns: minmax(0, 1fr) max-content max-content max-content;", normalized)
+        self.assertIn("min-height: 82px; height: 82px; max-height: 82px;", normalized)
+        self.assertIn(".brand-mark { width: 58px; height: 58px; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px;", normalized)
+        self.assertIn(".profile-avatar { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 6px;", normalized)
+        self.assertIn(".topbar-notification-button { grid-area: bell; border-radius: 8px;", normalized)
+        self.assertIn("@media (min-width: 761px) and (max-width: 1180px) { .topbar { grid-template-areas: \"title bell actions\" \"status status status\";", normalized)
+        self.assertIn(".topbar > .mobile-topbar-heading { display: flex;", normalized)
+        header_start = self.html.index('<header class="topbar">')
+        header_end = self.html.index("</header>", header_start)
+        header = self.html[header_start:header_end]
+        shell_order = [
+            header.index('class="mobile-topbar-heading"'),
+            header.index('id="headerNotificationBtn"'),
+            header.index('id="mobileMenuButton"'),
+            header.index('class="module-switch-actions"'),
+            header.index('id="topInfo"'),
+        ]
+        self.assertEqual(shell_order, sorted(shell_order))
+        self.assertIn('id="profileLogoutBtn"', self.html)
+        self.assertIn('role="status" aria-live="polite" aria-atomic="true"', header)
         self.assertGreaterEqual(self.html.count('src="assets/suiyue-logo-transparent.png"'), 3)
         logo = ROOT / "assets" / "suiyue-logo-transparent.png"
         self.assertTrue(logo.is_file())
@@ -215,6 +237,17 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn(".nav-list { display: grid; grid-auto-rows: max-content; gap: 0; align-content: start;", normalized_css)
         self.assertIn(".nav-ico svg { width: 18px; height: 18px; fill: none; stroke: currentColor;", normalized_css)
         self.assertIn('const labelElement = item.querySelector(".nav-label");', self.js)
+        apply_start = self.js.index("function applyRoleNavigation()")
+        apply_end = self.js.index("\nfunction ", apply_start + len("function applyRoleNavigation()"))
+        apply_navigation = self.js[apply_start:apply_end]
+        self.assertIn('item.style.removeProperty("order");', apply_navigation)
+        self.assertNotIn("item.style.order", apply_navigation)
+        self.assertIn("syncNavigationSectionVisibility();", apply_navigation)
+        self.assertIn("function syncNavigationSectionVisibility()", self.js)
+        self.assertEqual(
+            re.findall(r'class="nav-section-label">([^<]+)</p>', navigation),
+            ["總覽", "公文作業", "流程管理", "系統"],
+        )
         self.assertNotIn('id="workspaceSubnav"', self.html)
         self.assertNotIn('id="navMoreBtn"', self.html)
         self.assertNotIn('id="navMoreDialog"', self.html)

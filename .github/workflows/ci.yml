@@ -172,6 +172,7 @@ jobs:
       - name: Install pinned Python dependencies
         run: |
           python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check -r scripts/backup-restore-requirements.txt
           python -m pip install --disable-pip-version-check pglast==7.14
 
       - name: Compile Python backend

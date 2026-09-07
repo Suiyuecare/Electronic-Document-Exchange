@@ -13,6 +13,36 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FinanceCompanyScopeContractTest(unittest.TestCase):
+    def test_production_scope_excludes_unmapped_legacy_company_without_deleting_it(self) -> None:
+        canonical = {
+            "id": "FINCO-TEST", "name": "去識別化測試公司", "status": "active",
+            "source_system": "finance", "finance_entity_id": "E-TEST",
+            "finance_tenant_id": "tenant-test",
+        }
+        legacy = {"id": "CO-LEGACY", "name": "去識別化舊公司", "status": "active"}
+        source = [canonical, legacy]
+        with (
+            mock.patch.object(backend, "DEPLOYMENT_ENV", "production"),
+            mock.patch.dict(os.environ, {"EDOC_LAUNCH_COMPANY_MODE": "finance_active"}),
+        ):
+            companies, scope = backend.filter_launch_companies(source)
+        self.assertEqual(companies, [canonical])
+        self.assertEqual(scope["includedCompanyIds"], ["FINCO-TEST"])
+        self.assertEqual(scope["excludedCompanyIds"], ["CO-LEGACY"])
+        self.assertEqual(source, [canonical, legacy])
+        self.assertEqual(legacy["status"], "active")
+
+    def test_production_legacy_only_scope_reports_missing_finance_projection(self) -> None:
+        source = [{"id": "CO-LEGACY", "status": "active"}]
+        with (
+            mock.patch.object(backend, "DEPLOYMENT_ENV", "production"),
+            mock.patch.dict(os.environ, {"EDOC_LAUNCH_COMPANY_MODE": "finance_active"}),
+        ):
+            companies, scope = backend.filter_launch_companies(source)
+            blockers = backend.launch_company_scope_blockers(source, scope)
+        self.assertEqual(companies, [])
+        self.assertTrue(any("Finance" in value for value in blockers))
+
     def test_finance_active_mode_does_not_require_manual_company_ids(self) -> None:
         with mock.patch.dict(
             os.environ,

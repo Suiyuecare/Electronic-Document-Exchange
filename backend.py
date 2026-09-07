@@ -3903,7 +3903,8 @@ def notification_email_provider() -> str:
 
 def notification_email_required_env() -> List[str]:
     if env_present("RESEND_API_KEY") or env_present("MAIL_FROM") or env_present("RESEND_FROM") or not smtp_email_configured():
-        return ["RESEND_API_KEY", "MAIL_FROM"]
+        sender_key = next((name for name in ("MAIL_FROM", "RESEND_FROM", "SMTP_FROM") if env_present(name)), "MAIL_FROM")
+        return ["RESEND_API_KEY", sender_key]
     required = ["SMTP_HOST", "SMTP_PORT", "SMTP_FROM", "SMTP_CREDENTIAL_EXPIRES_AT"]
     if env_present("SMTP_USERNAME") or env_present("SMTP_PASSWORD"):
         required.extend(["SMTP_USERNAME", "SMTP_PASSWORD"])
@@ -4830,8 +4831,8 @@ def production_readiness() -> Dict[str, Any]:
         blockers.append(f"production 必須接正式物件儲存與防毒服務；缺少：{', '.join(storage_service['missing'])}。")
     elif not storage_service["ready"]:
         warnings.append(f"正式檔案儲存與防毒服務尚未完整：{', '.join(storage_service['missing'])}。")
-    if not env_present("MONITORING_WEBHOOK_URL"):
-        warnings.append("未設定 MONITORING_WEBHOOK_URL，監控告警將只留在系統內，不會推送到外部值班通道。")
+    if not env_present("MONITORING_WEBHOOK_URL") and not notification_email_configured():
+        warnings.append("監控告警尚未設定外部通道；請設定 Email 或 MONITORING_WEBHOOK_URL。")
     if not env_present("SENTRY_DSN"):
         warnings.append("未設定 SENTRY_DSN，正式錯誤追蹤需依賴 Vercel runtime logs 與系統 audit log。")
     if is_production() and EDOC_SIGNATURE_PROVIDER == "local-simulation":
@@ -5036,7 +5037,20 @@ def supabase_storage_browser_upload_key_status() -> Dict[str, Any]:
 def launch_company_scope_metadata(companies: List[Dict[str, Any]]) -> Dict[str, Any]:
     mode = launch_company_scope_mode()
     selected_ids = launch_company_scope_ids()
-    active_ids = [str(company.get("id") or company.get("company_id") or "") for company in companies]
+    # An old local company may remain for historical foreign keys. Production
+    # launch scope must match the Finance directory, not every enabled legacy
+    # row. Keep the row visible in excluded metadata for operations to review.
+    eligible_companies = [
+        company for company in companies
+        if not (is_production() and mode == "finance_active")
+        or (
+            roster_text(company.get("source_system")).lower() == "finance"
+            and roster_text(company.get("finance_entity_id"))
+            and roster_text(company.get("finance_tenant_id"))
+            and roster_text(company.get("status")).lower() in {"active", "啟用"}
+        )
+    ]
+    active_ids = [str(company.get("id") or company.get("company_id") or "") for company in eligible_companies]
     active_ids = [company_id for company_id in active_ids if company_id]
     active_id_set = set(active_ids)
     configured = mode == "manual_allowlist" and bool(selected_ids)
@@ -5076,8 +5090,6 @@ def launch_company_scope_metadata(companies: List[Dict[str, Any]]) -> Dict[str, 
 
 def filter_launch_companies(companies: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     scope = launch_company_scope_metadata(companies)
-    if not scope["configured"]:
-        return companies, scope
     included = set(scope["includedCompanyIds"])
     return [
         company
@@ -5093,6 +5105,8 @@ def launch_company_scope_blockers(all_companies: List[Dict[str, Any]], scope: Di
         return blockers
     if launch_company_scope_mode() == "invalid":
         blockers.append("EDOC_LAUNCH_COMPANY_MODE 必須是 finance_active 或 manual_allowlist。")
+    if scope.get("sourceOfTruth") == "finance" and not scope.get("includedCompanyIds"):
+        blockers.append("尚未同步可用的 Finance 公司，請確認公司來源與租戶對應。")
     if scope.get("unknownCompanyIds"):
         blockers.append(f"EDOC_LAUNCH_COMPANY_IDS 指定了不存在或未啟用的公司：{'、'.join(scope['unknownCompanyIds'])}。")
     if scope.get("configured") and not scope.get("includedCompanyIds"):
@@ -8551,6 +8565,18 @@ def production_emergency_manual_intake_template_artifact() -> Dict[str, Any]:
 def production_formal_account_roster_template_artifact() -> Dict[str, Any]:
     package = current_account_readiness_package()
     template = package.get("rosterImportTemplate") or {}
+    if template.get("deprecated"):
+        return csv_template_artifact(
+            file_name="edoc-finance-account-sync-checklist.csv",
+            headers=["role", "status", "next_action"],
+            rows=[{
+                "role": item.get("role") or "",
+                "status": item.get("status") or "",
+                "next_action": item.get("nextAction") or "",
+            } for item in package.get("roleTasks") or []],
+            x_artifact="finance-account-sync-checklist",
+            security_policy=package.get("securityPolicy") or {},
+        )
     headers = template.get("headers") or [
         "role",
         "required",
@@ -9450,7 +9476,7 @@ def current_production_cutover_readiness_package(conn: sqlite3.Connection | None
     access_counts = access.get("counts") or {}
     launch_data_checks = ((audit.get("dataReadiness") or {}).get("checks") or {})
     launch_company_scope = launch_data_checks.get("launchCompanyScope") or launch_company_scope_metadata([])
-    cutover_required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+    cutover_required_roles = ["員工", "主管", "主任", "執行長", "行政部主任", "總務"]
     access_role_checks = access.get("roleChecks") or []
     missing_roles: List[str] = []
     for role in cutover_required_roles:
@@ -9970,12 +9996,13 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
     access = report.get("accessReadiness") or {}
     counts = access.get("counts") or {}
     role_checks = access.get("roleChecks") or []
-    required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+    required_roles = ["員工", "主管", "主任", "執行長", "行政部主任", "總務"]
     recommended_roles = ["業務助理"]
     default_profiles = {
         "員工": {"unit": "行政部", "title": "承辦人", "provider": "Google Workspace"},
         "主管": {"unit": "營運管理部", "title": "申請人主管", "provider": "Google Workspace"},
         "主任": {"unit": "各部門", "title": "部門主任", "provider": "Google Workspace"},
+        "執行長": {"unit": "經營管理", "title": "執行長", "provider": "Google Workspace"},
         "行政部主任": {"unit": "行政部", "title": "行政部主任", "provider": "Microsoft Entra / Google Workspace"},
         "總務": {"unit": "總務", "title": "總務", "provider": "Google Workspace"},
         "業務助理": {"unit": "業務部", "title": "業務助理", "provider": "Google Workspace"},
@@ -10054,9 +10081,9 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "demoSeedCount": int(item.get("demoSeedCount") or 0),
             "hasActiveUser": has_active,
             "hasFormalAccount": has_formal,
-            "entryPoint": "帳號權限 → 正式帳號上線檢核 → 建立正式帳號",
-            "api": "POST /api/users 或 Logging Portal roster sync",
-            "nextAction": "建立或同步非 seed/demo 的正式帳號" if not has_formal else "用正式帳號完成登入走測",
+            "entryPoint": "會計系統 → 人員與組織維護 → Google 登入驗證",
+            "api": "Finance revisioned roster sync (read-only in eDoc)",
+            "nextAction": "請在會計系統維護人員與公司綁定，並由本人完成 Google 首次登入；eDoc 自動同步" if not has_formal else "資料已同步；仍需本人完成登入與待辦驗收",
             "doneWhen": f"{role} 的 formalAccountCount >= 1，且正式帳號可登入並看到正確待辦。",
             "suggestedProfile": profile,
         })
@@ -10072,8 +10099,8 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "title": "正式帳號資料來源",
             "severity": "blocker",
             "status": "不可驗收",
-            "nextAction": "先接上 Supabase production，匯入正式帳號 roster，並重新執行 account-readiness-package。",
-            "doneWhen": "activeUserCount > 0，且申請人、主管、主任、行政部主任、總務都有非 demo / 外部同步正式帳號。",
+            "nextAction": "確認會計系統的人員、組織與公司綁定及同步結果；不可在 eDoc 建立另一份名冊。",
+            "doneWhen": "activeUserCount > 0，且申請人、主管、主任、執行長、行政部主任、總務都有 Finance 同步正式帳號。",
             "evidence": blocker,
         }
         for index, blocker in enumerate(source_blockers)
@@ -10093,9 +10120,9 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "key": "formal_role_login_smoke",
             "title": "正式角色登入走測",
             "severity": "pass" if not required_missing else "blocker",
-            "status": "可走測" if not required_missing else "缺角色",
-            "nextAction": "用申請人、主管、主任、行政部主任、總務正式帳號各登入一次。",
-            "doneWhen": "五種角色都能登入，且待辦、簽核、總務寄發入口與權限相符。",
+            "status": "資料齊備，待真人驗收" if not required_missing else "缺角色",
+            "nextAction": "用申請人、主管、主任、執行長、行政部主任、總務正式帳號各登入一次。",
+            "doneWhen": "六種角色都能登入，且待辦、簽核、總務寄發入口與權限相符；帳號數量不是登入驗收證明。",
             "evidence": "missing=" + "、".join(item.get("role") or "" for item in required_missing) if required_missing else "required roles ready",
         },
         {
@@ -10104,8 +10131,8 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "severity": "warning",
             "status": "需確認",
             "nextAction": "高權限角色至少確認 MFA 狀態與 SSO/Logging Portal 同步來源。",
-            "doneWhen": "行政部主任、總務、系統管理員完成 MFA 或明確列入週一值班風險。",
-            "evidence": "此項不阻擋 internal mode，但週一正式使用前需人工確認。",
+            "doneWhen": "執行長、行政部主任、總務與系統管理員在共用 Google 登入來源完成 MFA 確認。",
+            "evidence": "此項不阻擋 internal mode，但正式使用前需人工確認。",
         },
     ]
     blocker_count = sum(1 for item in [*role_tasks, *policy_tasks] if item.get("severity") == "blocker")
@@ -10177,15 +10204,17 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
         "roleTasks": role_tasks,
         "policyTasks": policy_tasks,
         "rosterImportTemplate": {
+            "deprecated": True,
             "format": "csv",
             "fileName": "edoc-formal-account-import-template.csv",
             "headers": ["role", "required", "name", "email", "unit", "title", "job_level", "provider", "mfa_status", "status", "account_source", "done_when", "notes"],
-            "rows": roster_import_template_rows,
-            "importApi": "POST /api/users 或 Logging Portal roster sync",
+            "rows": [],
+            "importApi": None,
             "validationRules": [
-                "name 與 email 必填，且 email 必須是公司正式帳號。",
+                "人員、公司與組織只在 Finance 維護，eDoc 不接受另行匯入或新增人員。",
                 "不可使用 demo seed email、demo 密碼、共用測試帳號或個人非公司信箱。",
-                "主管、主任、行政部主任、總務補齊後需各登入一次完成待辦權限走測。",
+                "待啟用人員須由本人完成共用 Google 首次登入，不可手動跳過驗證。",
+                "主管、主任、執行長、行政部主任、總務補齊後需各登入一次完成待辦權限走測。",
                 "正式站必須設定 EDOC_DISABLE_DEMO_ACCOUNTS=true 並重新部署。",
             ],
             "securityPolicy": {
@@ -10199,6 +10228,7 @@ def current_account_readiness_package(conn: sqlite3.Connection | None = None) ->
             "申請人正式帳號登入後建立空白公文與 PDF 用印申請。",
             "主管正式帳號只能看到並核准輪到自己的待辦。",
             "主任正式帳號只能看到並核准部門主任關卡，不得跳關。",
+            "執行長正式帳號只在 C/D 用印類型的指定關卡簽核；A/B 不得多出此關。",
             "行政部主任正式帳號核准後不可跳到總務寄發任務。",
             "總務正式帳號可審核用印、重試用印失敗、回填寄發證明。",
             "demo 帳密與快速角色登入在正式站必須被拒絕。",
@@ -18164,7 +18194,7 @@ OFFICIAL_ATTACHMENT_MIME_TYPES = {
 # server-owned conditional workflow must be exercised by launch readiness.
 # Restricting this to staff hid the approved 課長／主任 shortened routes.
 INTERNAL_LAUNCH_APPLICANT_ROLES = ["員工", "業務助理", "主管", "主任"]
-INTERNAL_LAUNCH_REQUIRED_ROLES = ["主管", "主任", "行政部主任", "總務"]
+INTERNAL_LAUNCH_REQUIRED_ROLES = ["主管", "主任", "執行長", "行政部主任", "總務"]
 INTERNAL_LAUNCH_WORKFLOW_ROUTE_CODES = ("A", "C")
 INTERNAL_LAUNCH_REQUIRED_SEAL_CATEGORIES = {
     "general_seal": "便章",
@@ -19012,7 +19042,7 @@ def internal_launch_access_readiness(conn: sqlite3.Connection, role_counts: Dict
             "hasActiveUser": bool(role_users),
             "hasFormalAccount": bool(formal_users),
         })
-    required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+    required_roles = ["員工", "主管", "主任", "執行長", "行政部主任", "總務"]
     missing_active = [role for role in required_roles if role_counts.get(role, 0) < 1]
     missing_formal = [check["role"] for check in role_checks if check["role"] in required_roles and not check["hasFormalAccount"]]
     demo_seed_count = sum(1 for user in rows if user_is_demo_seed_account(user))
@@ -29546,9 +29576,7 @@ def channel_required_env(channel: str) -> List[str]:
 
 def notification_credential_status_for_channel(conn: sqlite3.Connection, channel: str) -> Dict[str, Any]:
     row = conn.execute("SELECT * FROM notification_channel_credentials WHERE channel = ? ORDER BY updated_at DESC LIMIT 1", (channel,)).fetchone()
-    if not row:
-        return {"channel": channel, "status": "未設定", "ok": False, "error": "credential_not_registered"}
-    credential = row_to_dict(row)
+    credential = notification_credential_display_metadata(row_to_dict(row) if row else {"channel": channel})
     required = channel_required_env(channel)
     if channel == "Line 工作群組" and not env_present("LINE_WEBHOOK_URL"):
         missing = [] if env_present("LINE_CHANNEL_ACCESS_TOKEN") and env_present("LINE_TARGET_ID") else required
@@ -29651,7 +29679,8 @@ def notification_credential_display_metadata(credential: Dict[str, Any]) -> Dict
 
     provider = notification_email_provider()
     if provider == "Resend":
-        env_key_name = "RESEND_API_KEY,MAIL_FROM"
+        env_key_name = ",".join(notification_email_required_env())
+        previous_env_keys = str(result.get("env_key_name") or "")
         result.update(
             {
                 "provider": "Resend Email API（沿用官網）",
@@ -29664,7 +29693,188 @@ def notification_credential_display_metadata(credential: Dict[str, Any]) -> Dict
         resend_expiry = os.getenv("RESEND_CREDENTIAL_EXPIRES_AT", "").strip()
         if resend_expiry:
             result["expires_at"] = resend_expiry
+        elif previous_env_keys and "RESEND_API_KEY" not in previous_env_keys:
+            # An expired historical SMTP credential does not expire the new
+            # Resend key. Preserve operator-set expiry only for this provider.
+            result["expires_at"] = ""
     return result
+
+
+def notification_runtime_readiness(deliveries: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+    """Configuration and provider acceptance are separate from human receipt."""
+    rows = deliveries or []
+    accepted = [row for row in rows if row.get("channel") == "Email" and row.get("status") == "成功" and row.get("receipt")]
+    accepted.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    configured = notification_email_configured()
+    return {
+        "source": "runtime_environment_and_delivery_records",
+        "checked_at": now(),
+        "system_inbox": {"enabled": True, "credentialValidation": "runtime"},
+        "external": {
+            "email": "configured" if configured else "disabled_pending_credentials",
+            "line": "configured" if env_present("LINE_WEBHOOK_URL") or (env_present("LINE_CHANNEL_ACCESS_TOKEN") and env_present("LINE_TARGET_ID")) else "not_enabled",
+        },
+        "email_provider": notification_email_provider(),
+        "email_validation": "provider_accepted" if accepted else "pending_delivery_test" if configured else "not_configured",
+        "last_accepted_notification_id": str(accepted[0].get("notification_id") or "") if accepted else "",
+        "last_accepted_at": str(accepted[0].get("created_at") or "") if accepted else "",
+        "human_receipt_confirmed": False,
+    }
+
+
+def monitored_notification_channels() -> List[str]:
+    channels = ["Email", "系統站內通知"]
+    if launch_scope() != "internal_official" or env_present("LINE_WEBHOOK_URL") or env_present("LINE_CHANNEL_ACCESS_TOKEN") or env_present("LINE_TARGET_ID"):
+        channels.append("Line 工作群組")
+    return channels
+
+
+def unresolved_notification_failure_count(deliveries: List[Dict[str, Any]]) -> int:
+    latest: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in sorted(deliveries, key=lambda item: str(item.get("created_at") or ""), reverse=True):
+        key = (str(row.get("notification_id") or row.get("id") or ""), str(row.get("channel") or ""))
+        latest.setdefault(key, row)
+    return sum(row.get("status") in {"失敗", "未設定", "憑證異常"} for row in latest.values())
+
+
+def monitoring_alert_recipients(users: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Resolve configured Finance operational roles to concrete enabled users."""
+    result = []
+    seen = set()
+    for user in users:
+        user_id = str(user.get("id") or "")
+        role_key = canonical_logging_role(user.get("logging_role_key"))
+        if user_id in seen or not user_id or user.get("status") != "啟用":
+            continue
+        if str(user.get("account_source") or "").lower() != "finance" or role_key not in {"admin_director", "ga_chief"}:
+            continue
+        if not user.get("company_id") or not valid_formal_email(str(user.get("email") or "")):
+            continue
+        seen.add(user_id)
+        result.append(user)
+    return sorted(result, key=lambda user: str(user.get("id") or ""))
+
+
+def monitoring_alert_delivery_preview(users: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Read-only preview; this function never creates or sends a notification."""
+    recipients = monitoring_alert_recipients(users)
+    return {
+        "dryRun": True,
+        "primary": "webhook" if MONITORING_WEBHOOK_URL else "email_and_inbox",
+        "emailProvider": notification_email_provider(),
+        "emailConfigured": notification_email_configured(),
+        "fallbackReady": notification_email_configured() and bool(recipients),
+        "deduplicationMinutes": {"critical": 60, "warning": 1440, "deliveryTest": 1440},
+        "advisoryCodesNotSent": ["READINESS-WARNING"],
+        "recipients": [{"userId": user["id"], "companyId": user["company_id"], "role": user.get("role"), "financeRole": user.get("logging_role_key")} for user in recipients],
+    }
+
+
+def monitoring_actionable_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    if snapshot.get("deliveryTest"):
+        return snapshot
+    actionable_codes = {"ENV-MISSING", "READINESS-BLOCKER", "EXCHANGE-FAILED", "NOTIFICATION-FAILED", "JOB-FAILED", "CRON-STALLED", "CREDENTIAL-INVALID", "CREDENTIAL-EXPIRING", "SIGNING-SERVICE-INCOMPLETE", "STORAGE-SERVICE-INCOMPLETE", "MONITORING-DELIVERY-NOT-READY"}
+    alerts = [alert for alert in snapshot.get("alerts", []) if alert.get("code") in actionable_codes]
+    status = "critical" if any(alert.get("level") == "critical" for alert in alerts) or (alerts and snapshot.get("status") == "critical") else "warning" if alerts else "healthy"
+    return {**snapshot, "alerts": alerts, "status": status}
+
+
+def monitoring_alert_notification_payload(snapshot: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
+    codes = sorted({str(alert.get("code") or "UNKNOWN") for alert in snapshot.get("alerts", [])})
+    level = str(snapshot.get("status") or "warning")
+    window = str(int(time.time() // 3600)) if level == "critical" else datetime.now().strftime("%Y-%m-%d")
+    fingerprint = stable_json_hash({"codes": codes, "level": level, "window": window, "user": user["id"]})[:32]
+    if snapshot.get("deliveryTest"):
+        fingerprint = stable_json_hash({"purpose": "launch_acceptance_test", "date": datetime.now().strftime("%Y-%m-%d"), "user": user["id"]})[:32]
+        return {
+            "id": f"NTF-MONTEST-{fingerprint}", "type": "上線驗收測試", "title": "【上線驗收測試】公文系統通知通道確認",
+            **exact_notification_target_payload(user, str(user["company_id"])),
+            "channel": "Email + 系統通知", "priority": "中", "source": f"MONTEST-{fingerprint}", "action_url": "/#settings",
+            "body": "這是公文系統上線前的通知通道驗收測試，沒有待簽公文或需要用印的案件。請確認您可看到本信及系統內通知。郵件服務接受寄送不等於已實收，實際收信請另外向行政部門主任確認。同日重試不重複寄送。",
+        }
+    return {
+        "id": f"NTF-MON-{fingerprint}", "type": "維運告警", "title": "公文系統需要處理維運異常",
+        **exact_notification_target_payload(user, str(user["company_id"])),
+        "channel": "Email + 系統通知" if notification_email_configured() else "系統通知",
+        "priority": "高" if level == "critical" else "中", "source": f"MON-{fingerprint}", "action_url": "/#settings",
+        # Do not include raw readiness messages, configuration values, URLs,
+        # document content or employee details in outward monitoring alerts.
+        "body": f"監控狀態：{level}\n錯誤碼：{'、'.join(codes)}\n請登入系統設定的維運中心查看並處理。相同告警{'每小時' if level == 'critical' else '每日'}最多提醒一次。",
+    }
+
+
+def deliver_local_monitoring_alerts(conn: sqlite3.Connection, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = monitoring_actionable_snapshot(snapshot)
+    users = [row_to_dict(row) for row in conn.execute("SELECT * FROM users WHERE status = '啟用'").fetchall()]
+    result = {**monitoring_alert_delivery_preview(users), "dryRun": False, "attempted": 0, "accepted": 0, "deduplicated": 0, "notificationIds": []}
+    if not snapshot.get("alerts"):
+        return {**result, "reason": "no_alerts"}
+    for user in monitoring_alert_recipients(users):
+        payload = monitoring_alert_notification_payload(snapshot, user)
+        if conn.execute("SELECT id FROM notifications WHERE id = ?", (payload["id"],)).fetchone():
+            result["deduplicated"] += 1
+            result["notificationIds"].append(payload["id"])
+            continue
+        notice = create_and_deliver_notification(conn, payload)
+        result["attempted"] += 1
+        result["accepted"] += any(row.get("channel") == "Email" and row.get("status") == "成功" for row in notice.get("delivery", {}).get("results", []))
+        result["notificationIds"].append(notice["id"])
+    return result
+
+
+def deliver_supabase_monitoring_alerts(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = monitoring_actionable_snapshot(snapshot)
+    users = supabase_filter_rows("users", {"status": "啟用", "account_source": "finance"}, limit=1000)
+    result = {**monitoring_alert_delivery_preview(users), "dryRun": False, "attempted": 0, "accepted": 0, "deduplicated": 0, "notificationIds": []}
+    if not snapshot.get("alerts"):
+        return {**result, "reason": "no_alerts"}
+    for user in monitoring_alert_recipients(users):
+        payload = monitoring_alert_notification_payload(snapshot, user)
+        if supabase_get("notifications", payload["id"]):
+            result["deduplicated"] += 1
+            result["notificationIds"].append(payload["id"])
+            continue
+        notice = supabase_create_and_deliver_notification(payload)
+        result["attempted"] += 1
+        result["accepted"] += any(row.get("channel") == "Email" and row.get("status") == "成功" for row in notice.get("delivery", {}).get("results", []))
+        result["notificationIds"].append(notice["id"])
+    return result
+
+
+def monitoring_request_mode(query: Dict[str, List[str]]) -> str:
+    if not query:
+        return "monitoring"
+    if len(query) != 1:
+        raise ValueError("monitoring_query_invalid")
+    key = next(iter(query))
+    if key not in {"dryRun", "deliveryTest"} or query[key] != ["1"]:
+        raise ValueError("monitoring_query_invalid")
+    return key
+
+
+def execute_monitoring_mode(mode: str, conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    if mode == "dryRun":
+        snapshot = local_monitoring_snapshot(conn) if conn is not None else supabase_monitoring_snapshot()
+        return {**snapshot, "mode": "dryRun", "dryRun": True, "writesPerformed": False}
+    if mode == "monitoring":
+        return run_local_monitoring_check(conn) if conn is not None else run_supabase_monitoring_check()
+    if mode != "deliveryTest":
+        raise ValueError("monitoring_query_invalid")
+    snapshot = {"status": "test", "deliveryTest": True, "alerts": [{"code": "MONITORING-LAUNCH-TEST", "level": "info"}], "checkedAt": now()}
+    delivery = deliver_local_monitoring_alerts(conn, snapshot) if conn is not None else deliver_supabase_monitoring_alerts(snapshot)
+    receipts = []
+    for notification_id in delivery.get("notificationIds", []):
+        if conn is not None:
+            rows = [row_to_dict(row) for row in conn.execute("SELECT channel,status,receipt FROM notification_deliveries WHERE notification_id = ? AND channel = 'Email' ORDER BY created_at DESC, rowid DESC LIMIT 1", (notification_id,)).fetchall()]
+        else:
+            rows = supabase_filter_rows("notification_deliveries", {"notification_id": notification_id, "channel": "Email"}, order="created_at.desc", limit=1, select="channel,status,receipt")
+        for row in rows:
+            receipts.append({"notificationId": notification_id, "serviceAccepted": row.get("status") == "成功" and bool(row.get("receipt")), "receipt": str(row.get("receipt") or "")})
+    return {
+        "mode": "deliveryTest", "testDate": datetime.now().strftime("%Y-%m-%d"), "delivery": delivery,
+        "receipts": receipts, "receiptMeaning": "provider_accepted_not_confirmed_delivery",
+        "humanReceiptConfirmed": False,
+    }
 
 
 def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -29679,11 +29889,12 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
     for item in readiness["warnings"]:
         append_alert(alerts, "warning", "READINESS-WARNING", item, "排入上線前檢核清單，避免營運缺口。")
 
+    deliveries = [row_to_dict(row) for row in conn.execute("SELECT * FROM notification_deliveries ORDER BY created_at DESC, rowid DESC").fetchall()]
     counts = {
         "documents": conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0],
         "attachments": conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0],
         "exchange_failed": conn.execute("SELECT COUNT(*) FROM exchange_tasks WHERE status IN ('交換失敗','失敗','逾期未確認')").fetchone()[0],
-        "notification_failed": conn.execute("SELECT COUNT(*) FROM notification_deliveries WHERE status IN ('失敗','未設定','憑證異常')").fetchone()[0],
+        "notification_failed": unresolved_notification_failure_count(deliveries),
         "job_failed": conn.execute("SELECT COUNT(*) FROM job_runs WHERE status IN ('失敗','錯誤')").fetchone()[0],
     }
     if counts["exchange_failed"] and not internal_mode:
@@ -29699,7 +29910,7 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
     if cron_run_is_stalled(last_job_age):
         append_alert(alerts, "critical", "CRON-STALLED", "正式環境背景排程超過預期時間未執行。", "檢查 Vercel Cron、CRON_SECRET 與 /api/cron/run-due 執行紀錄。")
 
-    credentials = [notification_credential_status_for_channel(conn, channel) for channel in ["Email", "Line 工作群組", "系統站內通知"]]
+    credentials = [notification_credential_status_for_channel(conn, channel) for channel in monitored_notification_channels()]
     for credential in credentials:
         if credential.get("status") in {"缺少環境憑證", "已到期", "未設定"}:
             append_alert(alerts, "warning" if internal_mode else "critical" if is_production() else "warning", "CREDENTIAL-INVALID", f"{credential['channel']} 憑證狀態：{credential.get('status')}", "補齊正式憑證、有效期限與環境變數後重新驗證。")
@@ -29728,10 +29939,13 @@ def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
             "ageMinutes": last_job_age,
             "stalledAfterMinutes": EDOC_MONITORING_EXPECTED_CRON_MINUTES,
         },
-        "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials},
+        "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials, "runtimeReadiness": notification_runtime_readiness(deliveries)},
+        "alertDelivery": monitoring_alert_delivery_preview([row_to_dict(row) for row in conn.execute("SELECT * FROM users WHERE status = '啟用'").fetchall()]),
         "signing": {"status": "disabled" if internal_mode else "ok" if signing_service["ready"] else "needs_action", "affectsCurrentScope": not internal_mode, **signing_service},
         "jAgent": {"status": "disabled" if internal_mode else "needs_action" if counts["exchange_failed"] else "ok", "affectsCurrentScope": not internal_mode, "failedTasks": counts["exchange_failed"]},
     }
+    if not MONITORING_WEBHOOK_URL and not checks["alertDelivery"]["fallbackReady"]:
+        append_alert(alerts, "warning", "MONITORING-DELIVERY-NOT-READY", "維運告警外部派送尚未就緒。", "確認 Email 設定及 Finance 行政部門主任／總務的啟用帳號。")
     status = monitoring_status(alerts)
     return {
         "ok": status != "critical",
@@ -29775,10 +29989,12 @@ def post_monitoring_webhook(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 def run_local_monitoring_check(conn: sqlite3.Connection) -> Dict[str, Any]:
     snapshot = local_monitoring_snapshot(conn)
-    webhook = post_monitoring_webhook(snapshot) if snapshot["alerts"] else {"sent": False, "reason": "無告警"}
+    actionable = monitoring_actionable_snapshot(snapshot)
+    webhook = post_monitoring_webhook(actionable) if actionable["alerts"] else {"sent": False, "reason": "無須派送的告警"}
+    fallback = deliver_local_monitoring_alerts(conn, actionable) if actionable["alerts"] and not webhook.get("sent") else {"attempted": 0, "reason": "webhook_sent_or_no_actionable_alerts"}
     log_structured("info", "production_monitoring_check", status=snapshot["status"], alerts=len(snapshot["alerts"]), webhook_sent=bool(webhook.get("sent")), runtime="local")
-    log_audit(conn, "Ops Monitor", "正式部署監控檢查", "production_monitoring", snapshot["status"], json.dumps({"alerts": snapshot["alerts"], "webhook": webhook}, ensure_ascii=False))
-    return {**snapshot, "webhook": webhook}
+    log_audit(conn, "Ops Monitor", "正式部署監控檢查", "production_monitoring", snapshot["status"], json.dumps({"alerts": snapshot["alerts"], "webhook": webhook, "fallback": fallback}, ensure_ascii=False))
+    return {**snapshot, "webhook": webhook, "alertDelivery": fallback}
 
 
 def notification_target_email(conn: sqlite3.Connection, role: str, explicit: str = "") -> str:
@@ -30085,8 +30301,10 @@ def send_smtp_email_notification(to_email: str, subject: str, body: str, notific
                     smtp.login(username, password)
                 smtp.send_message(message)
         return {"status": "成功", "receipt": message["Message-ID"], "error": ""}
-    except Exception as exc:
-        return {"status": "失敗", "receipt": "", "error": str(exc)}
+    except smtplib.SMTPResponseException as exc:
+        return {"status": "失敗", "receipt": "", "error": f"smtp_response_{int(exc.smtp_code)}"}
+    except Exception:
+        return {"status": "失敗", "receipt": "", "error": "smtp_transport_failed"}
 
 
 def send_email_notification(to_email: str, subject: str, body: str, notification_id: str = "") -> Dict[str, str]:
@@ -33139,7 +33357,7 @@ def supabase_internal_launch_access_readiness(role_counts: Dict[str, int]) -> Di
             "hasActiveUser": bool(role_users),
             "hasFormalAccount": bool(formal_users),
         })
-    required_roles = ["員工", "主管", "主任", "行政部主任", "總務"]
+    required_roles = ["員工", "主管", "主任", "執行長", "行政部主任", "總務"]
     missing_active = [role for role in required_roles if role_counts.get(role, 0) < 1]
     missing_formal = [check["role"] for check in role_checks if check["role"] in required_roles and not check["hasFormalAccount"]]
     demo_seed_count = sum(1 for user in rows if user_is_demo_seed_account(user))
@@ -39449,7 +39667,9 @@ def supabase_upsert_finance_company_snapshot(
                     return rows[0], "resolved"
                 raise
         current_revision = int(existing.get("finance_source_revision") or 0)
-        if source_revision and source_revision <= current_revision:
+        # A revision-less bootstrap must never restore a superseded name or
+        # reactivate a company after an authoritative company.changed event.
+        if current_revision and source_revision <= current_revision:
             return existing, "stale"
         if source_revision:
             query = urllib.parse.urlencode({
@@ -39472,7 +39692,8 @@ def supabase_upsert_finance_company_snapshot(
         if len(rows) == 1:
             if not update_existing:
                 return rows[0], "resolved"
-            if source_revision and int(rows[0].get("finance_source_revision") or 0) >= source_revision:
+            current_revision = int(rows[0].get("finance_source_revision") or 0)
+            if current_revision and current_revision >= source_revision:
                 return rows[0], "stale"
             if not source_revision:
                 return supabase_patch("companies", rows[0]["id"], values), "applied"
@@ -41987,7 +42208,7 @@ def supabase_run_due_background_jobs(all_enabled: bool = False) -> Dict[str, Any
 
 
 def supabase_notification_credential_status(channel: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    credential = next((row for row in rows if row.get("channel") == channel), {"channel": channel, "status": "未設定"})
+    credential = notification_credential_display_metadata(next((row for row in rows if row.get("channel") == channel), {"channel": channel, "status": "未設定"}))
     required = channel_required_env(channel)
     if channel == "Line 工作群組" and not env_present("LINE_WEBHOOK_URL"):
         missing = [] if env_present("LINE_CHANNEL_ACCESS_TOKEN") and env_present("LINE_TARGET_ID") else required
@@ -42020,18 +42241,18 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
         append_alert(alerts, "warning", "READINESS-WARNING", item, "排入上線前檢核清單，避免營運缺口。")
 
     exchange_tasks = supabase_list("exchange_tasks", {})
-    deliveries = supabase_list("notification_deliveries", {})
-    job_runs = supabase_list("job_runs", {"order": ["finished_at.desc"], "limit": ["20"]})
+    deliveries = supabase_filter_rows("notification_deliveries", order="created_at.desc", limit=1000)
+    job_runs = supabase_filter_rows("job_runs", order="finished_at.desc", limit=20)
     documents = supabase_list("documents", {"limit": ["1000"]})
     attachments = supabase_list("attachments", {"limit": ["1000"]})
     credential_rows = supabase_list("notification_channel_credentials", {}) if "notification_channel_credentials" in TABLES else []
-    credentials = [supabase_notification_credential_status(channel, credential_rows) for channel in ["Email", "Line 工作群組", "系統站內通知"]]
+    credentials = [supabase_notification_credential_status(channel, credential_rows) for channel in monitored_notification_channels()]
 
     counts = {
         "documents": len(documents),
         "attachments": len(attachments),
         "exchange_failed": len([item for item in exchange_tasks if item.get("status") in {"交換失敗", "失敗", "逾期未確認"}]),
-        "notification_failed": len([item for item in deliveries if item.get("status") in {"失敗", "未設定", "憑證異常"}]),
+        "notification_failed": unresolved_notification_failure_count(deliveries),
         "job_failed": len([item for item in job_runs if item.get("status") in {"失敗", "錯誤"}]),
     }
     if counts["exchange_failed"] and not internal_mode:
@@ -42074,10 +42295,13 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
             "ageMinutes": last_job_age,
             "stalledAfterMinutes": EDOC_MONITORING_EXPECTED_CRON_MINUTES,
         },
-        "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials},
+        "notifications": {"status": "ok" if all(item.get("status") in {"有效", "即將到期"} for item in credentials) else "needs_action", "credentials": credentials, "runtimeReadiness": notification_runtime_readiness(deliveries)},
+        "alertDelivery": monitoring_alert_delivery_preview(supabase_filter_rows("users", {"status": "啟用", "account_source": "finance"}, limit=1000)),
         "signing": {"status": "disabled" if internal_mode else "ok" if signing_service["ready"] else "needs_action", "affectsCurrentScope": not internal_mode, **signing_service},
         "jAgent": {"status": "disabled" if internal_mode else "needs_action" if counts["exchange_failed"] else "ok", "affectsCurrentScope": not internal_mode, "failedTasks": counts["exchange_failed"]},
     }
+    if not MONITORING_WEBHOOK_URL and not checks["alertDelivery"]["fallbackReady"]:
+        append_alert(alerts, "warning", "MONITORING-DELIVERY-NOT-READY", "維運告警外部派送尚未就緒。", "確認 Email 設定及 Finance 行政部門主任／總務的啟用帳號。")
     status = monitoring_status(alerts)
     return {
         "ok": status != "critical",
@@ -42092,7 +42316,9 @@ def supabase_monitoring_snapshot() -> Dict[str, Any]:
 
 def run_supabase_monitoring_check() -> Dict[str, Any]:
     snapshot = supabase_monitoring_snapshot()
-    webhook = post_monitoring_webhook(snapshot) if snapshot["alerts"] else {"sent": False, "reason": "無告警"}
+    actionable = monitoring_actionable_snapshot(snapshot)
+    webhook = post_monitoring_webhook(actionable) if actionable["alerts"] else {"sent": False, "reason": "無須派送的告警"}
+    fallback = deliver_supabase_monitoring_alerts(actionable) if actionable["alerts"] and not webhook.get("sent") else {"attempted": 0, "reason": "webhook_sent_or_no_actionable_alerts"}
     log_structured("info", "production_monitoring_check", status=snapshot["status"], alerts=len(snapshot["alerts"]), webhook_sent=bool(webhook.get("sent")), runtime="vercel")
     supabase_insert("audit_logs", {
         "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
@@ -42102,10 +42328,10 @@ def run_supabase_monitoring_check() -> Dict[str, Any]:
         "target_id": snapshot["status"],
         "ip": "vercel",
         "device": "serverless",
-        "detail": json.dumps({"alerts": snapshot["alerts"], "webhook": webhook}, ensure_ascii=False),
+        "detail": json.dumps({"alerts": snapshot["alerts"], "webhook": webhook, "fallback": fallback}, ensure_ascii=False),
         "created_at": now(),
     })
-    return {**snapshot, "webhook": webhook}
+    return {**snapshot, "webhook": webhook, "alertDelivery": fallback}
 
 
 def stable_json_hash(value: Any) -> str:
@@ -43270,7 +43496,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
-            self.handle_api("GET", parsed.path, parse_qs(parsed.query))
+            self.handle_api("GET", parsed.path, parse_qs(parsed.query, keep_blank_values=parsed.path.rstrip("/") == "/api/cron/monitoring"))
             return
         super().do_GET()
 
@@ -44251,13 +44477,14 @@ class Handler(SimpleHTTPRequestHandler):
         )
         return False
 
-    def cron_authorized(self) -> bool:
-        secret = os.getenv("CRON_SECRET", "").strip()
-        if not secret:
-            return False
+    def cron_authorized(self, *, monitoring_only: bool = False) -> bool:
+        secrets_to_check = [os.getenv("CRON_SECRET", "").strip()]
+        if monitoring_only:
+            monitoring_secret = os.getenv("EDOC_MONITORING_CRON_SECRET", "").strip()
+            if len(monitoring_secret.encode("utf-8")) >= 32:
+                secrets_to_check.append(monitoring_secret)
         provided = self.headers.get("Authorization", "")
-        expected = f"Bearer {secret}"
-        return len(provided) == len(expected) and hmac.compare_digest(provided, expected)
+        return any(secret and hmac.compare_digest(provided.encode("utf-8"), f"Bearer {secret}".encode("utf-8")) for secret in secrets_to_check)
 
     def antivirus_smoke_authorized(self) -> bool:
         secret = os.getenv("EDOC_AV_SMOKE_SECRET", "").strip()
@@ -44425,7 +44652,7 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(current_account_readiness_package())
                     return
                 if parts and parts[0] == "cron":
-                    if not self.cron_authorized():
+                    if not self.cron_authorized(monitoring_only=method == "GET" and parts == ["cron", "monitoring"]):
                         self.send_json({"error": "unauthorized"}, 401)
                         return
                 else:
@@ -44731,10 +44958,15 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(supabase_run_due_background_jobs(), 201)
                     return
                 if method == "GET" and parts == ["cron", "monitoring"]:
-                    if not self.cron_authorized():
+                    if not self.cron_authorized(monitoring_only=True):
                         self.send_json({"error": "unauthorized"}, 401)
                         return
-                    self.send_json(run_supabase_monitoring_check(), 201)
+                    try:
+                        mode = monitoring_request_mode(query)
+                    except ValueError:
+                        self.send_json({"error": "monitoring_query_invalid"}, 400)
+                        return
+                    self.send_json(execute_monitoring_mode(mode), 200 if mode == "dryRun" else 201)
                     return
                 if method == "POST" and parts == ["jobs", "run-due"]:
                     self.send_json(supabase_run_due_background_jobs(), 201)
@@ -44782,6 +45014,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if method == "GET" and parts == ["notifications", "gateway-status"]:
                     status = notification_gateway_status()
+                    status["runtimeReadiness"] = notification_runtime_readiness(supabase_filter_rows("notification_deliveries", order="created_at.desc", limit=1000))
                     credential_rows = supabase_list("notification_channel_credentials", {}) if "notification_channel_credentials" in TABLES else []
                     status["credentials"] = [
                         notification_credential_display_metadata(
@@ -45387,7 +45620,7 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(current_account_readiness_package(conn))
                     return
                 if parts and parts[0] == "cron":
-                    if not self.cron_authorized():
+                    if not self.cron_authorized(monitoring_only=method == "GET" and parts == ["cron", "monitoring"]):
                         self.send_json({"error": "unauthorized"}, 401)
                         return
                 else:
@@ -45607,12 +45840,18 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(result, 201)
                     return
                 if method == "GET" and parts == ["cron", "monitoring"]:
-                    if not self.cron_authorized():
+                    if not self.cron_authorized(monitoring_only=True):
                         self.send_json({"error": "unauthorized"}, 401)
                         return
-                    result = run_local_monitoring_check(conn)
-                    conn.commit()
-                    self.send_json(result, 201)
+                    try:
+                        mode = monitoring_request_mode(query)
+                    except ValueError:
+                        self.send_json({"error": "monitoring_query_invalid"}, 400)
+                        return
+                    result = execute_monitoring_mode(mode, conn)
+                    if mode != "dryRun":
+                        conn.commit()
+                    self.send_json(result, 200 if mode == "dryRun" else 201)
                     return
                 if method == "POST" and parts == ["production", "monitoring", "check"]:
                     result = run_local_monitoring_check(conn)
@@ -45676,6 +45915,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if method == "GET" and parts == ["notifications", "gateway-status"]:
                     status = notification_gateway_status()
+                    status["runtimeReadiness"] = notification_runtime_readiness([row_to_dict(row) for row in conn.execute("SELECT * FROM notification_deliveries ORDER BY created_at DESC, rowid DESC LIMIT 1000").fetchall()])
                     status["credentials"] = [
                         notification_credential_display_metadata(
                             notification_credential_status_for_channel(conn, channel)

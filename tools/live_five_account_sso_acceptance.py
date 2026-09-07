@@ -274,7 +274,7 @@ def signed_handoff(email: str, auth_user_id: str, secret: str, ordinal: int) -> 
     return f"{encoded}.{signature}"
 
 
-def acceptance_for_account(email: str, auth_user_id: str, secret: str, ordinal: int) -> dict[str, int]:
+def _acceptance_for_account(email: str, auth_user_id: str, secret: str, ordinal: int, issued_tokens: list[str]) -> dict[str, int]:
     jar = http.cookiejar.CookieJar()
     redirect = RecordingRedirect()
     handoff_opener = urllib.request.build_opener(
@@ -326,6 +326,7 @@ def acceptance_for_account(email: str, auth_user_id: str, secret: str, ordinal: 
     user = exchange.get("user") or {}
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
         raise AcceptanceError("handoff_exchange_token_invalid")
+    issued_tokens.append(token)
     if str(user.get("account_source") or "").lower() != "finance":
         raise AcceptanceError("handoff_exchange_account_source_invalid")
 
@@ -358,6 +359,25 @@ def acceptance_for_account(email: str, auth_user_id: str, secret: str, ordinal: 
         "companyBound": 1,
         "departmentsPresent": 1,
     }
+
+
+def acceptance_for_account(email: str, auth_user_id: str, secret: str, ordinal: int) -> dict[str, int]:
+    issued_tokens: list[str] = []
+    try:
+        result = _acceptance_for_account(email, auth_user_id, secret, ordinal, issued_tokens)
+    finally:
+        for token in issued_tokens:
+            headers = {"Authorization": f"Bearer {token}"}
+            status, payload = request_json(
+                f"{EDOC_ORIGIN}/api/auth/logout", method="POST", data=b"", headers=headers,
+            )
+            if status != 200 or not payload.get("ok"):
+                raise AcceptanceError("acceptance_session_cleanup_failed")
+            me_status, _ = request_json(f"{EDOC_ORIGIN}/api/auth/me", headers=headers)
+            if me_status != 401:
+                raise AcceptanceError("acceptance_session_not_revoked")
+    result["sessionRevoked"] = len(issued_tokens)
+    return result
 
 
 def main() -> int:
@@ -393,6 +413,8 @@ def main() -> int:
         "checks": dict(sorted(totals.items())),
         "failureCodes": dict(sorted(failures.items())),
         "piiPrinted": False,
+        "coverage": "verified_google_identity_signed_handoff_and_directory",
+        "humanGoogleLoginExercised": False,
     }
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if totals["handoff303"] == SAMPLE_SIZE and not failures else 1

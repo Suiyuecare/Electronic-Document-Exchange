@@ -268,6 +268,24 @@ class FinanceDirectoryBackendContractTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in result["companies"]], ["FINCO-E100"])
         self.assertEqual([row["name"] for row in result["departments"]], ["去識別化甲部門"])
 
+    def test_legacy_company_duplicates_are_not_exposed_to_privileged_dropdowns(self) -> None:
+        self.companies.extend([
+            {
+                "id": "CO-LEGACY", "name": "去識別化舊公司",
+                "tax_id": "00000001", "status": "active", "source_system": None,
+            },
+            {
+                "id": "CO-UNMAPPED", "name": "去識別化未綁定公司",
+                "tax_id": "00000001", "status": "active", "source_system": "finance",
+                "finance_tenant_id": TENANT_ID, "finance_entity_id": None,
+            },
+        ])
+        result = self.call_directory({
+            "id": "FIN-CEO", "company_id": "FINCO-E100",
+            "finance_tenant_id": TENANT_ID, "role": "執行長", "logging_role_key": "ceo",
+        })
+        self.assertEqual([company["id"] for company in result["companies"]], ["FINCO-E100", "FINCO-E200"])
+
     def test_privileged_operational_roles_receive_all_active_companies(self) -> None:
         roles = (
             ("執行長", "ceo"),

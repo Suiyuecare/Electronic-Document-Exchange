@@ -29,6 +29,9 @@ EDITOR_IMMUTABLE_PROMOTION = (
 USER_COMPANY_CACHE = (
     MIGRATIONS / "20260831102000_add_user_company_name_cache.sql"
 )
+COMPANY_PROJECTION_PARITY = (
+    MIGRATIONS / "20260907130400_retire_unmapped_legacy_company_projection.sql"
+)
 EDITOR_STORAGE_PREFLIGHT = (
     VERIFICATION / "editor_storage_promotion_preflight.sql"
 )
@@ -72,10 +75,14 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         runtime_smoke = RUNTIME_SMOKE.read_text(encoding="utf-8").lower()
         fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
         manifest = json.loads(MAIN_MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["migrations"][-1], USER_COMPANY_CACHE.name)
+        self.assertIn(COMPANY_PROJECTION_PARITY.name, manifest["migrations"])
         self.assertLess(
             manifest["migrations"].index(EDITOR_IMMUTABLE_PROMOTION.name),
             manifest["migrations"].index(USER_COMPANY_CACHE.name),
+        )
+        self.assertLess(
+            manifest["migrations"].index(USER_COMPANY_CACHE.name),
+            manifest["migrations"].index(COMPANY_PROJECTION_PARITY.name),
         )
         self.assertIn("editor-final/", sql)
         self.assertIn("trg_edoc_bind_finalized_editor_asset_storage", sql)

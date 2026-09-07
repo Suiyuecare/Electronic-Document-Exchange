@@ -8,6 +8,7 @@ or close stdin to tear down the temporary database and storage directory.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -23,7 +24,9 @@ def main() -> int:
     fixture.setUpClass()
     try:
         case = min(fixture.case_definitions, key=lambda item: item["ordinal"])
-        token = fixture._portal_session(case["email"])
+        role = os.environ.get("EDOC_BROWSER_ROLE", "")
+        identity = next((item for item in fixture.identity_by_email.values() if item["role"] == role), case)
+        token = fixture._portal_session(identity["email"])
         current = fixture._expect_json("GET", "/api/auth/me", 200, token=token)
         auth_state = {**current, "token": token}
         print(
@@ -33,7 +36,7 @@ def main() -> int:
                     "authState": auth_state,
                     "caseOrdinal": case["ordinal"],
                     "route": case["route"],
-                    "financeRole": case["role"],
+                    "financeRole": identity["role"],
                     "seed": ACCEPTANCE_SEED,
                 },
                 ensure_ascii=False,

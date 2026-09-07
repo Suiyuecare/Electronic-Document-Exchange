@@ -152,6 +152,49 @@ commit;
         self.assertTrue(bundle.endswith("commit;\n"))
         self.assertFalse(bundle.endswith("rollback;\n"))
 
+    def test_company_parity_forward_migration_matches_shared_ledger(self) -> None:
+        source_path = ROOT / "supabase/migrations/20260907130400_retire_unmapped_legacy_company_projection.sql"
+        shared_path = ROOT / "supabase/shared-project-migrations/20260907130912_retire_shared_legacy_company_projection.sql"
+        source = source_path.read_text(encoding="utf-8")
+        transformed = self.tool.transform_sql(source)
+        shared = shared_path.read_text(encoding="utf-8")
+        self.assertIn(transformed, shared)
+        self.assertIn(self.tool.sha256_text(source), shared)
+        self.assertIn(self.tool.sha256_text(transformed), shared)
+        self.assertIn(source_path.name, self.tool.load_manifest())
+
+    def test_monitoring_forward_migration_replays_source_before_ledger(self) -> None:
+        source_path = ROOT / "supabase/migrations/20260907131606_edoc_private_monitoring_schedule.sql"
+        shared_path = ROOT / "supabase/shared-project-migrations/20260907132633_record_shared_private_monitoring_schedule.sql"
+        source = source_path.read_text(encoding="utf-8")
+        transformed = self.tool.transform_sql(source)
+        shared = shared_path.read_text(encoding="utf-8")
+        self.assertIn(transformed, shared)
+        self.assertIn(self.tool.sha256_text(source), shared)
+        self.assertIn(self.tool.sha256_text(transformed), shared)
+        self.assertIn(source_path.name, self.tool.load_manifest())
+        self.assertLess(shared.index(transformed), shared.index("insert into edoc_private.shared_project_migration_ledger"))
+        self.assertIn("shared_monitoring_job_already_active", shared)
+        self.assertIn("pg_catalog.to_regclass('cron.job') is not null", shared)
+        self.assertIn("active := false", shared)
+        self.assertNotIn("active := true", shared)
+
+    def test_secure_monitoring_transport_forward_migration_matches_shared_boundary(self) -> None:
+        source_path = ROOT / "supabase/migrations/20260907132959_edoc_monitor_secure_http_transport.sql"
+        shared_path = ROOT / "supabase/shared-project-migrations/20260907133919_record_shared_secure_monitor_transport.sql"
+        source = source_path.read_text(encoding="utf-8")
+        transformed = self.tool.transform_sql(source)
+        shared = shared_path.read_text(encoding="utf-8")
+        self.assertIn(transformed, shared)
+        self.assertIn(self.tool.sha256_text(source), shared)
+        self.assertIn(self.tool.sha256_text(transformed), shared)
+        self.assertIn(source_path.name, self.tool.load_manifest())
+        self.assertLess(shared.index(transformed), shared.index("insert into edoc_private.shared_project_migration_ledger"))
+        self.assertIn("from public, anon, authenticated, service_role, authenticator, edoc_backend", shared)
+        self.assertNotIn("active :=", shared)
+        self.assertIn("security invoker", shared)
+        self.assertNotIn("net.http_get", shared)
+
     def test_fresh_replay_guards_ignore_unrelated_hr_auth_and_storage(self) -> None:
         source = """if exists (select 1 from auth.users) then
       v_exact_fresh_sentinel := false;

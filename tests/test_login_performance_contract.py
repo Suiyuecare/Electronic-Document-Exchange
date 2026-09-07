@@ -430,6 +430,7 @@ class EntryExperienceContractTest(unittest.TestCase):
         cls.html = (ROOT / "index.html").read_text(encoding="utf-8")
         cls.js = (ROOT / "app.js").read_text(encoding="utf-8")
         cls.css = (ROOT / "styles.css").read_text(encoding="utf-8")
+        cls.entry_bootstrap = (ROOT / "entry-bootstrap.js").read_text(encoding="utf-8")
 
     def test_entry_screen_has_named_determinate_progress(self) -> None:
         for marker in (
@@ -454,6 +455,21 @@ class EntryExperienceContractTest(unittest.TestCase):
         self.assertIn('screen.dataset.progressState = normalized >= 100 ? "complete" : "loading";', self.js)
         self.assertIn('screen.setAttribute("aria-busy", normalized < 100 ? "true" : "false");', self.js)
         self.assertIn('bar.style.removeProperty("width")', self.js)
+
+    def test_cached_session_reveals_a_locked_shell_before_network_revalidation(self) -> None:
+        for marker in (
+            "const cachedShellRevealTargetMs = 500;",
+            'document.body.dataset.sessionState = "revalidating";',
+            'appShell.setAttribute("inert", "");',
+            'entryScreen?.classList.add("hidden");',
+            "new MutationObserver",
+            "window.__edocCachedShellRevealedAt",
+        ):
+            self.assertIn(marker, self.entry_bootstrap)
+        self.assertIn('body[data-session-state="revalidating"] .workspace > .view', self.css)
+        self.assertIn("function completeCachedSessionShellReveal()", self.js)
+        self.assertIn('appShell?.removeAttribute("inert")', self.js)
+        self.assertIn('if (document.body?.dataset.sessionState !== "revalidating") screen.classList.remove("hidden");', self.js)
 
     def test_startup_sync_loads_only_dashboard_sources(self) -> None:
         start = self.js.index("function runAuthenticatedStartupSyncs")
