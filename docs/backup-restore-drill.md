@@ -70,6 +70,48 @@ python scripts/backup_restore_drill.py \
 receipt 僅包含 schema 名稱、總表數、總筆數、物件總數、hash、時間與固定錯誤碼。
 逐表和逐物件清冊只存在加密備份內。receipt hash 用來驗證完整性，不等同第三方簽章。
 
+## 異地副本驗證
+
+可將加密備份與 receipt 上傳到公司核准的私密 Google Drive 資料夾，但不能將解密金鑰一起上傳。
+使用既有授權的 Drive connector；不得公開分享檔案作為下載中轉，也不得讀取瀏覽器 cookie 或任意 OAuth 檔案繞過連接器。
+
+依序保留下列證據，不能合併成單一「已備份」狀態：
+
+1. **本機備份及隔離還原通過**：保留原始 receipt 與加密檔 bytes SHA-256。
+2. **私密異地上傳及權限讀回通過**：核對目的資料夾、file ID、MIME type、大小與 permissions；不得有 `anyone` 或未核准的 domain/group 權限。
+3. **異地 bytes 完整性通過**：透過 connector 原生下載路徑，取得實際 materialized 檔案後比對 SHA-256。只有 `file_uri`、`sediment://` 參照或相同檔案大小，還不能證明 bytes hash 相同；不可將參照字串當作檔案內容。
+4. **異地取回副本還原通過**：必須將步驟 3 的下載檔作為 `--restore-backup`，不可拿原本的本機檔案代替。
+
+驗證命令如下；`EDOC_DOWNLOADED_BACKUP_FILE` 必須是 connector 實際物化到本機的私密檔案路徑，不是 URL 或虛擬 file reference：
+
+```sh
+shasum -a 256 "$EDOC_DOWNLOADED_BACKUP_FILE"
+python scripts/backup_restore_drill.py \
+  --restore-backup "$EDOC_DOWNLOADED_BACKUP_FILE" \
+  --pg-bin-dir "$EDOC_PG_BIN_DIR" \
+  --source-project-ref "$EDOC_SOURCE_PROJECT_REF" \
+  --output-dir "$EDOC_OFFSITE_VERIFY_RECEIPT_DIR" \
+  --encryption-key-file "$EDOC_BACKUP_KEY_FILE"
+```
+
+receipt JSON 內的 `receipt_sha256` 是**移除該欄位後**、依工具 `canonical()` 規則重新序列化所得的雜湊；
+它不等於整份 receipt 檔案的 bytes SHA-256。上傳／下載對照時使用整份檔案的 bytes hash。
+來源快照超過預設 15 分鐘時，即使資料、政策與檔案還原全部一致，工具也會將 `ok` 標為 `false`、
+`result` 標為 `recovery_time_or_age_target_exceeded`；應分別記錄「還原完整性」與「資料時效」，不可放寬目標掩飾超時。
+
+若連接器不能物化下載內容，僅能將步驟 2 標為完成，步驟 3、4 必須維持未驗證。
+
+## 既有主機的例行備份條件
+
+在沒有另行核准雲端 runner 的情況下，可使用既有主機與已授權 connector 執行「主機輔助異地備份」，但它依賴主機開機、登入與網路連線，並非無人值守雲端 DR。
+
+- 先將 Python、鎖版套件與 PostgreSQL tools 安裝到持久 operator runtime；不能讓正式排程依賴 `/tmp` 或臨時 DMG 掛載。
+- 同一來源只允許一個備份工作，與其他刷新 Supabase CLI 短效資料庫登入的維運工作互斥。目前 CLI 工具本身尚未提供跨程序排程鎖。
+- 排程每次執行新備份、隔離還原、私密上傳與異地讀回驗證；未完成的步驟保留失敗／未驗證狀態，不覆寫前次成功證據。
+- 解密金鑰另存經公司核准的密碼保管庫；只在同一台主機的不同目錄存放，仍不能承受整台設備遺失。
+- 設定「最後一次已驗證異地快照」的過期告警；只有排程多次成功且中斷／補跑驗證完成後，才能宣稱持續達成指定 RPO。
+- 例行排程及保留政策需另外啟用並驗證。本文件與一次成功備份不代表排程已存在。
+
 ## 測試
 
 ```sh
