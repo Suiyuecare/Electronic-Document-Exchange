@@ -4724,6 +4724,72 @@ def _probe_antivirus_runtime(timeout: float) -> Dict[str, Any]:
     }
 
 
+_READINESS_DIAGNOSTIC_CODES = {
+    "databaseQuery": frozenset({"database_query_unavailable", "databaseQuery_probe_failed"}),
+    "databaseRpcs": frozenset({
+        "database_required_editor_table_missing", "database_required_rpc_missing",
+        "database_rpc_inventory_unavailable", "databaseRpcs_probe_failed",
+    }),
+    "privateStorage": frozenset({
+        "storage_supabase_project_url_invalid", "storage_object_endpoint_project_mismatch",
+        "storage_bucket_missing", "storage_bucket_not_private",
+        "storage_bucket_inventory_unavailable", "privateStorage_probe_failed",
+    }),
+    "storagePublicKeyAffinity": frozenset({
+        "storage_publishable_key_affinity_config_invalid",
+        "storage_publishable_key_affinity_contract_invalid",
+        "storage_publishable_key_affinity_rejected",
+        "storage_publishable_key_affinity_unavailable", "storagePublicKeyAffinity_probe_failed",
+    }),
+    "antivirus": frozenset({
+        "antivirus_runtime_config_invalid", "antivirus_health_not_ready",
+        "antivirus_health_unavailable", "antivirus_probe_failed",
+    }),
+    "sharedProjectIdentity": frozenset({
+        "shared_project_identity_mismatch", "shared_project_identity_unavailable",
+        "sharedProjectIdentity_probe_failed",
+    }),
+}
+
+
+def _readiness_diagnostic_ms(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return round(max(0.0, float(value)), 2)
+
+
+def _log_runtime_readiness_failure(
+    results: Dict[str, Dict[str, Any]], durations_ms: Dict[str, float],
+    *, total_ms: float, timeout_ms: float,
+) -> None:
+    """Log only fixed probe identifiers/codes and numeric timings, never payloads."""
+    try:
+        checks = {}
+        for name, allowed_codes in _READINESS_DIAGNOSTIC_CODES.items():
+            if name not in results:
+                continue
+            result = results[name]
+            ready = bool(result.get("ready"))
+            code = result.get("errorCode")
+            checks[name] = {
+                "ready": ready,
+                "errorCode": "" if ready else (
+                    code if isinstance(code, str) and code in allowed_codes
+                    else "unknown_probe_failure"
+                ),
+                "durationMs": _readiness_diagnostic_ms(durations_ms.get(name)),
+            }
+        if checks and not all(check["ready"] for check in checks.values()):
+            log_structured(
+                "warning", "runtime_readiness_failed", ready=False,
+                checks=checks, durationMs=_readiness_diagnostic_ms(total_ms),
+                timeoutMs=_readiness_diagnostic_ms(timeout_ms),
+            )
+    except Exception:
+        # Observability must never change availability or expose logger errors.
+        pass
+
+
 def production_runtime_dependency_readiness() -> Dict[str, Any]:
     """Run bounded, non-mutating production dependency probes for ``/readyz``."""
     if not is_production():
@@ -4736,6 +4802,7 @@ def production_runtime_dependency_readiness() -> Dict[str, Any]:
             "containsSecret": False,
             "containsPii": False,
         }
+    started_at = time.monotonic()
     timeout = _runtime_readiness_probe_timeout_seconds()
     probes = {
         "databaseQuery": lambda: _probe_main_supabase_query(timeout),
@@ -4749,8 +4816,20 @@ def production_runtime_dependency_readiness() -> Dict[str, Any]:
             timeout
         )
     results: Dict[str, Dict[str, Any]] = {}
+    durations_ms: Dict[str, float] = {}
+
+    def measured_probe(name: str, probe):
+        probe_started_at = time.monotonic()
+        try:
+            return probe()
+        finally:
+            durations_ms[name] = (time.monotonic() - probe_started_at) * 1000
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
-        pending = {name: executor.submit(probe) for name, probe in probes.items()}
+        pending = {
+            name: executor.submit(measured_probe, name, probe)
+            for name, probe in probes.items()
+        }
         for name, future in pending.items():
             try:
                 results[name] = future.result(timeout=(timeout * 2) + 0.5)
@@ -4765,6 +4844,11 @@ def production_runtime_dependency_readiness() -> Dict[str, Any]:
         if not result.get("ready") and result.get("errorCode")
     ]
     ready = all(bool(result.get("ready")) for result in results.values())
+    if not ready:
+        _log_runtime_readiness_failure(
+            results, durations_ms, total_ms=(time.monotonic() - started_at) * 1000,
+            timeout_ms=timeout * 1000,
+        )
     return {
         "ready": ready,
         "checked": True,
