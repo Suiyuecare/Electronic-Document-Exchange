@@ -14,12 +14,14 @@
 - 通知依即時設定與實際服務回應顯示，修正 Resend 寄件人別名、舊 SMTP 到期日誤判，以及已重送成功仍計為失敗。
 - 告警沿用 Email／站內通知，按 Finance 目前啟用的行政部主任及總務精準收件；一般建議不反覆寄送。
 - 新監控憑證僅授權指定監控 GET 端點，不能登入、讀公文或呼叫其他排程。
+- 寄信設定診斷僅輸出格式布林；上游錯誤僅保留白名單代碼，不保存原始錯誤本文、信箱或金鑰。
+- 最新寄信失敗不再被舊的成功紀錄掩蓋。驗收通知禁止一般／批次重送繞過上限，另提供原 ID、原內容、唯一原子 claim 的一次 Email-only 重試。
 - 補齊內部收發、異常處理、責任角色及回復交接文件。
 
 ## 測試證據及限制
 
-本機完整 suite：499 tests，0 failures，2 skipped；備份 PostgreSQL 隔離實測另行完成。
-GitHub CI run `34129167366` 對應 `cf0096a1e1013a69823b59417eb09ef865a2125e`，
+最新本機完整 suite：507 tests，0 failures，2 skipped；備份 PostgreSQL 隔離實測另行完成。
+GitHub CI run `34130720456` 對應 `cb8e08c34fc60043757702d1b63258e587d9a92b`，
 前後端驗證與 Supabase fresh bootstrap 兩個 job 均為 SUCCESS。
 後者包含全新 migration 重建、RPC、RLS、稽核鏈及隔離 Storage 真實 TUS 五帳號驗收。
 
@@ -55,7 +57,7 @@ GitHub CI run `34129167366` 對應 `cf0096a1e1013a69823b59417eb09ef865a2125e`，
 
 1. 待啟用同仁以本人公司 Google 帳號首次登入，確認公司、部門及待辦。
 2. 六種角色實際操作驗收；已有資料與自動化測試不能取代真人確認。
-3. 通知服務接受後，行政部主任／總務確認信箱實收與站內待辦。
+3. 帳號擁有者先在 eDoc Vercel Production 安全重設有效 `RESEND_API_KEY` 與合法 `MAIL_FROM`，重新部署後驗證；通知服務接受後，行政部主任／總務再確認信箱實收與站內待辦。不要將金鑰貼入對話或 repo。
 4. 確認異地備份及上線日主責、備援人與聯絡方式。
 5. 正式印章補齊後，另驗收實際用印、申請人收件、歷任簽核人下載。
 
@@ -63,7 +65,8 @@ GitHub CI run `34129167366` 對應 `cf0096a1e1013a69823b59417eb09ef865a2125e`，
 
 前一個正式部署：`dpl_BKQ15UvCGaFpHoxWCvpyFj43KpkT`。
 前端版本標記：`20260907-launch-readiness-r1`。
-正式部署：`dpl_3Ep7LjQLVmQwqFQjUBHLoHum21FQ`，由已通過 CI 的 `cf0096a` 建立，
+首批修復部署：`dpl_3Ep7LjQLVmQwqFQjUBHLoHum21FQ`（`cf0096a`）。
+最新正式部署：`dpl_BJn6fiWPwSStmtE4cb8AtBb7g6D4`，由已通過 CI 的 `cb8e08c` 建立，
 先使用 production env 的 skip-domain 候選部署，再於 CI 成功後 promote。
 正式網域已回傳新版 cache tag 及「待首次登入」篩選。
 `/api/readyz` 與 `/api/healthz` 皆 HTTP 200；匿名 editor-state 與 monitoring 皆 HTTP 401，
@@ -72,4 +75,16 @@ GitHub CI run `34129167366` 對應 `cf0096a1e1013a69823b59417eb09ef865a2125e`，
 
 監控 dryRun：HTTP 200，`writesPerformed=false`，notifications、deliveries、audit 三表筆數不變。
 固定驗收通知僅建立行政部主任及總務各一筆，兩筆站內通知成功，Email 均回覆 `Resend HTTP 400`。
-目前未重複寄送、未更換 provider／收件人，15 分鐘排程保持 inactive；Email 驗收尚未通過。
+候選環境唯讀診斷進一步確認：`senderPresent=true`，`singleValidAddress=false`、
+`senderFormatValid=false`、`resendKeyFormatValid=false`；引號、換行、字面換行及全形括號檢查皆 false。
+這是正式 production env 的執行期格式結果，不是由 Vercel 遮罩字串推測。
+Vercel 的 eDoc 與官網同名變數均為 sensitive，唯讀 API 無法取得可供重新設定的原值。
+已停止：未消耗唯一重試、未更換 provider／收件人，15 分鐘排程保持 inactive；Email 驗收尚未通過。
+原有每日 Vercel 排程未變更，MONTEST 驗收通知已排除於一般批次重送之外。
+
+因此本次證明「程式修補已部署、CI／Storage／隔離還原已通過」，不代表所有正式上線驗收完成。
+仍待有效寄信設定、真人角色流程驗收、異地備份位置與排班確認；印章依使用者要求排除。
+
+參考：[Resend 寄信 API](https://resend.com/docs/api-reference/emails/send-email)、
+[錯誤代碼](https://resend.com/docs/api-reference/errors)、
+[冪等重試](https://resend.com/docs/dashboard/emails/idempotency-keys)。
