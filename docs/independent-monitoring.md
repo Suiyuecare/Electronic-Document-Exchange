@@ -1,6 +1,6 @@
 # 獨立可用性監控與錯誤追蹤
 
-狀態：**未啟用待 root 部署驗證**。本文件不代表已部署、排程已執行或通知已實收。
+狀態（2026-09-08）：已發布至 main，正式域名可用後已啟用 enable variable。兩次真正 GitHub runner 手動執行及 cache 保存／回讀已驗證；schedule 觸發與人員通知實收仍需分別核實，不能用手動執行代替。
 
 ## 監控範圍
 
@@ -44,8 +44,14 @@
 
 日誌刻意不收錄例外原文、request body/header、動態公文 ID、SQL 值或本機變數。這是結構化執行期日誌，不代表已接入 Sentry、外部 log drain 或長期封存；平台無法啟動程序、非 JSON 回應等情況也不保證有應用層 errorId。
 
+依賴探測失敗另產生 `runtime_readiness_failed` 事件，提供固定探測名稱、白名單錯誤碼、各項／總耗時及設定時限。未知碼統一為 `unknown_probe_failure`；成功探測不另產生事件，logger 本身失敗不影響 readiness。此事件不改變 1.5 秒預設探測時限、公開明細隱藏或安全判定。
+
 ## 本版驗證證據
 
 - 單元測試覆蓋連續失敗、連續恢復、兩種交錯結果、過期／未來 cache、HTTPS 限制、禁止重新導向、回應遮罩與私密狀態檔。
 - 錯誤追蹤測試覆蓋敏感原文排除、動態路徑排除、fingerprint／事件 ID 及日誌寫入失敗不影響回應。
-- 真正的 default-branch scheduled run、cache restore/save 與 GitHub 人員通知實收：**待 root 部署後驗證**。
+- 已發布 main commit：`6949817b267c16beb26d51e2f35381557b0a34be`。
+- 手動 run `34146467078`：首次 cache 不存在後成功保存；health 全 200，ready 200／503／200，正確保留 unknown／inconclusive，沒有將綠色 workflow 結果誤當網站健康。
+- 手動 run `34146544888`：成功回讀前次 cache，兩組 health／ready 全 200，判定 healthy 並保存新狀態。
+- 該次短暫 503 已產生遮罩後 runtime 事件；現有資訊不足以認定是哪個依賴故障，因此不放寬探測時限，也不宣稱根因已確定。
+- 真正的 default-branch scheduled run 與 GitHub 人員通知實收：仍待獨立證據；未故意製造正式故障或重寄既有通知。
