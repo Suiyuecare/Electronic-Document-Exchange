@@ -18,6 +18,11 @@
 
 ## 測試證據及限制
 
+本機完整 suite：499 tests，0 failures，2 skipped；備份 PostgreSQL 隔離實測另行完成。
+GitHub CI run `34129167366` 對應 `cf0096a1e1013a69823b59417eb09ef865a2125e`，
+前後端驗證與 Supabase fresh bootstrap 兩個 job 均為 SUCCESS。
+後者包含全新 migration 重建、RPC、RLS、稽核鏈及隔離 Storage 真實 TUS 五帳號驗收。
+
 桌機 1440×1000、手機 390×844 已以隔離資料在真實瀏覽器測試六大入口及待登入篩選，
 無頁面 JavaScript 例外、無整頁水平溢出。這是本機瀏覽器驗收，不是正式人員 Google 登入證明。
 
@@ -58,4 +63,13 @@
 
 前一個正式部署：`dpl_BKQ15UvCGaFpHoxWCvpyFj43KpkT`。
 前端版本標記：`20260907-launch-readiness-r1`。
-新部署、CI、監控啟用及通知服務回應於完成後補登；目前本文不作為已發布證明。
+正式部署：`dpl_3Ep7LjQLVmQwqFQjUBHLoHum21FQ`，由已通過 CI 的 `cf0096a` 建立，
+先使用 production env 的 skip-domain 候選部署，再於 CI 成功後 promote。
+正式網域已回傳新版 cache tag 及「待首次登入」篩選。
+`/api/readyz` 與 `/api/healthz` 皆 HTTP 200；匿名 editor-state 與 monitoring 皆 HTTP 401，
+四者皆 `Cache-Control: no-store`。
+全新瀏覽器從 eDoc 導向共用 Portal 的 Google 登入，未使用真人帳號或另建 eDoc 登入頁。
+
+監控 dryRun：HTTP 200，`writesPerformed=false`，notifications、deliveries、audit 三表筆數不變。
+固定驗收通知僅建立行政部主任及總務各一筆，兩筆站內通知成功，Email 均回覆 `Resend HTTP 400`。
+目前未重複寄送、未更換 provider／收件人，15 分鐘排程保持 inactive；Email 驗收尚未通過。

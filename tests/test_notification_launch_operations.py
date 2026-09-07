@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 from pathlib import Path
 import sqlite3
 import unittest
+import urllib.error
 from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
@@ -53,6 +55,103 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
         self.assertFalse(accepted["human_receipt_confirmed"])
         self.assertNotIn("provider-id", json.dumps(accepted))
 
+    def test_latest_failed_attempt_overrides_historical_success_without_losing_history(self):
+        rows = [{"notification_id": "OLD", "channel": "Email", "status": "成功", "receipt": "accepted", "created_at": "2026-09-06"}, {"notification_id": "LATEST", "channel": "Email", "status": "失敗", "error": "Resend HTTP 400", "created_at": "2026-09-07"}]
+        readiness = backend.notification_runtime_readiness(rows)
+        self.assertEqual(readiness["email_validation"], "delivery_failed")
+        self.assertEqual(readiness["last_accepted_notification_id"], "OLD")
+        self.assertEqual(readiness["lastAttemptStatus"], "失敗")
+        self.assertEqual(readiness["safeErrorCode"], "Resend HTTP 400")
+        rows[-1]["error"] = "private recipient@example.test key-re-secret"
+        self.assertEqual(backend.notification_runtime_readiness(rows)["safeErrorCode"], "email_delivery_failed")
+
+    def test_sender_diagnostics_are_only_booleans_and_never_reveal_configuration(self):
+        for value in ('"notify@example.test"', 'notify@example.test\\n', 'notify@example.test\nother@example.test', 'Name ＜notify@example.test＞', 'one@example.test,two@example.test'):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"MAIL_FROM": value}):
+                result = backend.notification_email_format_diagnostics()
+                self.assertFalse(result["senderFormatValid"])
+                self.assertTrue(all(isinstance(item, bool) for item in result.values()))
+                self.assertNotIn("@", json.dumps(result))
+        with mock.patch.dict(os.environ, {"MAIL_FROM": "通知系統 <notify@example.test>", "RESEND_API_KEY": "re_" + "a" * 32}):
+            result = backend.notification_email_format_diagnostics()
+            self.assertTrue(result["senderFormatValid"])
+            self.assertTrue(result["resendKeyFormatValid"])
+
+    def test_resend_error_classifies_only_allowlisted_name_and_field(self):
+        body = json.dumps({"name": "validation_error", "message": "Invalid `from` field: private@example.test re_secret"}).encode()
+        error = urllib.error.HTTPError("https://example.test", 400, "Bad Request", {}, io.BytesIO(body))
+        safe = backend.resend_safe_http_error(error)
+        self.assertEqual(safe, "Resend HTTP 400 [validation_error:from]")
+        self.assertNotIn("private", safe)
+        self.assertNotIn("re_secret", safe)
+        for body in (b'{"name":"recipient@example.test","message":"secret"}', b'not-json'):
+            error = urllib.error.HTTPError("https://example.test", 400, "Bad", {}, io.BytesIO(body))
+            self.assertEqual(backend.resend_safe_http_error(error), "Resend HTTP 400")
+
+    def test_fixed_test_retry_only_sends_email_once_with_original_payload(self):
+        user = self.user()
+        self.conn.execute("INSERT INTO users (id,name,email,role,status,company_id,account_source,logging_role_key,created_at) VALUES (:id,:name,:email,:role,:status,:company_id,:account_source,:logging_role_key,'2026-09-07')", user)
+        with mock.patch.object(backend, "send_email_notification", return_value={"status": "失敗", "receipt": "", "error": "Resend HTTP 400"}):
+            first = backend.execute_monitoring_mode("deliveryTest", self.conn)
+        notice_id = first["delivery"]["notificationIds"][0]
+        notice = dict(self.conn.execute("SELECT * FROM notifications WHERE id=?", (notice_id,)).fetchone())
+        with mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "失敗", "receipt": "", "error": "Resend HTTP 400 [validation_error:from]"}) as send, mock.patch.object(backend, "push_system_notification") as inbox:
+            retry = backend.execute_monitoring_mode("deliveryTestRetry", self.conn)
+            third = backend.execute_monitoring_mode("deliveryTestRetry", self.conn)
+        send.assert_called_once_with(notice["target_email"], notice["title"], notice["body"], notice_id)
+        inbox.assert_not_called()
+        self.assertEqual(retry["attempted"], 1)
+        self.assertEqual(third["attempted"], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM system_inbox").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notification_deliveries WHERE channel='Email'").fetchone()[0], 2)
+        with mock.patch.object(backend, "send_email_notification") as generic_send:
+            self.assertEqual(backend.deliver_notification(self.conn, notice_id)["error"], "fixed_test_retry_only")
+            self.assertEqual(backend.retry_failed_notifications(self.conn)["count"], 0)
+        generic_send.assert_not_called()
+
+    def test_retry_eligibility_rejects_other_dates_payloads_statuses_or_attempt_counts(self):
+        expected = backend.monitoring_alert_notification_payload({"deliveryTest": True}, self.user())
+        notice = {**expected, "created_at": backend.now()}
+        attempts = [{"status": "失敗", "receipt": "", "error": "Resend HTTP 400", "attempt_count": 1, "target": expected["target_email"]}]
+        self.assertTrue(backend.monitoring_test_retry_eligible(notice, attempts, expected))
+        for patch in ({"id": "NTF-BUSINESS"}, {"created_at": "2000-01-01"}, {"target_email": "changed@example.test"}, {"title": "changed"}, {"type": "一般通知"}, {"body": "changed"}, {"target_user_id": "someone-else"}):
+            self.assertFalse(backend.monitoring_test_retry_eligible({**notice, **patch}, attempts, expected))
+        for patch in ({"status": "成功", "receipt": "accepted"}, {"receipt": "receipt"}, {"error": "Resend HTTP 403"}, {"status": "憑證異常"}, {"attempt_count": 2}, {"target": "different@example.test"}):
+            self.assertFalse(backend.monitoring_test_retry_eligible(notice, [{**attempts[0], **patch}], expected))
+        self.assertFalse(backend.monitoring_test_retry_eligible(None, attempts, expected))
+        self.assertFalse(backend.monitoring_test_retry_eligible(notice, [], expected))
+        self.assertFalse(backend.monitoring_test_retry_eligible(notice, attempts * 2, expected))
+
+    def test_supabase_retry_atomic_claim_prevents_stale_count_double_send(self):
+        user = self.user()
+        expected = backend.monitoring_alert_notification_payload({"deliveryTest": True}, user)
+        notice = {**expected, "created_at": backend.now()}
+        attempts = [{"status": "失敗", "receipt": "", "error": "Resend HTTP 400", "attempt_count": 1, "target": user["email"]}]
+        claims = set()
+        def insert(table, payload):
+            self.assertEqual(table, "notification_deliveries")
+            if payload["id"] in claims:
+                raise RuntimeError("unique_claim_conflict")
+            claims.add(payload["id"])
+            return payload
+        def query(table, *args, **kwargs):
+            return [user] if table == "users" else attempts
+        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", return_value=notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_patch"), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
+            first = backend.retry_monitoring_delivery_test()
+            second = backend.retry_monitoring_delivery_test()
+        send.assert_called_once()
+        self.assertEqual(first["attempted"], 1)
+        self.assertEqual(second["attempted"], 0)
+        self.assertEqual(second["skipped"][0]["reason"], "retry_claim_unavailable")
+
+    def test_supabase_generic_retry_cannot_bypass_fixed_test_limit(self):
+        notice = {"id": "NTF-MONTEST-today", "status": "部分派送"}
+        with mock.patch.object(backend, "supabase_list", return_value=[notice]), mock.patch.object(backend, "supabase_filter_rows", return_value=[{"channel": "Email"}]), mock.patch.object(backend, "send_email_notification") as send:
+            self.assertEqual(backend.supabase_deliver_notification(notice["id"])["error"], "fixed_test_retry_only")
+            self.assertEqual(backend.supabase_retry_failed_notifications()["count"], 0)
+        send.assert_not_called()
+
     def test_unconfigured_line_is_not_an_internal_launch_requirement(self):
         with mock.patch.object(backend, "launch_scope", return_value="internal_official"):
             self.assertEqual(backend.monitored_notification_channels(), ["Email", "系統站內通知"])
@@ -66,6 +165,11 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
             {"notification_id": "N-1", "channel": "Line 工作群組", "status": "失敗", "created_at": "2026-09-01"},
         ]
         self.assertEqual(backend.unresolved_notification_failure_count(rows), 1)
+
+    def test_interrupted_claim_stays_unresolved_in_monitoring(self):
+        rows = [{"notification_id": "N-1", "channel": "Email", "status": "失敗", "created_at": "2026-09-06"}, {"notification_id": "N-1", "channel": "Email", "status": "重試中", "created_at": "2026-09-07"}]
+        self.assertEqual(backend.unresolved_notification_failure_count(rows), 1)
+        self.assertEqual(backend.notification_runtime_readiness(rows)["email_validation"], "delivery_failed")
 
     def test_dry_run_targets_only_exact_active_finance_operational_users(self):
         users = [self.user(), self.user("GA", logging_role_key="ga_chief", role="總務"), self.user("STOP", status="停用"), self.user("STAFF", logging_role_key="staff"), self.user("LEGACY", account_source="edoc"), self.user("BAD", email="not-an-email")]

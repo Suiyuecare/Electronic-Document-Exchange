@@ -74,6 +74,13 @@ Email receipt 代表郵件服務接受寄送，不等於收件者收到或閱讀
 不接受外部指定收件人或內容。同日每人固定通知 ID，重試會回既有 provider receipt，避免重寄。
 receipt 回應僅代表服務接受，仍需收件者另行確認。空值、重複值、未知參數或兩模式同時傳入均回 400。
 
+`dryRun` 額外提供寄件設定格式的布林診斷，不顯示地址或 key。若最新 Email 嘗試失敗，
+runtime 顯示 `delivery_failed` 及遮罩代碼；舊成功紀錄仍保留，不當成目前送件正常。
+經維護者確認後，`?deliveryTestRetry=1` 只允許今日原固定測試、唯一一次 Email 嘗試為
+`Resend HTTP 400` 且無成功 receipt 的通知重試一次。原 ID、收件人、內容及 idempotency key 不變，
+不新增通知也不重發站內通知；固定 delivery PK 先佔位再寄送，並發或中斷後不得第三次自動寄送。
+`重試中` 未決紀錄仍計入待處理失敗，不會被監控誤認成修復。
+
 ## 上線門檻
 
 - GitHub Actions `Static checks`、`vercel build --prod`、`Smoke test production` 全數通過。

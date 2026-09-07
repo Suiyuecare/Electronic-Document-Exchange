@@ -39,6 +39,7 @@ import warnings
 import zipfile
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+from email.utils import getaddresses
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -29706,6 +29707,11 @@ def notification_runtime_readiness(deliveries: List[Dict[str, Any]] | None = Non
     accepted = [row for row in rows if row.get("channel") == "Email" and row.get("status") == "成功" and row.get("receipt")]
     accepted.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     configured = notification_email_configured()
+    attempts = sorted([row for row in rows if row.get("channel") == "Email"], key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    latest = attempts[0] if attempts else None
+    validation = "not_configured" if not configured else "pending_delivery_test"
+    if latest:
+        validation = "provider_accepted" if latest.get("status") == "成功" and latest.get("receipt") else "delivery_failed"
     return {
         "source": "runtime_environment_and_delivery_records",
         "checked_at": now(),
@@ -29715,10 +29721,39 @@ def notification_runtime_readiness(deliveries: List[Dict[str, Any]] | None = Non
             "line": "configured" if env_present("LINE_WEBHOOK_URL") or (env_present("LINE_CHANNEL_ACCESS_TOKEN") and env_present("LINE_TARGET_ID")) else "not_enabled",
         },
         "email_provider": notification_email_provider(),
-        "email_validation": "provider_accepted" if accepted else "pending_delivery_test" if configured else "not_configured",
+        "email_validation": validation,
+        "lastAttemptStatus": str(latest.get("status") or "") if latest else "",
+        "safeErrorCode": notification_safe_email_error(latest.get("error")) if latest else "",
         "last_accepted_notification_id": str(accepted[0].get("notification_id") or "") if accepted else "",
         "last_accepted_at": str(accepted[0].get("created_at") or "") if accepted else "",
         "human_receipt_confirmed": False,
+    }
+
+
+def notification_safe_email_error(error: Any) -> str:
+    value = str(error or "")
+    if re.fullmatch(r"Resend HTTP [1-5][0-9]{2}(?: \[(?:validation_error|invalid_idempotency_key|missing_api_key|restricted_api_key|invalid_permission|suspended_api_key|daily_quota_exceeded|monthly_quota_exceeded|rate_limit_exceeded|invalid_parameter|missing_required_field|application_error|service_unavailable)(?::(?:from|to|subject|html|text|tags|idempotency_key))?\])?", value):
+        return value
+    return "email_delivery_failed" if value else ""
+
+
+def notification_email_format_diagnostics() -> Dict[str, bool]:
+    sender = notification_email_sender()
+    try:
+        addresses = getaddresses([sender])
+    except (ValueError, TypeError):
+        addresses = []
+    single = len(addresses) == 1 and valid_formal_email(addresses[0][1])
+    newline = "\n" in sender or "\r" in sender
+    escaped = "\\n" in sender or "\\r" in sender
+    quoted = bool(sender) and sender[:1] in {'"', "'"} and sender[-1:] == sender[:1]
+    fullwidth = any(char in sender for char in "＜＞")
+    return {
+        "senderPresent": bool(sender), "singleValidAddress": bool(single),
+        "containsNewline": newline, "containsEscapedNewline": escaped,
+        "outerQuotes": quoted, "fullWidthBrackets": fullwidth,
+        "senderFormatValid": bool(single and not (newline or escaped or quoted or fullwidth)),
+        "resendKeyFormatValid": bool(re.fullmatch(r"re_[A-Za-z0-9_-]{16,}", os.getenv("RESEND_API_KEY", "").strip())),
     }
 
 
@@ -29734,7 +29769,7 @@ def unresolved_notification_failure_count(deliveries: List[Dict[str, Any]]) -> i
     for row in sorted(deliveries, key=lambda item: str(item.get("created_at") or ""), reverse=True):
         key = (str(row.get("notification_id") or row.get("id") or ""), str(row.get("channel") or ""))
         latest.setdefault(key, row)
-    return sum(row.get("status") in {"失敗", "未設定", "憑證異常"} for row in latest.values())
+    return sum(row.get("status") in {"失敗", "未設定", "憑證異常", "重試中"} for row in latest.values())
 
 
 def monitoring_alert_recipients(users: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -29847,7 +29882,7 @@ def monitoring_request_mode(query: Dict[str, List[str]]) -> str:
     if len(query) != 1:
         raise ValueError("monitoring_query_invalid")
     key = next(iter(query))
-    if key not in {"dryRun", "deliveryTest"} or query[key] != ["1"]:
+    if key not in {"dryRun", "deliveryTest", "deliveryTestRetry"} or query[key] != ["1"]:
         raise ValueError("monitoring_query_invalid")
     return key
 
@@ -29855,9 +29890,11 @@ def monitoring_request_mode(query: Dict[str, List[str]]) -> str:
 def execute_monitoring_mode(mode: str, conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
     if mode == "dryRun":
         snapshot = local_monitoring_snapshot(conn) if conn is not None else supabase_monitoring_snapshot()
-        return {**snapshot, "mode": "dryRun", "dryRun": True, "writesPerformed": False}
+        return {**snapshot, "mode": "dryRun", "dryRun": True, "writesPerformed": False, "emailFormatDiagnostics": notification_email_format_diagnostics()}
     if mode == "monitoring":
         return run_local_monitoring_check(conn) if conn is not None else run_supabase_monitoring_check()
+    if mode == "deliveryTestRetry":
+        return retry_monitoring_delivery_test(conn)
     if mode != "deliveryTest":
         raise ValueError("monitoring_query_invalid")
     snapshot = {"status": "test", "deliveryTest": True, "alerts": [{"code": "MONITORING-LAUNCH-TEST", "level": "info"}], "checkedAt": now()}
@@ -29875,6 +29912,61 @@ def execute_monitoring_mode(mode: str, conn: sqlite3.Connection | None = None) -
         "receipts": receipts, "receiptMeaning": "provider_accepted_not_confirmed_delivery",
         "humanReceiptConfirmed": False,
     }
+
+
+def monitoring_test_retry_eligible(notice: Dict[str, Any] | None, attempts: List[Dict[str, Any]], expected: Dict[str, Any]) -> bool:
+    if not notice or not str(notice.get("created_at") or "").startswith(datetime.now().strftime("%Y-%m-%d")):
+        return False
+    fields = ("id", "type", "title", "body", "source", "target_user_id", "target_company_id", "target_email", "target_role", "channel")
+    if any(str(notice.get(field) or "") != str(expected.get(field) or "") for field in fields):
+        return False
+    return bool(len(attempts) == 1 and attempts[0].get("status") == "失敗" and not attempts[0].get("receipt") and attempts[0].get("error") == "Resend HTTP 400" and str(attempts[0].get("target") or "") == notice.get("target_email") and int(attempts[0].get("attempt_count") or 1) == 1)
+
+
+def retry_monitoring_delivery_test(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    """One claimed Email-only retry of today's original fixed failed test IDs."""
+    result = {"mode": "deliveryTestRetry", "attempted": 0, "receipts": [], "skipped": [], "humanReceiptConfirmed": False}
+    if notification_email_provider() != "Resend":
+        return {**result, "reason": "original_provider_required"}
+    users = [row_to_dict(row) for row in conn.execute("SELECT * FROM users WHERE status = '啟用'").fetchall()] if conn is not None else supabase_filter_rows("users", {"status": "啟用", "account_source": "finance"}, limit=1000)
+    for user in monitoring_alert_recipients(users):
+        expected = monitoring_alert_notification_payload({"deliveryTest": True}, user)
+        notification_id = expected["id"]
+        if conn is not None:
+            row = conn.execute("SELECT * FROM notifications WHERE id = ?", (notification_id,)).fetchone()
+            notice = row_to_dict(row) if row else None
+            attempts = [row_to_dict(row) for row in conn.execute("SELECT * FROM notification_deliveries WHERE notification_id = ? AND channel = 'Email' ORDER BY created_at DESC, rowid DESC LIMIT 3", (notification_id,)).fetchall()]
+        else:
+            notice = supabase_get("notifications", notification_id)
+            attempts = supabase_filter_rows("notification_deliveries", {"notification_id": notification_id, "channel": "Email"}, order="created_at.desc", limit=3)
+        if not monitoring_test_retry_eligible(notice, attempts, expected):
+            result["skipped"].append({"notificationId": notification_id, "reason": "fixed_test_retry_not_eligible"})
+            continue
+        claim_id = "NDEL-MONRETRY-" + stable_json_hash({"notificationId": notification_id})[:32]
+        claim = {"id": claim_id, "notification_id": notification_id, "channel": "Email", "target": notice["target_email"], "status": "重試中", "receipt": "", "error": "", "attempt_count": 1, "created_at": now()}
+        try:
+            if conn is not None:
+                conn.execute("INSERT INTO notification_deliveries (id,notification_id,channel,target,status,receipt,error,attempt_count,created_at) VALUES (:id,:notification_id,:channel,:target,:status,:receipt,:error,:attempt_count,:created_at)", claim)
+                conn.commit()  # Reserve the only retry before any external action.
+            else:
+                supabase_insert("notification_deliveries", claim)  # Plain INSERT: unique PK is the cross-worker lock.
+        except Exception:
+            result["skipped"].append({"notificationId": notification_id, "reason": "retry_claim_unavailable"})
+            continue
+        outcome = send_resend_email_notification(notice["target_email"], notice["title"], notice["body"], notice["id"])
+        patch = {"status": outcome["status"], "receipt": outcome.get("receipt", ""), "error": notification_safe_email_error(outcome.get("error"))}
+        accepted = outcome.get("status") == "成功" and bool(outcome.get("receipt"))
+        notice_patch = {"status": "已派送" if accepted else "部分派送", "sent_at": now(), "delivery_receipt": "Email:" + patch["status"] + (" / " + patch["error"] if patch["error"] else "")}
+        if conn is not None:
+            conn.execute("UPDATE notification_deliveries SET status=:status,receipt=:receipt,error=:error WHERE id=:id", {**patch, "id": claim_id})
+            conn.execute("UPDATE notifications SET status=:status,sent_at=:sent_at,delivery_receipt=:delivery_receipt WHERE id=:id", {**notice_patch, "id": notification_id})
+            conn.commit()
+        else:
+            supabase_patch("notification_deliveries", claim_id, patch)
+            supabase_patch("notifications", notification_id, notice_patch)
+        result["attempted"] += 1
+        result["receipts"].append({"notificationId": notification_id, "serviceAccepted": accepted, "receipt": patch["receipt"], "safeErrorCode": patch["error"]})
+    return result
 
 
 def local_monitoring_snapshot(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -30221,6 +30313,23 @@ def resend_idempotency_key(notification_id: str) -> str:
     return f"edoc-notification/{safe or secrets.token_hex(8)}"[:256]
 
 
+def resend_safe_http_error(exc: urllib.error.HTTPError) -> str:
+    code = int(getattr(exc, "code", 0) or 0)
+    base = f"Resend HTTP {code}"
+    try:
+        payload = json.loads(_consume_http_error(exc, max_bytes=8192).decode("utf-8", "replace") or "{}")
+        name = str(payload.get("name") or "") if isinstance(payload, dict) else ""
+        message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
+        known = {"validation_error", "invalid_idempotency_key", "missing_api_key", "restricted_api_key", "invalid_permission", "suspended_api_key", "daily_quota_exceeded", "monthly_quota_exceeded", "rate_limit_exceeded", "invalid_parameter", "missing_required_field", "application_error", "service_unavailable"}
+        if name not in known:
+            return base
+        # Classify only known field labels, never persist provider free text.
+        field = next((candidate for candidate in ("from", "to", "subject", "html", "text", "tags", "idempotency_key") if re.search(r"(?:^|[\s`'\"])(?:" + candidate + r")(?:[\s`'\":]|$)", message, re.IGNORECASE)), "")
+        return f"{base} [{name}{':' + field if field else ''}]"
+    except Exception:
+        return base
+
+
 def send_resend_email_notification(to_email: str, subject: str, body: str, notification_id: str = "") -> Dict[str, str]:
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     sender = notification_email_sender()
@@ -30258,9 +30367,7 @@ def send_resend_email_notification(to_email: str, subject: str, body: str, notif
                 return {"status": "失敗", "receipt": "", "error": "Resend 未回傳寄送識別碼"}
             return {"status": "成功", "receipt": receipt, "error": ""}
     except urllib.error.HTTPError as exc:
-        code = int(getattr(exc, "code", 0) or 0)
-        _consume_http_error(exc)
-        return {"status": "失敗", "receipt": "", "error": f"Resend HTTP {code}"}
+        return {"status": "失敗", "receipt": "", "error": resend_safe_http_error(exc)}
     except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
         return {"status": "失敗", "receipt": "", "error": "Resend 連線失敗"}
     except Exception:
@@ -30398,6 +30505,8 @@ def notification_delivery_report(notification: Dict[str, Any], delivery: Dict[st
 
 
 def deliver_notification(conn: sqlite3.Connection, notification_id: str, force_channel: str = "") -> Dict[str, Any]:
+    if str(notification_id).startswith("NTF-MONTEST-") and conn.execute("SELECT 1 FROM notification_deliveries WHERE notification_id=? AND channel='Email' LIMIT 1", (notification_id,)).fetchone():
+        return {"id": notification_id, "status": "失敗", "error": "fixed_test_retry_only", "results": []}
     row = conn.execute("SELECT * FROM notifications WHERE id = ?", (notification_id,)).fetchone()
     if not row:
         return {"id": notification_id, "status": "失敗", "error": "notification_not_found", "results": []}
@@ -30876,7 +30985,7 @@ def sync_notifications_from_business_state(conn: sqlite3.Connection) -> Dict[str
 
 def retry_failed_notifications(conn: sqlite3.Connection) -> Dict[str, Any]:
     rows = conn.execute("SELECT id FROM notifications WHERE status IN ('派送失敗','部分派送') OR delivery_receipt IS NULL OR delivery_receipt = ''").fetchall()
-    results = [deliver_notification(conn, row["id"]) for row in rows]
+    results = [deliver_notification(conn, row["id"]) for row in rows if not str(row["id"]).startswith("NTF-MONTEST-")]
     return {"count": len(results), "results": results}
 
 
@@ -42752,6 +42861,8 @@ def supabase_record_notification_delivery(notification_id: str, channel: str, ta
 
 
 def supabase_deliver_notification(notification_id: str, force_channel: str = "") -> Dict[str, Any]:
+    if str(notification_id).startswith("NTF-MONTEST-") and supabase_filter_rows("notification_deliveries", {"notification_id": notification_id, "channel": "Email"}, limit=1):
+        return {"id": notification_id, "status": "失敗", "error": "fixed_test_retry_only", "results": []}
     item = supabase_get("notifications", notification_id)
     if not item:
         return {"id": notification_id, "status": "失敗", "error": "notification_not_found", "results": []}
@@ -42882,7 +42993,7 @@ def supabase_sync_notifications_from_business_state() -> Dict[str, Any]:
 def supabase_retry_failed_notifications() -> Dict[str, Any]:
     rows = [
         item for item in supabase_list("notifications", {})
-        if item.get("status") in {"派送失敗", "部分派送"} or not item.get("delivery_receipt")
+        if not str(item.get("id") or "").startswith("NTF-MONTEST-") and (item.get("status") in {"派送失敗", "部分派送"} or not item.get("delivery_receipt"))
     ]
     results = [supabase_deliver_notification(row["id"]) for row in rows]
     return {"count": len(results), "results": results}
