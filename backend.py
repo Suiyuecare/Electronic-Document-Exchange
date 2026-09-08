@@ -39,6 +39,7 @@ import urllib.request
 import warnings
 import zipfile
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from email.utils import getaddresses
 from http import HTTPStatus
@@ -48,6 +49,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 from runtime_observability import capture_runtime_error, error_tracking_status
+from edoc_numbering import SQLITE_NUMBERING_SQL, install_sqlite_numbering
 
 from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
 from finance_bridge import (
@@ -583,6 +585,8 @@ def roster_text(value: Any) -> str:
 
 def api_value_error_status(detail: str) -> int:
     """Map stable application error codes without inspecting free-form text."""
+    if detail == "official_document_numbering_unavailable":
+        return 503
     if detail.startswith((
         "formal_signing_service_not_ready",
         "formal_signature_provider",
@@ -2105,6 +2109,7 @@ CREATE TABLE IF NOT EXISTS seal_usage_logs (
 
 CREATE TABLE IF NOT EXISTS official_documents (
   id TEXT PRIMARY KEY,
+  dispatch_no TEXT,
   company_id TEXT NOT NULL,
   document_type TEXT NOT NULL DEFAULT 'outgoing_official_document',
   source_type TEXT NOT NULL CHECK(source_type IN ('blank_editor','uploaded_pdf')),
@@ -2122,6 +2127,8 @@ CREATE TABLE IF NOT EXISTS official_documents (
   workflow_template_key TEXT NOT NULL DEFAULT 'internal_official_dispatch_v1',
   dispatch_method TEXT NOT NULL DEFAULT 'electronic_official_document_by_general_affairs',
   requires_stamp INTEGER NOT NULL DEFAULT 1,
+  output_mode TEXT NOT NULL DEFAULT 'physical',
+  dispatch_date TEXT,
   current_status TEXT NOT NULL DEFAULT 'draft',
   current_step TEXT,
   request_reason TEXT,
@@ -3807,6 +3814,8 @@ CREATE INDEX IF NOT EXISTS idx_compliance_attestations_period ON compliance_atte
 CREATE INDEX IF NOT EXISTS idx_compliance_attestations_signed ON compliance_attestations(signed_at);
 """
 
+
+SCHEMA += SQLITE_NUMBERING_SQL
 
 SEED_DOCUMENTS = [
     {
@@ -11603,7 +11612,7 @@ def roc_date_string(value: Any = None) -> str:
     return f"中華民國{parsed.year - 1911}年{parsed.month}月{parsed.day}日"
 
 
-OFFICIAL_PDF_RENDERER_VERSION = "reportlab-4.4.9-formal-tw-v3-edukai-5.1"
+OFFICIAL_PDF_RENDERER_VERSION = "reportlab-4.4.9-formal-tw-v4-edukai-5.1"
 OFFICIAL_PDF_CONTENT_LEFT = 70.35
 OFFICIAL_PDF_CONTENT_RIGHT = 520.10
 OFFICIAL_PDF_BODY_INDENT = 119.85
@@ -11977,7 +11986,7 @@ def paginate_official_pdf(
         ("電子信箱", info.get("contact_email")),
     ):
         if value:
-            contact_lines.extend(official_pdf_wrap_text(f"{label}：{value}", 216.0, 216.0, font_name, 12.0))
+            contact_lines.extend(official_pdf_wrap_text(f"{label}：{value}", 250.0, 250.0, font_name, 12.0))
 
     recipient_lines = official_pdf_wrap_text(
         f"受文者：{info['recipient']}",
@@ -12879,7 +12888,10 @@ def connect() -> sqlite3.Connection:
     register_sqlite_functions(conn)
     conn.execute("PRAGMA foreign_keys = ON")
     if not LOCAL_SCHEMA_READY:
+        install_sqlite_numbering(conn)
         conn.executescript(SCHEMA)
+        ensure_column(conn, "official_documents", "output_mode", "TEXT NOT NULL DEFAULT 'physical'")
+        ensure_column(conn, "official_documents", "dispatch_date", "TEXT")
         ensure_local_company_seal_file_integrity(conn)
         ensure_local_official_dispatch_integrity(conn)
         conn.commit()
@@ -13082,6 +13094,7 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition:
 def migrate() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        install_sqlite_numbering(conn)
         ensure_column(conn, "documents", "company_name", "TEXT NOT NULL DEFAULT '歲悅長照股份有限公司'")
         ensure_column(conn, "documents", "seal_plan_json", "TEXT NOT NULL DEFAULT '{}'")
         ensure_column(conn, "documents", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
@@ -13110,6 +13123,24 @@ def migrate() -> None:
         ensure_column(conn, "official_documents", "workflow_template_key", "TEXT NOT NULL DEFAULT 'internal_official_dispatch_v1'")
         ensure_column(conn, "official_documents", "stamped_file_id", "TEXT")
         ensure_column(conn, "official_documents", "requires_stamp", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "official_documents", "output_mode", "TEXT NOT NULL DEFAULT 'physical'")
+        ensure_column(conn, "official_documents", "dispatch_date", "TEXT")
+        conn.executescript("""
+          CREATE TRIGGER IF NOT EXISTS trg_compose_output_fields_insert
+          BEFORE INSERT ON official_documents
+          WHEN NEW.output_mode NOT IN ('electronic', 'physical') OR
+            (NEW.output_mode = 'electronic' AND (NEW.source_type <> 'blank_editor' OR NEW.document_type <> 'outgoing_official_document' OR NEW.requires_stamp <> 0)) OR
+            (NEW.output_mode = 'physical' AND NEW.requires_stamp <> 1)
+          BEGIN SELECT RAISE(ABORT, 'official_document_output_mode_invalid'); END;
+          CREATE TRIGGER IF NOT EXISTS trg_compose_output_fields_update
+          BEFORE UPDATE OF output_mode, requires_stamp, dispatch_date ON official_documents
+          WHEN NEW.output_mode NOT IN ('electronic', 'physical') OR
+            (NEW.output_mode = 'electronic' AND (NEW.source_type <> 'blank_editor' OR NEW.document_type <> 'outgoing_official_document' OR NEW.requires_stamp <> 0)) OR
+            (NEW.output_mode = 'physical' AND NEW.requires_stamp <> 1) OR
+            (OLD.current_status <> 'draft' AND (OLD.output_mode IS NOT NEW.output_mode OR OLD.requires_stamp IS NOT NEW.requires_stamp)) OR
+            (OLD.current_status NOT IN ('draft', 'rejected') AND OLD.dispatch_date IS NOT NEW.dispatch_date)
+          BEGIN SELECT RAISE(ABORT, 'official_document_output_fields_locked'); END;
+        """)
         ensure_column(conn, "notifications", "target_user_id", "TEXT")
         ensure_column(conn, "notifications", "target_company_id", "TEXT")
         ensure_column(conn, "notifications", "action_url", "TEXT")
@@ -20495,6 +20526,7 @@ def official_dispatch_route_notification_payload(
     record: Dict[str, Any],
 ) -> Dict[str, Any]:
     owner_type = str(record.get("dispatch_owner_type") or "")
+    completed_version = "電子公文已核准" if official_compose_electronic_output(document) else "已用印版本已產生"
     if owner_type == "general_affairs":
         target = active_user_by_id(conn, record.get("dispatch_owner_user_id") or "") or {}
         return {
@@ -20505,7 +20537,7 @@ def official_dispatch_route_notification_payload(
             "channel": "Email + 系統通知",
             "source": document["id"],
             "priority": "高",
-            "body": "已用印版本已產生，請完成寄發並回填寄送日期與證明。",
+            "body": f"{completed_version}，請完成寄發並回填寄送日期與證明。",
         }
     if owner_type == "applicant":
         target = active_user_by_id(conn, document.get("applicant_id") or "") or {}
@@ -20517,7 +20549,7 @@ def official_dispatch_route_notification_payload(
             "channel": "Email + 系統通知",
             "source": document["id"],
             "priority": "高",
-            "body": "已用印版本已產生，請完成寄送並回填寄送日期與證明。",
+            "body": f"{completed_version}，請完成寄送並回填寄送日期與證明。",
         }
     target = active_user_by_id(conn, document.get("applicant_id") or "") or {}
     return {
@@ -20528,7 +20560,7 @@ def official_dispatch_route_notification_payload(
         "channel": "Email + 系統通知",
         "source": document["id"],
         "priority": "高",
-        "body": "寄發方式為不需寄發，已用印版本已產生，請確認結案。",
+        "body": f"寄發方式為不需寄發，{completed_version}，請確認結案。",
     }
 
 
@@ -21081,7 +21113,9 @@ def official_pdf_document_payload(conn: sqlite3.Connection, document: Dict[str, 
         body_parts.append(f"辦法：\n{document['method']}")
     return {
         "id": document["id"],
-        "doc_no": document["id"],
+        "doc_no": document.get("dispatch_no") or extra.get("dispatch_no") or metadata.get("dispatch_no") or document["id"],
+        "dispatch_date": document.get("dispatch_date"),
+        "output_mode": document.get("output_mode") or "physical",
         "company_name": company.get("name") or "歲悅股份有限公司",
         "doc_type": extra.get("document_type") or metadata.get("document_type") or "函",
         "agency_name": document.get("recipient") or "未指定受文者",
@@ -21354,6 +21388,12 @@ def official_application_package(
     if public_stamp_request:
         public_stamp_request.pop("claim_token", None)
         public_stamp_request.pop("claim_owner_id", None)
+    final_file_id = str(document.get("stamped_file_id") or "")
+    final_file_type = "generated_pdf" if official_compose_electronic_output(document) else "stamped_pdf"
+    final_file = next((
+        file for file in versions
+        if final_file_id and str(file.get("id") or "") == final_file_id and file.get("file_type") == final_file_type
+    ), None)
     return {
         "id": document.get("id"),
         "record_type": "official_document_application",
@@ -21367,7 +21407,9 @@ def official_application_package(
         "approval_route_code": (seal_context or {}).get("approval_route_code") or "",
         "approval_route_name": (seal_context or {}).get("approval_route_name") or "",
         "dispatch_method": document.get("dispatch_method"),
+        "output_mode": document.get("output_mode") or "physical",
         "stamped_file_id": document.get("stamped_file_id"),
+        "final_file": final_file,
         "current_status": document.get("current_status"),
         "current_step": document.get("current_step"),
         "applicant_id": document.get("applicant_id"),
@@ -21387,6 +21429,7 @@ def official_application_package(
             "approval_step_count": len(steps),
             "download_count": len(download_logs),
             "has_stamped_pdf": any(file.get("file_type") == "stamped_pdf" for file in versions),
+            "has_final_pdf": bool(final_file),
             "has_dispatch_record": bool(dispatch_record),
         },
     }
@@ -21715,11 +21758,60 @@ def require_official_creation_company(user: Dict[str, Any], requested_company_id
     return company_id
 
 
-def require_official_seal_classification(payload: Dict[str, Any]) -> Dict[str, Any]:
+def official_compose_electronic_output(document: Dict[str, Any]) -> bool:
+    """Only a typed, server-persisted compose letter can be sent without a seal."""
+    return bool(
+        document.get("output_mode") == "electronic"
+        and document.get("source_type") == "blank_editor"
+        and document.get("document_type") == "outgoing_official_document"
+        and not bool(document.get("requires_stamp", True))
+    )
+
+
+def official_output_fields(payload: Dict[str, Any], document: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    current = document or {}
+    mode = str(payload.get("output_mode", current.get("output_mode") or "physical"))
+    if mode not in {"electronic", "physical"}:
+        raise ValueError("official_document_output_mode_invalid")
+    source = str(current.get("source_type") or payload.get("source_type") or "blank_editor")
+    document_type = str(current.get("document_type") or payload.get("document_type") or (
+        "uploaded_pdf_for_stamp" if source == "uploaded_pdf" else "outgoing_official_document"
+    ))
+    if mode == "electronic" and (source != "blank_editor" or document_type != "outgoing_official_document"):
+        raise PermissionError("official_document_electronic_output_forbidden")
+    if document and mode != (current.get("output_mode") or "physical") and current.get("current_status") != "draft":
+        raise ValueError("official_document_output_mode_locked")
+    if mode == "physical" and "requires_stamp" in payload and str(payload["requires_stamp"]).lower() in {"false", "0", "no", "off", "none"}:
+        raise PermissionError("official_document_stamp_required")
+    return {"output_mode": mode, "requires_stamp": mode != "electronic"}
+
+
+def official_compose_dispatch_date(payload: Dict[str, Any], document: Dict[str, Any] | None = None) -> str:
+    if "dispatch_date" in payload:
+        return _validated_official_dispatch_date(payload["dispatch_date"])
+    existing = (document or {}).get("dispatch_date")
+    return _validated_official_dispatch_date(existing or datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d"))
+
+
+def require_official_compose_number(document: Dict[str, Any], *, allow_legacy: bool = False) -> str:
+    if document.get("source_type") != "blank_editor":
+        return ""
+    candidates = [str(document.get("dispatch_no") or "").strip()]
+    if allow_legacy:
+        metadata = parse_json_field(document.get("metadata_json"))
+        extra = metadata.get("extra") if isinstance(metadata.get("extra"), dict) else {}
+        candidates.extend(str(value or "").strip() for value in (extra.get("dispatch_no"), metadata.get("dispatch_no")))
+    number = next((value for value in candidates if re.fullmatch(r"[^\s]{1,80}字第[0-9]{1,20}號", value)), "")
+    if not number:
+        raise ValueError("official_document_numbering_unavailable")
+    return number
+
+
+def require_official_seal_classification(payload: Dict[str, Any], *, allow_electronic: bool = False) -> Dict[str, Any]:
     """Require the server-derived seal category and reject client no-stamp bypasses."""
     raw_requires_stamp = payload.get("requires_stamp", True)
     requires_stamp = str(raw_requires_stamp).strip().lower() not in {"false", "0", "no", "off", "none"}
-    if not requires_stamp:
+    if not requires_stamp and not allow_electronic:
         raise PermissionError("official_document_stamp_required")
     seal_context = official_seal_approval_context(payload)
     if not seal_context:
@@ -21742,8 +21834,17 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
     applicant_department = authoritative_applicant_department(user, payload)
     dispatch_method = official_document_dispatch_method(source_type, payload.get("dispatch_method"))
     document_id = payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    existing = conn.execute("SELECT * FROM official_documents WHERE id = ?", (document_id,)).fetchone() if payload.get("id") else None
+    if existing:
+        if existing["applicant_id"] != user["id"] or existing["company_id"] != company_id:
+            raise PermissionError("official_document_create_id_conflict")
+        if existing["current_status"] == "draft" and existing["source_type"] == "blank_editor":
+            require_official_compose_number(row_to_dict(existing), allow_legacy=True)
+            ensure_official_generated_pdf(conn, row_to_dict(existing), official_actor_name(user))
+        return {**official_document_detail(conn, document_id, session), "create_replayed": True}
     ts = now()
     extra_metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+    extra_metadata.pop("dispatch_no", None)
     extra_metadata["attachment_details"] = validated_official_attachment_description(official_attachment_description(payload))
     extra_metadata.setdefault("contact_owner", payload.get("handler_name") or user.get("name") or "")
     extra_metadata.setdefault("contact_email", user.get("email") or "")
@@ -21758,8 +21859,9 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
         or payload.get("copyRecipients"),
         company.get("name") or "",
     )[:OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH]
-    requires_stamp = True
-    seal_context = require_official_seal_classification(payload)
+    output_fields = official_output_fields(payload)
+    requires_stamp = output_fields["requires_stamp"]
+    seal_context = require_official_seal_classification(payload, allow_electronic=not requires_stamp)
     workflow_template_key = (seal_context or {}).get("workflow_template_key") or payload.get("workflow_template_key") or "internal_official_dispatch_v1"
     metadata = {
         "attachments": extra_metadata["attachment_details"],
@@ -21813,6 +21915,8 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
         "workflow_template_key": workflow_template_key,
         "dispatch_method": dispatch_method,
         "requires_stamp": 1 if requires_stamp else 0,
+        "output_mode": output_fields["output_mode"],
+        "dispatch_date": official_compose_dispatch_date(payload),
         "current_status": "draft",
         "current_step": "",
         "request_reason": payload.get("request_reason") or payload.get("reason") or "",
@@ -21821,7 +21925,18 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
         "created_at": ts,
         "updated_at": ts,
     }
-    insert_row(conn, "official_documents", document)
+    try:
+        insert_row(conn, "official_documents", document)
+    except sqlite3.IntegrityError:
+        existing = conn.execute("SELECT * FROM official_documents WHERE id = ?", (document_id,)).fetchone()
+        if not existing or existing["applicant_id"] != user["id"] or existing["company_id"] != company_id:
+            raise
+        if existing["current_status"] == "draft" and existing["source_type"] == "blank_editor":
+            require_official_compose_number(row_to_dict(existing), allow_legacy=True)
+            ensure_official_generated_pdf(conn, row_to_dict(existing), official_actor_name(user))
+        return {**official_document_detail(conn, document_id, session), "create_replayed": True}
+    document = official_document_row(conn, document_id)
+    require_official_compose_number(document)
     if source_type == "uploaded_pdf":
         file_row = store_official_pdf_file(conn, document_id, "original_pdf", Path(payload.get("file_name") or f"{document_id}.pdf").name, original_pdf_data, official_actor_name(user))
         insert_official_log(conn, document_id, "upload_original_pdf", user, file_row["file_hash"], file_id=file_row["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
@@ -21879,6 +21994,8 @@ OFFICIAL_CORRECTION_EDITABLE_FIELDS = {
     "dispatch_unit",
     "handler_name",
     "request_reason",
+    "dispatch_date",
+    "output_mode",
 }
 
 OFFICIAL_CORRECTION_CLASSIFICATION_FIELDS = {
@@ -21899,7 +22016,6 @@ OFFICIAL_CORRECTION_FILE_FIELDS = {"content_base64", "file_content_base64"}
 OFFICIAL_CORRECTION_METADATA_TEXT_FIELDS = {
     "source": 80,
     "legacy_document_id": 180,
-    "dispatch_no": 180,
     "company_name": 300,
     "document_type": 80,
     "priority": 40,
@@ -22100,10 +22216,16 @@ def _official_correction_plan(
     }
     if "title" in updates and not updates["title"]:
         raise ValueError("official_document_title_required")
+    output_fields = official_output_fields(payload, document)
+    if "output_mode" in payload:
+        updates.update(output_fields)
+    if "dispatch_date" in payload:
+        updates["dispatch_date"] = official_compose_dispatch_date(payload, document)
+    requires_stamp = output_fields["requires_stamp"]
 
     classification_supplied = bool(OFFICIAL_CORRECTION_CLASSIFICATION_FIELDS.intersection(payload))
     seal_context = (
-        require_official_seal_classification(payload)
+        require_official_seal_classification(payload, allow_electronic=not requires_stamp)
         if classification_supplied
         else official_seal_context_from_document(document)
     )
@@ -22117,11 +22239,15 @@ def _official_correction_plan(
         raise ValueError("official_seal_route_name_mismatch")
 
     seal_id = str(payload.get("seal_id") or (stamp_request or {}).get("seal_id") or "").strip()
-    if not seal_id and document.get("current_status") != "draft":
+    if not requires_stamp:
+        seal_id = ""
+    if requires_stamp and not seal_id and document.get("current_status") != "draft":
         raise ValueError("official_document_seal_required")
     positions_supplied = "stamp_positions" in payload or "positions" in payload or "stamp_position" in payload
     existing_positions = (stamp_request or {}).get("stamp_positions") or []
-    if positions_supplied:
+    if not requires_stamp:
+        positions, positions_supplied = [], True
+    elif positions_supplied:
         raw_positions = payload.get("stamp_positions") if "stamp_positions" in payload else payload.get("positions")
         if raw_positions is not None and not raw_positions and document.get("current_status") != "draft":
             raise ValueError("official_document_seal_position_required")
@@ -22156,6 +22282,8 @@ def _official_correction_plan(
         if overlays_supplied
         else official_text_overlays_payload({"text_overlays": (stamp_request or {}).get("text_overlays") or []})
     )
+    if not requires_stamp:
+        overlays = []
     if overlays and not positions:
         raise ValueError("official_document_text_overlay_requires_seal_position")
 
@@ -22505,7 +22633,8 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
     # transaction.  The durable rejection job gate below is Supabase-only;
     # consulting it here would incorrectly couple local/offline operation to a
     # configured remote runtime.
-    if not bool(document.get("requires_stamp", 1)):
+    electronic_output = official_compose_electronic_output(document)
+    if not bool(document.get("requires_stamp", 1)) and not electronic_output:
         raise PermissionError("official_document_stamp_required")
     seal_context = official_seal_context_from_document(document)
     if not seal_context:
@@ -22546,12 +22675,21 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
     assert_official_document_uploads_av_clean(conn, document)
     lock_official_editor_submission(conn, document, payload, user)
     stamp_request = official_document_stamp_request(conn, document_id)
-    if not stamp_request:
+    if not stamp_request and not electronic_output:
         raise ValueError("official_document_seal_required")
-    stamp_request = lock_official_stamp_seal_versions(conn, document, stamp_request)
-    validate_official_document_seal(conn, stamp_request["seal_id"], document["company_id"], require_current=True)
+    if not electronic_output:
+        stamp_request = lock_official_stamp_seal_versions(conn, document, stamp_request)
+        validate_official_document_seal(conn, stamp_request["seal_id"], document["company_id"], require_current=True)
     if document["source_type"] == "blank_editor":
-        ensure_official_generated_pdf(conn, document, official_actor_name(user))
+        generated_source = ensure_official_generated_pdf(conn, document, official_actor_name(user))
+        if electronic_output:
+            source_lock = {"source_file_id": generated_source["id"], "source_sha256": generated_source["file_hash"]}
+            source_metadata = parse_json_field(document.get("metadata_json"))
+            source_metadata["electronic_output"] = source_lock
+            document["metadata_json"] = source_metadata
+            conn.execute("UPDATE official_documents SET metadata_json = ? WHERE id = ?", (json.dumps(source_metadata, ensure_ascii=False), document_id))
+            if workflow_lock_metadata is not None:
+                workflow_lock_metadata["electronic_output"] = source_lock
     if workflow_lock_metadata is not None:
         document["metadata_json"] = json.dumps(workflow_lock_metadata, ensure_ascii=False)
         conn.execute(
@@ -22772,11 +22910,12 @@ def claim_official_document_approval(
     if next_step.get("step_key") == "applicant_confirm":
         if step.get("step_key") not in {"general_affairs_review", "ceo"}:
             raise ValueError("official_document_invalid_final_approval_step")
-        if not bool(document.get("requires_stamp", 1)):
+        electronic_output = official_compose_electronic_output(document)
+        if not bool(document.get("requires_stamp", 1)) and not electronic_output:
             raise PermissionError("official_document_stamp_required")
-        transition = "auto_stamp"
+        transition = "electronic_dispatch" if electronic_output else "auto_stamp"
         next_status = "approved"
-        next_key = "auto_stamp"
+        next_key = "electronic_dispatch" if electronic_output else "auto_stamp"
     else:
         transition = "next_step"
         next_key = str(next_step.get("step_key") or "")
@@ -23304,6 +23443,8 @@ def approve_official_document(conn: sqlite3.Connection, document_id: str, payloa
     document = official_document_row(conn, document_id)
     if document["current_status"] in {"draft", "stamping", "stamped", "pending_general_affairs_dispatch", "returned_to_applicant_for_send", "dispatched", "sent_by_applicant", "closed", "cancelled", "rejected"}:
         raise ValueError("official_document_not_pending_approval")
+    if not bool(document.get("requires_stamp", True)) and not official_compose_electronic_output(document):
+        raise PermissionError("official_document_stamp_required")
     step = current_official_pending_step(conn, document)
     delegation = assert_official_step_actor(user, step, document, conn=conn)
     if step["step_key"] != "applicant_confirm" and user["id"] == document["applicant_id"]:
@@ -23358,6 +23499,9 @@ def approve_official_document(conn: sqlite3.Connection, document_id: str, payloa
         decision_evidence=evidence,
     )
     next_step = claim["next_step"]
+    if claim["transition"] == "electronic_dispatch":
+        complete_official_electronic_output(conn, document_id, user)
+        return official_document_detail(conn, document_id, session)
     if claim["transition"] == "auto_stamp":
         result = auto_stamp_official_document(conn, document_id, payload, user)
         return {**official_document_detail(conn, document_id, session), "auto_stamp": result}
@@ -23371,6 +23515,37 @@ def approve_official_document(conn: sqlite3.Connection, document_id: str, payloa
         "body": f"{step['step_name']}已核准，請接續處理。",
     })
     return official_document_detail(conn, document_id, session)
+
+
+def complete_official_electronic_output(conn: sqlite3.Connection, document_id: str, actor: Dict[str, Any]) -> Dict[str, Any]:
+    """Release the approved generated PDF without ever reading Seal Vault."""
+    document = official_document_row(conn, document_id)
+    if not official_compose_electronic_output(document):
+        raise PermissionError("official_document_electronic_output_forbidden")
+    if document.get("current_status") != "approved" or document.get("current_step") != "electronic_dispatch":
+        raise ValueError("official_document_not_fully_approved")
+    steps = official_document_steps(conn, document_id)
+    generation = max((int(step.get("workflow_generation") or 1) for step in steps), default=0)
+    current_steps = [step for step in steps if int(step.get("workflow_generation") or 1) == generation]
+    if not current_steps or any(step.get("status") != "approved" for step in current_steps if step.get("step_key") != "applicant_confirm"):
+        raise ValueError("official_document_not_fully_approved")
+    source = official_latest_source_file(conn, document)
+    if source.get("file_type") != "generated_pdf":
+        raise ValueError("official_document_electronic_source_invalid")
+    source_lock = parse_json_field(document.get("metadata_json")).get("electronic_output") or {}
+    if source_lock.get("source_file_id") != source.get("id") or source_lock.get("source_sha256") != source.get("file_hash"):
+        raise ValueError("official_document_electronic_source_invalid")
+    source_object, source_bytes = read_file_object_bytes(conn, source["file_object_id"])
+    verify_official_file_bytes(source, source_object, source_bytes)
+    record = upsert_official_dispatch_record(conn, document, actor=actor)
+    config = OFFICIAL_DISPATCH_METHODS[record["dispatch_method"]]
+    conn.execute(
+        "UPDATE official_documents SET stamped_file_id = ?, current_status = ?, current_step = ?, updated_at = ? WHERE id = ?",
+        (source["id"], config["next_status"], config["next_step"], now(), document_id),
+    )
+    insert_official_log(conn, document_id, "electronic_output_approved", actor, f"file_hash={source['file_hash']}", file_id=source["id"])
+    enqueue_official_dispatch_route(conn, document, record, actor, source["id"])
+    return record
 
 
 def reject_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -34843,7 +35018,9 @@ def supabase_official_pdf_document_payload(document: Dict[str, Any]) -> Dict[str
         body_parts.append(f"辦法：\n{document['method']}")
     return {
         "id": document["id"],
-        "doc_no": document["id"],
+        "doc_no": document.get("dispatch_no") or extra.get("dispatch_no") or metadata.get("dispatch_no") or document["id"],
+        "dispatch_date": document.get("dispatch_date"),
+        "output_mode": document.get("output_mode") or "physical",
         "company_name": company.get("name") or "歲悅股份有限公司",
         "doc_type": extra.get("document_type") or metadata.get("document_type") or "函",
         "agency_name": document.get("recipient") or "未指定受文者",
@@ -36984,8 +37161,17 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
     applicant_department = authoritative_applicant_department(user, payload)
     dispatch_method = official_document_dispatch_method(source_type, payload.get("dispatch_method"))
     document_id = payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
+    existing = supabase_get("official_documents", document_id) if payload.get("id") else None
+    if existing:
+        if existing.get("applicant_id") != user["id"] or existing.get("company_id") != company_id:
+            raise PermissionError("official_document_create_id_conflict")
+        if existing.get("current_status") == "draft" and existing.get("source_type") == "blank_editor":
+            require_official_compose_number(existing, allow_legacy=True)
+            supabase_ensure_official_generated_pdf(existing, official_actor_name(user))
+        return {**supabase_official_document_detail(document_id, session), "create_replayed": True}
     ts = now()
     extra_metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+    extra_metadata.pop("dispatch_no", None)
     extra_metadata["attachment_details"] = validated_official_attachment_description(official_attachment_description(payload))
     extra_metadata.setdefault("contact_owner", payload.get("handler_name") or user.get("name") or "")
     extra_metadata.setdefault("contact_email", user.get("email") or "")
@@ -37000,8 +37186,9 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
         or payload.get("copyRecipients"),
         company.get("name") or "",
     )[:OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH]
-    requires_stamp = True
-    seal_context = require_official_seal_classification(payload)
+    output_fields = official_output_fields(payload)
+    requires_stamp = output_fields["requires_stamp"]
+    seal_context = require_official_seal_classification(payload, allow_electronic=not requires_stamp)
     workflow_template_key = (seal_context or {}).get("workflow_template_key") or payload.get("workflow_template_key") or "internal_official_dispatch_v1"
     metadata = {
         "attachments": extra_metadata["attachment_details"],
@@ -37036,7 +37223,7 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
     submit_requested = bool(payload.get("submit", True))
     if seal_id and requires_stamp:
         supabase_validate_official_document_seal(seal_id, company_id, require_current=submit_requested)
-    document = supabase_insert("official_documents", {
+    document_row = {
         "id": document_id,
         "company_id": company_id,
         "document_type": payload.get("document_type") or ("uploaded_pdf_for_stamp" if source_type == "uploaded_pdf" else "outgoing_official_document"),
@@ -37055,6 +37242,8 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
         "workflow_template_key": workflow_template_key,
         "dispatch_method": dispatch_method,
         "requires_stamp": requires_stamp,
+        "output_mode": output_fields["output_mode"],
+        "dispatch_date": official_compose_dispatch_date(payload),
         "current_status": "draft",
         "current_step": "",
         "request_reason": payload.get("request_reason") or payload.get("reason") or "",
@@ -37062,7 +37251,18 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
         "metadata_json": metadata,
         "created_at": ts,
         "updated_at": ts,
-    })
+    }
+    try:
+        document = supabase_insert("official_documents", document_row)
+    except Exception:
+        existing = supabase_get("official_documents", document_id)
+        if not existing or existing.get("applicant_id") != user["id"] or existing.get("company_id") != company_id:
+            raise
+        if existing.get("current_status") == "draft" and existing.get("source_type") == "blank_editor":
+            require_official_compose_number(existing, allow_legacy=True)
+            supabase_ensure_official_generated_pdf(existing, official_actor_name(user))
+        return {**supabase_official_document_detail(document_id, session), "create_replayed": True}
+    require_official_compose_number(document)
     if source_type == "uploaded_pdf":
         file_row = supabase_store_official_pdf_file(document_id, "original_pdf", Path(payload.get("file_name") or f"{document_id}.pdf").name, original_pdf_data, official_actor_name(user))
         supabase_insert_official_log(document_id, "upload_original_pdf", user, file_row["file_hash"], file_id=file_row["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
@@ -37719,7 +37919,8 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         ) == "committed":
             return supabase_official_document_detail(document_id, session)
         raise ValueError("official_document_not_submittable")
-    if not bool(document.get("requires_stamp", True)):
+    electronic_output = official_compose_electronic_output(document)
+    if not bool(document.get("requires_stamp", True)) and not electronic_output:
         raise PermissionError("official_document_stamp_required")
     expected_status = str(document["current_status"])
     expected_updated_at = str(document.get("updated_at") or "")
@@ -37770,7 +37971,11 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         user,
         persist=False,
     )
-    if editor_plan:
+    if electronic_output:
+        if editor_plan:
+            raise PermissionError("official_document_electronic_output_forbidden")
+        stamp_request_row, stamp_position_rows, editor_lock_evidence = {}, [], {}
+    elif editor_plan:
         stamp_request_row = dict(editor_plan["request_row"])
         stamp_position_rows = [dict(row) for row in editor_plan["position_rows"]]
         editor_lock_evidence = {
@@ -37799,8 +38004,9 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         "status": "pending",
         "error_message": "",
     })
+    generated_source = None
     if document["source_type"] == "blank_editor":
-        supabase_ensure_official_generated_pdf(document, official_actor_name(user))
+        generated_source = supabase_ensure_official_generated_pdf(document, official_actor_name(user))
     applicant = supabase_user_by_id(document["applicant_id"]) or user
     workflow_plan = supabase_plan_official_workflow_submission(
         document,
@@ -37825,7 +38031,10 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         "first_step_id": first["id"],
         "first_step_key": first["step_key"],
         "workflow_generation": workflow_plan["workflow_generation"],
-        "stamp_request_id": stamp_request_row["id"],
+        "stamp_request_id": stamp_request_row.get("id") or "",
+        "output_mode": document.get("output_mode") or "physical",
+        "source_file_id": generated_source["id"] if electronic_output and generated_source else "",
+        "source_sha256": generated_source["file_hash"] if electronic_output and generated_source else "",
         "resubmitted": is_resubmit,
         "editor_lock": editor_lock_evidence,
     }
@@ -38209,11 +38418,11 @@ def supabase_claim_official_document_approval(
     if (
         result.get("document_id") != document_id
         or result.get("step_id") != expected_step_id
-        or result.get("transition") not in {"next_step", "auto_stamp"}
+        or result.get("transition") not in {"next_step", "auto_stamp", "electronic_dispatch"}
         or not isinstance(result.get("next_step"), dict)
     ):
         raise RuntimeError("official_document_approval_claim_invalid_response")
-    if result["transition"] == "auto_stamp" and result["next_step"].get("step_key") != "applicant_confirm":
+    if result["transition"] in {"auto_stamp", "electronic_dispatch"} and result["next_step"].get("step_key") != "applicant_confirm":
         raise RuntimeError("official_document_approval_claim_invalid_response")
     if result["transition"] == "next_step" and result["next_step"].get("step_key") == "applicant_confirm":
         raise RuntimeError("official_document_approval_claim_invalid_response")
@@ -38271,7 +38480,7 @@ def supabase_approve_official_document(document_id: str, payload: Dict[str, Any]
     document = supabase_official_document_row(document_id)
     if document["current_status"] in {"draft", "stamping", "stamped", "pending_general_affairs_dispatch", "returned_to_applicant_for_send", "dispatched", "sent_by_applicant", "closed", "cancelled", "rejected"}:
         raise ValueError("official_document_not_pending_approval")
-    if not bool(document.get("requires_stamp", True)):
+    if not bool(document.get("requires_stamp", True)) and not official_compose_electronic_output(document):
         raise PermissionError("official_document_stamp_required")
     step = supabase_current_official_pending_step(document)
     delegation = assert_official_step_actor(user, step, document, supabase_mode=True)

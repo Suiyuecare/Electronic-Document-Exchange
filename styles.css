@@ -5365,6 +5365,7 @@ body.demo-login-disabled #roleSelect:disabled {
 .compose-input-panel {
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 
 .compose-input-panel .field-hint {
@@ -5379,6 +5380,70 @@ body.demo-login-disabled #roleSelect:disabled {
 
 .compose-field-grid .span-all {
   grid-column: 1 / -1;
+}
+
+.compose-input-panel .compose-essential-hint {
+  display: block;
+}
+
+.compose-document-meta > label {
+  align-content: start;
+}
+
+#composeApprovalSection .field-hint:empty {
+  display: none;
+}
+
+#composeSealFields[hidden] {
+  display: none;
+}
+
+#composeApprovalSection {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  margin-top: 14px;
+}
+
+#composeApprovalSection .compose-approval-flow,
+.compose-confirm-page .compose-approval-flow {
+  display: flex;
+  gap: 20px;
+  max-width: 100%;
+  padding: 3px 2px 10px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+
+#composeApprovalSection .compose-approval-flow li,
+.compose-confirm-page .compose-approval-flow li {
+  flex: 1 0 145px;
+  min-width: 145px;
+  min-height: 68px;
+  padding: 8px;
+  scroll-snap-align: start;
+}
+
+#composeApprovalSection .compose-approval-flow li:not(.empty):not(:last-child)::after,
+.compose-confirm-page .compose-approval-flow li:not(.empty):not(:last-child)::after {
+  top: calc(50% - 8px);
+  right: -17px;
+  bottom: auto;
+  left: auto;
+  content: "→";
+}
+
+#composeApprovalSection .compose-approval-flow li.empty,
+.compose-confirm-page .compose-approval-flow li.empty {
+  flex: 1 0 auto;
+  min-width: 0;
+  min-height: 44px;
+}
+
+#composeApprovalSection .compose-approval-flow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 .draft-preview-panel.live {
@@ -10197,6 +10262,13 @@ textarea {
 .compose-purpose-generate {
   justify-self: start;
   margin-top: 4px;
+  min-height: 44px;
+  background: #b45309;
+  color: #fff;
+}
+
+.compose-purpose-generate:hover:not(:disabled) {
+  background: #92400e;
 }
 
 @media (max-width: 720px) {
@@ -10623,10 +10695,12 @@ textarea {
   display: grid;
   align-content: start;
   gap: 0;
-  width: 36.5cqw;
+  /* Match the final A4 PDF: keep x near 303 pt and widen to 250 pt. */
+  width: 42cqw;
   min-height: 12.6cqw;
   margin-top: 1cqw;
   margin-left: auto;
+  margin-right: -5.5cqw;
   color: #111;
   font-size: 2.02cqw;
   font-style: normal;

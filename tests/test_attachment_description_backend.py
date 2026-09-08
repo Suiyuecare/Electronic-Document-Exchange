@@ -100,9 +100,13 @@ class AttachmentDescriptionBackendTest(unittest.TestCase):
                     }
                     before = copy.deepcopy(payload)
                     captured = []
+                    connection = mock.Mock()
+                    connection.execute.return_value.fetchone.return_value = None
 
                     def capture_insert(*args):
                         table, row = args if supabase else args[1:]
+                        if table == "official_documents":
+                            row = {**row, "dispatch_no": "測試字第1150908001號"}
                         captured.append((table, copy.deepcopy(row)))
                         return row
 
@@ -117,10 +121,12 @@ class AttachmentDescriptionBackendTest(unittest.TestCase):
                         stack.enter_context(mock.patch.object(backend, f"{prefix}ensure_official_generated_pdf"))
                         stack.enter_context(mock.patch.object(backend, f"{prefix}insert_official_log"))
                         stack.enter_context(mock.patch.object(backend, f"{prefix}official_document_detail", return_value={"id": payload["id"]}))
+                        stack.enter_context(mock.patch.object(backend, "supabase_get", return_value=None))
+                        stack.enter_context(mock.patch.object(backend, "official_document_row", side_effect=lambda *_: next(row for table, row in captured if table == "official_documents")))
                         if supabase:
                             backend.supabase_create_official_document(payload, session)
                         else:
-                            backend.create_official_document(mock.Mock(), payload, session)
+                            backend.create_official_document(connection, payload, session)
                     document = next(row for table, row in captured if table == "official_documents")
                     metadata = document["metadata_json"]
                     self.assertEqual(metadata["attachments"], description)
