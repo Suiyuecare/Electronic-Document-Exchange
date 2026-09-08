@@ -122,7 +122,8 @@ where schemaname = 'public'
   and roles && array['public', 'anon', 'authenticated']::name[]
 order by tablename, policyname;
 
--- 2b. Exact backend grant parity for all 88 direct PostgREST tables.
+-- 2b. Exact backend grant parity for 88 direct PostgREST tables and the two
+-- trigger-managed numbering tables.
 -- Pass condition: table_exists, owner_matches, no_unexpected_table_grants and
 -- grant_matches must all be true for every row, in addition to the zero-row
 -- browser-grant checks in section 2. The first 82 are backend.TABLES and the
@@ -150,6 +151,7 @@ with backend_tables(table_name) as (
     'official_document_dispatch_records', 'official_document_editor_assets',
     'official_document_editor_revisions',
     'official_document_editor_storage_jobs', 'official_document_files',
+    'official_document_number_counters', 'official_document_number_allocations',
     'official_document_stamp_positions', 'official_document_stamp_requests',
     'official_document_text_overlays', 'official_documents',
     'official_workflow_delegations', 'pdf_versions', 'permissions',
@@ -179,6 +181,7 @@ with backend_tables(table_name) as (
     'official_document_approval_steps', 'official_document_editor_assets',
     'official_document_editor_revisions',
     'official_document_editor_storage_jobs', 'official_document_files',
+    'official_document_number_counters', 'official_document_number_allocations',
     'official_document_stamp_positions', 'official_document_stamp_requests',
     'official_document_text_overlays', 'official_documents', 'pdf_versions',
     'seal_permissions', 'seal_usage_approvals', 'seal_usage_logs',
@@ -195,7 +198,7 @@ with backend_tables(table_name) as (
     'module_account_links', 'notification_channel_credentials',
     'notifications', 'official_document_approval_steps',
     'official_document_dispatch_records', 'official_document_editor_assets',
-    'official_document_editor_storage_jobs',
+    'official_document_editor_storage_jobs', 'official_document_number_counters',
     'official_document_stamp_positions', 'official_document_stamp_requests',
     'official_documents', 'seal_usage_approvals', 'seal_usage_requests',
     'settings', 'system_inbox', 'users', 'finance_member_sync_receipts',
@@ -345,9 +348,9 @@ select
 from resolved
 order by signature;
 
--- 4b. No other public function may be executable by service_role. The only
--- non-RPC exception is the pure immutable seal-dimension validator required
--- by a draft-position trigger. Pass condition: zero rows.
+-- 4b. No other public function may be executable by service_role. Non-RPC
+-- exceptions are the seal-dimension validator and the exact invoker helpers
+-- required by the numbering triggers. Pass condition: zero rows.
 with allowed(signature) as (
   values
     ('public.edoc_apply_finance_organization_projection_v2(text,text,bigint,text,text,jsonb)'),
@@ -373,7 +376,12 @@ with allowed(signature) as (
     ('public.edoc_revalidate_finance_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_revoke_official_workflow_delegation(text,text)'),
     ('public.edoc_set_current_company_seal_file(text,text,text,text)'),
-    ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)')
+    ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)'),
+    ('public.edoc_number_safe_metadata(text)'),
+    ('public.edoc_allocate_official_number()'),
+    ('public.edoc_record_official_number()'),
+    ('public.edoc_guard_official_number()'),
+    ('public.edoc_guard_number_allocation()')
 ), allowed_oids as (
   select pg_catalog.to_regprocedure(signature) as oid from allowed
 )
@@ -384,6 +392,33 @@ where n.nspname = 'public'
   and pg_catalog.has_function_privilege('service_role', p.oid, 'EXECUTE')
   and p.oid not in (select oid from allowed_oids where oid is not null)
 order by 1;
+
+-- Exact numbering/output helpers must remain invoker-only, postgres-owned,
+-- fixed to an empty search_path, and unavailable to browser roles. This is
+-- an inventory of individual functions, never a schema-wide exemption.
+with compose_helpers(signature) as (
+  values
+    ('public.edoc_number_safe_metadata(text)'),
+    ('public.edoc_allocate_official_number()'),
+    ('public.edoc_record_official_number()'),
+    ('public.edoc_guard_official_number()'),
+    ('public.edoc_guard_number_allocation()'),
+    ('edoc_private.is_electronic_compose(public.official_documents)')
+), resolved as (
+  select signature, pg_catalog.to_regprocedure(signature) as oid from compose_helpers
+)
+select resolved.signature,
+  coalesce(
+    not p.prosecdef
+    and pg_catalog.pg_get_userbyid(p.proowner) = 'postgres'
+    and coalesce(p.proconfig @> array['search_path=""'], false)
+    and pg_catalog.has_function_privilege('service_role', p.oid, 'EXECUTE')
+    and not pg_catalog.has_function_privilege('anon', p.oid, 'EXECUTE')
+    and not pg_catalog.has_function_privilege('authenticated', p.oid, 'EXECUTE'),
+    false
+  ) as helper_access_matches
+from resolved left join pg_catalog.pg_proc p on p.oid = resolved.oid
+order by resolved.signature;
 
 -- 4b.1. The approval/rejection evidence validator must remain a private,
 -- postgres-owned, fixed-search-path SECURITY DEFINER function. Every boolean
@@ -1088,8 +1123,10 @@ select
       on namespace_row.oid = procedure_row.pronamespace
     where namespace_row.nspname = 'edoc_private'
       and pg_catalog.has_function_privilege('service_role', procedure_row.oid, 'EXECUTE')
-      and procedure_row.oid <>
-        'edoc_private.audit_log_hash_payload(text,text,text,text,text,text,text,text,text,text)'::pg_catalog.regprocedure
+      and procedure_row.oid not in (
+        'edoc_private.audit_log_hash_payload(text,text,text,text,text,text,text,text,text,text)'::pg_catalog.regprocedure,
+        'edoc_private.is_electronic_compose(public.official_documents)'::pg_catalog.regprocedure
+      )
   ) as no_unexpected_private_function_access;
 
 -- 8c. End-to-end audit continuity. Pass condition:

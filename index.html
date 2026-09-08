@@ -1044,13 +1044,13 @@
                     <h3>公文資料</h3>
                     <span class="status-pill">第 1 頁</span>
                   </div>
-                  <label>
-                    公司行號
-                    <select id="composeCompanySelect">
-                      <option>歲悅長照股份有限公司</option>
-                    </select>
-                  </label>
                   <div class="inline-fields">
+                    <label>
+                      公司行號
+                      <select id="composeCompanySelect">
+                        <option>歲悅長照股份有限公司</option>
+                      </select>
+                    </label>
                     <label>
                       文別
                       <select id="docType">
@@ -1060,70 +1060,9 @@
                         <option>公告</option>
                       </select>
                     </label>
-                    <label>
-                      速別
-                      <select id="priority">
-                        <option>普通件</option>
-                        <option>速件</option>
-                        <option>最速件</option>
-                      </select>
-                    </label>
                   </div>
-                  <section class="approval-route-picker compose-route-picker">
-                    <label>公文用印文件類型
-                      <select id="composeApprovalCategorySelect" required aria-describedby="composeApprovalCategoryHint">
-                        <option value="" selected disabled>請選擇文件細項</option>
-                      </select>
-                      <span class="field-hint" id="composeApprovalCategoryHint">四大分類僅供分組，請選擇分類下的文件細項。</span>
-                    </label>
-                    <div class="approval-route-summary" aria-live="polite">
-                      <div class="approval-route-heading">
-                        <span>自動判定流程</span>
-                        <strong id="composeApprovalRouteBadge">尚未選擇</strong>
-                      </div>
-                      <p id="composeApprovalRouteName">選擇文件細項後顯示 A／B／C／D 流程。</p>
-                      <ol class="compose-approval-flow compact" id="composeApprovalRoutePreview">
-                        <li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>
-                      </ol>
-                      <p class="approval-route-outcome" id="composeApprovalRouteOutcome"></p>
-                    </div>
-                  </section>
-                  <label>
-                    發文字號
-                    <div class="input-action">
-                      <input id="dispatchNo" value="" readonly />
-                      <button class="secondary-button" id="generateDispatchNoBtn" type="button">重新產生</button>
-                    </div>
-                  </label>
-                  <label>
-                    受文者
-                    <input id="recipient" placeholder="例如：臺北市政府社會局" />
-                    <span class="field-hint" id="recipientHint"></span>
-                  </label>
-                  <label>
-                    副本
-                    <textarea id="copyRecipients" rows="2" placeholder="送件公司會自動列入；可用頓號或換行增補其他副本"></textarea>
-                    <span class="field-hint">送件公司固定列為第一個副本，可自行增補其他單位或人員。</span>
-                  </label>
-                  <label class="compose-purpose-field">
-                    這份公文用途
-                    <textarea id="documentPurpose" rows="4" placeholder="先用自己的話寫要辦理的事情、原因、希望對方採取的行動，以及重要期限。"></textarea>
-                    <span class="field-hint" id="documentPurposeHint">內容只用來協助產生函稿，不會直接出現在正式 PDF。</span>
-                    <button class="secondary-button compose-purpose-generate" id="generateFromPurposeBtn" type="button">產生公文主旨與說明</button>
-                  </label>
-                  <label>
-                    主旨
-                    <input id="subject" placeholder="可自行輸入，或由上方用途產生" />
-                    <span class="field-hint" id="subjectHint"></span>
-                  </label>
-                  <label>
-                    說明
-                    <textarea id="bodyText" rows="8" placeholder="可自行輸入，或由上方用途產生"></textarea>
-                    <span class="field-hint" id="bodyTextHint"></span>
-                  </label>
-
-                  <div class="compose-field-grid">
-                    <label>
+                  <div class="compose-field-grid compose-contact-fields" aria-label="寄件聯絡資訊">
+                    <label class="span-all">
                       寄件人地址
                       <input id="contactAddress" placeholder="依登入帳號所屬公司預設，可編輯" />
                     </label>
@@ -1139,13 +1078,76 @@
                       寄件人傳真
                       <input id="contactFax" value="N/A" />
                     </label>
-                    <label class="span-all">
+                    <label>
                       寄件人電子信箱
                       <input id="contactEmail" type="email" placeholder="依登入帳號 Email 預設，可編輯" />
                     </label>
                   </div>
+                  <label>
+                    受文者
+                    <input id="recipient" placeholder="例如：臺北市政府社會局" />
+                    <span class="field-hint" id="recipientHint"></span>
+                  </label>
+                  <div class="compose-field-grid compose-document-meta">
+                    <label>
+                      發文日期
+                      <input id="dispatchDate" type="date" required />
+                    </label>
+                    <label>
+                      發文字號
+                      <input id="dispatchNo" value="" readonly placeholder="儲存時自動配號" aria-describedby="dispatchNoHint" />
+                      <span class="field-hint compose-essential-hint" id="dispatchNoHint">儲存草稿時由系統依序配號，取得後不可修改或重新產生。</span>
+                    </label>
+                    <label>
+                      速別
+                      <select id="priority">
+                        <option>普通件</option>
+                        <option>速件</option>
+                        <option>最速件</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label>
+                    附件
+                    <input id="attachments" type="file" multiple />
+                    <span class="field-hint">送出後附件會保留在同一張公文申請單，後續每一位指定簽核人都可檢視與下載。</span>
+                  </label>
+                  <label>
+                    附件文字內容
+                    <textarea id="attachmentDetails" rows="3" maxlength="5000" placeholder="選擇附件後自動帶入檔名，可改成公文要顯示的附件說明。"></textarea>
+                    <span class="field-hint">公文只顯示此處文字；修改文字不會更改附件檔名或內容。</span>
+                    <span class="field-hint" id="attachmentDetailsHint"></span>
+                  </label>
+                  <label class="compose-purpose-field">
+                    這份公文用途
+                    <textarea id="documentPurpose" rows="4" placeholder="先用自己的話寫要辦理的事情、原因、希望對方採取的行動，以及重要期限。"></textarea>
+                    <span class="field-hint" id="documentPurposeHint">內容只用來協助產生函稿，不會直接出現在正式 PDF。</span>
+                    <button class="primary-button compose-purpose-generate" id="generateFromPurposeBtn" type="button">AI產生公文主旨與說明</button>
+                  </label>
+                  <label>
+                    主旨
+                    <input id="subject" placeholder="可自行輸入，或由上方用途產生" />
+                    <span class="field-hint" id="subjectHint"></span>
+                  </label>
+                  <label>
+                    說明
+                    <textarea id="bodyText" rows="8" placeholder="可自行輸入，或由上方用途產生"></textarea>
+                    <span class="field-hint" id="bodyTextHint"></span>
+                  </label>
 
-                  <div class="inline-fields">
+                  <label>
+                    副本
+                    <textarea id="copyRecipients" rows="2" placeholder="送件公司會自動列入；可用頓號或換行增補其他副本"></textarea>
+                    <span class="field-hint">送件公司固定列為第一個副本，可自行增補其他單位或人員。</span>
+                  </label>
+                  <label>
+                    公文產出
+                    <select id="composeOutputMode" aria-describedby="composeSealModeHint">
+                      <option value="electronic">A. 電子公文（不放大小章）</option>
+                      <option value="physical" selected>B. 實體公文（可放大小章）</option>
+                    </select>
+                  </label>
+                  <div class="inline-fields" id="composeSealFields">
                     <label>
                       大章
                       <select id="largeSealType">
@@ -1167,17 +1169,7 @@
                       </select>
                     </label>
                   </div>
-                  <small class="field-hint" id="composeSealModeHint">所有發文均須依文件類型完成用印簽核；政府電子公文正式交換目前維持停用。</small>
-                  <label>
-                    附件
-                    <input id="attachments" type="file" multiple />
-                    <span class="field-hint">送出後附件會保留在同一張公文申請單，後續每一位指定簽核人都可檢視與下載。</span>
-                  </label>
-                  <label>
-                    附件文字內容
-                    <textarea id="attachmentDetails" rows="4" placeholder="例如：附件一為補正資料、附件二為切結書，或填寫附件清冊文字內容。"></textarea>
-                    <span class="field-hint" id="attachmentDetailsHint"></span>
-                  </label>
+                  <small class="field-hint compose-essential-hint" id="composeSealModeHint">電子與實體公文都須完成簽核；此選項不會啟用政府電子公文正式交換。</small>
                 </section>
 
                 <section class="panel draft-preview-panel live" id="draftPreviewPanel">
@@ -1195,6 +1187,25 @@
                   </div>
                 </section>
               </div>
+              <section class="approval-route-picker compose-route-picker" id="composeApprovalSection">
+                <label>公文用印文件類型
+                  <select id="composeApprovalCategorySelect" required aria-describedby="composeApprovalCategoryHint">
+                    <option value="" selected disabled>請選擇文件細項</option>
+                  </select>
+                  <span class="field-hint" id="composeApprovalCategoryHint">四大分類僅供分組，請選擇分類下的文件細項。</span>
+                </label>
+                <div class="approval-route-summary" aria-live="polite">
+                  <div class="approval-route-heading">
+                    <span>自動判定流程</span>
+                    <strong id="composeApprovalRouteBadge">尚未選擇</strong>
+                  </div>
+                  <p id="composeApprovalRouteName">選擇文件細項後顯示 A／B／C／D 流程。</p>
+                  <ol class="compose-approval-flow compact" id="composeApprovalRoutePreview" tabindex="0" aria-label="簽核流程，可左右捲動查看完整流程">
+                    <li class="empty"><strong>尚未選擇公文用印文件類型</strong></li>
+                  </ol>
+                  <p class="approval-route-outcome" id="composeApprovalRouteOutcome"></p>
+                </div>
+              </section>
             </section>
 
             <section class="compose-page compose-confirm-page" data-compose-pane="confirm">
@@ -1234,87 +1245,6 @@
               <button class="primary-button" id="submitDispatchBtn" type="submit" disabled>送出簽核</button>
             </div>
           </form>
-        </section>
-
-        <section class="view official-document-entry" id="format">
-          <div class="section-header">
-            <div>
-              <p class="eyebrow">公文格式</p>
-              <h3>文書格式</h3>
-            </div>
-            <div class="quick-actions">
-              <button class="primary-button" id="formatValidateBtn" type="button">格式檢核</button>
-              <button class="secondary-button" id="formatApplyBtn" type="button">帶入建立公文</button>
-            </div>
-          </div>
-
-          <div class="format-layout">
-            <section class="form-panel">
-              <div class="panel-heading">
-                <h3>公文欄位</h3>
-                <button class="text-button" id="formatGenerateNoBtn" type="button">產生文號</button>
-              </div>
-              <div class="inline-fields">
-                <label>文號<input id="formatDocNo" value="歲悅字第1140522007號" /></label>
-                <label>文別<select id="formatDocType"><option>函</option><option>開會通知單</option><option>書函</option><option>公告</option><option>令</option></select></label>
-              </div>
-              <div class="inline-fields">
-                <label>速別<select id="formatPriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
-                <label>密等<select id="formatSecurity"><option>普通</option><option>密</option><option>機密</option><option>極機密</option></select></label>
-              </div>
-              <label>機關代碼<input id="formatAgencyCode" value="A63000000J" /></label>
-              <label>受文者<input id="formatRecipient" value="臺北市政府社會局" /></label>
-              <label>主旨<textarea id="formatSubject" rows="3">檢送本公司日間照顧中心設立許可補正資料，請查照。</textarea></label>
-              <div class="form-actions">
-                <button class="secondary-button" id="formatLookupAgencyBtn" type="button">查詢機關代碼</button>
-                <button class="secondary-button" id="formatSaveTemplateBtn" type="button">儲存格式範本</button>
-                <button class="secondary-button" id="formatExportBtn" type="button">匯出格式 JSON</button>
-              </div>
-            </section>
-
-            <aside class="panel">
-              <div class="panel-heading">
-                <h3>格式檢核結果</h3>
-                <span class="status-pill" id="formatStatus">待檢核</span>
-              </div>
-              <div class="check-list" id="formatCheckList"></div>
-            </aside>
-          </div>
-
-          <div class="format-workbench">
-            <section class="panel">
-              <div class="panel-heading">
-                <h3>附件清冊</h3>
-                <button class="text-button" id="formatAddAttachmentBtn" type="button">新增附件</button>
-              </div>
-              <form class="compact-form" id="formatAttachmentForm">
-                <label>附件名稱<input id="formatAttachmentName" value="設立許可補正資料.pdf" /></label>
-                <label>頁數<input id="formatAttachmentPages" type="number" min="1" value="12" /></label>
-                <label>檔案格式<select id="formatAttachmentType"><option>PDF</option><option>XML</option><option>XLSX</option><option>DOCX</option><option>ZIP</option></select></label>
-              </form>
-              <div class="format-attachment-list" id="formatAttachmentList"></div>
-            </section>
-
-            <section class="panel">
-              <div class="panel-heading">
-                <h3>機關代碼查詢</h3>
-                <button class="text-button" id="formatClearAgencyBtn" type="button">清除結果</button>
-              </div>
-              <form class="compact-form" id="formatAgencyForm">
-                <label>機關名稱或代碼<input id="formatAgencyQuery" value="臺北市政府社會局" /></label>
-                <button class="primary-button" type="submit">查詢</button>
-              </form>
-              <div class="address-results" id="formatAgencyResults"></div>
-            </section>
-
-            <section class="panel">
-              <div class="panel-heading">
-                <h3>格式操作紀錄</h3>
-                <button class="text-button" id="formatClearLogBtn" type="button">清除畫面紀錄</button>
-              </div>
-              <div class="timeline" id="formatAuditLog"></div>
-            </section>
-          </div>
         </section>
 
         <section class="view" id="workflow">

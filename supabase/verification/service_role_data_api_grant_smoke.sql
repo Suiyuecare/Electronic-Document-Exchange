@@ -65,6 +65,8 @@ begin
       ('official_document_editor_revisions', 'SI'),
       ('official_document_editor_storage_jobs', 'SIU'),
       ('official_document_files', 'SI'),
+      ('official_document_number_counters', 'SIU'),
+      ('official_document_number_allocations', 'SI'),
       ('official_document_stamp_positions', 'SIUD'),
       ('official_document_stamp_requests', 'SIU'),
       ('official_document_text_overlays', 'SID'),
@@ -174,6 +176,7 @@ begin
           ('official_document_dispatch_records'), ('official_document_editor_assets'),
           ('official_document_editor_storage_jobs'),
           ('official_document_editor_revisions'), ('official_document_files'),
+          ('official_document_number_counters'), ('official_document_number_allocations'),
           ('official_document_stamp_positions'), ('official_document_stamp_requests'),
           ('official_document_text_overlays'), ('official_documents'),
           ('official_workflow_delegations'), ('pdf_versions'), ('permissions'),
@@ -267,7 +270,12 @@ begin
       ('public.edoc_revalidate_finance_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
       ('public.edoc_revoke_official_workflow_delegation(text,text)'),
       ('public.edoc_set_current_company_seal_file(text,text,text,text)'),
-      ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)')
+      ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)'),
+      ('public.edoc_number_safe_metadata(text)'),
+      ('public.edoc_allocate_official_number()'),
+      ('public.edoc_record_official_number()'),
+      ('public.edoc_guard_official_number()'),
+      ('public.edoc_guard_number_allocation()')
     ) allowed(signature)
   loop
     v_oid := pg_catalog.to_regprocedure(v_signature);
@@ -317,12 +325,48 @@ begin
         ('public.edoc_revalidate_finance_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
         ('public.edoc_revoke_official_workflow_delegation(text,text)'),
         ('public.edoc_set_current_company_seal_file(text,text,text,text)'),
-        ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)')
+        ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)'),
+        ('public.edoc_number_safe_metadata(text)'),
+        ('public.edoc_allocate_official_number()'),
+        ('public.edoc_record_official_number()'),
+        ('public.edoc_guard_official_number()'),
+        ('public.edoc_guard_number_allocation()')
       ) allowed(signature)
     );
   if v_unexpected <> 0 then
     raise exception 'service_role_unexpected_public_function_grant:%', v_unexpected;
   end if;
+
+  -- These are exact invoker helpers, not new privileged RPC exceptions.
+  -- Keep owner, empty search path and browser denial explicit for all six.
+  for v_signature in
+    select signature from (values
+      ('public.edoc_number_safe_metadata(text)'),
+      ('public.edoc_allocate_official_number()'),
+      ('public.edoc_record_official_number()'),
+      ('public.edoc_guard_official_number()'),
+      ('public.edoc_guard_number_allocation()'),
+      ('edoc_private.is_electronic_compose(public.official_documents)')
+    ) allowed(signature)
+  loop
+    v_oid := pg_catalog.to_regprocedure(v_signature);
+    if v_oid is null
+       or not exists (
+         select 1 from pg_catalog.pg_proc procedure_row
+         where procedure_row.oid = v_oid
+           and pg_catalog.pg_get_userbyid(procedure_row.proowner) = 'postgres'
+           and not procedure_row.prosecdef
+           and exists (
+             select 1 from pg_catalog.unnest(procedure_row.proconfig) config(value)
+             where config.value in ('search_path=', 'search_path=""')
+           )
+       )
+       or not pg_catalog.has_function_privilege('service_role', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('anon', v_oid, 'EXECUTE')
+       or pg_catalog.has_function_privilege('authenticated', v_oid, 'EXECUTE') then
+      raise exception 'service_role_compose_helper_security_mismatch:%', v_signature;
+    end if;
+  end loop;
 
   if not pg_catalog.has_schema_privilege('service_role', 'edoc_private', 'USAGE')
      or not pg_catalog.has_function_privilege(
@@ -339,7 +383,10 @@ begin
     on namespace_row.oid = procedure_row.pronamespace
   where namespace_row.nspname = 'edoc_private'
     and pg_catalog.has_function_privilege('service_role', procedure_row.oid, 'EXECUTE')
-    and procedure_row.oid <> 'edoc_private.audit_log_hash_payload(text,text,text,text,text,text,text,text,text,text)'::pg_catalog.regprocedure;
+    and procedure_row.oid not in (
+      'edoc_private.audit_log_hash_payload(text,text,text,text,text,text,text,text,text,text)'::pg_catalog.regprocedure,
+      'edoc_private.is_electronic_compose(public.official_documents)'::pg_catalog.regprocedure
+    );
   if v_unexpected <> 0 then
     raise exception 'service_role_unexpected_private_function_grant:%', v_unexpected;
   end if;

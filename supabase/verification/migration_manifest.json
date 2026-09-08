@@ -56,6 +56,8 @@
     "20260831102000_add_user_company_name_cache.sql",
     "20260907130400_retire_unmapped_legacy_company_projection.sql",
     "20260907131606_edoc_private_monitoring_schedule.sql",
-    "20260907132959_edoc_monitor_secure_http_transport.sql"
+    "20260907132959_edoc_monitor_secure_http_transport.sql",
+    "20260908135730_immutable_official_document_numbering.sql",
+    "20260908135911_compose_electronic_output_dispatch_date.sql"
   ]
 }

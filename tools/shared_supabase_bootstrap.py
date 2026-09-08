@@ -238,6 +238,11 @@ grant usage on schema edoc to edoc_backend;
 grant usage on schema edoc_private to edoc_backend;
 
 -- edoc_backend does not bypass RLS.  Table grants from the immutable chain
+-- The compose insert guard is SECURITY INVOKER and only needs this read-free
+-- predicate. Never expose the completion/mutation helpers to backend callers.
+grant execute on function edoc_private.is_electronic_compose(edoc.official_documents) to edoc_backend;
+
+-- edoc_backend does not bypass RLS.  Table grants from the immutable chain
 -- decide which SQL commands are allowed; these policies permit only those
 -- already-granted commands to pass the row-security boundary.
 do $backend_rls$

@@ -912,6 +912,8 @@ let draftPreviewExpanded = false;
 let draftPreviewRenderTimer = null;
 let activeComposeStep = "fill";
 let currentComposeDraftId = "";
+let composeDraftRequestId = "";
+let composeSaveInFlight = null;
 let composeAutosaveRestoredForIdentity = "";
 let composeSaveState = {
   tone: "idle",
@@ -3118,9 +3120,7 @@ const integratedMajorPageGroups = Object.freeze({
   dashboard: [
     ["notifications", "全部待辦與通知", true]
   ],
-  compose: [
-    ["format", "文書與格式檢核", false]
-  ],
+  compose: [],
   electronicSeal: [],
   approvalLog: [
     ["reports", "簽核統計", false]
@@ -3504,7 +3504,7 @@ function officialDocumentTodoCard(item = {}) {
     title: item.title || item.subject || item.id,
     meta: `${officialStatusLabel(status)} · ${item.current_step_name || item.current_step || "未送出"}`,
     body: status === "pending_general_affairs_dispatch"
-      ? "已用印完成，請總務下載已用印版本、寄發並回填證明。"
+      ? (officialIsElectronicCompose(item) ? "電子公文已核准，請總務下載核准版本、寄發並回填證明。" : "已用印完成，請總務下載已用印版本、寄發並回填證明。")
       : status === "returned_to_applicant_for_send"
         ? "已用印完成，請申請人自行寄送並回填紀錄。"
         : status === "stamping_failed"
@@ -4654,6 +4654,13 @@ function renderComposeApprovalRoute() {
     names: ["#composeApprovalRouteName", "#composeApprovalRouteConfirmName"],
     flows: ["#composeApprovalRoutePreview", "#composeApprovalFlow"],
     outcomes: ["#composeApprovalRouteOutcome", "#composeApprovalRouteConfirmOutcome"]
+  });
+  ["#composeApprovalRouteOutcome", "#composeApprovalRouteConfirmOutcome"].forEach((selector) => {
+    const outcome = document.querySelector(selector);
+    if (outcome) outcome.textContent = !selection.approvalRouteCode ? ""
+      : composeOutputMode() === "electronic"
+        ? "依上述流程核准後提供不含大小章的電子公文，由總務辦理寄發；不啟用政府正式交換。"
+        : "依上述流程核准後用印，由總務辦理實體公文寄發，申請人收件確認。";
   });
   renderWorkflowReadinessContext("compose");
   return selection;
@@ -6969,15 +6976,54 @@ function syncComposeCopyRecipientsDefault(force = false) {
   return input.value;
 }
 
+function syncComposeAttachmentDescription() {
+  const input = document.querySelector("#attachments");
+  const description = document.querySelector("#attachmentDetails");
+  if (!input || !description) return;
+  const fileNames = [...(input.files || [])].map((file) => file.name).join("、");
+  const previousDefault = description.dataset.attachmentFileNames || "";
+  // Only replace our previous default; a user's edited description belongs to them.
+  if (description.dataset.attachmentTextEdited !== "true"
+      && (!description.value.trim() || description.value === previousDefault)) {
+    description.value = fileNames;
+  }
+  description.dataset.attachmentFileNames = fileNames;
+}
+
+function composeTodayDate(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(now);
+  return ["year", "month", "day"].map((key) => parts.find((part) => part.type === key).value).join("-");
+}
+
+function isValidComposeDispatchDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function composeOutputMode() {
+  return document.querySelector("#composeOutputMode")?.value === "electronic" ? "electronic" : "physical";
+}
+
+function ensureComposeDraftRequestId() {
+  if (!composeDraftRequestId) composeDraftRequestId = `OD-${crypto.randomUUID()}`;
+  return composeDraftRequestId;
+}
+
 function composePayload() {
-  const selectedLargeSealType = document.querySelector("#largeSealType")?.value || "無";
-  const selectedSmallSealType = document.querySelector("#smallSealType")?.value || "無";
+  const outputMode = composeOutputMode();
+  const selectedLargeSealType = outputMode === "electronic" ? "無" : document.querySelector("#largeSealType")?.value || "無";
+  const selectedSmallSealType = outputMode === "electronic" ? "無" : document.querySelector("#smallSealType")?.value || "無";
   const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
   const companyName = document.querySelector("#composeCompanySelect")?.value || companyRegistry[0]?.name || "歲悅長照股份有限公司";
   const copyInput = document.querySelector("#copyRecipients");
   return {
     companyName,
     no: document.querySelector("#dispatchNo")?.value.trim() || "",
+    dispatchDate: document.querySelector("#dispatchDate")?.value || composeTodayDate(),
+    outputMode,
     type: document.querySelector("#docType")?.value || "函",
     priority: document.querySelector("#priority")?.value || "普通件",
     ...approvalSelection,
@@ -6989,7 +7035,7 @@ function composePayload() {
     contactPhone: document.querySelector("#contactPhone")?.value.trim() || composeDefaultContactPhone,
     contactFax: document.querySelector("#contactFax")?.value.trim() || composeDefaultContactFax,
     contactEmail: document.querySelector("#contactEmail")?.value.trim() || authState?.user?.email || "",
-    deliveryMode: "seal_or_manual_dispatch",
+    deliveryMode: outputMode === "electronic" ? "electronic_document" : "seal_or_manual_dispatch",
     largeSealType: selectedLargeSealType,
     smallSealType: selectedSmallSealType,
     sealPlacements: {
@@ -7009,9 +7055,16 @@ function syncComposeElectronicExchangeMode(_changedSelect = null) {
   if (!largeSelect || !smallSelect) return false;
   if (!composeSealTypes.includes(largeSelect.value)) largeSelect.value = "一般章";
   if (!composeSealTypes.includes(smallSelect.value)) smallSelect.value = "無";
+  const electronic = composeOutputMode() === "electronic";
+  const fields = document.querySelector("#composeSealFields");
+  if (fields) fields.hidden = electronic;
+  largeSelect.disabled = electronic;
+  smallSelect.disabled = electronic;
   const hint = document.querySelector("#composeSealModeHint");
   if (hint) {
-    hint.textContent = "所有發文均須依文件類型完成用印簽核；政府電子公文正式交換目前維持停用。";
+    hint.textContent = electronic
+      ? "電子公文不放大小章，仍須完成簽核；政府正式電子交換維持停用。"
+      : "實體公文可選擇大小章與位置，簽核通過後由系統用印。";
     hint.dataset.validity = "";
   }
   return false;
@@ -7023,6 +7076,8 @@ const composeAutosaveSelectors = [
   "#priority",
   "#composeApprovalCategorySelect",
   "#dispatchNo",
+  "#dispatchDate",
+  "#composeOutputMode",
   "#recipient",
   "#copyRecipients",
   "#documentPurpose",
@@ -7057,6 +7112,7 @@ function composeRawSnapshot() {
       small: { ...composeSealPlacements.small }
     },
     currentComposeDraftId,
+    draftRequestId: composeDraftRequestId,
     role: activeRole()
   };
 }
@@ -7177,6 +7233,10 @@ function restoreComposeAutosave() {
     const safeValue = value.slice(0, element.tagName === "TEXTAREA" ? 50000 : 2000);
     if (element.tagName === "SELECT" && ![...element.options].some((option) => option.value === safeValue)) return;
     element.value = safeValue;
+    if (selector === "#attachmentDetails") {
+      delete element.dataset.attachmentFileNames;
+      element.dataset.attachmentTextEdited = "true";
+    }
     if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#copyRecipients"].includes(selector)) {
       element.dataset.autoDefault = "false";
     }
@@ -7191,6 +7251,8 @@ function restoreComposeAutosave() {
   currentComposeDraftId = dispatchDocs.some((item) => item.id === snapshot.currentComposeDraftId && item.status === "草稿")
     ? snapshot.currentComposeDraftId
     : "";
+  composeDraftRequestId = /^OD-[0-9a-f-]{36}$/i.test(snapshot.draftRequestId || "") ? snapshot.draftRequestId : "";
+  syncComposeElectronicExchangeMode();
   draftConfirmed = false;
   draftSigned = false;
   activeComposeStep = "fill";
@@ -7333,10 +7395,9 @@ function draftSubjectSource(text) {
 }
 
 function draftAttachmentText(data) {
-  const fileText = data.attachments?.length ? data.attachments.join("、") : "";
-  const detailText = data.attachmentDetails?.trim() || "";
-  if (fileText && detailText) return `${fileText}；${detailText}`;
-  return detailText || fileText || "無";
+  // The uploaded files and the editable printed description are independent.
+  if (data.attachmentDetails != null) return String(data.attachmentDetails).trim() || "無";
+  return data.attachments?.length ? data.attachments.join("、") : "無";
 }
 
 function ensureDraftMeasurePreview() {
@@ -7563,6 +7624,7 @@ function normalizeSealPlacementPages(pageCount) {
 }
 
 function renderDraftSealLayer(data, pageNumber) {
+  if (data.outputMode === "electronic") return "";
   return `
     <footer class="draft-footer">
       ${composeSealPlacements.large.page === pageNumber ? renderDraftSealPlaceholder("large", "公司大章", data.largeSealType, "large") : ""}
@@ -7768,8 +7830,8 @@ function clearAiDraft() {
 }
 
 function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, attachmentsText) {
-  const today = new Date();
-  const rocDate = `中華民國${today.getFullYear() - 1911}年${today.getMonth() + 1}月${today.getDate()}日`;
+  const [year, month, day] = (isValidComposeDispatchDate(data.dispatchDate) ? data.dispatchDate : composeTodayDate()).split("-").map(Number);
+  const rocDate = `中華民國${year - 1911}年${month}月${day}日`;
   const isFirstPage = pageNumber === 1;
   const isLastPage = pageNumber === totalPages;
   const pageContent = typeof content === "string"
@@ -7813,7 +7875,7 @@ function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, atta
         <section class="draft-recipient-line"><span>受文者：</span><strong>${escapeDraftHtml(data.recipient)}</strong></section>
         <section class="draft-official-meta">
           <div><span>發文日期：</span><strong>${escapeDraftHtml(rocDate)}</strong></div>
-          <div><span>發文字號：</span><strong>${escapeDraftHtml(data.no || "系統產生中")}</strong></div>
+          <div><span>發文字號：</span><strong>${escapeDraftHtml(data.no || "儲存時自動配號")}</strong></div>
           <div><span>速別：</span><strong>${escapeDraftHtml(data.priority)}</strong></div>
           <div><span>密等及解密條件或保密期限：</span><strong aria-hidden="true">　</strong></div>
           <div><span>附件：</span><strong>${escapeDraftHtml(attachmentsText)}</strong></div>
@@ -7969,8 +8031,9 @@ function composeStepIndex(key = activeComposeStep) {
 }
 
 function composeInputState() {
-  const largeSealType = document.querySelector("#largeSealType")?.value || "無";
-  const smallSealType = document.querySelector("#smallSealType")?.value || "無";
+  const outputMode = composeOutputMode();
+  const largeSealType = outputMode === "electronic" ? "無" : document.querySelector("#largeSealType")?.value || "無";
+  const smallSealType = outputMode === "electronic" ? "無" : document.querySelector("#smallSealType")?.value || "無";
   const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
   return {
     ...approvalSelection,
@@ -7979,6 +8042,7 @@ function composeInputState() {
     body: document.querySelector("#bodyText")?.value.trim() || "",
     attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name),
     attachmentDetails: document.querySelector("#attachmentDetails")?.value.trim() || "",
+    outputMode,
     largeSealType,
     smallSealType
   };
@@ -8034,13 +8098,13 @@ function composeReadinessChecks() {
     },
     {
       key: "seal",
-      label: "用印",
+      label: "公文產出",
       target: "seal",
       required: true,
-      done: sealTypes.length > 0,
-      detail: sealTypes.length
+      done: state.outputMode === "electronic" || sealTypes.length > 0,
+      detail: state.outputMode === "electronic" ? "電子公文不放大小章，仍依所選類型完成簽核。" : sealTypes.length
         ? `已選 ${sealTypes.join("、")}，可在下方預覽拖曳位置。`
-        : "所有發文都必須選擇印章並標示用印位置。"
+        : "實體公文請選擇印章並標示用印位置。"
     },
     {
       key: "confirm",
@@ -8061,6 +8125,7 @@ function renderComposeFieldHints() {
   [
     ["#composeApprovalCategorySelect", "#composeApprovalCategoryHint"],
     ["#dispatchNo", null],
+    ["#dispatchDate", null],
     ["#recipient", "#recipientHint"],
     ["#subject", "#subjectHint"],
     ["#bodyText", "#bodyTextHint"],
@@ -8152,6 +8217,7 @@ function composeValidationData() {
   const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
   return {
     ...approvalSelection,
+    dispatchDate: document.querySelector("#dispatchDate")?.value || "",
     recipient: document.querySelector("#recipient")?.value.trim() || "",
     subject: document.querySelector("#subject")?.value.trim() || "",
     body: document.querySelector("#bodyText")?.value.trim() || "",
@@ -8170,7 +8236,6 @@ function isValidComposeContactPhone(value = "") {
 function validateComposeStep(step = activeComposeStep) {
   if (step !== "fill") return true;
   const data = composeValidationData();
-  const dispatchNo = assignNextDispatchNo(false);
   const attachmentFiles = [...(document.querySelector("#attachments")?.files || [])];
   const validations = [
     {
@@ -8181,11 +8246,11 @@ function validateComposeStep(step = activeComposeStep) {
       ok: data.approvalRouteCode ? `已自動判定 ${data.approvalRouteName}。` : ""
     },
     {
-      selector: "#dispatchNo",
+      selector: "#dispatchDate",
       hint: null,
-      valid: Boolean(dispatchNo),
-      invalid: "請先產生發文字號。",
-      ok: "發文字號已建立。"
+      valid: isValidComposeDispatchDate(data.dispatchDate),
+      invalid: "請填寫有效的發文日期。",
+      ok: "發文日期已填寫。"
     },
     {
       selector: "#recipient",
@@ -8239,8 +8304,10 @@ function validateComposeStep(step = activeComposeStep) {
     {
       selector: "#attachmentDetails",
       hint: "#attachmentDetailsHint",
-      valid: !attachmentFiles.length || Boolean(data.attachmentDetails),
-      invalid: "已選附件檔案時，請填寫附件文字內容或清冊。",
+      valid: data.attachmentDetails.length <= 5000 && (!attachmentFiles.length || Boolean(data.attachmentDetails)),
+      invalid: data.attachmentDetails.length > 5000
+        ? "附件文字內容最多 5,000 字，請縮短說明後再儲存或送出。"
+        : "已選附件檔案時，請填寫附件文字內容或清冊。",
       ok: attachmentFiles.length || data.attachmentDetails ? "附件資訊已建立。" : "無附件可先送出。"
     }
   ];
@@ -8256,6 +8323,10 @@ function validateComposeStep(step = activeComposeStep) {
 
 function setComposeStep(key, options = {}) {
   if (key === "preview") key = "fill";
+  if (key === "confirm" && activeComposeStep === "fill" && !options.force) {
+    void advanceComposeStep();
+    return;
+  }
   const steps = composeStepKeys();
   if (!steps.includes(key)) return;
   const currentIndex = composeStepIndex();
@@ -8266,12 +8337,14 @@ function setComposeStep(key, options = {}) {
   renderComposeStepper();
 }
 
-function advanceComposeStep() {
+async function advanceComposeStep() {
   const steps = composeStepKeys();
   const currentIndex = composeStepIndex();
   const current = steps[currentIndex];
   if (!validateComposeStep(current)) return;
   if (current === "fill") {
+    const saved = await saveComposeDraft();
+    if (!saved?.officialDocumentId || !saved.no) return;
     draftPreviewExpanded = true;
     setComposeStep("confirm", { force: true });
     return;
@@ -8357,34 +8430,11 @@ function renderComposeStepper() {
   });
 }
 
-function rocDateSerial(date = new Date()) {
-  const rocYear = date.getFullYear() - 1911;
-  return `${rocYear}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function nextDispatchNo() {
-  const dateSerial = rocDateSerial();
-  const prefix = `歲悅字第${dateSerial}`;
-  const numbers = [
-    ...dispatchDocs.map((doc) => doc.no),
-    ...archiveRecords.map((record) => record.docNo),
-    document.querySelector("#dispatchNo")?.value,
-    document.querySelector("#formatDocNo")?.value
-  ]
-    .filter(Boolean)
-    .map((value) => {
-      const match = String(value).match(new RegExp(`^${prefix}(\\d{3})號$`));
-      return match ? Number(match[1]) : 0;
-    });
-  const next = Math.max(0, ...numbers) + 1;
-  return `${prefix}${String(next).padStart(3, "0")}號`;
-}
-
-function assignNextDispatchNo(force = false) {
+function assignNextDispatchNo(_force = false) {
   const input = document.querySelector("#dispatchNo");
   if (!input) return "";
-  if (force || !input.value.trim()) input.value = nextDispatchNo();
-  renderDraftPreview();
+  input.readOnly = true;
+  input.placeholder = "儲存時自動配號";
   return input.value.trim();
 }
 
@@ -8635,7 +8685,8 @@ function officialApplicationSummary(item = {}) {
     attachmentCount: summary.attachment_count ?? attachments.length,
     approvalStepCount: summary.approval_step_count ?? (item.approval_steps || []).length,
     downloadCount: summary.download_count ?? downloadLogs.length,
-    hasStampedPdf: summary.has_stamped_pdf ?? versions.some((file) => file.file_type === "stamped_pdf")
+    hasStampedPdf: summary.has_stamped_pdf ?? versions.some((file) => file.file_type === "stamped_pdf"),
+    hasFinalPdf: summary.has_final_pdf ?? Boolean(latestOfficialStampedFile(item))
   };
 }
 
@@ -8710,18 +8761,19 @@ function officialDispatchReadinessTask(item = {}) {
     };
   }
   if (status === "pending_general_affairs_dispatch") {
+    const missingFinalFile = officialIsElectronicCompose(item) ? "缺已核准電子公文" : "缺已用印 PDF";
     const missing = [
-      summary.hasStampedPdf ? "" : "缺已用印 PDF",
+      summary.hasFinalPdf ? "" : missingFinalFile,
       officialDispatchMethodNeedsExternalNumber(method) && !externalNo ? "缺發文字號" : "",
       officialDispatchMethodNeedsProof(method) && !proofFileId ? "待上傳寄發證明" : ""
     ].filter(Boolean);
     return {
       ...base,
-      severity: missing.includes("缺已用印 PDF") ? "issue" : "wait",
+      severity: missing.includes(missingFinalFile) ? "issue" : "wait",
       statusLabel: "等待總務寄發",
       owner: record.dispatch_owner_name || "總務",
       action: "完成發文",
-      body: "已用印版本應由總務下載後正式寄發，並回填寄發資料與證明。",
+      body: `${officialIsElectronicCompose(item) ? "已核准電子公文" : "已用印版本"}應由總務下載後寄發，並回填寄發資料與證明。`,
       evidence: missing.join("、") || "可回填寄發資訊。",
       sort: 1
     };
@@ -8748,7 +8800,7 @@ function officialDispatchReadinessTask(item = {}) {
       statusLabel: "等待申請人確認",
       owner: item.applicant_name || "申請人",
       action: "申請人確認",
-      body: "寄發階段已完成，申請人需回到申請單確認已用印版本與寄發紀錄後結案。",
+      body: `寄發階段已完成，申請人需回到申請單確認${officialIsElectronicCompose(item) ? "已核准電子公文" : "已用印版本"}與寄發紀錄後結案。`,
       evidence: missing.join("、") || "寄發資料已完成，待申請人確認。",
       sort: missing.length ? 1.5 : 3
     };
@@ -8915,6 +8967,16 @@ function officialComposeMetadata(item = {}) {
   return { ...extra, ...metadata, extra };
 }
 
+function officialComposeAttachmentDescription(item, metadata = officialComposeMetadata(item)) {
+  const description = item.attachment_details ?? item.attachmentDetails
+    ?? metadata.extra?.attachment_details ?? metadata.extra?.attachmentDetails
+    ?? metadata.attachment_details ?? metadata.attachmentDetails
+    ?? item.attachments_summary ?? metadata.attachments ?? "";
+  if (!Array.isArray(description)) return String(description);
+  return description.map((file) => typeof file === "string" ? file
+    : file?.file_name || file?.fileName || file?.name || file?.title || "").filter(Boolean).join("、");
+}
+
 function composeSealTypeFromCategory(category = "") {
   return {
     general_seal: "一般章",
@@ -8980,7 +9042,9 @@ function beginComposeOfficialCorrection(item) {
     "#composeCompanySelect": metadata.company_name || item.company_name || authState?.user?.company_name || "",
     "#docType": metadata.document_type || "函",
     "#priority": metadata.priority || "普通件",
-    "#dispatchNo": metadata.dispatch_no || "",
+    "#dispatchNo": item.dispatch_no || metadata.dispatch_no || "",
+    "#dispatchDate": item.dispatch_date || metadata.dispatch_date || composeTodayDate(),
+    "#composeOutputMode": item.output_mode || "physical",
     "#recipient": item.recipient || "",
     "#copyRecipients": metadata.copy_recipients || metadata.copyRecipients || metadata.company_name || item.company_name || authState?.user?.company_name || "",
     "#documentPurpose": metadata.purpose || item.request_reason || "",
@@ -8993,9 +9057,16 @@ function beginComposeOfficialCorrection(item) {
     "#smallSealType": smallSealType,
     "#subject": item.subject || item.title || "",
     "#bodyText": item.description || "",
-    "#attachmentDetails": metadata.attachment_details || item.attachments_summary || ""
+    "#attachmentDetails": officialComposeAttachmentDescription(item, metadata)
   };
   Object.entries(values).forEach(([selector, value]) => setComposeDraftField(selector, value));
+  composeDraftRequestId = item.id;
+  syncComposeElectronicExchangeMode();
+  const attachmentDescription = document.querySelector("#attachmentDetails");
+  if (attachmentDescription) {
+    delete attachmentDescription.dataset.attachmentFileNames;
+    attachmentDescription.dataset.attachmentTextEdited = "true";
+  }
   const copyInput = document.querySelector("#copyRecipients");
   if (copyInput) copyInput.dataset.defaultCompany = values["#composeCompanySelect"];
   syncComposeCopyRecipientsDefault(false);
@@ -9010,6 +9081,8 @@ function beginComposeOfficialCorrection(item) {
   }
   Object.assign(localDoc, {
     no: document.querySelector("#dispatchNo")?.value || metadata.dispatch_no || item.id,
+    dispatchDate: values["#dispatchDate"],
+    outputMode: values["#composeOutputMode"],
     exchangeNo: item.exchange_id || "尚未交換",
     companyName: values["#composeCompanySelect"],
     type: values["#docType"],
@@ -9025,6 +9098,7 @@ function beginComposeOfficialCorrection(item) {
     requiresResubmit: item.current_status === "rejected",
     owner: item.applicant_name || authState?.user?.name || "",
     attachments: officialApplicationFiles(item).map((file) => file.file_name).filter(Boolean),
+    attachmentDetails: values["#attachmentDetails"],
     checks: { format: false, recipient: Boolean(item.recipient), attachments: true, certificate: true, package: false }
   });
   currentComposeDraftId = localDoc.id;
@@ -9379,9 +9453,21 @@ function renderOfficialFiles(files = [], documentId = "") {
   `).join("")}</div>`;
 }
 
+function officialIsElectronicCompose(item = {}) {
+  return item.output_mode === "electronic" && item.source_type === "blank_editor"
+    && item.document_type === "outgoing_official_document"
+    && (item.requires_stamp === false || item.requires_stamp === 0);
+}
+
 function latestOfficialStampedFile(item = {}) {
-  const stampedFiles = officialApplicationFiles(item).filter((file) => file.file_type === "stamped_pdf");
+  const files = officialApplicationFiles(item);
   const lockedFileId = String(item.stamped_file_id || item.stampedFileId || "");
+  if (officialIsElectronicCompose(item)) {
+    // Never substitute a newer, unapproved draft for the approved electronic file.
+    return files.find((file) => lockedFileId && String(file.id || "") === lockedFileId
+      && file.file_type === "generated_pdf") || null;
+  }
+  const stampedFiles = files.filter((file) => file.file_type === "stamped_pdf");
   if (lockedFileId) {
     const lockedFile = stampedFiles.find((file) => String(file.id || "") === lockedFileId);
     if (lockedFile) return lockedFile;
@@ -9395,14 +9481,16 @@ function latestOfficialStampedFile(item = {}) {
 
 function renderOfficialFinalStampedDownload(item = {}) {
   const file = latestOfficialStampedFile(item);
+  const electronic = officialIsElectronicCompose(item);
+  const label = electronic ? "已核准電子公文" : "最終用印檔";
   const documentId = escapeDraftHtml(item.id || "");
   if (!file) {
     return `
       <section class="official-final-download pending" data-final-stamped-download>
         <div>
-          <span>最終用印檔</span>
+          <span>${label}</span>
           <strong>尚未產生</strong>
-          <p>完成用印後，申請人、流程中的簽核人與總務可依同一申請單權限在此下載。</p>
+          <p>${electronic ? "完成簽核" : "完成用印"}後，申請人、流程中的簽核人與總務可依同一申請單權限在此下載。</p>
         </div>
       </section>
     `;
@@ -9410,11 +9498,11 @@ function renderOfficialFinalStampedDownload(item = {}) {
   return `
     <section class="official-final-download ready" data-final-stamped-download>
       <div>
-        <span>最終用印檔</span>
-        <strong>${escapeDraftHtml(file.display_label || file.file_name || "已完成用印 PDF")}</strong>
+        <span>${label}</span>
+        <strong>${escapeDraftHtml(electronic ? file.file_name || "已核准電子公文 PDF" : file.display_label || file.file_name || "已完成用印 PDF")}</strong>
         <p>申請人、流程中的簽核人與總務可依同一申請單權限下載；此處提供最新鎖定版本。</p>
       </div>
-      <button class="primary-button" type="button" data-official-download="${escapeDraftHtml(file.id || "")}" data-document-id="${documentId}">下載最終用印 PDF</button>
+      <button class="primary-button" type="button" data-official-download="${escapeDraftHtml(file.id || "")}" data-document-id="${documentId}">${electronic ? "下載已核准電子公文" : "下載最終用印 PDF"}</button>
     </section>
   `;
 }
@@ -9456,7 +9544,7 @@ function renderOfficialApplicationSummary(item = {}) {
       <span>補充附件 <strong>${Number(summary.attachmentCount) || 0}</strong></span>
       <span>簽核節點 <strong>${Number(summary.approvalStepCount) || 0}</strong></span>
       <span>下載紀錄 <strong>${Number(summary.downloadCount) || 0}</strong></span>
-      <span>${summary.hasStampedPdf ? "已有已用印版本" : "尚未產生已用印版本"}</span>
+      <span>${officialIsElectronicCompose(item) ? (summary.hasFinalPdf ? "已有已核准電子公文" : "尚待簽核完成") : (summary.hasStampedPdf ? "已有已用印版本" : "尚未產生已用印版本")}</span>
     </div>
   `;
 }
@@ -9559,7 +9647,7 @@ function renderOfficialWorkflowDetail() {
         <div><dt>受文者</dt><dd>${escapeHtml(item.recipient || "未指定")}</dd></div>
         <div><dt>來源</dt><dd>${item.source_type === "uploaded_pdf" ? "上傳 PDF" : "空白公文撰寫"}</dd></div>
         <div><dt>用印原因</dt><dd>${escapeHtml(item.request_reason || "未填寫")}</dd></div>
-        <div><dt>文件版本</dt><dd>${summary.versionCount} 版${summary.hasStampedPdf ? " · 已用印" : ""}</dd></div>
+        <div><dt>文件版本</dt><dd>${summary.versionCount} 版${officialIsElectronicCompose(item) ? (summary.hasFinalPdf ? " · 電子公文已核准" : "") : (summary.hasStampedPdf ? " · 已用印" : "")}</dd></div>
         <div><dt>下載紀錄</dt><dd>${summary.downloadCount} 筆</dd></div>
       </div>
       ${renderOfficialApplicationSummary(item)}
@@ -11122,6 +11210,8 @@ function unsafeAttachmentsForDoc(doc) {
 function dispatchDocSnapshot(doc) {
   return {
     no: doc.no || "",
+    dispatchDate: doc.dispatchDate || "",
+    outputMode: doc.outputMode || "physical",
     companyName: doc.companyName || "",
     type: doc.type || "",
     priority: doc.priority || "",
@@ -11310,12 +11400,12 @@ function composeSealCategory(sealType) {
 async function createOfficialApplicationFromCompose(doc, data, options = {}) {
   const company = composeCompanyForOfficialApplication(data.companyName);
   if (!company?.id) throw new Error("登入帳號尚未連動 Finance 公司，請先聯絡管理員更新人員主檔。");
-  const requiresStamp = true;
+  const requiresStamp = data.outputMode !== "electronic";
   let sealId = "";
   let stampPositions = [];
   if (requiresStamp) {
     const primaryKind = data.largeSealType !== "無" ? "large" : data.smallSealType !== "無" ? "small" : "";
-    if (!primaryKind && options.submit !== false) throw new Error("所有發文都必須選擇要使用的印章。");
+    if (!primaryKind && options.submit !== false) throw new Error("實體公文請選擇要使用的印章。");
     if (primaryKind) {
       const sealType = primaryKind === "large" ? data.largeSealType : data.smallSealType;
       const category = composeSealCategory(sealType);
@@ -11348,18 +11438,21 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
     }
   }
   const payload = {
+    id: doc.officialDocumentId || ensureComposeDraftRequestId(),
     source_type: "blank_editor",
     document_type: "outgoing_official_document",
     company_id: company.id,
     seal_id: sealId || undefined,
     requires_stamp: requiresStamp,
+    output_mode: data.outputMode,
+    dispatch_date: data.dispatchDate,
     document_category: data.documentCategory,
     document_category_group: data.documentCategoryGroup,
     approval_route_code: data.approvalRouteCode,
     approval_route_name: data.approvalRouteName,
     approval_flow_nodes: [...data.approvalFlowNodes],
     workflow_template_key: data.workflowTemplateKey,
-    dispatch_method: "electronic_official_document_by_general_affairs",
+    dispatch_method: data.outputMode === "electronic" ? "electronic_official_document_by_general_affairs" : "physical_mail_by_general_affairs",
     title: data.subject,
     subject: data.subject,
     description: data.body,
@@ -11367,13 +11460,14 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
     dispatch_unit: activeUnit(),
     handler_name: data.contactOwner,
     request_reason: data.purpose || "公文發文與用印申請",
-    attachments_summary: data.attachmentDetails || data.attachments.join("、"),
+    attachments_summary: data.attachmentDetails,
     stamp_position: stampPositions[0],
     stamp_positions: stampPositions,
     metadata: {
       source: "compose_form",
       legacy_document_id: doc.id,
-      dispatch_no: data.no,
+      dispatch_date: data.dispatchDate,
+      output_mode: data.outputMode,
       company_name: data.companyName,
       document_type: data.type,
       priority: data.priority,
@@ -11404,6 +11498,23 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
   let result = documentId
     ? await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`, { method: "PATCH", body: JSON.stringify(payload) })
     : await backendRequest("/official-documents", { method: "POST", body: JSON.stringify(payload) });
+  if (result.create_replayed) {
+    if (result.current_status !== "draft") {
+      throw new Error("這份公文已送簽，不能再以草稿覆寫；請從簽核紀錄查看目前狀態。");
+    }
+    doc.officialDocumentId = result.id;
+    // A timed-out create may already have committed. Preserve its number, but
+    // explicitly save any edits made since that request before reporting success.
+    result = await backendRequest(`/official-documents/${encodeURIComponent(result.id)}`, {
+      method: "PATCH", body: JSON.stringify(payload)
+    });
+  }
+  doc.officialDocumentId = result.id;
+  const assignedNo = result.dispatch_no || officialComposeMetadata(result).dispatch_no || "";
+  if (!assignedNo) throw new Error("後端尚未完成發文字號配號，請稍後重試；不會改用本機流水號。");
+  doc.no = assignedNo;
+  const numberInput = document.querySelector("#dispatchNo");
+  if (numberInput) numberInput.value = assignedNo;
   const attachments = [...(document.querySelector("#attachments")?.files || [])];
   if (attachments.length) {
     await uploadOfficialDocumentAttachments(result.id, attachments);
@@ -11425,6 +11536,19 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
 }
 
 async function createDispatchFromForm(status = "草稿") {
+  if (composeSaveInFlight) {
+    showToast("目前正在保存公文，請稍候。連續點擊不會重新配號。");
+    return null;
+  }
+  composeSaveInFlight = performCreateDispatchFromForm(status);
+  try {
+    return await composeSaveInFlight;
+  } finally {
+    composeSaveInFlight = null;
+  }
+}
+
+async function performCreateDispatchFromForm(status = "草稿") {
   const approvalSelection = approvalSelectionForSelect("#composeApprovalCategorySelect");
   if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) {
     setComposeFieldValidity("#composeApprovalCategorySelect", "#composeApprovalCategoryHint", false, "請選擇公文用印文件類型的文件細項。");
@@ -11438,9 +11562,15 @@ async function createDispatchFromForm(status = "草稿") {
   }
   if (status !== "草稿") draftSigned = true;
   const data = composePayload();
+  if (!isValidComposeDispatchDate(data.dispatchDate)) {
+    showToast("請填寫有效的發文日期。");
+    return null;
+  }
+  ensureComposeDraftRequestId();
+  writeComposeAutosave();
   const existingComposeDraft = dispatchDocs.find((item) => item.id === currentComposeDraftId && item.status === "草稿");
   const existingDoc = existingComposeDraft || null;
-  const no = existingDoc?.no || assignNextDispatchNo();
+  const no = existingDoc?.no || "";
   const attachmentManifest = [...new Set(["函稿本文.pdf", "附件清冊.xml", ...data.attachments])];
   const doc = existingDoc || {
     id: `OUT-${Date.now()}`,
@@ -11449,6 +11579,8 @@ async function createDispatchFromForm(status = "草稿") {
   };
   Object.assign(doc, {
     companyName: data.companyName,
+    dispatchDate: data.dispatchDate,
+    outputMode: data.outputMode,
     type: data.type,
     priority: data.priority,
     documentCategory: data.documentCategory,
@@ -11507,11 +11639,14 @@ async function createDispatchFromForm(status = "草稿") {
     if (officialIndex >= 0) officialWorkflowItems[officialIndex] = officialApplication;
     else officialWorkflowItems.unshift(officialApplication);
   } catch (error) {
-    if (!existingDoc) {
+    if (!existingDoc && !doc.officialDocumentId) {
       const insertedIndex = dispatchDocs.indexOf(doc);
       if (insertedIndex >= 0) dispatchDocs.splice(insertedIndex, 1);
     }
-    else doc.status = "草稿";
+    else {
+      doc.status = "草稿";
+      currentComposeDraftId = doc.id;
+    }
     draftSigned = false;
     composeSaveState = {
       tone: "error",
@@ -11526,8 +11661,10 @@ async function createDispatchFromForm(status = "草稿") {
   if (status === "草稿") currentComposeDraftId = doc.id;
   if (status !== "草稿") {
     currentComposeDraftId = "";
+    composeDraftRequestId = "";
     clearComposeAutosave();
-    assignNextDispatchNo(true);
+    const numberInput = document.querySelector("#dispatchNo");
+    if (numberInput) numberInput.value = "";
     setDraftConfirmed(false);
     draftSigned = false;
   } else {
@@ -11573,6 +11710,7 @@ async function saveComposeDraft() {
       renderComposeStepper();
       showToast(existingDraft ? `發文草稿已更新：${doc.no}` : `發文草稿已儲存：${doc.no}`);
     }
+    return doc;
   } catch (error) {
     writeComposeAutosave();
     composeSaveState = {
@@ -15497,7 +15635,7 @@ function validateSettingsAgency() {
   const data = settingsPayload();
   const valid = /^[A-Z]\d{8,}[A-Z]?$/.test(data.agencyCode);
   settingsState.agencyVerified = valid;
-  document.querySelector("#formatAgencyCode").value = data.agencyCode;
+  setFieldValue("#formatAgencyCode", data.agencyCode);
   renderFormatChecks();
   renderSettingsStatus();
   addSettingsAudit("檢核機關代碼", valid ? `${data.agencyName}（${data.agencyCode}）格式通過。` : `${data.agencyCode} 格式不符，需補正。`);
@@ -19378,6 +19516,16 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     finance_company_master_read_only: "公司主檔請只在會計系統修改，eDoc 會自動同步。",
     official_document_company_forbidden: "只能為登入帳號所屬的 Finance 公司建立公文或用印申請。",
     official_document_create_forbidden: "你目前沒有建立發文申請單的權限。",
+    official_document_create_id_conflict: "這個草稿識別碼已被其他案件使用，請重新開啟撰寫公文，不會覆寫原案件。",
+    official_document_numbering_unavailable: "發文字號服務尚未完成設定，草稿未完成保存；請通知管理員套用配號資料庫更新後再重試。",
+    official_document_number_immutable: "發文字號一經配發即固定，不能修改或重新產生。",
+    official_dispatch_date_required: "請填寫發文日期。",
+    official_dispatch_date_invalid: "發文日期格式不正確，請重新選擇日期。",
+    official_document_output_mode_invalid: "請選擇電子公文或實體公文。",
+    official_document_output_mode_locked: "這份公文已送簽，不能更改電子／實體產出類型。",
+    official_document_electronic_output_forbidden: "免章電子公文僅適用於「撰寫公文」，上傳 PDF 用印仍須依原流程辦理。",
+    official_document_electronic_source_invalid: "送簽時的電子公文版本驗證失敗，系統已停止產出，請聯絡管理員。",
+    attachment_description_too_long: "附件文字內容最多 5,000 字，請縮短說明後再儲存或送出。",
     official_seal_document_category_required: "請選擇公文用印文件類型後再送出。",
     invalid_official_seal_document_category: "公文用印文件類型不在允許清單中，請重新選擇。",
     official_seal_route_mismatch: "文件類型與 A／B／C／D 簽核流程不一致，請重新整理後再送出。",
@@ -19385,7 +19533,7 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     official_document_access_denied: "你不在這張申請單的流程或授權名單內，無法查看。",
     official_document_download_forbidden: "你沒有下載這份文件的權限。",
     official_document_seal_required: "請先選擇有效印章，才能送出用印簽核。",
-    official_document_stamp_required: "所有發文都必須依文件類型完成用印，不提供免用印繞過模式。",
+    official_document_stamp_required: "實體公文與上傳 PDF 用印必須選擇印章；只有「撰寫公文」的電子公文模式不放大小章，仍須完成簽核。",
     official_document_not_submittable: "這張申請單目前不能送簽，請確認是否已送出、已結案或狀態不允許。",
     official_document_current_step_not_pending: "目前沒有可操作的待簽核關卡，請重新整理後再試。",
     official_document_not_pending_approval: "這張申請單目前不是待簽核狀態。",
@@ -19536,6 +19684,8 @@ function backendDocumentPayload(doc) {
       lockedHash: doc.lockedHash || "",
       lockedAttachmentHash: doc.lockedAttachmentHash || "",
       attachmentDetails: doc.attachmentDetails || "",
+      dispatchDate: doc.dispatchDate || "",
+      outputMode: doc.outputMode || "physical",
       attachmentManifest: doc.attachments || [],
       copy_recipients: doc.copyRecipients || doc.companyName || "",
       documentCategory: doc.documentCategory || "",
@@ -19850,6 +20000,8 @@ function applyPersistentDocuments(rows = []) {
       body: row.body || "",
       copyRecipients: metadata.copy_recipients || metadata.copyRecipients || row.company_name || "",
       attachmentDetails: metadata.attachmentDetails || "",
+      dispatchDate: metadata.dispatchDate || "",
+      outputMode: metadata.outputMode || "physical",
       status: row.status,
       owner: row.owner,
       dept: row.department || row.owner,
@@ -20684,18 +20836,19 @@ function addFormatAudit(title, body) {
 
 function formatPayload() {
   return {
-    no: document.querySelector("#formatDocNo").value.trim(),
-    type: document.querySelector("#formatDocType").value,
-    priority: document.querySelector("#formatPriority").value,
-    security: document.querySelector("#formatSecurity").value,
-    agencyCode: document.querySelector("#formatAgencyCode").value.trim(),
-    recipient: document.querySelector("#formatRecipient").value.trim(),
-    subject: document.querySelector("#formatSubject").value.trim(),
+    no: document.querySelector("#dispatchNo")?.value.trim() || "",
+    type: document.querySelector("#docType")?.value || "函",
+    priority: document.querySelector("#priority")?.value || "普通件",
+    security: "普通",
+    agencyCode: settingsPayload().agencyCode || "",
+    recipient: document.querySelector("#recipient")?.value.trim() || "",
+    subject: document.querySelector("#subject")?.value.trim() || "",
     attachments: formatState.attachments
   };
 }
 
 function renderFormatAttachments() {
+  if (!document.querySelector("#formatAttachmentList")) return;
   document.querySelector("#formatAttachmentList").innerHTML = formatState.attachments.map((item) => `
     <article class="address-card">
       <strong>${item.name}</strong>
@@ -20715,6 +20868,7 @@ function renderFormatAttachments() {
 }
 
 function renderFormatChecks() {
+  if (!document.querySelector("#formatCheckList")) return true;
   const data = formatPayload();
   const allowedDocTypes = enabledDocumentTypeNames();
   const checks = [
@@ -20739,6 +20893,7 @@ function renderFormatChecks() {
 
 function renderFormatAgencyResults() {
   const box = document.querySelector("#formatAgencyResults");
+  if (!box) return;
   if (!formatState.agencyResults.length) {
     box.innerHTML = `<p class="empty-text">尚無機關代碼查詢結果。</p>`;
     return;
@@ -20788,7 +20943,6 @@ function addFormatAttachment() {
 
 function applyFormatToCompose() {
   const data = formatPayload();
-  document.querySelector("#dispatchNo").value = data.no;
   document.querySelector("#docType").value = data.type;
   document.querySelector("#priority").value = data.priority;
   document.querySelector("#recipient").value = data.recipient;
@@ -20799,6 +20953,7 @@ function applyFormatToCompose() {
 }
 
 function renderFormatAuditLog() {
+  if (!document.querySelector("#formatAuditLog")) return;
   document.querySelector("#formatAuditLog").innerHTML = formatAuditLog.map(([time, title, body]) => `
     <article class="timeline-item">
       <time>${time}</time>
@@ -27061,7 +27216,7 @@ function buildOfficialPdf(doc, stamps = [], options = {}) {
     stream += pdfText(`Type: ${doc.type}    Priority: ${doc.priority}    Security: ${doc.security}`, 72, 638, 11);
     stream += pdfText(`Subject: ${doc.subject}`, 72, 610, 11);
     stream += pdfText(`Body: ${doc.body}`, 72, 585, 10);
-    stream += pdfText(`Attachments: ${doc.attachments.join(", ")}`, 72, 548, 10);
+    stream += pdfText(`Attachments: ${draftAttachmentText(doc)}`, 72, 548, 10);
     stream += pdfText(`Generated: ${new Date().toLocaleString("zh-TW", { hour12: false })}`, 72, 92, 8);
     stream += pdfText(`Page ${page} of ${pageCount}`, 480, 56, 8);
     const pageObjectNumber = 3 + (page - 1) * 2;
@@ -27174,6 +27329,9 @@ function backendPdfPayload(doc, request = null) {
       body: doc.body,
       copyRecipients: doc.copyRecipients || companyName,
       attachments: doc.attachments,
+      attachmentDetails: doc.attachmentDetails,
+      dispatch_date: doc.dispatchDate,
+      output_mode: doc.outputMode || "physical",
       owner: doc.owner,
       department: doc.dept,
       dueDate: doc.dueDate,
@@ -28391,12 +28549,6 @@ document.querySelector("#clearDispatchLogBtn").addEventListener("click", () => {
   clearLogWithConfirm(dispatchAuditLog, renderDispatchAuditLog, "發文操作紀錄");
 });
 document.querySelector("#saveDispatchDraftBtn").addEventListener("click", saveComposeDraft);
-document.querySelector("#generateDispatchNoBtn").addEventListener("click", () => {
-  const no = assignNextDispatchNo(true);
-  setDraftConfirmed(false);
-  addDispatchAudit("重新產生發文字號", `已產生 ${no}。`);
-  showToast(`已產生發文字號：${no}`);
-});
 document.querySelector("#aiGenerateDraftBtn")?.addEventListener("click", generateAiDraft);
 document.querySelector("#generateFromPurposeBtn")?.addEventListener("click", generateAiDraft);
 document.querySelector("#aiApplyDraftBtn")?.addEventListener("click", applyAiDraftToCompose);
@@ -28441,6 +28593,16 @@ document.querySelector("#composeNextAction").addEventListener("click", (event) =
   });
 });
 syncComposeElectronicExchangeMode();
+document.querySelector("#composeOutputMode")?.addEventListener("change", () => {
+  syncComposeElectronicExchangeMode();
+  markDraftDirty();
+});
+document.querySelector("#dispatchDate")?.addEventListener("input", markDraftDirty);
+document.querySelector("#dispatchDate")?.addEventListener("change", markDraftDirty);
+document.querySelector("#attachments")?.addEventListener("change", syncComposeAttachmentDescription);
+document.querySelector("#attachmentDetails")?.addEventListener("input", (event) => {
+  event.currentTarget.dataset.attachmentTextEdited = "true";
+});
 ["#composeCompanySelect", "#docType", "#priority", "#composeApprovalCategorySelect", "#recipient", "#copyRecipients", "#documentPurpose", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);
@@ -28498,45 +28660,6 @@ document.querySelector("#clearAddressResultsBtn").addEventListener("click", () =
   renderAddressResults();
   renderJagentStatus();
   showToast("已清除地址簿查詢結果。");
-});
-document.querySelector("#formatValidateBtn").addEventListener("click", () => {
-  const ok = renderFormatChecks();
-  addFormatAudit("文書格式檢核", ok ? "文號、文別、速別、密等、主旨、附件清冊與機關代碼均通過。" : "文書格式仍有欄位需補正。");
-  showToast(ok ? "文書格式檢核通過。" : "文書格式需補正。");
-});
-document.querySelector("#formatApplyBtn").addEventListener("click", applyFormatToCompose);
-document.querySelector("#formatGenerateNoBtn").addEventListener("click", () => {
-  document.querySelector("#formatDocNo").value = nextDispatchNo();
-  renderFormatChecks();
-  addFormatAudit("產生文號", "已依日期與流水號產生新文號。");
-  showToast("已產生新文號。");
-});
-document.querySelector("#formatLookupAgencyBtn").addEventListener("click", () => {
-  searchFormatAgency(document.querySelector("#formatRecipient").value || document.querySelector("#formatAgencyCode").value);
-});
-document.querySelector("#formatSaveTemplateBtn").addEventListener("click", () => {
-  saveCurrentFormatAsTemplate();
-});
-document.querySelector("#formatExportBtn").addEventListener("click", () => {
-  addFormatAudit("匯出格式 JSON", JSON.stringify(formatPayload()));
-  showToast("已匯出文書格式 JSON。");
-});
-document.querySelector("#formatAddAttachmentBtn").addEventListener("click", addFormatAttachment);
-document.querySelector("#formatAgencyForm").addEventListener("submit", (event) => {
-  event.preventDefault();
-  searchFormatAgency(document.querySelector("#formatAgencyQuery").value);
-});
-document.querySelector("#formatClearAgencyBtn").addEventListener("click", () => {
-  formatState.agencyResults = [];
-  renderFormatAgencyResults();
-  showToast("已清除機關代碼查詢結果。");
-});
-document.querySelector("#formatClearLogBtn").addEventListener("click", () => {
-  clearLogWithConfirm(formatAuditLog, renderFormatAuditLog, "格式操作紀錄");
-});
-["#formatDocNo", "#formatDocType", "#formatPriority", "#formatSecurity", "#formatAgencyCode", "#formatRecipient", "#formatSubject"].forEach((selector) => {
-  document.querySelector(selector).addEventListener("input", renderFormatChecks);
-  document.querySelector(selector).addEventListener("change", renderFormatChecks);
 });
 document.querySelector("#workflowRoleSelect").addEventListener("change", (event) => {
   if (roleSwitchDisabledByPolicy()) {
@@ -29588,6 +29711,9 @@ function initializeDeferredWorkspace() {
   renderOfficialApplicationApprovalRoute();
   renderUploadedSealApprovalRoute();
   assignNextDispatchNo(true);
+  const dateInput = document.querySelector("#dispatchDate");
+  if (dateInput && !dateInput.value) dateInput.value = composeTodayDate();
+  syncComposeElectronicExchangeMode();
   applyComposeContactDefaults();
   renderDraftPreview();
   renderQueueRows();

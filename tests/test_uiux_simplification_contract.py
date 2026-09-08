@@ -286,7 +286,6 @@ class UiUxSimplificationContractTest(unittest.TestCase):
             "tracking",
             "archive",
             "seals",
-            "format",
             "workflow",
             "exchange",
             "reports",
@@ -301,6 +300,8 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn('"contractSeal"', retired)
         self.assertNotIn('"contracts"', retired)
         self.assertNotIn('"format"', retired)
+        self.assertNotIn('"format"', groups)
+        self.assertNotIn('id="format"', self.html)
 
         electronic_seal_match = re.search(
             r"electronicSeal:\s*\[(.*?)\]\s*,\s*approvalLog:",

@@ -8,6 +8,7 @@
       "config": {
         "maxDuration": 180,
         "includeFiles": [
+          "edoc_numbering.py",
           "assets/fonts/edukai-5.1_20251208.ttf",
           "assets/fonts/LXGWWenKaiTC-Regular.ttf",
           "supabase/verification/production_cutover_checks.sql",
