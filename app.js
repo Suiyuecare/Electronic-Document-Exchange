@@ -6969,6 +6969,20 @@ function syncComposeCopyRecipientsDefault(force = false) {
   return input.value;
 }
 
+function syncComposeAttachmentDescription() {
+  const input = document.querySelector("#attachments");
+  const description = document.querySelector("#attachmentDetails");
+  if (!input || !description) return;
+  const fileNames = [...(input.files || [])].map((file) => file.name).join("、");
+  const previousDefault = description.dataset.attachmentFileNames || "";
+  // Only replace our previous default; a user's edited description belongs to them.
+  if (description.dataset.attachmentTextEdited !== "true"
+      && (!description.value.trim() || description.value === previousDefault)) {
+    description.value = fileNames;
+  }
+  description.dataset.attachmentFileNames = fileNames;
+}
+
 function composePayload() {
   const selectedLargeSealType = document.querySelector("#largeSealType")?.value || "無";
   const selectedSmallSealType = document.querySelector("#smallSealType")?.value || "無";
@@ -7177,6 +7191,10 @@ function restoreComposeAutosave() {
     const safeValue = value.slice(0, element.tagName === "TEXTAREA" ? 50000 : 2000);
     if (element.tagName === "SELECT" && ![...element.options].some((option) => option.value === safeValue)) return;
     element.value = safeValue;
+    if (selector === "#attachmentDetails") {
+      delete element.dataset.attachmentFileNames;
+      element.dataset.attachmentTextEdited = "true";
+    }
     if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#copyRecipients"].includes(selector)) {
       element.dataset.autoDefault = "false";
     }
@@ -7333,10 +7351,9 @@ function draftSubjectSource(text) {
 }
 
 function draftAttachmentText(data) {
-  const fileText = data.attachments?.length ? data.attachments.join("、") : "";
-  const detailText = data.attachmentDetails?.trim() || "";
-  if (fileText && detailText) return `${fileText}；${detailText}`;
-  return detailText || fileText || "無";
+  // The uploaded files and the editable printed description are independent.
+  if (data.attachmentDetails != null) return String(data.attachmentDetails).trim() || "無";
+  return data.attachments?.length ? data.attachments.join("、") : "無";
 }
 
 function ensureDraftMeasurePreview() {
@@ -8239,8 +8256,10 @@ function validateComposeStep(step = activeComposeStep) {
     {
       selector: "#attachmentDetails",
       hint: "#attachmentDetailsHint",
-      valid: !attachmentFiles.length || Boolean(data.attachmentDetails),
-      invalid: "已選附件檔案時，請填寫附件文字內容或清冊。",
+      valid: data.attachmentDetails.length <= 5000 && (!attachmentFiles.length || Boolean(data.attachmentDetails)),
+      invalid: data.attachmentDetails.length > 5000
+        ? "附件文字內容最多 5,000 字，請縮短說明後再儲存或送出。"
+        : "已選附件檔案時，請填寫附件文字內容或清冊。",
       ok: attachmentFiles.length || data.attachmentDetails ? "附件資訊已建立。" : "無附件可先送出。"
     }
   ];
@@ -8915,6 +8934,16 @@ function officialComposeMetadata(item = {}) {
   return { ...extra, ...metadata, extra };
 }
 
+function officialComposeAttachmentDescription(item, metadata = officialComposeMetadata(item)) {
+  const description = item.attachment_details ?? item.attachmentDetails
+    ?? metadata.extra?.attachment_details ?? metadata.extra?.attachmentDetails
+    ?? metadata.attachment_details ?? metadata.attachmentDetails
+    ?? item.attachments_summary ?? metadata.attachments ?? "";
+  if (!Array.isArray(description)) return String(description);
+  return description.map((file) => typeof file === "string" ? file
+    : file?.file_name || file?.fileName || file?.name || file?.title || "").filter(Boolean).join("、");
+}
+
 function composeSealTypeFromCategory(category = "") {
   return {
     general_seal: "一般章",
@@ -8993,9 +9022,14 @@ function beginComposeOfficialCorrection(item) {
     "#smallSealType": smallSealType,
     "#subject": item.subject || item.title || "",
     "#bodyText": item.description || "",
-    "#attachmentDetails": metadata.attachment_details || item.attachments_summary || ""
+    "#attachmentDetails": officialComposeAttachmentDescription(item, metadata)
   };
   Object.entries(values).forEach(([selector, value]) => setComposeDraftField(selector, value));
+  const attachmentDescription = document.querySelector("#attachmentDetails");
+  if (attachmentDescription) {
+    delete attachmentDescription.dataset.attachmentFileNames;
+    attachmentDescription.dataset.attachmentTextEdited = "true";
+  }
   const copyInput = document.querySelector("#copyRecipients");
   if (copyInput) copyInput.dataset.defaultCompany = values["#composeCompanySelect"];
   syncComposeCopyRecipientsDefault(false);
@@ -9025,6 +9059,7 @@ function beginComposeOfficialCorrection(item) {
     requiresResubmit: item.current_status === "rejected",
     owner: item.applicant_name || authState?.user?.name || "",
     attachments: officialApplicationFiles(item).map((file) => file.file_name).filter(Boolean),
+    attachmentDetails: values["#attachmentDetails"],
     checks: { format: false, recipient: Boolean(item.recipient), attachments: true, certificate: true, package: false }
   });
   currentComposeDraftId = localDoc.id;
@@ -11367,7 +11402,7 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
     dispatch_unit: activeUnit(),
     handler_name: data.contactOwner,
     request_reason: data.purpose || "公文發文與用印申請",
-    attachments_summary: data.attachmentDetails || data.attachments.join("、"),
+    attachments_summary: data.attachmentDetails,
     stamp_position: stampPositions[0],
     stamp_positions: stampPositions,
     metadata: {
@@ -19378,6 +19413,7 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     finance_company_master_read_only: "公司主檔請只在會計系統修改，eDoc 會自動同步。",
     official_document_company_forbidden: "只能為登入帳號所屬的 Finance 公司建立公文或用印申請。",
     official_document_create_forbidden: "你目前沒有建立發文申請單的權限。",
+    attachment_description_too_long: "附件文字內容最多 5,000 字，請縮短說明後再儲存或送出。",
     official_seal_document_category_required: "請選擇公文用印文件類型後再送出。",
     invalid_official_seal_document_category: "公文用印文件類型不在允許清單中，請重新選擇。",
     official_seal_route_mismatch: "文件類型與 A／B／C／D 簽核流程不一致，請重新整理後再送出。",
@@ -27061,7 +27097,7 @@ function buildOfficialPdf(doc, stamps = [], options = {}) {
     stream += pdfText(`Type: ${doc.type}    Priority: ${doc.priority}    Security: ${doc.security}`, 72, 638, 11);
     stream += pdfText(`Subject: ${doc.subject}`, 72, 610, 11);
     stream += pdfText(`Body: ${doc.body}`, 72, 585, 10);
-    stream += pdfText(`Attachments: ${doc.attachments.join(", ")}`, 72, 548, 10);
+    stream += pdfText(`Attachments: ${draftAttachmentText(doc)}`, 72, 548, 10);
     stream += pdfText(`Generated: ${new Date().toLocaleString("zh-TW", { hour12: false })}`, 72, 92, 8);
     stream += pdfText(`Page ${page} of ${pageCount}`, 480, 56, 8);
     const pageObjectNumber = 3 + (page - 1) * 2;
@@ -27174,6 +27210,7 @@ function backendPdfPayload(doc, request = null) {
       body: doc.body,
       copyRecipients: doc.copyRecipients || companyName,
       attachments: doc.attachments,
+      attachmentDetails: doc.attachmentDetails,
       owner: doc.owner,
       department: doc.dept,
       dueDate: doc.dueDate,
@@ -28441,6 +28478,10 @@ document.querySelector("#composeNextAction").addEventListener("click", (event) =
   });
 });
 syncComposeElectronicExchangeMode();
+document.querySelector("#attachments")?.addEventListener("change", syncComposeAttachmentDescription);
+document.querySelector("#attachmentDetails")?.addEventListener("input", (event) => {
+  event.currentTarget.dataset.attachmentTextEdited = "true";
+});
 ["#composeCompanySelect", "#docType", "#priority", "#composeApprovalCategorySelect", "#recipient", "#copyRecipients", "#documentPurpose", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);

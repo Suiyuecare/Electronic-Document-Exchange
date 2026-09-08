@@ -11763,6 +11763,32 @@ def official_pdf_attachment_text(value: Any) -> str:
     return "、".join(visible) or "無"
 
 
+def official_attachment_description(doc: Dict[str, Any]) -> str:
+    """Read editable letter text independently of the original attachment files.
+
+    Key presence is intentional: an explicitly cleared description must never
+    fall back to an earlier filename summary. Legacy records without a text
+    field retain their existing attachment-list rendering.
+    """
+    metadata = parse_json_field(doc.get("metadata_json") if "metadata_json" in doc else doc.get("metadata"))
+    extra = metadata.get("extra") if isinstance(metadata.get("extra"), dict) else {}
+    for source in (doc, extra, metadata):
+        for key in ("attachment_details", "attachmentDetails"):
+            if key in source:
+                return str(source.get(key) or "").strip()
+    if "attachments_summary" in doc:
+        return str(doc.get("attachments_summary") or "").strip()
+    legacy_value = doc["attachments"] if "attachments" in doc else metadata.get("attachments")
+    return official_pdf_attachment_text(legacy_value) if legacy_value else ""
+
+
+def validated_official_attachment_description(value: Any) -> str:
+    description = str(value or "").strip()
+    if len(description) > 5000:
+        raise ValueError("attachment_description_too_long")
+    return description
+
+
 def official_pdf_body_sections(value: Any) -> List[Dict[str, str]]:
     source = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not source:
@@ -11812,9 +11838,6 @@ def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
         or metadata_extra.get("copyRecipients")
         or metadata_extra.get("cc")
     )
-    raw_attachments = doc.get("attachments")
-    if raw_attachments in (None, ""):
-        raw_attachments = metadata.get("attachments")
     body = doc.get("body") if doc.get("body") not in (None, "") else doc.get("description")
     return {
         "company": str(company),
@@ -11839,7 +11862,7 @@ def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
         "subject": doc.get("subject") or "未填主旨",
         "body": str(body or ""),
         "body_sections": official_pdf_body_sections(body),
-        "attachments": official_pdf_attachment_text(raw_attachments),
+        "attachments": official_attachment_description(doc) or "無",
         "contact_address": doc.get("contactAddress") or doc.get("contact_address") or contact.get("address") or metadata_extra.get("contact_address") or "",
         "contact_owner": doc.get("contactOwner") or doc.get("contact_owner") or contact.get("owner") or doc.get("owner") or "",
         "contact_phone": doc.get("contactPhone") or doc.get("contact_phone") or contact.get("phone") or EDOC_DEFAULT_CONTACT_PHONE,
@@ -21070,7 +21093,8 @@ def official_pdf_document_payload(conn: sqlite3.Connection, document: Dict[str, 
         "body": "\n\n".join(body_parts) or document.get("description") or "尚未填寫說明內容。",
         "owner": document.get("handler_name") or document.get("applicant_name") or "承辦人",
         "department": document.get("dispatch_unit") or document.get("applicant_department_name") or "",
-        "attachments": metadata.get("attachments", "附件詳如附件區"),
+        "attachments": official_attachment_description(document),
+        "attachment_details": official_attachment_description(document),
         "priority": extra.get("priority") or metadata.get("priority") or "普通件",
         "contact_address": extra.get("contact_address") or extra.get("contactAddress") or company.get("address") or "",
         "contact_owner": extra.get("contact_owner") or extra.get("contactOwner") or document.get("handler_name") or document.get("applicant_name") or "",
@@ -21720,6 +21744,7 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
     document_id = payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     ts = now()
     extra_metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+    extra_metadata["attachment_details"] = validated_official_attachment_description(official_attachment_description(payload))
     extra_metadata.setdefault("contact_owner", payload.get("handler_name") or user.get("name") or "")
     extra_metadata.setdefault("contact_email", user.get("email") or "")
     extra_metadata.setdefault("contact_address", user.get("company_address") or company.get("address") or "")
@@ -21737,7 +21762,7 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
     seal_context = require_official_seal_classification(payload)
     workflow_template_key = (seal_context or {}).get("workflow_template_key") or payload.get("workflow_template_key") or "internal_official_dispatch_v1"
     metadata = {
-        "attachments": payload.get("attachments_summary") or payload.get("attachments") or "",
+        "attachments": extra_metadata["attachment_details"],
         "workflow_template": workflow_template_key,
         "future_rule_inputs": {
             "company_id": company_id,
@@ -21913,6 +21938,8 @@ def _official_correction_client_metadata(payload: Dict[str, Any]) -> Dict[str, A
                 value = str(value or EDOC_DEFAULT_CONTACT_FAX).strip() or EDOC_DEFAULT_CONTACT_FAX
             elif key == "copy_recipients":
                 value = official_pdf_party_text(value)
+            elif key == "attachment_details":
+                value = validated_official_attachment_description(value)
             sanitized[key] = str(value or "").strip()[:limit]
     placements = source.get("seal_placements")
     if isinstance(placements, dict):
@@ -21927,9 +21954,17 @@ def _official_correction_client_metadata(payload: Dict[str, Any]) -> Dict[str, A
                 "y": max(0.0, min(100.0, round(pdf_safe_float(item.get("y"), 0), 4))),
             }
         sanitized["seal_placements"] = safe_placements
-    attachments_summary = str(payload.get("attachments_summary") or "").strip()
-    if attachments_summary:
-        sanitized.setdefault("attachment_details", attachments_summary[:5000])
+    if "attachment_details" not in sanitized:
+        for candidate, keys in (
+            (source, ("attachmentDetails",)),
+            (payload, ("attachment_details", "attachmentDetails", "attachments_summary")),
+        ):
+            for key in keys:
+                if key in candidate:
+                    sanitized["attachment_details"] = validated_official_attachment_description(candidate.get(key))
+                    break
+            if "attachment_details" in sanitized:
+                break
     return sanitized
 
 
@@ -22003,8 +22038,8 @@ def _official_correction_render_metadata_changes(
         previous_value = previous_extra.get(key, previous.get(key, ""))
         updated_value = updated_extra.get(key, updated_metadata.get(key, ""))
         if key == "attachment_details":
-            previous_value = previous.get("attachments", previous_value)
-            updated_value = updated_metadata.get("attachments", updated_value)
+            previous_value = official_attachment_description({"metadata_json": previous})
+            updated_value = official_attachment_description({"metadata_json": updated_metadata})
         if str(previous_value or "") != str(updated_value or ""):
             changed.append(key)
     return changed
@@ -34820,7 +34855,8 @@ def supabase_official_pdf_document_payload(document: Dict[str, Any]) -> Dict[str
         "body": "\n\n".join(body_parts) or document.get("description") or "尚未填寫說明內容。",
         "owner": document.get("handler_name") or document.get("applicant_name") or "承辦人",
         "department": document.get("dispatch_unit") or document.get("applicant_department_name") or "",
-        "attachments": metadata.get("attachments", "附件詳如附件區"),
+        "attachments": official_attachment_description(document),
+        "attachment_details": official_attachment_description(document),
         "priority": extra.get("priority") or metadata.get("priority") or "普通件",
         "contact_address": extra.get("contact_address") or extra.get("contactAddress") or company.get("address") or "",
         "contact_owner": extra.get("contact_owner") or extra.get("contactOwner") or document.get("handler_name") or document.get("applicant_name") or "",
@@ -36950,6 +36986,7 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
     document_id = payload.get("id") or f"OD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     ts = now()
     extra_metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+    extra_metadata["attachment_details"] = validated_official_attachment_description(official_attachment_description(payload))
     extra_metadata.setdefault("contact_owner", payload.get("handler_name") or user.get("name") or "")
     extra_metadata.setdefault("contact_email", user.get("email") or "")
     extra_metadata.setdefault("contact_address", user.get("company_address") or company.get("address") or "")
@@ -36967,7 +37004,7 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
     seal_context = require_official_seal_classification(payload)
     workflow_template_key = (seal_context or {}).get("workflow_template_key") or payload.get("workflow_template_key") or "internal_official_dispatch_v1"
     metadata = {
-        "attachments": payload.get("attachments_summary") or payload.get("attachments") or "",
+        "attachments": extra_metadata["attachment_details"],
         "workflow_template": workflow_template_key,
         "future_rule_inputs": {
             "company_id": company_id,
