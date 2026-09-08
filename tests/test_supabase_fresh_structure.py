@@ -20,6 +20,7 @@ STORAGE_MIGRATIONS = SUPABASE / "storage-migrations"
 VERIFICATION = SUPABASE / "verification"
 SCHEMA_PARITY = MIGRATIONS / "20260827050436_complete_edoc_runtime_schema_parity.sql"
 GRANT_HARDENING = MIGRATIONS / "20260827063824_lock_runtime_table_data_api_grants.sql"
+OFFICIAL_NUMBERING = MIGRATIONS / "20260908135730_immutable_official_document_numbering.sql"
 DISPATCH_EVENT_CAPTURE = (
     MIGRATIONS / "20260827101441_capture_official_dispatch_events.sql"
 )
@@ -606,7 +607,20 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         expected_matrix = dict(
             re.findall(r"\('([a-z0-9_]+)',\s*'([siud]+)'\)", matrix_smoke)
         )
-        self.assertEqual(set(expected_matrix), granted_select | later_select)
+        numbering_matrix = {
+            "official_document_number_counters": "siu",
+            "official_document_number_allocations": "si",
+        }
+        numbering_sql = OFFICIAL_NUMBERING.read_text(encoding="utf-8").lower()
+        for table, operations in numbering_matrix.items():
+            with self.subTest(numbering_table=table):
+                self.assertEqual(expected_matrix[table], operations)
+                privileges = ", ".join(
+                    name for name, marker in (("select", "s"), ("insert", "i"), ("update", "u"))
+                    if marker in operations
+                )
+                self.assertIn(f"grant {privileges} on public.{table} to service_role;", numbering_sql)
+        self.assertEqual(set(expected_matrix), granted_select | later_select | set(numbering_matrix))
         for privilege, marker in (("insert", "i"), ("update", "u"), ("delete", "d")):
             block = re.search(
                 rf"grant {privilege} on table\s+(.*?)\s+to service_role;",
@@ -617,6 +631,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             granted = set(re.findall(r"public\.([a-z0-9_]+)", block.group(1)))
             if privilege in {"insert", "update"}:
                 granted |= later_select
+            granted |= {table for table, operations in numbering_matrix.items() if marker in operations}
             self.assertEqual(
                 granted,
                 {table for table, operations in expected_matrix.items() if marker in operations},
@@ -671,13 +686,62 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             cutover,
         )
         self.assertNotIn("and table_name in (", cutover)
-        self.assertIn("88 direct postgrest tables", cutover)
+        for cte, marker in (("backend_tables", "s"), ("insert_tables", "i"), ("update_tables", "u"), ("delete_tables", "d")):
+            array_block = re.search(
+                rf"{cte}\(table_name\) as \(\s*select unnest\(array\[(.*?)\]::text\[\]\)",
+                cutover, re.DOTALL,
+            )
+            self.assertIsNotNone(array_block)
+            self.assertEqual(
+                set(re.findall(r"'([a-z0-9_]+)'", array_block.group(1))),
+                {table for table, operations in expected_matrix.items() if marker in operations},
+            )
         self.assertIn("unexpected_service_role_function", cutover)
         for rpc_name in required_rpc_names:
             with self.subTest(rpc=rpc_name):
                 self.assertGreaterEqual(cutover.count(f"public.{rpc_name}("), 2)
                 self.assertIn(f"public.{rpc_name}(", matrix_smoke)
         self.assertIn("notify pgrst, 'reload schema'", sql)
+
+    def test_compose_grant_smoke_keeps_closed_table_and_invoker_helper_allowlists(self) -> None:
+        smoke = SERVICE_ROLE_GRANT_SMOKE.read_text(encoding="utf-8").lower()
+        table_block = smoke.split("do $service_role_table_matrix$", 1)[1].split("$service_role_table_matrix$;", 1)[0]
+        expected = dict(re.findall(r"\('([a-z0-9_]+)',\s*'([siud]+)'\)", table_block))
+        allowed_block = table_block.split("from information_schema.table_privileges", 1)[1]
+        allowed = set(re.findall(r"\('([a-z0-9_]+)'\)", allowed_block))
+        self.assertEqual(set(expected), allowed)
+        self.assertEqual(expected["official_document_number_counters"], "siu")
+        self.assertEqual(expected["official_document_number_allocations"], "si")
+        # Extra DELETE/UPDATE must fail exactly like missing required grants;
+        # unrelated-table denial and special-privilege denial remain in force.
+        for operation, marker in (("select", "s"), ("insert", "i"), ("update", "u"), ("delete", "d")):
+            self.assertIn(f"v_expected := position('{marker}' in v_row.operations) > 0;", table_block)
+            self.assertIn(f"has_table_privilege('service_role', v_table, '{operation}') is distinct from v_expected", table_block)
+        for operation in ("truncate", "references", "trigger"):
+            self.assertIn(f"has_table_privilege('service_role', v_table, '{operation}')", table_block)
+        self.assertIn("service_role_unexpected_public_table_grant", table_block)
+
+        helpers = {
+            "public.edoc_number_safe_metadata(text)",
+            "public.edoc_allocate_official_number()",
+            "public.edoc_record_official_number()",
+            "public.edoc_guard_official_number()",
+            "public.edoc_guard_number_allocation()",
+            "edoc_private.is_electronic_compose(public.official_documents)",
+        }
+        helper_block = smoke.split("-- these are exact invoker helpers", 1)[1].split(
+            "if not pg_catalog.has_schema_privilege", 1
+        )[0]
+        self.assertEqual(set(re.findall(r"\('([^']+)'\)", helper_block)), helpers)
+        self.assertIn("and not procedure_row.prosecdef", helper_block)
+        self.assertIn("pg_get_userbyid(procedure_row.proowner) = 'postgres'", helper_block)
+        self.assertIn("config.value in ('search_path=', 'search_path=\"\"')", helper_block)
+        for role in ("anon", "authenticated"):
+            self.assertIn(f"has_function_privilege('{role}', v_oid, 'execute')", helper_block)
+        self.assertIn("service_role_compose_helper_security_mismatch", helper_block)
+        self.assertIn("service_role_unexpected_public_function_grant", smoke)
+        self.assertIn("service_role_unexpected_private_function_grant", smoke)
+        self.assertNotIn("edoc_private.complete_electronic_compose", smoke)
 
     def test_cloud_push_separates_fresh_roles_from_existing_forward_only(self) -> None:
         tool = MAIN_PUSH_TOOL.read_text(encoding="utf-8")
