@@ -37,10 +37,10 @@ class FourRoleUiContractTest(unittest.TestCase):
         self.assertEqual(
             re.findall(r'data-approval-log-filter="([^"]+)">([^<]+)</button>', approval_html),
             [
-                ("my_pending", "我的待簽"),
+                ("my_pending", "待我處理"),
                 ("delegated", "代理待簽"),
                 ("overdue", "逾期"),
-                ("processed", "已處理"),
+                ("processed", "其他紀錄"),
             ],
         )
         for element_id in (

@@ -280,6 +280,8 @@ POSTGREST_BUSINESS_CONFLICT_CODES = (
 )
 API_CONFLICT_ERROR_CODES = POSTGREST_BUSINESS_CONFLICT_CODES | frozenset({
     "editor_locked_after_submit",
+    "official_dispatch_record_locked",
+    "internal_dispatch_closed",
 })
 EDOC_EDITOR_ALLOWED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg"}
 EDOC_PUBLIC_BASE_URL = os.getenv("EDOC_PUBLIC_BASE_URL", os.getenv("PRODUCTION_BASE_URL", "")).rstrip("/")
@@ -20613,6 +20615,16 @@ def can_manage_official_dispatch(
     return False
 
 
+def official_dispatch_record_editable(record: Dict[str, Any] | None) -> bool:
+    """Completed dispatch evidence is read-only, including for its owner."""
+    return bool(record and record.get("dispatch_status") in {"pending", "failed"} and not record.get("completed_at"))
+
+
+def require_official_dispatch_record_editable(record: Dict[str, Any] | None) -> None:
+    if not official_dispatch_record_editable(record):
+        raise ValueError("official_dispatch_record_locked")
+
+
 def can_retry_official_stamp(
     user: Dict[str, Any] | None,
     workflow_steps: Iterable[Dict[str, Any]] | None,
@@ -20738,6 +20750,7 @@ def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, 
         record = upsert_official_dispatch_record(conn, document, method, user)
     if not can_manage_official_dispatch(user, document, record, session, steps):
         raise PermissionError("official_dispatch_update_forbidden")
+    require_official_dispatch_record_editable(record)
     if "proof_file_id" in payload:
         raise ValueError("official_dispatch_proof_file_server_managed")
     allowed = {
@@ -20751,7 +20764,12 @@ def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, 
     if not update:
         return official_dispatch_record(conn, document_id) or record
     assignments = ", ".join([f"{key} = ?" for key in update])
-    conn.execute(f"UPDATE official_document_dispatch_records SET {assignments}, updated_at = ? WHERE id = ?", [*update.values(), now(), record["id"]])
+    updated = conn.execute(
+        f"UPDATE official_document_dispatch_records SET {assignments}, updated_at = ? WHERE id = ? AND dispatch_status = ? AND COALESCE(completed_at, '') = ''",
+        [*update.values(), now(), record["id"], record["dispatch_status"]],
+    )
+    if updated.rowcount != 1:
+        raise ValueError("official_dispatch_record_locked")
     insert_official_log(conn, document_id, "update_dispatch", user, json.dumps(update, ensure_ascii=False), ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
     return official_dispatch_record(conn, document_id) or {}
 
@@ -20874,6 +20892,7 @@ def upload_official_dispatch_proof_file(conn: sqlite3.Connection, document_id: s
         record = upsert_official_dispatch_record(conn, document, method, user)
     if not can_manage_official_dispatch(user, document, record, session, steps):
         raise PermissionError("official_dispatch_proof_upload_forbidden")
+    require_official_dispatch_record_editable(record)
     content = payload.get("content_base64") or ""
     if not content:
         raise ValueError("dispatch_proof_file_required")
@@ -20895,7 +20914,12 @@ def upload_official_dispatch_proof_file(conn: sqlite3.Connection, document_id: s
         official_actor_name(user),
     )
     official_file = insert_official_document_file(conn, document_id, "dispatch_proof", file_row, official_actor_name(user))
-    conn.execute("UPDATE official_document_dispatch_records SET proof_file_id = ?, updated_at = ? WHERE id = ?", (official_file["id"], now(), record["id"]))
+    cursor = conn.execute(
+        "UPDATE official_document_dispatch_records SET proof_file_id = ?, updated_at = ? WHERE id = ? AND dispatch_status = ? AND COALESCE(completed_at, '') = ''",
+        (official_file["id"], now(), record["id"], record["dispatch_status"]),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("official_dispatch_record_locked")
     insert_official_log(conn, document_id, "upload_dispatch_proof", user, official_file["file_hash"], file_id=official_file["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
     return {"dispatch_record": official_dispatch_record(conn, document_id), "file": official_file_metadata(official_file)}
 
@@ -21488,7 +21512,7 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
         "can_download": is_participant,
-        "can_manage_dispatch": bool(user and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
+        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
         "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
         "can_act": bool(user and current_step and current_step.get("status") == "pending" and (current_step.get("approver_user_id") == user.get("id") or active_delegation)),
@@ -21696,7 +21720,7 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
             all_steps,
             actor_snapshots,
         )
-        item["can_manage_dispatch"] = can_manage_official_dispatch(
+        item["can_manage_dispatch"] = official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(
             user,
             item,
             dispatch_record,
@@ -27682,6 +27706,8 @@ def reply_internal_dispatch(conn: sqlite3.Connection, dispatch_id: str, payload:
         raise PermissionError("internal_dispatch_reply_forbidden")
     if recipient and not bool(recipient.get("action_required")):
         raise PermissionError("internal_dispatch_reply_not_required")
+    if detail.get("status") in {"closed", "cancelled"} or detail.get("closed_at"):
+        raise ValueError("internal_dispatch_closed")
     attachment_file_id = ""
     if payload.get("content_base64"):
         data = base64.b64decode(payload["content_base64"])
@@ -27709,7 +27735,7 @@ def reply_internal_dispatch(conn: sqlite3.Connection, dispatch_id: str, payload:
         conn.execute("UPDATE internal_dispatch_recipients SET status = 'replied', replied_at = ?, updated_at = ? WHERE id = ?", (now(), now(), recipient["id"]))
     pending = conn.execute("SELECT COUNT(*) AS count FROM internal_dispatch_recipients WHERE dispatch_id = ? AND action_required = 1 AND status <> 'replied'", (dispatch_id,)).fetchone()["count"]
     if detail.get("reply_required") and not pending:
-        conn.execute("UPDATE internal_dispatches SET reply_status = 'completed', status = 'reply_completed', updated_at = ? WHERE id = ?", (now(), dispatch_id))
+        conn.execute("UPDATE internal_dispatches SET reply_status = 'completed', status = 'reply_completed', updated_at = ? WHERE id = ? AND status NOT IN ('closed', 'cancelled') AND COALESCE(closed_at, '') = ''", (now(), dispatch_id))
     internal_dispatch_log(conn, dispatch_id, user, "reply_internal_dispatch", row["reply_text"], payload)
     return internal_dispatch_detail(conn, dispatch_id, session)
 
@@ -34746,13 +34772,17 @@ def supabase_update_official_dispatch_record(document_id: str, payload: Dict[str
         record = supabase_upsert_official_dispatch_record(document, method, user)
     if not can_manage_official_dispatch(user, document, record, session, steps):
         raise PermissionError("official_dispatch_update_forbidden")
+    require_official_dispatch_record_editable(record)
     if "proof_file_id" in payload:
         raise ValueError("official_dispatch_proof_file_server_managed")
     allowed = {"external_official_document_number", "dispatch_date", "recipient", "recipient_contact", "dispatch_note"}
     update = {key: payload.get(key) or "" for key in allowed if key in payload}
     if not update:
         return supabase_official_dispatch_record(document_id) or record
-    supabase_patch("official_document_dispatch_records", record["id"], update)
+    query = urllib.parse.urlencode({"id": f"eq.{record['id']}", "dispatch_status": f"eq.{record['dispatch_status']}", "or": "(completed_at.is.null,completed_at.eq.)"})
+    updated = supabase_request("PATCH", f"official_document_dispatch_records?{query}", {**update, "updated_at": now()})
+    if not updated:
+        raise ValueError("official_dispatch_record_locked")
     supabase_insert_official_log(document_id, "update_dispatch", user, json.dumps(update, ensure_ascii=False), ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
     return supabase_official_dispatch_record(document_id) or {}
 
@@ -34825,6 +34855,7 @@ def supabase_upload_official_dispatch_proof_file(document_id: str, payload: Dict
         record = supabase_upsert_official_dispatch_record(document, method, user)
     if not can_manage_official_dispatch(user, document, record, session, steps):
         raise PermissionError("official_dispatch_proof_upload_forbidden")
+    require_official_dispatch_record_editable(record)
     content = payload.get("content_base64") or ""
     if not content:
         raise ValueError("dispatch_proof_file_required")
@@ -34844,7 +34875,14 @@ def supabase_upload_official_dispatch_proof_file(document_id: str, payload: Dict
         official_actor_name(user),
     )
     official_file = supabase_insert_official_document_file(document_id, "dispatch_proof", file_row, official_actor_name(user))
-    supabase_patch("official_document_dispatch_records", record["id"], {"proof_file_id": official_file["id"], "updated_at": now()})
+    query = urllib.parse.urlencode({
+        "id": f"eq.{record['id']}",
+        "dispatch_status": f"eq.{record['dispatch_status']}",
+        "or": "(completed_at.is.null,completed_at.eq.)",
+    })
+    updated = supabase_request("PATCH", f"official_document_dispatch_records?{query}", {"proof_file_id": official_file["id"], "updated_at": now()})
+    if not updated:
+        raise ValueError("official_dispatch_record_locked")
     supabase_insert_official_log(document_id, "upload_dispatch_proof", user, official_file["file_hash"], file_id=official_file["id"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
     return {"dispatch_record": supabase_official_dispatch_record(document_id), "file": official_file_metadata(official_file)}
 
@@ -35405,7 +35443,7 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
         "can_download": is_participant,
-        "can_manage_dispatch": bool(user and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
+        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
         "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
         "can_act": bool(user and current_step and current_step.get("status") == "pending" and (current_step.get("approver_user_id") == user.get("id") or active_delegation)),
@@ -35482,7 +35520,7 @@ def supabase_list_official_documents(query: Dict[str, List[str]] | None, session
         item["dispatch_record"] = dispatch_record
         item["current_step_name"] = next((step["step_name"] for step in steps if step.get("step_key") == item.get("current_step")), "")
         item["can_download"] = is_participant
-        item["can_manage_dispatch"] = can_manage_official_dispatch(
+        item["can_manage_dispatch"] = official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(
             user,
             item,
             dispatch_record,
@@ -39819,6 +39857,8 @@ def supabase_reply_internal_dispatch(dispatch_id: str, payload: Dict[str, Any], 
         raise PermissionError("internal_dispatch_reply_forbidden")
     if recipient and not bool(recipient.get("action_required")):
         raise PermissionError("internal_dispatch_reply_not_required")
+    if detail.get("status") in {"closed", "cancelled"} or detail.get("closed_at"):
+        raise ValueError("internal_dispatch_closed")
     attachment_file_id = None
     if payload.get("content_base64"):
         data = base64.b64decode(payload["content_base64"])
@@ -39844,7 +39884,10 @@ def supabase_reply_internal_dispatch(dispatch_id: str, payload: Dict[str, Any], 
         supabase_patch("internal_dispatch_recipients", recipient["id"], {"status": "replied", "replied_at": now(), "updated_at": now()})
     refreshed = supabase_internal_dispatch_detail(dispatch_id, session)
     if refreshed.get("reply_required") and not any(bool(item.get("action_required")) and item.get("status") != "replied" for item in refreshed["recipients"]):
-        supabase_patch("internal_dispatches", dispatch_id, {"reply_status": "completed", "status": "reply_completed", "updated_at": now()})
+        # A concurrent sender close must never be changed back to open by a
+        # reply that started earlier. Keep the terminal state server-owned.
+        query = urllib.parse.urlencode({"id": f"eq.{dispatch_id}", "status": "not.in.(closed,cancelled)", "or": "(closed_at.is.null,closed_at.eq.)"})
+        supabase_request("PATCH", f"internal_dispatches?{query}", {"reply_status": "completed", "status": "reply_completed", "updated_at": now()})
     supabase_internal_dispatch_log(dispatch_id, user, "reply_internal_dispatch", row["reply_text"], payload)
     return supabase_internal_dispatch_detail(dispatch_id, session)
 
@@ -44598,7 +44641,7 @@ class Handler(SimpleHTTPRequestHandler):
         _, _, signed = supabase_official_document_download_file(document_id, file_id, session, self.client_ip(), self.client_device())
         self.send_supabase_storage_redirect(signed)
 
-    def send_editor_seal_preview(self, seal_id: str, *, supabase_mode: bool = False) -> None:
+    def send_editor_seal_preview(self, seal_id: str, *, session: Dict[str, Any] | None, conn: sqlite3.Connection | None = None, supabase_mode: bool = False) -> None:
         query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
 
         def first_query_value(*names: str) -> str:
@@ -44624,13 +44667,12 @@ class Handler(SimpleHTTPRequestHandler):
             ),
         }
         if supabase_mode:
-            session = supabase_current_session(self.bearer_token())
             data = supabase_editor_seal_preview(seal_id, session, **binding)
         else:
-            with connect() as conn:
-                session = current_session(conn, self.bearer_token())
-                data = local_editor_seal_preview(conn, seal_id, session, **binding)
-                conn.commit()
+            if conn is None:
+                raise RuntimeError("editor_preview_connection_required")
+            data = local_editor_seal_preview(conn, seal_id, session, **binding)
+            conn.commit()
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(data)))
@@ -44643,7 +44685,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def send_editor_asset(self, document_id: str, asset_id: str, *, supabase_mode: bool = False) -> None:
+    def send_editor_asset(self, document_id: str, asset_id: str, *, session: Dict[str, Any] | None, conn: sqlite3.Connection | None = None, supabase_mode: bool = False) -> None:
         query = parse_qs(urlparse(self.path).query)
         try:
             expires = int((query.get("expires") or ["0"])[0])
@@ -44651,15 +44693,16 @@ class Handler(SimpleHTTPRequestHandler):
             raise PermissionError("editor_asset_url_invalid") from exc
         token = (query.get("token") or [""])[0]
         if supabase_mode:
-            session = supabase_current_session(self.bearer_token())
             _, signed = supabase_editor_asset_download(document_id, asset_id, expires, token, session)
             self.send_supabase_storage_redirect(signed)
             return
         else:
-            with connect() as conn:
-                session = current_session(conn, self.bearer_token())
-                asset, data = local_editor_asset_download(conn, document_id, asset_id, expires, token, session)
-                conn.commit()
+            if conn is None:
+                raise RuntimeError("editor_asset_connection_required")
+            # The route already resolved the session on this connection. Reopening
+            # it here can deadlock against its uncommitted Finance roster sync.
+            asset, data = local_editor_asset_download(conn, document_id, asset_id, expires, token, session)
+            conn.commit()
         self.send_response(200)
         self.send_header("Content-Type", asset.get("mime_type") or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
@@ -45776,7 +45819,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json({"count": len(results), "results": results}, 201)
                     return
                 if method == "GET" and len(parts) == 3 and parts[0] == "company-seals" and parts[2] == "editor-preview":
-                    self.send_editor_seal_preview(parts[1], supabase_mode=True)
+                    session = supabase_current_session(self.bearer_token())
+                    self.send_editor_seal_preview(parts[1], session=session, supabase_mode=True)
                     return
                 if method == "GET" and parts == ["official-documents"]:
                     session = supabase_current_session(self.bearer_token())
@@ -45853,7 +45897,7 @@ class Handler(SimpleHTTPRequestHandler):
                         self.send_json(supabase_fail_official_editor_upload(document_id, parts[3], self.read_json(), session))
                         return
                     if method == "GET" and len(parts) == 5 and parts[2] == "editor-assets" and parts[4] == "download":
-                        self.send_editor_asset(document_id, parts[3], supabase_mode=True)
+                        self.send_editor_asset(document_id, parts[3], session=session, supabase_mode=True)
                         return
                     if method == "GET" and len(parts) == 3 and parts[2] == "editor-state":
                         self.send_json(supabase_get_official_editor_state(document_id, session))
@@ -46790,7 +46834,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(rows)
                     return
                 if method == "GET" and len(parts) == 3 and parts[0] == "company-seals" and parts[2] == "editor-preview":
-                    self.send_editor_seal_preview(parts[1], supabase_mode=False)
+                    session = current_session(conn, self.bearer_token())
+                    self.send_editor_seal_preview(parts[1], session=session, conn=conn, supabase_mode=False)
                     return
                 if method == "GET" and parts == ["official-documents"]:
                     session = current_session(conn, self.bearer_token())
@@ -46898,7 +46943,7 @@ class Handler(SimpleHTTPRequestHandler):
                         self.send_json(result)
                         return
                     if method == "GET" and len(parts) == 5 and parts[2] == "editor-assets" and parts[4] == "download":
-                        self.send_editor_asset(document_id, parts[3], supabase_mode=False)
+                        self.send_editor_asset(document_id, parts[3], session=session, conn=conn, supabase_mode=False)
                         return
                     if len(parts) == 3 and parts[2] == "editor-state" and method == "GET":
                         self.send_json(get_official_editor_state(conn, document_id, session))
