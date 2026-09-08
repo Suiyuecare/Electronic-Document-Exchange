@@ -34,6 +34,7 @@ const loggingQuickLoginWindowNamePrefix = "suiyue_hris_quick_login_user:";
 let authState = readJsonStorage(authStorageKey);
 
 const inboundDocs = [];
+const inboundDocumentLoadState = { scope: "", status: "idle", request: null, generation: 0 };
 
 const pulledInboundTemplates = [
   {
@@ -193,6 +194,8 @@ let officialStampPositions = [createOfficialStampPosition()];
 let selectedOfficialStampPositionId = officialStampPositions[0].id;
 let internalDispatchItems = [];
 let internalDispatchRecipientDirectory = [];
+let internalDispatchLoadGeneration = 0;
+let internalDispatchLoadStatus = "idle";
 let selectedInternalDispatchId = "";
 const dispatchAuditLog = [
   ["10:12", "系統初始化", "載入既有發文與交換紀錄。"]
@@ -1316,6 +1319,7 @@ function emptyUploadedSealEditorState() {
 
 function clearUploadedEditorSensitivePreviews() {
   window.clearTimeout(uploadedSealEditorRuntime?.saveTimer || 0);
+  resetUploadedSealApplicationSaving();
   [uploadedSealEditorRuntime?.assetUrls, uploadedSealEditorRuntime?.imageUrls].forEach((map) => {
     map?.forEach?.((url) => { if (String(url || "").startsWith("blob:")) URL.revokeObjectURL(url); });
     map?.clear?.();
@@ -1344,6 +1348,9 @@ function clearUploadedEditorSensitivePreviews() {
     uploadedSealEditorRuntime.uploading = false;
     uploadedSealEditorRuntime.directoryLoading = false;
     uploadedSealEditorRuntime.reviewMode = "edited";
+    uploadedSealEditorRuntime.currentPageId = "";
+    uploadedSealEditorRuntime.currentViewport = null;
+    uploadedSealEditorRuntime.currentPageProxy = null;
     uploadedSealEditorRuntime.selectedIds?.clear?.();
     uploadedSealEditorRuntime.undoStack = [];
     uploadedSealEditorRuntime.redoStack = [];
@@ -1357,6 +1364,11 @@ function clearUploadedEditorSensitivePreviews() {
   }
   uploadedSealEditorState = emptyUploadedSealEditorState();
   uploadedSealPdf = null;
+  uploadedSealEditorRuntime.renderTask?.cancel?.();
+  uploadedSealEditorRuntime.renderNonce += 1;
+  const canvas = document.querySelector("#uploadedPdfCanvas");
+  canvas?.getContext?.("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+  document.querySelector("#uploadedEditorSvgLayer")?.replaceChildren();
   clearUploadedEditorUploadError();
 }
 
@@ -2812,6 +2824,9 @@ function aclRuleForDoc(doc, role = activeRole()) {
 }
 
 function baseDepartmentVisible(doc) {
+  // Canonical rows have already passed the authenticated backend's record ACL.
+  // Do not re-filter Finance department names using legacy role-name strings.
+  if (hasAuthenticatedBackendSession() && backendInboundScopes.get(doc) === frontendSessionScope()) return true;
   const role = activeRole();
   const scope = roleDataScopes[role];
   if (!scope) return false;
@@ -3353,10 +3368,10 @@ function applyRoleNavigation() {
   const canManageInbound = canManageInboundOperations();
   document.querySelector("#openInboundArchiveBtn")?.toggleAttribute("hidden", !canManageInbound);
   document.querySelector('[data-inbound-section="archive"]')?.toggleAttribute("hidden", !canManageInbound);
-  document.querySelector('[data-inbound-section="dispatch"]')?.toggleAttribute("hidden", !canCreateInternalDispatch());
+  document.querySelector('[data-inbound-section="dispatch"]')?.toggleAttribute("hidden", !canViewInternalDispatch());
   document.querySelector(".inbound-advanced")?.toggleAttribute("hidden", !canManageInbound);
   document.querySelector(".inbound-audit-panel")?.toggleAttribute("hidden", !canManageInbound);
-  if (!canManageInbound && inboundSection !== "records") setInboundSection("records");
+  if ((!canManageInbound && inboundSection === "archive") || (!canViewInternalDispatch() && inboundSection === "dispatch")) setInboundSection("records");
   const active = document.body.dataset.activeRoute || document.querySelector(".view.active")?.id || "dashboard";
   const activeMajorRoute = majorRouteForRoute(active);
   document.querySelector("#pageTitle").textContent = simpleRouteTitle(activeMajorRoute);
@@ -3404,12 +3419,12 @@ function internalDispatchDueTime(item = {}) {
 
 function isInternalDispatchOverdue(item = {}) {
   const dueTime = internalDispatchDueTime(item);
-  return Boolean(dueTime && item.status !== "closed" && dueTime < Date.now());
+  return Boolean(dueTime && !["closed", "cancelled"].includes(item.status) && !item.closed_at && dueTime < Date.now());
 }
 
 function internalDispatchNeedsMyReply(item = {}) {
   const recipient = internalDispatchRecipientForCurrentUser(item);
-  return Boolean(item.reply_required && item.status !== "closed" && recipient?.action_required && recipient.status !== "replied");
+  return Boolean(item.reply_required && !["closed", "cancelled"].includes(item.status) && !item.closed_at && recipient?.action_required && recipient.status !== "replied");
 }
 
 function internalDispatchNeedsClose(item = {}) {
@@ -3521,6 +3536,7 @@ function refreshDashboardWorkEntryPoints() {
   renderRoleDashboard();
   renderUnifiedFlows();
   renderElectronicSealWorkQueue();
+  renderDailyActionCenter();
 }
 
 function identityWorkbenchData() {
@@ -3899,6 +3915,10 @@ function renderDailyActionCenter() {
       <button class="secondary-button" type="button" data-daily-action-empty="compose">撰寫公文</button>
     </article>
   `;
+  if (internalDispatchLoadStatus === "error") {
+    grid.insertAdjacentHTML("beforeend", `<p class="empty-text" role="status">部分派文待辦尚未更新。<button class="text-button" type="button" data-retry-daily-dispatch>重新載入</button></p>`);
+    grid.querySelector("[data-retry-daily-dispatch]")?.addEventListener("click", () => void loadInternalDispatches(false, { includeDirectory: false }));
+  }
   document.querySelectorAll("[data-daily-action]").forEach((button) => {
     button.addEventListener("click", () => openDailyAction(button.dataset.dailyAction));
   });
@@ -3975,10 +3995,10 @@ function dashboardRoleData() {
         ["附件檢閱", "必須完成", "原稿、送簽版與全部附件完成後才能核准"]
       ],
       pipeline: [
-        ["我的待簽", ceoPending.filter((record) => approvalProgressCategory(record) === "my_pending").length],
+        ["待我處理", ceoPending.filter((record) => approvalProgressCategory(record) === "my_pending").length],
         ["代理待簽", ceoPending.filter((record) => approvalProgressCategory(record) === "delegated").length],
         ["逾期", ceoOverdue.length],
-        ["已處理", approvalLogRecords().filter((record) => approvalProgressCategory(record) === "processed").length]
+        ["其他紀錄", approvalLogRecords().filter((record) => approvalProgressCategory(record) === "processed").length]
       ],
       primaryTitle: "執行長核定案件",
       primaryTarget: "approvalLog",
@@ -4254,7 +4274,7 @@ function renderDashboardApprovalProgress() {
   list.innerHTML = records.map((record) => {
     const item = record.task;
     const itemCurrent = record.currentStep || record.steps.find((step) => step.state === "current" || step.state === "returned") || record.steps[0];
-    const categoryLabel = { overdue: "逾期", delegated: "代理待簽", my_pending: "我的待簽" }[approvalProgressCategory(record)] || "待處理";
+    const categoryLabel = { overdue: "逾期", delegated: "代理待簽", my_pending: "待我處理" }[approvalProgressCategory(record)] || "待處理";
     return `
       <button class="dashboard-approval-item ${item.id === selectedWorkflowTaskId ? "active" : ""}" type="button" data-dashboard-approval="${escapeHtml(item.id)}">
         <strong>${escapeHtml(item.title)}</strong>
@@ -5207,11 +5227,14 @@ function runAuthenticatedStartupSyncs(silent = true) {
   void loadOfficialWorkflow(workflowScope);
   void syncNotificationsFromBackend(silent);
   void syncDashboardFromBackend(silent);
+  // Personal incoming work must appear without opening 收發管理 first.
+  void loadInternalDispatches(true, { includeDirectory: false });
 }
 
 const routeBackendDataLoaded = new Set();
 
 async function loadRouteBackendData(target, silent = true) {
+  if (target === "inbound" && inboundDocumentLoadState.scope !== frontendSessionScope()) routeBackendDataLoaded.delete(target);
   if (!hasAuthenticatedBackendSession() || routeBackendDataLoaded.has(target)) return;
   routeBackendDataLoaded.add(target);
   try {
@@ -5231,7 +5254,7 @@ async function loadRouteBackendData(target, silent = true) {
     if (["contractSeal", "electronicSeal"].includes(target)) await refreshWorkflowReadinessForContext("uploadedSeal", { silent });
     if (target === "workflow") await loadWorkflowDelegations(silent);
     if (target === "inbound") {
-      await Promise.all([loadInternalDispatches(silent), loadInboundAssigneeCandidates()]);
+      await Promise.all([loadInboundDocuments(silent), loadInternalDispatches(silent), loadInboundAssigneeCandidates()]);
     }
     if (target === "seals") await loadCompanySealModule(true);
     if (target === "jobs") await syncJobsFromBackend(silent);
@@ -5760,6 +5783,8 @@ function clearFrontendSeedRecordsForAuthenticatedSession() {
   officialWorkflowItems = [];
   internalDispatchItems = [];
   internalDispatchRecipientDirectory = [];
+  internalDispatchLoadGeneration += 1;
+  internalDispatchLoadStatus = "idle";
   searchResults = [];
   dailyActionCache = [];
   selectedInboundId = "";
@@ -6032,17 +6057,22 @@ function canCreateInternalDispatch() {
   return ["總務", "行政部主任", "行政部門主任", "執行長"].includes(activeRole());
 }
 
+function canViewInternalDispatch() {
+  return hasAuthenticatedBackendSession() && isRouteAllowed("inbound");
+}
+
 function setInboundSection(section = "records") {
   const requested = ["records", "archive", "dispatch"].includes(section) ? section : "records";
   inboundSection = requested === "archive" && !canManageInboundOperations()
     ? "records"
-    : requested === "dispatch" && !canCreateInternalDispatch()
+    : requested === "dispatch" && !canViewInternalDispatch()
       ? "records"
       : requested;
   document.querySelectorAll("[data-inbound-section]").forEach((button) => {
     const active = button.dataset.inboundSection === inboundSection;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
   document.querySelectorAll("[data-inbound-section-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.inboundSectionPanel !== inboundSection;
@@ -6079,7 +6109,7 @@ function prepareInboundArchiveForm() {
     if (!generalAffairs || source.selectedOptions[0]?.disabled) source.value = "local_unit_physical";
   }
   const receivedDate = document.querySelector("#inboundArchiveReceivedDate");
-  if (receivedDate && !receivedDate.value) receivedDate.value = new Date().toISOString().slice(0, 10);
+  if (receivedDate && !receivedDate.value) receivedDate.value = composeTodayDate();
   renderInboundArchiveDepartmentOptions({ preferAccount: !document.querySelector("#inboundArchiveDepartment")?.value });
   const owner = document.querySelector("#inboundArchiveOwnerLabel");
   if (owner) owner.textContent = `${user.name || "目前帳號"}｜${user.unit || "未設定單位"}`;
@@ -6106,22 +6136,84 @@ function renderComplianceChecks() {
   `).join("");
 }
 
+function renderInboundLoadStatus() {
+  const notice = document.querySelector("#inboundLoadNotice");
+  const reload = document.querySelector("#inboundReloadBtn");
+  const { status } = inboundDocumentLoadState;
+  if (reload) {
+    reload.disabled = status === "loading";
+    reload.textContent = status === "loading" ? "載入中…" : status === "error" ? "重新載入" : "重新整理";
+  }
+  if (!notice) return;
+  notice.hidden = !["loading", "error"].includes(status);
+  notice.classList.toggle("inbound-load-error", status === "error");
+  notice.textContent = status === "error"
+    ? `收錄清單暫時無法載入。${inboundDocs.length ? "已保留上次讀取的資料；" : "這不代表沒有收錄資料；"}請按「重新載入」再試一次。`
+    : status === "loading" ? "正在讀取您有權限檢視的收錄資料…" : "";
+}
+
+async function loadInboundDocuments(silent = true) {
+  if (!hasAuthenticatedBackendSession()) return null;
+  const scope = frontendSessionScope();
+  if (inboundDocumentLoadState.scope === scope && inboundDocumentLoadState.request) return inboundDocumentLoadState.request;
+  if (inboundDocumentLoadState.scope && inboundDocumentLoadState.scope !== scope) {
+    inboundDocs.splice(0, inboundDocs.length);
+    selectedInboundId = "";
+  }
+  const generation = ++inboundDocumentLoadState.generation;
+  inboundDocumentLoadState.scope = scope;
+  inboundDocumentLoadState.status = "loading";
+  renderInboundRows();
+  const request = (async () => {
+    try {
+      const rows = await backendRequest("/inbound-documents");
+      if (!Array.isArray(rows)) throw new Error("inbound_list_response_invalid");
+      if (!hasAuthenticatedBackendSession() || frontendSessionScope() !== scope || inboundDocumentLoadState.generation !== generation) return null;
+      inboundDocumentLoadState.status = "loaded";
+      applyPersistentInboundDocuments(rows);
+      renderInternalDispatchDocumentOptions();
+      refreshDashboardWorkEntryPoints();
+      return rows;
+    } catch (error) {
+      if (hasAuthenticatedBackendSession() && frontendSessionScope() === scope && inboundDocumentLoadState.generation === generation) {
+        inboundDocumentLoadState.status = "error";
+        routeBackendDataLoaded.delete("inbound");
+        renderInboundRows();
+        if (!silent) showToast("收錄清單載入失敗，請重新載入；您填寫的表單內容未被清除。");
+      }
+      throw error;
+    } finally {
+      if (inboundDocumentLoadState.generation === generation) {
+        inboundDocumentLoadState.request = null;
+        renderInboundLoadStatus();
+      }
+    }
+  })();
+  inboundDocumentLoadState.request = request;
+  return request;
+}
+
 function renderInboundRows() {
+  renderInboundLoadStatus();
   const rows = filteredInboundDocs();
   if (rows.length && !rows.some((doc) => doc.id === selectedInboundId)) selectedInboundId = rows[0].id;
-  document.querySelector("#inboundCount").textContent = `${rows.length} 筆`;
+  document.querySelector("#inboundCount").textContent = inboundDocumentLoadState.status === "error"
+    ? rows.length ? `${rows.length} 筆（上次資料）` : "尚未載入"
+    : inboundDocumentLoadState.status === "loading" && !rows.length ? "載入中" : `${rows.length} 筆`;
   if (!rows.length) {
-    document.querySelector("#inboundRows").innerHTML = `<tr><td colspan="6" class="empty-text">目前沒有可檢視的收錄資料。</td></tr>`;
+    const emptyMessage = inboundDocumentLoadState.status === "error" ? "清單載入失敗，請按「重新載入」。"
+      : inboundDocumentLoadState.status === "loading" ? "收錄資料載入中…" : "目前沒有可檢視的收錄資料。";
+    document.querySelector("#inboundRows").innerHTML = `<tr><td colspan="6" class="empty-text">${emptyMessage}</td></tr>`;
     return;
   }
   document.querySelector("#inboundRows").innerHTML = rows.map((doc) => `
     <tr class="${doc.id === selectedInboundId ? "selected-row" : ""}" data-inbound-id="${escapeHtml(doc.id)}" tabindex="0">
-      <td><button class="text-button row-select" type="button" data-select-inbound="${escapeHtml(doc.id)}">${escapeHtml(doc.receiveNo)}</button><small>${escapeHtml(doc.exchangeNo)}</small></td>
-      <td>${escapeHtml(inboundSourceLabel(doc.sourceType))}</td>
-      <td>${escapeHtml(doc.agency)}<small>${escapeHtml(doc.agencyCode)}</small></td>
-      <td>${escapeHtml(doc.subject)}</td>
-      <td><span class="badge ${safeHtmlClassToken(badgeClass(doc.status), "info")}">${escapeHtml(doc.status)}</span></td>
-      <td>${escapeHtml(doc.owner)}<small>${escapeHtml(doc.dept)}</small></td>
+      <td data-label="收文號"><button class="text-button row-select" type="button" data-select-inbound="${escapeHtml(doc.id)}">${escapeHtml(doc.receiveNo)}</button><small>${escapeHtml(doc.exchangeNo)}</small></td>
+      <td data-label="收錄來源">${escapeHtml(inboundSourceLabel(doc.sourceType))}</td>
+      <td data-label="來文單位">${escapeHtml(doc.agency)}<small>${escapeHtml(doc.agencyCode)}</small></td>
+      <td data-label="主旨">${escapeHtml(doc.subject)}</td>
+      <td data-label="狀態"><span class="badge ${safeHtmlClassToken(badgeClass(doc.status), "info")}">${escapeHtml(doc.status)}</span></td>
+      <td data-label="承辦">${escapeHtml(doc.owner)}<small>${escapeHtml(doc.dept)}</small></td>
     </tr>
   `).join("");
 
@@ -6262,6 +6354,8 @@ function renderInboundAuditLog() {
   `).join("");
 }
 
+const backendInboundScopes = new WeakMap();
+
 function mapBackendInboundDocument(row = {}) {
   const attachments = Array.isArray(row.attachments) ? row.attachments : [];
   const metadata = row.metadata || {};
@@ -6274,7 +6368,7 @@ function mapBackendInboundDocument(row = {}) {
     closed: "結案",
     cancelled: "已取消"
   }[row.status] || row.status || "待登錄";
-  return {
+  const doc = {
     id: row.id,
     version: Number(row.mutation_version ?? row.version ?? 0),
     backendStatus: row.status || "",
@@ -6303,6 +6397,8 @@ function mapBackendInboundDocument(row = {}) {
       createdAt: file.created_at || ""
     }))
   };
+  if (hasAuthenticatedBackendSession()) backendInboundScopes.set(doc, frontendSessionScope());
+  return doc;
 }
 
 function upsertInboundDocFromBackend(row = {}) {
@@ -8122,38 +8218,52 @@ function composeBasicBlockers() {
 }
 
 function renderComposeFieldHints() {
-  [
-    ["#composeApprovalCategorySelect", "#composeApprovalCategoryHint"],
-    ["#dispatchNo", null],
-    ["#dispatchDate", null],
-    ["#recipient", "#recipientHint"],
-    ["#subject", "#subjectHint"],
-    ["#bodyText", "#bodyTextHint"],
-    ["#contactAddress", null],
-    ["#contactOwner", null],
-    ["#contactPhone", null],
-    ["#contactEmail", null],
-    ["#attachmentDetails", "#attachmentDetailsHint"]
-  ].forEach(([inputSelector, hintSelector]) => {
-    const input = document.querySelector(inputSelector);
-    const hint = document.querySelector(hintSelector);
-    if (input) delete input.dataset.validity;
-    if (hint) {
-      delete hint.dataset.validity;
-      hint.textContent = "";
-    }
+  // Keep uncorrected errors visible while the user fixes another field.
+  const pending = composeFieldValidations().filter((item) => {
+    const input = document.querySelector(item.selector);
+    if (input?.getAttribute("aria-invalid") !== "true") return false;
+    setComposeFieldValidity(item.selector, item.hint, item.valid, item.valid ? "" : item.invalid);
+    return !item.valid;
   });
+  renderComposeValidationSummary(pending);
 }
 
 function setComposeFieldValidity(inputSelector, hintSelector, valid, message = "") {
   const input = document.querySelector(inputSelector);
-  const hint = hintSelector ? document.querySelector(hintSelector) : null;
+  let hint = hintSelector ? document.querySelector(hintSelector) : document.querySelector(`${inputSelector}ValidationHint`);
+  if (!hint && input?.closest("label")) {
+    hint = document.createElement("span");
+    hint.id = `${input.id}ValidationHint`;
+    hint.className = "field-hint";
+    hint.dataset.composeValidationHint = "true";
+    input.closest("label").append(hint);
+  }
   const state = valid ? "ok" : "needs";
-  if (input) input.dataset.validity = state;
+  if (input) {
+    input.dataset.validity = state;
+    input.setAttribute("aria-invalid", String(!valid));
+    if (hint?.id) {
+      const descriptions = new Set((input.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean));
+      descriptions.add(hint.id);
+      input.setAttribute("aria-describedby", [...descriptions].join(" "));
+    }
+  }
   if (hint) {
     hint.dataset.validity = state;
     hint.textContent = message;
   }
+}
+
+function renderComposeValidationSummary(invalid = []) {
+  const summary = document.querySelector("#composeValidationSummary");
+  if (!summary) return;
+  summary.hidden = !invalid.length;
+  summary.innerHTML = invalid.length
+    ? `<strong>還有 ${invalid.length} 個欄位需要確認</strong><ul>${invalid.map((item) => `<li><button type="button" data-compose-fix="${escapeHtml(item.selector)}">${escapeHtml(item.invalid)}</button></li>`).join("")}</ul>`
+    : "";
+  summary.querySelectorAll("[data-compose-fix]").forEach((button) => {
+    button.addEventListener("click", () => focusComposeValidationField(button.dataset.composeFix));
+  });
 }
 
 function focusComposeValidationField(selector) {
@@ -8233,8 +8343,7 @@ function isValidComposeContactPhone(value = "") {
   return /^02-66045432\s*#\s*\d{1,10}$/.test(String(value).trim());
 }
 
-function validateComposeStep(step = activeComposeStep) {
-  if (step !== "fill") return true;
+function composeFieldValidations() {
   const data = composeValidationData();
   const attachmentFiles = [...(document.querySelector("#attachments")?.files || [])];
   const validations = [
@@ -8297,8 +8406,8 @@ function validateComposeStep(step = activeComposeStep) {
     {
       selector: "#contactEmail",
       hint: null,
-      valid: Boolean(data.contactEmail),
-      invalid: "請填寫寄件人電子信箱。",
+      valid: Boolean(data.contactEmail) && document.querySelector("#contactEmail")?.validity?.typeMismatch !== true,
+      invalid: data.contactEmail ? "電子信箱格式不正確，例如 name@example.com。" : "請填寫寄件人電子信箱。",
       ok: "寄件人電子信箱已填寫。"
     },
     {
@@ -8311,7 +8420,19 @@ function validateComposeStep(step = activeComposeStep) {
       ok: attachmentFiles.length || data.attachmentDetails ? "附件資訊已建立。" : "無附件可先送出。"
     }
   ];
-  validations.forEach((item) => setComposeFieldValidity(item.selector, item.hint, item.valid, item.valid ? item.ok : item.invalid));
+  return validations.sort((left, right) => {
+    const a = document.querySelector(left.selector);
+    const b = document.querySelector(right.selector);
+    if (!a || !b || a === b) return 0;
+    return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+  });
+}
+
+function validateComposeStep(step = activeComposeStep) {
+  if (step !== "fill") return true;
+  const validations = composeFieldValidations();
+  validations.forEach((item) => setComposeFieldValidity(item.selector, item.hint, item.valid, item.valid ? "" : item.invalid));
+  renderComposeValidationSummary(validations.filter((item) => !item.valid));
   const firstInvalid = validations.find((item) => !item.valid);
   if (firstInvalid) {
     focusComposeValidationField(firstInvalid.selector);
@@ -10898,25 +11019,32 @@ function renderInternalDispatchRecipientOptions() {
   });
 }
 
-async function loadInternalDispatches(silent = false) {
+async function loadInternalDispatches(silent = false, { includeDirectory = true } = {}) {
+  if (!hasAuthenticatedBackendSession()) return null;
+  const scope = frontendSessionScope();
+  const generation = ++internalDispatchLoadGeneration;
+  internalDispatchLoadStatus = "loading";
   try {
     const [items, directory] = await Promise.all([
       backendRequest("/internal-dispatches"),
-      canCreateInternalDispatch() ? backendRequest("/internal-dispatches/recipients") : Promise.resolve([])
+      includeDirectory && canCreateInternalDispatch() ? backendRequest("/internal-dispatches/recipients") : Promise.resolve(null)
     ]);
+    if (!hasAuthenticatedBackendSession() || frontendSessionScope() !== scope || generation !== internalDispatchLoadGeneration) return null;
+    if (!Array.isArray(items) || (directory !== null && !Array.isArray(directory))) throw new Error("internal_dispatch_list_invalid");
     internalDispatchItems = items;
-    internalDispatchRecipientDirectory = directory;
+    if (directory !== null) internalDispatchRecipientDirectory = directory;
+    internalDispatchLoadStatus = "loaded";
     if (!internalDispatchItems.some((item) => item.id === selectedInternalDispatchId)) {
       selectedInternalDispatchId = internalDispatchItems[0]?.id || "";
     }
     renderInternalDispatchModule();
     refreshDashboardWorkEntryPoints();
   } catch (error) {
-    internalDispatchItems = [];
-    internalDispatchRecipientDirectory = [];
+    if (!hasAuthenticatedBackendSession() || frontendSessionScope() !== scope || generation !== internalDispatchLoadGeneration) return null;
+    internalDispatchLoadStatus = "error";
     renderInternalDispatchModule();
     refreshDashboardWorkEntryPoints();
-    if (!silent) showToast(`內部派文載入失敗：${error.message}`);
+    if (!silent) showToast("內部派文暫時無法載入，已保留上次資料，請重新整理再試一次。");
   }
 }
 
@@ -10924,9 +11052,9 @@ function renderInternalDispatchList() {
   const list = document.querySelector("#internalDispatchList");
   const count = document.querySelector("#internalDispatchCount");
   if (!list || !count) return;
-  count.textContent = `${internalDispatchItems.length} 件`;
+  count.textContent = internalDispatchLoadStatus === "error" ? internalDispatchItems.length ? `${internalDispatchItems.length} 件（上次資料）` : "尚未載入" : `${internalDispatchItems.length} 件`;
   if (!internalDispatchItems.length) {
-    list.innerHTML = `<p class="empty-text">尚無內部派發紀錄。</p>`;
+    list.innerHTML = `<p class="empty-text">${internalDispatchLoadStatus === "error" ? "內部派發清單載入失敗，請按重新整理。" : internalDispatchLoadStatus === "loading" ? "正在讀取派發紀錄…" : "尚無內部派發紀錄。"}</p>`;
     return;
   }
   list.innerHTML = internalDispatchItems.map((item) => {
@@ -10956,7 +11084,8 @@ function canReplyInternalDispatch(item) {
   const recipient = (item?.recipients || []).find((entry) => entry.recipient_user_id === userId);
   return Boolean(
     item?.reply_required
-    && item.status !== "closed"
+    && !["closed", "cancelled"].includes(item.status)
+    && !item.closed_at
     && recipient
     && Boolean(recipient.action_required)
     && recipient.status !== "replied"
@@ -10965,7 +11094,7 @@ function canReplyInternalDispatch(item) {
 
 function canCloseInternalDispatch(item) {
   const userId = authState?.user?.id || "";
-  return Boolean(item && item.status !== "closed" && (item.sender_user_id === userId || (authState?.permissions || []).includes("official_documents.all_todo")));
+  return Boolean(item && !["closed", "cancelled"].includes(item.status) && !item.closed_at && (item.sender_user_id === userId || (authState?.permissions || []).includes("official_documents.all_todo")));
 }
 
 function renderInternalDispatchDetail() {
@@ -11081,7 +11210,35 @@ function renderInternalDispatchModule() {
   renderLaunchChecklist();
 }
 
+const internalDispatchMutationsInFlight = new Set();
+
+async function runInternalDispatchOnce(key, selector, operation) {
+  if (internalDispatchMutationsInFlight.has(key)) return null;
+  internalDispatchMutationsInFlight.add(key);
+  const button = document.querySelector(selector);
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "處理中…";
+  }
+  try {
+    return await operation();
+  } finally {
+    internalDispatchMutationsInFlight.delete(key);
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = label;
+    }
+  }
+}
+
 async function createInternalDispatchFromForm() {
+  return runInternalDispatchOnce("create", "#internalDispatchSubmitBtn", performCreateInternalDispatchFromForm);
+}
+
+async function performCreateInternalDispatchFromForm() {
   if (!canCreateInternalDispatch()) return showToast("只有總務、行政部門主任或執行長可以建立內部派發。");
   const selectedRecipients = [...document.querySelectorAll(".internal-dispatch-recipient-check:checked")];
   const inboundDocumentId = document.querySelector("#internalDispatchDocumentSelect")?.value || "";
@@ -11129,6 +11286,10 @@ async function createInternalDispatchFromForm() {
 }
 
 async function replyInternalDispatch(dispatchId) {
+  return runInternalDispatchOnce(`reply:${dispatchId}`, "#internalDispatchReplyForm button[type=submit]", () => performReplyInternalDispatch(dispatchId));
+}
+
+async function performReplyInternalDispatch(dispatchId) {
   const text = document.querySelector("#internalDispatchReplyText")?.value.trim() || "";
   const file = document.querySelector("#internalDispatchReplyFile")?.files?.[0];
   if (!text && !file) return showToast("請填寫回文內容或上傳附件。");
@@ -11154,6 +11315,10 @@ async function replyInternalDispatch(dispatchId) {
 }
 
 async function closeInternalDispatch(dispatchId) {
+  return runInternalDispatchOnce(`close:${dispatchId}`, "#internalDispatchCloseBtn", () => performCloseInternalDispatch(dispatchId));
+}
+
+async function performCloseInternalDispatch(dispatchId) {
   try {
     const result = await backendRequest(`/internal-dispatches/${encodeURIComponent(dispatchId)}/close`, {
       method: "POST",
@@ -11562,7 +11727,9 @@ async function performCreateDispatchFromForm(status = "草稿") {
   }
   if (status !== "草稿") draftSigned = true;
   const data = composePayload();
-  if (!isValidComposeDispatchDate(data.dispatchDate)) {
+  if (!isValidComposeDispatchDate(document.querySelector("#dispatchDate")?.value)) {
+    setComposeFieldValidity("#dispatchDate", null, false, "請填寫有效的發文日期。");
+    focusComposeValidationField("#dispatchDate");
     showToast("請填寫有效的發文日期。");
     return null;
   }
@@ -11709,6 +11876,13 @@ async function saveComposeDraft() {
       };
       renderComposeStepper();
       showToast(existingDraft ? `發文草稿已更新：${doc.no}` : `發文草稿已儲存：${doc.no}`);
+    } else if (composeSaveState.tone === "saving") {
+      composeSaveState = {
+        tone: "error",
+        title: "草稿尚未儲存",
+        detail: document.querySelector('#composeForm .field-hint[data-validity="needs"]')?.textContent || "請補齊畫面標示的必要資料後，再按儲存草稿。"
+      };
+      renderComposeSaveStatus();
     }
     return doc;
   } catch (error) {
@@ -12776,6 +12950,8 @@ async function openContractInElectronicSeal(contract = currentContract()) {
     return;
   }
   if ((uploadedSealEditorRuntime.documentId || uploadedSealEditorState.pages.length) && !window.confirm("目前電子用印區已有另一份草稿。切換到這筆合約會離開目前畫面；已自動保存的後端版本仍會保留。是否繼續？")) return;
+  try { await flushUploadedSealDraftBeforeSwitch(); }
+  catch (error) { showToast(error.message); return; }
   clearUploadedEditorSensitivePreviews();
   setView("electronicSeal");
   configureUploadedSealMode("electronicSeal");
@@ -19633,6 +19809,8 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     internal_dispatch_create_forbidden: "只有總務、行政部門主任或執行長可以建立內部派發。",
     internal_dispatch_reply_forbidden: "你不是這筆內部派文的收件人，不能回覆。",
     internal_dispatch_reply_not_required: "這筆公文對你標示為僅供知悉，不需要回覆。",
+    internal_dispatch_closed: "這筆內部派發已結案，不能再回覆。請重新整理查看最新紀錄。",
+    official_dispatch_record_locked: "寄發已完成，寄發資料與證明已鎖定，只能檢視或下載。",
     internal_dispatch_reply_attachment_too_large: "回文附件目前單檔上限 3 MB，請壓縮後再上傳。",
     internal_dispatch_close_forbidden: "只有派文建立者或管理者可以結案。"
   };
@@ -21204,7 +21382,7 @@ function approvalLogRecords() {
         lastSignedAt: currentStep?.time,
         lastComment: currentStep?.comment
       },
-      doc: { id: item.id, no: item.id, subject: item.subject || item.title, to: item.recipient, companyName: item.company_name },
+      doc: { id: item.id, no: item.dispatch_no || item.id, subject: item.subject || item.title, to: item.recipient, companyName: item.company_name },
       currentStep,
       doneCount: steps.filter((step) => step.state === "done").length,
       totalSteps: steps.length,
@@ -21335,6 +21513,19 @@ function approvalProgressCategory({ task, currentStep, officialDocument } = {}) 
   return "processed";
 }
 
+function approvalRecordTimeMeta({ officialDocument, submittedAt, doneCount = 0, totalSteps = 0 } = {}) {
+  const draft = officialDocument?.current_status === "draft";
+  const stepTimes = (officialDocument?.approval_steps || []).map((step) => step.created_at).filter(Boolean).sort();
+  return {
+    label: draft ? "建立時間" : officialDocument?.correction_resubmitted_at ? "最近送出" : "送出時間",
+    value: draft ? officialDocument.created_at || "尚未儲存" : officialDocument
+      ? officialDocument.correction_resubmitted_at || officialDocument.submitted_at || officialDocument.requested_at || stepTimes[0] || "尚無送出紀錄"
+      : submittedAt || "尚無送出紀錄",
+    actorLabel: draft ? "申請人" : "送出人",
+    progress: draft ? "草稿・尚未送簽" : `${Number(doneCount)}/${Number(totalSteps)} 關`
+  };
+}
+
 function renderApprovalLog() {
   const list = document.querySelector("#approvalLogList");
   const detail = document.querySelector("#approvalLogDetail");
@@ -21356,7 +21547,7 @@ function renderApprovalLog() {
     });
     heading.insertBefore(proxyButton, fullCaseButton || null);
   }
-  const progressLabels = { my_pending: "我的待簽", delegated: "代理待簽", overdue: "逾期", processed: "已處理" };
+  const progressLabels = { my_pending: "待我處理", delegated: "代理待簽", overdue: "逾期", processed: "其他紀錄" };
   const allProgressRecords = approvalLogRecords();
   document.querySelectorAll("[data-approval-log-filter]").forEach((button) => {
     const key = button.dataset.approvalLogFilter;
@@ -21364,6 +21555,7 @@ function renderApprovalLog() {
     button.textContent = `${progressLabels[key] || key} ${count}`;
     button.classList.toggle("active", key === approvalLogFilter);
     button.setAttribute("aria-selected", String(key === approvalLogFilter));
+    button.tabIndex = key === approvalLogFilter ? 0 : -1;
   });
   const records = filteredApprovalLogRecords();
   document.querySelector("#approvalLogCount").textContent = `${records.length} 件`;
@@ -21375,7 +21567,7 @@ function renderApprovalLog() {
       <span>${escapeHtml(doc?.subject || task.title)}</span>
       <p>${escapeHtml(currentStep?.title || task.step)} · ${escapeHtml(task.role)} · ${escapeHtml(task.status)}</p>
       ${officialDocument ? renderOfficialHumanProgress(officialDocument, true) : ""}
-      <small>${Number(doneCount)}/${Number(totalSteps)} 關 · 送出時間 ${escapeHtml(submittedAt)}</small>
+      <small>${escapeHtml(approvalRecordTimeMeta({ officialDocument, submittedAt, doneCount, totalSteps }).progress)} · ${escapeHtml(approvalRecordTimeMeta({ officialDocument, submittedAt }).label)} ${escapeHtml(approvalRecordTimeMeta({ officialDocument, submittedAt }).value)}</small>
       <div class="row-actions">
         <button class="segment" type="button" data-approval-log-select="${escapeHtml(task.id)}">檢視</button>
       </div>
@@ -21383,10 +21575,12 @@ function renderApprovalLog() {
   `).join("") : `<div class="ux-empty-state"><strong>目前沒有這一類簽核紀錄</strong><p>若要開始申請，可直接建立公文；若剛送出，請重新整理後再查看。</p>${isRouteAllowed("compose") ? `<button class="primary-button" type="button" data-empty-action-target="compose">建立公文申請</button>` : ""}</div>`;
 
   const selected = records.find(({ task }) => task.id === selectedWorkflowTaskId) || records[0];
+  if (fullCaseButton) fullCaseButton.disabled = !selected;
   if (!selected) {
     detail.innerHTML = `<div class="ux-empty-state"><strong>尚未有可檢視的流程</strong><p>送出申請後，這裡會顯示目前負責人、等待時間、下一步與完整附件。</p></div>`;
   } else {
     const { task, doc, currentStep, doneCount, totalSteps, steps, submittedAt, requester, officialDocument } = selected;
+    const timeMeta = approvalRecordTimeMeta(selected);
     const officialDetailReady = !officialDocument || officialDocumentDetailReady.has(officialDocument.id);
     const pendingOfficialStep = (officialDocument?.approval_steps || []).find((step) => step.step_key === officialDocument.current_step && step.status === "pending");
     const canActOfficial = Boolean(
@@ -21411,9 +21605,9 @@ function renderApprovalLog() {
         ${officialDocument ? renderOfficialHumanProgress(officialDocument) : ""}
         <dl class="approval-log-meta">
           <div><dt>公司</dt><dd>${escapeHtml(doc?.companyName || "歲悅長照股份有限公司")}</dd></div>
-          <div><dt>送出人</dt><dd>${escapeHtml(requester)}</dd></div>
-          <div><dt>送出時間</dt><dd>${escapeHtml(submittedAt)}</dd></div>
-          <div><dt>進度</dt><dd>${Number(doneCount)}/${Number(totalSteps)} 關</dd></div>
+          <div><dt>${escapeHtml(timeMeta.actorLabel)}</dt><dd>${escapeHtml(requester)}</dd></div>
+          <div><dt>${escapeHtml(timeMeta.label)}</dt><dd>${escapeHtml(timeMeta.value)}</dd></div>
+          <div><dt>進度</dt><dd>${escapeHtml(timeMeta.progress)}</dd></div>
           <div><dt>最近時間戳</dt><dd>${escapeHtml(task.lastSignedAt || "尚未簽核")}</dd></div>
           <div><dt>簽核意見</dt><dd>${escapeHtml(task.lastComment || "尚未填寫")}</dd></div>
         </dl>
@@ -23957,12 +24151,21 @@ function renderUploadedSealCompanyOptions() {
   if (!select) return;
   const companies = uploadedSealCompanies();
   const previous = select.value;
+  const previousLabel = select.selectedOptions[0]?.textContent || "原申請公司（歷史快照）";
   const accountCompany = financeDirectoryCurrentCompany();
+  const preserveHistorical = Boolean(uploadedSealEditorRuntime.documentId && previous && !companies.some((item) => item.id === previous));
   select.innerHTML = companies.length
     ? companies.map((item) => `<option value="${escapeDraftHtml(item.id)}">${escapeDraftHtml(item.name)}</option>`).join("")
     : `<option value="">尚未開放可送簽公司</option>`;
+  if (preserveHistorical) {
+    const snapshot = document.createElement("option");
+    snapshot.value = previous;
+    snapshot.textContent = previousLabel;
+    snapshot.dataset.historicalSnapshot = "true";
+    select.append(snapshot);
+  }
   select.disabled = !companies.length || financeIdentitySelectionLocked() || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
-  if (companies.some((item) => item.id === previous)) select.value = previous;
+  if (preserveHistorical || companies.some((item) => item.id === previous)) select.value = previous;
   else if (accountCompany) select.value = accountCompany.id;
   else if (!financeIdentitySelectionLocked() && companies[0]) select.value = companies[0].id;
   renderUploadedSealDepartmentOptions();
@@ -24004,7 +24207,7 @@ function renderUploadedSealDepartmentOptions({ preferAccount = false } = {}) {
   const accountDepartment = preferredFinanceDepartment(departments);
   const selectionLocked = financeIdentitySelectionLocked();
   const availableDepartments = selectionLocked ? (accountDepartment ? [accountDepartment] : []) : departments;
-  const preserveHistorical = Boolean(!selectionLocked && previous && !departments.some((department) => department.name === previous) && uploadedSealEditorRuntime.documentId);
+  const preserveHistorical = Boolean(previous && !availableDepartments.some((department) => department.name === previous) && uploadedSealEditorRuntime.documentId);
   select.innerHTML = [
     ...availableDepartments.map((department) => `<option value="${escapeDraftHtml(department.name)}" data-finance-unit-id="${escapeDraftHtml(department.financeUnitId || department.id)}">${escapeDraftHtml(department.name)}${department.code ? `（${escapeDraftHtml(department.code)}）` : ""}</option>`),
     preserveHistorical ? `<option value="${escapeDraftHtml(previous)}" data-historical-snapshot="true">${escapeDraftHtml(previous)}（歷史快照）</option>` : ""
@@ -24640,6 +24843,7 @@ function pushUploadedEditorHistory(previousState) {
 }
 
 function markUploadedEditorDirty() {
+  invalidateUploadedEditorSubmissionPreview();
   uploadedSealEditorRuntime.dirtyGeneration += 1;
   uploadedSealEditorRuntime.preparedFileId = "";
   uploadedSealEditorRuntime.preparedSha256 = "";
@@ -24778,22 +24982,31 @@ async function ensureUploadedEditorDraft() {
     throw new Error("請先選擇用印文件類型，再上傳 PDF。");
   }
   if (uploadedSealEditorRuntime.draftCreatePromise) return uploadedSealEditorRuntime.draftCreatePromise;
-  uploadedSealEditorRuntime.draftCreatePromise = backendRequest("/official-documents/editor-drafts", {
+  const applicationPayload = editorDraftPayload();
+  const creationScope = uploadedSealApplicationScopeSnapshot();
+  const operation = backendRequest("/official-documents/editor-drafts", {
     method: "POST",
-    body: JSON.stringify(editorDraftPayload())
+    body: JSON.stringify(applicationPayload)
   }).then((result) => {
+    if (!uploadedSealApplicationScopeIsCurrent(creationScope)) throw new Error("登入或草稿已切換，已忽略先前的建立結果。");
     uploadedSealEditorRuntime.documentId = result.document_id || result.id || "";
     uploadedSealEditorRuntime.revisionId = result.editor_revision?.id || result.editor_revision?.revision_id || result.revision_id || "";
     uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || result.editor_state?.manifestSha256 || result.editor_revision?.manifestSha256 || result.editor_revision?.manifest_sha256 || "";
     const serverRevisionNo = Number(result.editor_revision?.revision_no ?? result.editor_revision?.revisionNo ?? result.editor_state?.revisionNo);
     if (Number.isFinite(serverRevisionNo)) uploadedSealEditorState.revisionNo = serverRevisionNo;
     rememberUploadedEditorSavedSealBindings(result.editor_state || result.editor_revision?.state || null);
+    uploadedSealApplicationRuntime.documentId = uploadedSealEditorRuntime.documentId;
+    uploadedSealApplicationRuntime.savedKey = uploadedSealApplicationKey(applicationPayload);
+    uploadedSealApplicationRuntime.editable = true;
+    scheduleUploadedSealApplicationSave();
     setUploadedEditorSaveStatus("saved", "私密草稿已建立");
     return uploadedSealEditorRuntime.documentId;
   }).finally(() => {
-    uploadedSealEditorRuntime.draftCreatePromise = null;
+    if (uploadedSealApplicationScopeIsCurrent(creationScope, false)
+      && uploadedSealEditorRuntime.draftCreatePromise === operation) uploadedSealEditorRuntime.draftCreatePromise = null;
   });
-  return uploadedSealEditorRuntime.draftCreatePromise;
+  uploadedSealEditorRuntime.draftCreatePromise = operation;
+  return operation;
 }
 
 async function requestEditorUpload(file, assetKind = "source_pdf") {
@@ -25957,6 +26170,7 @@ function renderUploadedEditorChangeSummary() {
 
 async function showUploadedEditorReview(mode) {
   if (!["original", "edited", "prepared", "changes"].includes(mode)) return;
+  if (mode !== "prepared") invalidateUploadedEditorSubmissionPreview();
   const reviewGeneration = ++uploadedSealEditorRuntime.reviewGeneration;
   uploadedSealEditorRuntime.reviewMode = mode;
   const reviewSelect = document.querySelector("#uploadedEditorReviewSelect");
@@ -26223,6 +26437,9 @@ function renderUploadedEditorProperties() {
   const count = document.querySelector("#uploadedEditorSelectionCount");
   if (count) count.textContent = selected.length ? `已選 ${selected.length} 個` : "未選取";
   if (form) form.hidden = !selected.length;
+  form?.querySelectorAll("input, select, textarea, button").forEach((input) => {
+    input.disabled = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited";
+  });
   if (empty) empty.hidden = Boolean(selected.length);
   if (!selected.length) return;
   const element = selected[0];
@@ -26627,7 +26844,14 @@ async function fetchEditorAuthorizedBlob(url) {
   const headers = { "Cache-Control": "no-store" };
   if (new URL(resolved).origin === window.location.origin && isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
   const response = await fetch(resolved, { headers, cache: "no-store" });
-  if (!response.ok) throw new Error(`短效檔案授權已失效（${response.status}）。`);
+  if (!response.ok) {
+    const message = [401, 403].includes(response.status)
+      ? "檔案存取權限已失效，請重新開啟案件；若仍失敗，請重新登入。"
+      : response.status === 404
+        ? "找不到這份 PDF 檔案，請聯絡管理員確認原稿保存狀態。"
+        : `暫時無法讀取 PDF 檔案（${response.status}），請稍後重新開啟案件。`;
+    throw new Error(message);
+  }
   return response.blob();
 }
 
@@ -26649,24 +26873,46 @@ async function hydrateUploadedEditorAuthorizedAssets(result = {}) {
 }
 
 async function loadUploadedEditorState(documentId) {
-  uploadedSealEditorRuntime.documentId = documentId;
+  const previousScope = uploadedSealApplicationScopeSnapshot();
+  await flushUploadedSealDraftBeforeSwitch();
+  if (!uploadedSealApplicationScopeIsCurrent(previousScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  uploadedSealApplicationRuntime.epoch += 1;
+  const openingScope = uploadedSealApplicationScopeSnapshot();
+  // Get the authorized application snapshot before changing the active draft.
+  // PDF revisions do not contain the six application fields.
+  const application = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
+  if (!uploadedSealApplicationScopeIsCurrent(openingScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/editor-state`);
+  if (!uploadedSealApplicationScopeIsCurrent(openingScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   const state = result.state || result.editor_state;
   if (!state || Number(state.schemaVersion || state.schema_version) !== PDF_EDITOR_SCHEMA_VERSION) throw new Error("找不到相容的 PDF Editor V2 草稿。");
+  clearUploadedEditorSensitivePreviews();
+  uploadedSealEditorRuntime.documentId = documentId;
+  const loadedScope = uploadedSealApplicationScopeSnapshot();
   uploadedSealEditorState = { ...emptyUploadedSealEditorState(), ...cloneUploadedEditorValue(state), revisionNo: Number(result.revisionNo ?? state.revisionNo ?? 0), manifestSha256: result.manifestSha256 || state.manifestSha256 || "" };
   uploadedSealEditorRuntime.revisionId = result.revision_id || result.revisionId || "";
   uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || state.manifestSha256 || "";
   uploadedSealEditorRuntime.preparedFileId = result.preparedFileId || "";
   uploadedSealEditorRuntime.preparedSha256 = result.preparedSha256 || "";
   uploadedSealEditorRuntime.preparedUrl = editorPreparedAuthorizedUrl(result);
-  uploadedSealEditorRuntime.locked = ["locked", "submitted", "approved"].includes(result.status);
+  const applicationLocked = ["locked", "submitted", "approved"].includes(result.status)
+    || !["draft", "rejected"].includes(application.current_status)
+    || !officialDocumentIsApplicant(application);
+  // Keep the editor read-only until every authorized source has loaded. A
+  // failed asset request must not expose a partially hydrated editable state.
+  uploadedSealEditorRuntime.locked = true;
+  restoreUploadedSealApplication(application);
   rememberUploadedEditorSavedSealBindings(uploadedSealEditorState);
   const sealGeometryNormalized = normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
   uploadedSealEditorRuntime.dirtyGeneration = 0;
   uploadedSealEditorRuntime.savedGeneration = 0;
   uploadedSealEditorRuntime.saveQueued = false;
   uploadedSealEditorRuntime.currentPageId = uploadedSealEditorState.pages[0]?.pageId || "";
+  renderUploadedSealWorkbench();
   await hydrateUploadedEditorAuthorizedAssets(result);
+  if (!uploadedSealApplicationScopeIsCurrent(loadedScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  uploadedSealEditorRuntime.locked = applicationLocked;
+  uploadedSealApplicationRuntime.editable = !applicationLocked;
   syncLegacyUploadedEditorCollections();
   if (uploadedSealEditorState.pages.length) {
     try {
@@ -26676,6 +26922,10 @@ async function loadUploadedEditorState(documentId) {
     }
   }
   if (sealGeometryNormalized && !uploadedSealEditorRuntime.locked) markUploadedEditorDirty();
+  await loadUploadedSealOptions(application.company_id || "");
+  if (!uploadedSealApplicationScopeIsCurrent(loadedScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  await refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true });
+  if (!uploadedSealApplicationScopeIsCurrent(loadedScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   renderUploadedSealWorkbench();
   return result;
 }
@@ -26692,15 +26942,26 @@ function officialDocumentHasEditorV2(item = {}) {
 
 async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
   if (!documentId) return false;
-  try {
-    setView("electronicSeal");
-    await loadUploadedEditorState(documentId);
-    await showUploadedEditorReview(mode);
-    document.querySelector("#uploadedPdfEditor")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    return true;
-  } catch (error) {
-    showToast(`PDF 編輯版本載入失敗：${error.message}`);
+  if (uploadedSealApplicationRuntime.openPromise) {
+    showToast("正在載入 PDF 草稿，請稍候。");
     return false;
+  }
+  const openOperation = (async () => {
+    try {
+      await loadUploadedEditorState(documentId);
+      setView("electronicSeal");
+      await showUploadedEditorReview(mode);
+      document.querySelector("#uploadedPdfEditor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return true;
+    } catch (error) {
+      showToast(`PDF 編輯版本載入失敗：${error.message}`);
+      return false;
+    }
+  })();
+  uploadedSealApplicationRuntime.openPromise = openOperation;
+  try { return await openOperation; }
+  finally {
+    if (uploadedSealApplicationRuntime.openPromise === openOperation) uploadedSealApplicationRuntime.openPromise = null;
   }
 }
 
@@ -26716,6 +26977,8 @@ async function preflightUploadedEditor() {
     body: JSON.stringify({ editorRevisionId: uploadedSealEditorRuntime.revisionId, manifestSha256: uploadedSealEditorState.manifestSha256 })
   });
   if (result.status !== "prepared") throw new Error("確認版尚未完成，請稍後再試。");
+  void uploadedSealEditorRuntime.preparedPdfDocument?.destroy?.();
+  uploadedSealEditorRuntime.preparedPdfDocument = null;
   uploadedSealEditorRuntime.preparedFileId = result.preparedFileId || result.prepared_file_id || "";
   uploadedSealEditorRuntime.preparedSha256 = result.preparedSha256 || result.prepared_sha256 || "";
   uploadedSealEditorRuntime.preparedUrl = editorPreparedAuthorizedUrl(result) || result.authorizedUrl || result.authorized_url || "";
@@ -26913,8 +27176,8 @@ function renderUploadedSealAvailabilityNotice(hasUsableSeal) {
   if (hasUsableSeal) return;
   const canManage = isCompanySealCustodian() && isRouteAllowed("seals");
   notice.innerHTML = canManage
-    ? `目前公司沒有可用的 current 印章版本，因此不能加入章位或送簽。<button class="text-button" type="button" data-open-seal-settings>前往系統設定處理印章</button>`
-    : "目前公司沒有可用的 current 印章版本，因此不能加入章位或送簽。請聯絡執行長或行政部門主任至「系統設定 → 印章檔案」上傳並啟用版本。";
+    ? `可先上傳 PDF、加文字並保存草稿；目前尚無可用印章，啟用後即可放章與送簽。<button class="text-button" type="button" data-open-seal-settings>前往系統設定處理印章</button>`
+    : "可先上傳 PDF、加文字並保存草稿；目前尚無可用印章，請由執行長或行政部門主任在「系統設定 → 印章檔案」啟用後再放章與送簽。";
   notice.querySelector("[data-open-seal-settings]")?.addEventListener("click", () => {
     setView("seals");
     openIntegratedPageSection("seals");
@@ -26922,6 +27185,11 @@ function renderUploadedSealAvailabilityNotice(hasUsableSeal) {
 }
 
 function renderUploadedSealWorkbench() {
+  renderUploadedSealApplicationSaveStatus();
+  ["#uploadedSealApplicant", "#uploadedSealTitle", "#uploadedSealReason"].forEach((selector) => {
+    const input = document.querySelector(selector);
+    if (input) input.disabled = uploadedSealEditorRuntime.locked || uploadedSealApplicationRuntime.submissionBusy;
+  });
   const applicantInput = document.querySelector("#uploadedSealApplicant");
   const departmentInput = document.querySelector("#uploadedSealDepartment");
   const emailInput = document.querySelector("#uploadedSealEmail");
@@ -26935,7 +27203,7 @@ function renderUploadedSealWorkbench() {
     !departmentInput.options.length
     || departmentInput.dataset.financeCompanyId !== (companySelect?.value || "")
   )) renderUploadedSealDepartmentOptions({ preferAccount: true });
-  if (companySelect) companySelect.disabled = !companySelect.options.length || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+  if (companySelect) companySelect.disabled = !companySelect.options.length || financeIdentitySelectionLocked() || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
   const typeSelect = document.querySelector("#uploadedSealType");
   if (typeSelect) typeSelect.disabled = Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
   const approvalCategorySelect = document.querySelector("#uploadedSealApprovalCategorySelect");
@@ -27011,25 +27279,7 @@ function renderUploadedSealWorkbench() {
   });
   const addStampButton = document.querySelector("#addSelectedStampBtn");
   if (addStampButton) addStampButton.disabled = addStampButton.disabled || !hasUsableSeal;
-  const submitApplicationButton = document.querySelector("#submitUploadedSealBtn");
-  if (submitApplicationButton) {
-    const readinessSelection = workflowReadinessSelection("uploadedSeal");
-    const workflowReady = workflowReadinessAllowsSubmit(
-      readinessSelection,
-      officialWorkflowReadinessByRoute.get(readinessSelection.approvalRouteCode || "")
-    );
-    submitApplicationButton.disabled = reviewReadOnly
-      || uploadedSealEditorRuntime.locked
-      || uploadedSealEditorRuntime.uploading
-      || !hasUsableSeal
-      || !uploadedSealEditorState.pages.length
-      || !workflowReady;
-    submitApplicationButton.title = !hasUsableSeal
-      ? "請先由執行長或行政部門主任在系統設定上傳並啟用 current 印章版本。"
-      : !workflowReady
-        ? "會計系統簽核關係尚未完整，只能先保存 PDF 草稿。"
-        : "";
-  }
+  renderUploadedEditorSubmissionActions();
   document.querySelectorAll("[data-uploaded-placement-mode]").forEach((button) => button.classList.toggle("active", button.dataset.uploadedPlacementMode === uploadedSealPlacementMode));
   const generalOptions = document.querySelector("#uploadedEditorGeneralOptions");
   if (generalOptions) generalOptions.hidden = !["seal", "text", "replacement"].includes(uploadedSealEditorRuntime.tool);
@@ -27107,58 +27357,348 @@ async function initializeUploadedSealWorkspace() {
   renderUploadedSealWorkbench();
 }
 
-async function syncUploadedSealApplicationDraft() {
-  if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
-  const draft = editorDraftPayload();
-  setUploadedEditorSaveStatus("saving", "正在同步申請資訊");
-  await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      title: draft.title,
-      subject: draft.title,
-      description: draft.description,
-      request_reason: draft.request_reason,
-      handler_name: draft.handler_name,
-      dispatch_unit: draft.dispatch_unit
-    })
+const uploadedSealApplicationRuntime = {
+  documentId: "", savedKey: "", timer: 0, promise: null, error: "",
+  editable: true, retryCount: 0, openPromise: null, epoch: 0,
+  submissionPreview: null, submissionBusy: false
+};
+
+function uploadedSealApplicationScopeSnapshot() {
+  return {
+    scope: frontendSessionScope(), epoch: uploadedSealApplicationRuntime.epoch,
+    documentId: uploadedSealEditorRuntime.documentId
+  };
+}
+
+function uploadedSealApplicationScopeIsCurrent(snapshot, matchDocument = true) {
+  return snapshot.scope === frontendSessionScope()
+    && snapshot.epoch === uploadedSealApplicationRuntime.epoch
+    && (!matchDocument || snapshot.documentId === uploadedSealEditorRuntime.documentId);
+}
+
+function uploadedEditorSubmissionFingerprint() {
+  return JSON.stringify({
+    documentId: uploadedSealEditorRuntime.documentId,
+    revisionId: uploadedSealEditorRuntime.revisionId,
+    revisionNo: uploadedSealEditorState.revisionNo,
+    manifestSha256: uploadedSealEditorState.manifestSha256,
+    preparedFileId: uploadedSealEditorRuntime.preparedFileId,
+    preparedSha256: uploadedSealEditorRuntime.preparedSha256,
+    applicationKey: uploadedSealApplicationKey()
   });
-  setUploadedEditorSaveStatus("saved", "申請資訊與 PDF 草稿已同步");
+}
+
+function uploadedEditorSubmissionPreviewIsCurrent() {
+  return Boolean(uploadedSealApplicationRuntime.submissionPreview
+    && uploadedSealApplicationRuntime.submissionPreview === uploadedEditorSubmissionFingerprint()
+    && uploadedSealEditorRuntime.reviewMode === "prepared"
+    && uploadedSealEditorRuntime.preparedPdfDocument
+    && !uploadedSealApplicationHasUnsavedChanges()
+    && !uploadedSealApplicationRuntime.promise
+    && uploadedSealEditorRuntime.savedGeneration >= uploadedSealEditorRuntime.dirtyGeneration
+    && !uploadedSealEditorRuntime.saving && !uploadedSealEditorRuntime.conflict);
+}
+
+function invalidateUploadedEditorSubmissionPreview() {
+  if (uploadedSealApplicationRuntime.submissionPreview) {
+    const status = document.querySelector("#uploadedEditorPreflightStatus");
+    if (status) status.textContent = "內容已變更，請返回修改後重新產生送簽確認版。";
+  }
+  uploadedSealApplicationRuntime.submissionPreview = null;
+}
+
+function renderUploadedEditorSubmissionActions() {
+  const button = document.querySelector("#submitUploadedSealBtn");
+  if (!button) return;
+  const current = uploadedEditorSubmissionPreviewIsCurrent();
+  const selection = workflowReadinessSelection("uploadedSeal");
+  const workflowReady = workflowReadinessAllowsSubmit(selection, officialWorkflowReadinessByRoute.get(selection.approvalRouteCode || ""));
+  const hasSeal = uploadedSealOptions.some(officialSealHasCurrentFile);
+  button.textContent = uploadedSealApplicationRuntime.submissionBusy ? "處理中…" : current ? "確認內容並送簽" : "預覽送簽確認版";
+  button.disabled = uploadedSealApplicationRuntime.submissionBusy
+    || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading
+    || !hasSeal || !uploadedSealEditorState.pages.length || !workflowReady
+    || (!current && uploadedSealEditorRuntime.reviewMode !== "edited");
+  button.title = !hasSeal ? "請由執行長或行政部門主任啟用印章版本後再送簽。"
+    : !workflowReady ? "會計系統簽核關係尚未完整，只能先保存 PDF 草稿。" : "";
+  let back = document.querySelector("#uploadedEditorBackToEditBtn");
+  if (!back) {
+    back = document.createElement("button");
+    back.id = "uploadedEditorBackToEditBtn";
+    back.type = "button";
+    back.className = "secondary-button";
+    back.textContent = "返回修改";
+    back.addEventListener("click", () => {
+      invalidateUploadedEditorSubmissionPreview();
+      void showUploadedEditorReview("edited");
+    });
+    button.before(back);
+  }
+  back.hidden = uploadedSealEditorRuntime.reviewMode !== "prepared" || uploadedSealEditorRuntime.locked;
+  back.disabled = uploadedSealApplicationRuntime.submissionBusy;
+}
+
+function uploadedSealApplicationPatch(draft = editorDraftPayload()) {
+  return {
+    title: draft.title || "", subject: draft.title || "",
+    description: draft.description || "", request_reason: draft.request_reason || "",
+    handler_name: draft.handler_name || "", dispatch_unit: draft.dispatch_unit || ""
+  };
+}
+
+function uploadedSealApplicationKey(draft = editorDraftPayload()) {
+  return JSON.stringify(uploadedSealApplicationPatch(draft));
+}
+
+function uploadedSealApplicationHasUnsavedChanges() {
+  return Boolean(uploadedSealEditorRuntime.documentId
+    && !uploadedSealEditorRuntime.locked && uploadedSealApplicationRuntime.editable
+    && uploadedSealApplicationRuntime.documentId === uploadedSealEditorRuntime.documentId
+    && uploadedSealApplicationRuntime.savedKey !== uploadedSealApplicationKey());
+}
+
+function resetUploadedSealApplicationSaving() {
+  window.clearTimeout(uploadedSealApplicationRuntime.timer);
+  uploadedSealApplicationRuntime.epoch += 1;
+  uploadedSealApplicationRuntime.timer = 0;
+  uploadedSealEditorRuntime.draftCreatePromise = null;
+  uploadedSealApplicationRuntime.documentId = "";
+  uploadedSealApplicationRuntime.savedKey = "";
+  uploadedSealApplicationRuntime.error = "";
+  uploadedSealApplicationRuntime.promise = null;
+  uploadedSealApplicationRuntime.editable = true;
+  uploadedSealApplicationRuntime.retryCount = 0;
+  invalidateUploadedEditorSubmissionPreview();
+}
+
+function renderUploadedSealApplicationSaveStatus() {
+  const form = document.querySelector("#uploadedSealForm");
+  if (!form) return;
+  let status = document.querySelector("#uploadedSealApplicationSaveStatus");
+  if (!status) {
+    const line = document.createElement("div");
+    line.className = "row-actions";
+    status = document.createElement("span");
+    status.id = "uploadedSealApplicationSaveStatus";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    const retry = document.createElement("button");
+    retry.id = "uploadedSealApplicationRetryBtn";
+    retry.className = "text-button";
+    retry.type = "button";
+    retry.textContent = "重試保存申請資訊";
+    retry.addEventListener("click", () => {
+      uploadedSealApplicationRuntime.retryCount = 0;
+      void syncUploadedSealApplicationDraft().catch(() => {});
+    });
+    line.append(status, retry);
+    form.prepend(line);
+  }
+  let kind = "saved", message = "申請資訊已保存";
+  if (!uploadedSealEditorRuntime.documentId) { kind = "idle"; message = "上傳 PDF 後，申請資訊會自動保存"; }
+  else if (uploadedSealEditorRuntime.locked) { kind = "locked"; message = "申請資訊唯讀"; }
+  else if (uploadedSealApplicationRuntime.promise) { kind = "saving"; message = "申請資訊儲存中…"; }
+  else if (uploadedSealApplicationRuntime.error) { kind = "error"; message = `申請資訊未保存：${uploadedSealApplicationRuntime.error}`; }
+  else if (uploadedSealApplicationHasUnsavedChanges()) {
+    kind = navigator.onLine ? "dirty" : "offline";
+    message = navigator.onLine ? "申請資訊有變更，等待自動保存" : "離線中，申請資訊尚未同步";
+  }
+  status.className = `pdf-editor-save-status ${kind}`;
+  status.textContent = message;
+  const retry = document.querySelector("#uploadedSealApplicationRetryBtn");
+  if (retry) {
+    retry.hidden = !uploadedSealApplicationRuntime.error || uploadedSealEditorRuntime.locked;
+    retry.disabled = Boolean(uploadedSealApplicationRuntime.promise);
+  }
+}
+
+function scheduleUploadedSealApplicationSave() {
+  invalidateUploadedEditorSubmissionPreview();
+  renderUploadedEditorSubmissionActions();
+  window.clearTimeout(uploadedSealApplicationRuntime.timer);
+  uploadedSealApplicationRuntime.error = "";
+  uploadedSealApplicationRuntime.retryCount = 0;
+  renderUploadedSealApplicationSaveStatus();
+  if (!uploadedSealApplicationHasUnsavedChanges()) return;
+  const scope = uploadedSealApplicationScopeSnapshot();
+  uploadedSealApplicationRuntime.timer = window.setTimeout(() => {
+    if (uploadedSealApplicationScopeIsCurrent(scope)) void syncUploadedSealApplicationDraft().catch(() => {});
+  }, 1800);
+}
+
+async function syncUploadedSealApplicationDraft() {
+  const scope = uploadedSealApplicationScopeSnapshot();
+  window.clearTimeout(uploadedSealApplicationRuntime.timer);
+  if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
+  if (uploadedSealApplicationRuntime.promise) {
+    try { await uploadedSealApplicationRuntime.promise; }
+    catch (error) {
+      if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
+      throw error;
+    }
+    if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
+    if (uploadedSealApplicationHasUnsavedChanges()) return syncUploadedSealApplicationDraft();
+    return;
+  }
+  if (!uploadedSealApplicationHasUnsavedChanges()) return;
+  const documentId = uploadedSealEditorRuntime.documentId;
+  if (!navigator.onLine) {
+    uploadedSealApplicationRuntime.error = "目前離線，請連線後重試；請勿關閉此頁";
+    renderUploadedSealApplicationSaveStatus();
+    throw new Error(uploadedSealApplicationRuntime.error);
+  }
+  const title = document.querySelector("#uploadedSealTitle");
+  if (!title?.value.trim()) {
+    uploadedSealApplicationRuntime.error = "請填寫申請主旨後再保存";
+    renderUploadedSealApplicationSaveStatus();
+    throw new Error(uploadedSealApplicationRuntime.error);
+  }
+  const patch = uploadedSealApplicationPatch();
+  const savedKey = JSON.stringify(patch);
+  const operation = backendRequest(`/official-documents/${encodeURIComponent(documentId)}`, {
+    method: "PATCH", body: JSON.stringify(patch)
+  });
+  uploadedSealApplicationRuntime.promise = operation;
+  uploadedSealApplicationRuntime.error = "";
+  renderUploadedSealApplicationSaveStatus();
+  try {
+    const result = await operation;
+    if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
+    uploadedSealApplicationRuntime.savedKey = savedKey;
+    uploadedSealApplicationRuntime.retryCount = 0;
+    const itemIndex = officialWorkflowItems.findIndex((item) => item.id === documentId);
+    if (itemIndex >= 0) officialWorkflowItems[itemIndex] = { ...officialWorkflowItems[itemIndex], ...result };
+    renderElectronicSealWorkQueue();
+  } catch (error) {
+    if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
+    uploadedSealApplicationRuntime.error = error.message || "保存失敗，請重試；請勿關閉此頁";
+    if (uploadedSealApplicationRuntime.retryCount < 3 && ![401, 403, 409].includes(error.status)) {
+      uploadedSealApplicationRuntime.retryCount += 1;
+      uploadedSealApplicationRuntime.timer = window.setTimeout(() => {
+        if (uploadedSealApplicationScopeIsCurrent(scope)) void syncUploadedSealApplicationDraft().catch(() => {});
+      }, 5000);
+    }
+    throw error;
+  } finally {
+    if (uploadedSealApplicationScopeIsCurrent(scope) && uploadedSealApplicationRuntime.promise === operation) {
+      uploadedSealApplicationRuntime.promise = null;
+      renderUploadedSealApplicationSaveStatus();
+    }
+  }
+  // A keystroke during the request belongs to a newer save, never overwrite it.
+  if (uploadedSealApplicationScopeIsCurrent(scope) && uploadedSealApplicationHasUnsavedChanges()) return syncUploadedSealApplicationDraft();
+}
+
+async function flushUploadedSealDraftBeforeSwitch() {
+  const scope = uploadedSealApplicationScopeSnapshot();
+  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.draftCreatePromise) {
+    throw new Error("PDF 正在上傳或建立草稿，請完成後再切換案件。");
+  }
+  if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
+  await syncUploadedSealApplicationDraft();
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  if (uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration) {
+    await saveUploadedEditorState({ immediate: true });
+    if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  }
+  if (uploadedSealApplicationHasUnsavedChanges() || uploadedSealEditorRuntime.conflict
+    || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration) {
+    throw new Error("目前草稿尚未保存完成，請先處理離線或版本衝突，再切換案件。");
+  }
+}
+
+function restoreUploadedSealApplication(application) {
+  const metadata = parseJsonMaybe(application.metadata_json) || {};
+  const setValue = (selector, value, label = "") => {
+    const input = document.querySelector(selector);
+    if (!input) return;
+    const text = String(value || "");
+    if (input.tagName === "SELECT" && text && ![...input.options].some((option) => option.value === text)) {
+      const option = document.createElement("option");
+      option.value = text;
+      option.textContent = label || text;
+      option.dataset.historicalSnapshot = "true";
+      input.append(option);
+    }
+    input.value = text;
+  };
+  renderUploadedSealCompanyOptions();
+  setValue("#uploadedSealCompany", application.company_id, application.company_name || "原申請公司（歷史快照）");
+  renderUploadedSealDepartmentOptions();
+  setValue("#uploadedSealDepartment", application.dispatch_unit || application.applicant_department_name || "");
+  setValue("#uploadedSealApplicant", application.handler_name || application.applicant_name || "");
+  setValue("#uploadedSealTitle", application.title || application.subject || "");
+  setValue("#uploadedSealReason", application.request_reason || application.description || "");
+  setValue("#uploadedSealApprovalCategorySelect", application.document_category || metadata.document_category || "");
+  setValue("#uploadedSealEmail", application.contact_email || metadata.contact_email || "");
+  setValue("#uploadedSealPhone", application.contact_phone || metadata.contact_phone || "");
+  setValue("#uploadedSealCounterparty", application.recipient || "");
+  uploadedSealMode = application.document_type === "contract_pdf_for_stamp" ? "contract" : "official_document";
+  setValue("#uploadedSealType", uploadedSealMode);
+  uploadedSealApplicationRuntime.documentId = application.id;
+  uploadedSealApplicationRuntime.editable = !uploadedSealEditorRuntime.locked;
+  uploadedSealApplicationRuntime.savedKey = uploadedSealApplicationKey();
+  uploadedSealApplicationRuntime.error = "";
+  const selection = renderUploadedSealApprovalRoute();
+  setOfficialFieldValidity(
+    "#uploadedSealApprovalCategorySelect", "#uploadedSealApprovalCategoryHint",
+    Boolean(selection.approvalRouteCode),
+    selection.approvalRouteCode ? `已還原 ${selection.approvalRouteName}，用印文件類型已鎖定。` : "此歷史文件類型已停用，請聯絡管理員確認。"
+  );
+  renderUploadedSealApplicationSaveStatus();
 }
 
 async function submitUploadedSealApplication() {
+  if (uploadedSealApplicationRuntime.submissionBusy || uploadedSealEditorRuntime.locked) return;
   const form = document.querySelector("#uploadedSealForm");
   if (form && !form.reportValidity()) return;
   const contractMode = uploadedSealMode === "contract";
   const approvalSelection = approvalSelectionForSelect("#uploadedSealApprovalCategorySelect");
   if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) return showToast("請先選擇用印文件類型。");
-  const readiness = await loadOfficialWorkflowReadiness(approvalSelection.approvalRouteCode, { silent: false, force: true });
-  if (!workflowReadinessAllowsSubmit(approvalSelection, readiness)) {
-    renderWorkflowReadinessContext("uploadedSeal");
-    document.querySelector("#uploadedSealWorkflowReadinessNotice")?.scrollIntoView({ behavior: "smooth", block: "center" });
-    showToast("會計系統的簽核關係尚未完整，目前已保留 PDF 草稿但不能送簽。");
-    return;
-  }
   if (!uploadedSealEditorState.pages.length || !uploadedSealEditorRuntime.documentId) return showToast("請先完成 PDF 上傳、掃毒與預檢。");
   const seals = uploadedSealEditorState.elements.filter((element) => element.kind === "seal");
   if (!seals.length) return showToast("請先加入至少一個用印處。");
-  const submitButton = document.querySelector("#submitUploadedSealBtn");
   try {
-    if (submitButton) submitButton.disabled = true;
-    await syncUploadedSealApplicationDraft();
-    const prepared = await preflightUploadedEditor();
-    const confirmed = window.confirm(`後端已產生送簽確認版。\n\n頁數：${uploadedSealEditorState.pages.length}\n編輯物件：${uploadedSealEditorState.elements.length}\n印章：${seals.length}\nprepared hash：${uploadedSealEditorRuntime.preparedSha256.slice(0, 16)}…\n\n確認內容正確並鎖定送簽？`);
-    if (!confirmed) return;
+    uploadedSealApplicationRuntime.submissionBusy = true;
+    renderUploadedSealWorkbench();
+    const readiness = await loadOfficialWorkflowReadiness(approvalSelection.approvalRouteCode, { silent: false, force: true });
+    if (!workflowReadinessAllowsSubmit(approvalSelection, readiness)) {
+      renderWorkflowReadinessContext("uploadedSeal");
+      document.querySelector("#uploadedSealWorkflowReadinessNotice")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      showToast("會計系統的簽核關係尚未完整，目前已保留 PDF 草稿但不能送簽。");
+      return;
+    }
+    if (!uploadedEditorSubmissionPreviewIsCurrent()) {
+      if (uploadedSealEditorRuntime.reviewMode !== "edited") {
+        throw new Error("內容已變更，請先返回修改，再重新產生送簽確認版。");
+      }
+      await syncUploadedSealApplicationDraft();
+      await preflightUploadedEditor();
+      await showUploadedEditorReview("prepared");
+      if (uploadedSealEditorRuntime.reviewMode !== "prepared" || !uploadedSealEditorRuntime.preparedPdfDocument) {
+        throw new Error("送簽確認版尚未成功顯示，請重試預覽；目前未送簽。");
+      }
+      uploadedSealApplicationRuntime.submissionPreview = uploadedEditorSubmissionFingerprint();
+      const status = document.querySelector("#uploadedEditorPreflightStatus");
+      if (status) status.textContent = `請檢查上方 ${uploadedSealEditorState.pages.length} 頁確認版；${seals.length} 個章位將於核准後用印。確認後再按「確認內容並送簽」。`;
+      document.querySelector("#uploadedPdfStage")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      showToast("確認版已顯示，尚未送簽。請檢查內容，或按「返回修改」。");
+      return;
+    }
+    // This is a second, explicit user action on the exact displayed snapshot.
+    if (!uploadedEditorSubmissionPreviewIsCurrent()) throw new Error("確認版已失效，請重新預覽後再送簽。");
     const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/submit`, {
       method: "POST",
       body: JSON.stringify({
         comment: contractMode ? "合約 PDF V2 編輯確認後送出簽核" : "電子用印 PDF V2 編輯確認後送出簽核",
-        editorRevisionId: uploadedSealEditorRuntime.revisionId || prepared.revision?.id || prepared.revision?.revision_id,
+        editorRevisionId: uploadedSealEditorRuntime.revisionId,
         manifestSha256: uploadedSealEditorState.manifestSha256,
         preparedFileId: uploadedSealEditorRuntime.preparedFileId,
         preparedSha256: uploadedSealEditorRuntime.preparedSha256
       })
     });
     uploadedSealEditorRuntime.locked = true;
+    invalidateUploadedEditorSubmissionPreview();
     document.querySelector("#uploadedPdfEditor")?.setAttribute("data-editor-locked", "true");
     setUploadedEditorSaveStatus("locked", "已送簽並鎖定");
     await showSubmittedOfficialDocument(result.id || uploadedSealEditorRuntime.documentId);
@@ -27169,7 +27709,8 @@ async function submitUploadedSealApplication() {
     addSealAudit("PDF V2 送簽失敗", error.message);
     showToast(`送簽失敗：${error.message}`);
   } finally {
-    if (submitButton && !uploadedSealEditorRuntime.locked) submitButton.disabled = false;
+    uploadedSealApplicationRuntime.submissionBusy = false;
+    renderUploadedSealWorkbench();
   }
 }
 
@@ -28254,6 +28795,9 @@ document.querySelectorAll("[data-inbound-filter]").forEach((button) => {
 document.querySelectorAll("[data-inbound-section]").forEach((button) => {
   button.addEventListener("click", () => setInboundSection(button.dataset.inboundSection));
 });
+document.querySelector("#inboundReloadBtn")?.addEventListener("click", () => {
+  void loadInboundDocuments(false).catch(() => {});
+});
 document.querySelector("#openInboundArchiveBtn")?.addEventListener("click", () => setInboundSection("archive"));
 document.querySelector("#inboundArchiveForm")?.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -28454,6 +28998,22 @@ document.querySelectorAll("[data-approval-log-filter]").forEach((button) => {
     approvalLogFilter = button.dataset.approvalLogFilter;
     renderApprovalLog();
   });
+});
+// Automatic tab activation with a single Tab stop; hidden role-only tabs are skipped.
+function handleWorkspaceTabKeydown(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const list = event.currentTarget.closest('[role="tablist"]');
+  const tabs = Array.from(list?.querySelectorAll('[role="tab"]') || []).filter((tab) => !tab.hidden && !tab.disabled);
+  if (!tabs.length) return;
+  const index = tabs.indexOf(event.currentTarget);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+    : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  event.preventDefault();
+  tabs[next].click();
+  tabs[next].focus();
+}
+document.querySelectorAll('[data-approval-log-filter], [data-inbound-section]').forEach((tab) => {
+  tab.addEventListener("keydown", handleWorkspaceTabKeydown);
 });
 document.querySelector("#approvalLogOpenWorkflowBtn").addEventListener("click", async () => {
   const record = approvalLogRecords().find(({ task }) => task.id === selectedWorkflowTaskId);
@@ -28856,6 +29416,22 @@ document.querySelector("#uploadedSealCompany")?.addEventListener("change", async
 document.querySelector("#uploadedSealDepartment")?.addEventListener("change", () => {
   officialWorkflowReadinessByRoute.clear();
   void refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true });
+  scheduleUploadedSealApplicationSave();
+});
+document.querySelectorAll("#uploadedSealApplicant, #uploadedSealTitle, #uploadedSealReason").forEach((input) => {
+  input.addEventListener("input", scheduleUploadedSealApplicationSave);
+  input.addEventListener("change", scheduleUploadedSealApplicationSave);
+});
+window.addEventListener("online", () => {
+  if (uploadedSealApplicationHasUnsavedChanges()) scheduleUploadedSealApplicationSave();
+});
+window.addEventListener("beforeunload", (event) => {
+  if (uploadedSealApplicationHasUnsavedChanges() || uploadedSealApplicationRuntime.promise
+    || (uploadedSealEditorRuntime.documentId && !uploadedSealEditorRuntime.locked
+      && (uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration))) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
 });
 document.querySelector("#uploadedSealApprovalCategorySelect")?.addEventListener("change", () => {
   const selection = renderUploadedSealApprovalRoute();

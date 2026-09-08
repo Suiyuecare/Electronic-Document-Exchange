@@ -409,10 +409,10 @@
 
           <div class="inbound-toolbar panel">
             <div class="inbound-simple-flow" role="tablist" aria-label="簽核進度篩選">
-              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="my_pending">我的待簽</button>
+              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="my_pending">待我處理</button>
               <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="delegated">代理待簽</button>
               <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="overdue">逾期</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="processed">已處理</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="processed">其他紀錄</button>
             </div>
             <label class="toolbar-search compact">搜尋<input id="approvalLogSearch" type="search" placeholder="文號、主旨、角色、狀態" /></label>
           </div>
@@ -677,8 +677,12 @@
               <section class="panel inbound-list-panel">
                 <div class="panel-heading">
                   <h3>收錄清單</h3>
-                  <span class="status-pill" id="inboundCount">0 筆</span>
+                  <div class="panel-actions">
+                    <span class="status-pill" id="inboundCount">0 筆</span>
+                    <button class="secondary-button" id="inboundReloadBtn" type="button">重新整理</button>
+                  </div>
                 </div>
+                <p class="inbound-load-notice" id="inboundLoadNotice" role="status" aria-live="polite" hidden></p>
                 <div class="table-wrap">
                   <table>
                     <thead>
@@ -729,7 +733,7 @@
               <div class="inline-fields">
                 <label>速別<select id="inboundArchivePriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
                 <label>密等<select id="inboundArchiveSecurity"><option>普通</option><option>密</option><option>機密</option></select></label>
-                <label>附件<input id="inboundArchiveFiles" type="file" multiple /><span class="field-hint">目前一般附件以 JSON 上傳，單檔上限 3 MB。</span></label>
+                <label>附件<input id="inboundArchiveFiles" type="file" accept="application/pdf,.pdf" multiple /><span class="field-hint">請選擇 A4 PDF（直式或橫式），每個檔案最多 3 MB。</span></label>
               </div>
               <button class="primary-button" id="inboundArchiveSubmitBtn" type="submit">完成收錄歸檔</button>
             </form>
@@ -1036,7 +1040,8 @@
           </div>
           <div class="next-action-card compose-hidden-action" id="composeNextAction" hidden></div>
 
-          <form class="compose-form-shell official-document-entry" id="composeForm">
+          <form class="compose-form-shell official-document-entry" id="composeForm" novalidate>
+            <div class="compose-validation-summary" id="composeValidationSummary" role="alert" hidden></div>
             <section class="compose-page compose-edit-page active" data-compose-pane="fill">
               <div class="compose-two-column">
                 <section class="form-panel compose-input-panel">
