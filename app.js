@@ -918,6 +918,19 @@ let currentComposeDraftId = "";
 let composeDraftRequestId = "";
 let composeSaveInFlight = null;
 let composeAutosaveRestoredForIdentity = "";
+let composeCloudTimer = null;
+let composeCloudOperation = null;
+let composeCloudEpoch = 0;
+let composeCloudDraftId = "";
+let composeCloudConflict = false;
+let composeCloudRows = [];
+const composeCloudRevisions = new Map();
+const composeCloudSavedSnapshots = new Map();
+let composeOfficialContentRevision = null;
+let composeAiOperation = null;
+let composeAiSuggestion = null;
+let composeAiUndo = null;
+const officialAttachmentUploadCache = new Map();
 let composeSaveState = {
   tone: "idle",
   title: "尚未暫存",
@@ -1421,6 +1434,7 @@ const uploadedSealEditorRuntime = {
   guides: [],
   clipboard: [],
   conflict: null,
+  conflictRecoveryPromise: null,
   draftCreatePromise: null,
   offlineDirty: false,
   uploadRetry: null
@@ -1543,7 +1557,7 @@ function pdfFileValidationKey(file) {
   return file ? `${file.name}:${file.size}:${file.lastModified || 0}` : "";
 }
 
-async function inspectPdfFileA4(file) {
+async function inspectPdfFileA4(file, options = {}) {
   const pdfjsLib = await ensurePdfJsLibrary();
   const loadingTask = pdfjsLib.getDocument({
     data: new Uint8Array(await file.arrayBuffer()),
@@ -1559,7 +1573,7 @@ async function inspectPdfFileA4(file) {
   let pdfDocument;
   try {
     pdfDocument = await loadingTask.promise;
-    const validation = await validateUploadedPdfDocument(pdfDocument);
+    const validation = await validateUploadedPdfDocument(pdfDocument, options);
     return validation.a4Report;
   } catch (error) {
     if (passwordProtected || error?.name === "PasswordException") throw new Error("密碼加密 PDF 不接受上傳，請提供未加密版本。");
@@ -5701,6 +5715,11 @@ function leaveApp() {
   clearUploadedEditorSensitivePreviews();
   clearComposeAutosave();
   composeAutosaveRestoredForIdentity = "";
+  resetComposeAsyncScope();
+  composeCloudRows = [];
+  composeCloudRevisions.clear();
+  composeCloudSavedSnapshots.clear();
+  officialAttachmentUploadCache.clear();
   localStorage.removeItem(authStorageKey);
   cleanPortalHandoffUrl();
   closeMobileNavigation({ restoreFocus: false });
@@ -7209,6 +7228,9 @@ function composeRawSnapshot() {
     },
     currentComposeDraftId,
     draftRequestId: composeDraftRequestId,
+    cloudDraftId: composeCloudDraftId,
+    officialContentRevision: composeOfficialContentRevision,
+    officialDocumentId: dispatchDocs.find(item => item.id === currentComposeDraftId)?.officialDocumentId || "",
     role: activeRole()
   };
 }
@@ -7260,8 +7282,118 @@ function writeComposeAutosave() {
   composeSaveState = {
     tone: "local",
     title: "此瀏覽器已保護",
-    detail: `${formatComposeSaveTime(saved.updatedAt)} 已保留目前輸入，按暫存草稿後才會進發文清單。`
+    detail: `${formatComposeSaveTime(saved.updatedAt)} 已保留目前輸入，稍後自動保存到私人雲端草稿。`
   };
+  scheduleComposeCloudSave();
+}
+
+function composeRequestScope() {
+  return `${frontendSessionScope()}|${authState?.token || ""}|${composeCloudEpoch}|${currentComposeDraftId}|${composeDraftRequestId}|${document.querySelector("#composeCompanySelect")?.value || ""}`;
+}
+
+function resetComposeAsyncScope() {
+  composeCloudEpoch += 1;
+  clearTimeout(composeCloudTimer);
+  composeCloudOperation = null;
+  composeCloudDraftId = "";
+  composeCloudConflict = false;
+  composeAiOperation = null;
+  composeAiSuggestion = null;
+  composeAiUndo = null;
+  const aiButton = document.querySelector("#generateFromPurposeBtn");
+  if (aiButton) { aiButton.disabled = false; aiButton.textContent = "AI產生公文主旨與說明"; }
+  renderComposeAiActions();
+}
+
+function scheduleComposeCloudSave() {
+  clearTimeout(composeCloudTimer);
+  if (!authState?.token || composeCloudConflict) return;
+  composeCloudTimer = setTimeout(() => { void saveComposeCloudDraft(); }, 1800);
+}
+
+async function saveComposeCloudDraft({ archived = false } = {}) {
+  clearTimeout(composeCloudTimer);
+  if (!authState?.token || composeCloudConflict || !composeSnapshotHasMeaningfulContent(composeRawSnapshot())) return null;
+  if (composeCloudOperation) return composeCloudOperation;
+  if (!composeCloudDraftId) composeCloudDraftId = `OD-${crypto.randomUUID()}`;
+  const draftId = composeCloudDraftId;
+  const scope = composeRequestScope();
+  const snapshot = composeRawSnapshot();
+  const serialized = JSON.stringify(snapshot);
+  if (!archived && composeCloudSavedSnapshots.get(draftId) === serialized) return { id: draftId };
+  const valid = () => scope === composeRequestScope() && draftId === composeCloudDraftId;
+  composeSaveState = { tone: "saving", title: "正在自動保存", detail: "文字與用印位置保存至私人雲端草稿；未上傳的附件仍在此裝置。" };
+  renderComposeSaveStatus();
+  const operation = (async () => {
+    try {
+      const result = await backendRequest(`/compose-drafts/${encodeURIComponent(draftId)}`, {
+        method: "PUT", body: JSON.stringify({ snapshot, expected_revision: composeCloudRevisions.get(draftId) || 0, archived })
+      });
+      if (!valid()) return null;
+      composeCloudRevisions.set(draftId, result.revision);
+      composeCloudSavedSnapshots.set(draftId, serialized);
+      composeSaveState = { tone: "saved", title: "私人雲端草稿已保存", detail: "可在其他裝置從「雲端草稿」繼續；尚未送簽。未上傳的附件請在原裝置完成上傳。" };
+      renderComposeSaveStatus();
+      return result;
+    } catch (error) {
+      if (!valid()) return null;
+      composeCloudConflict = error?.status === 409 || /compose_draft_revision_conflict/.test(error?.message || error?.detail || "");
+      composeSaveState = { tone: "error", title: composeCloudConflict ? "其他裝置已修改這份草稿" : "尚未保存到雲端", detail: composeCloudConflict ? "已保留此頁輸入，不會覆蓋別人的版本。可保留為新草稿，或從雲端草稿載入最新版。" : `此頁輸入仍保留。${navigator.onLine === false ? "目前離線，連線恢復後會重試。" : "請按重試保存。"}` };
+      renderComposeSaveStatus();
+      return null;
+    } finally {
+      if (composeCloudOperation === operation) composeCloudOperation = null;
+      if (valid() && !composeCloudConflict && composeCloudSavedSnapshots.get(draftId) === serialized && JSON.stringify(composeRawSnapshot()) !== serialized) scheduleComposeCloudSave();
+    }
+  })();
+  composeCloudOperation = operation;
+  return operation;
+}
+
+async function refreshComposeCloudDrafts() {
+  if (!authState?.token) return;
+  const identity = () => `${frontendSessionScope()}|${authState?.token || ""}`;
+  const scope = identity();
+  try {
+    const rows = await backendRequest("/compose-drafts");
+    if (scope !== identity()) return;
+    composeCloudRows = Array.isArray(rows) ? rows : [];
+    const select = document.querySelector("#composeCloudDraftSelect");
+    if (select) select.innerHTML = `<option value="">選擇私人雲端草稿</option>` + composeCloudRows.map(row => `<option value="${escapeHtml(row.id)}">${escapeHtml(row.snapshot?.values?.["#subject"] || row.snapshot?.values?.["#documentPurpose"] || "尚未命名")} · ${escapeHtml(row.updatedAt || "")}</option>`).join("");
+    document.querySelector("#composeCloudDraftNotice")?.replaceChildren(document.createTextNode(`共 ${composeCloudRows.length} 份私人草稿；不會自動蓋掉目前輸入。`));
+  } catch (_) {
+    if (scope === identity()) document.querySelector("#composeCloudDraftNotice")?.replaceChildren(document.createTextNode("雲端草稿暫時無法讀取，請按重新載入。"));
+  }
+}
+
+async function loadComposeCloudDraft() {
+  const row = composeCloudRows.find(item => item.id === document.querySelector("#composeCloudDraftSelect")?.value);
+  if (!row) return showToast("請先選擇一份雲端草稿。");
+  if (composeSnapshotHasMeaningfulContent(composeRawSnapshot()) && !window.confirm("載入雲端草稿會取代目前畫面。請先確認目前內容已保存；是否繼續？")) return;
+  // A FileList belongs to the currently open draft, never to the snapshot
+  // selected from another device/document. Do not carry it across this switch.
+  const attachments = document.querySelector("#attachments");
+  if (attachments) attachments.value = "";
+  document.querySelector("#composeAttachmentUploadStatus")?.replaceChildren();
+  resetComposeAsyncScope();
+  localStorage.setItem(composeAutosaveStorageKey, JSON.stringify({ updatedAt: row.updatedAt, snapshot: { ...row.snapshot, cloudDraftId: row.id } }));
+  composeAutosaveRestoredForIdentity = "";
+  restoreComposeAutosave();
+  composeCloudDraftId = row.id;
+  composeCloudRevisions.set(row.id, row.revision);
+  composeCloudSavedSnapshots.set(row.id, JSON.stringify(composeRawSnapshot()));
+  showToast("已載入私人雲端草稿；尚未上傳的附件請重新選擇。");
+}
+
+function keepComposeAsNewCloudDraft() {
+  resetComposeAsyncScope();
+  currentComposeDraftId = "";
+  composeDraftRequestId = "";
+  composeOfficialContentRevision = null;
+  const number = document.querySelector("#dispatchNo");
+  if (number) number.value = "";
+  markDraftDirty();
+  void saveComposeCloudDraft();
 }
 
 function composeAutosaveIdentity() {
@@ -7315,6 +7447,7 @@ function restoreComposeAutosave() {
   const identity = composeAutosaveIdentity();
   if (!identity || composeAutosaveRestoredForIdentity === identity) return false;
   composeAutosaveRestoredForIdentity = identity;
+  void refreshComposeCloudDrafts();
   const saved = readComposeAutosave();
   if (!saved) return false;
   const snapshot = saved.snapshot;
@@ -7347,7 +7480,14 @@ function restoreComposeAutosave() {
   currentComposeDraftId = dispatchDocs.some((item) => item.id === snapshot.currentComposeDraftId && item.status === "草稿")
     ? snapshot.currentComposeDraftId
     : "";
+  if (!currentComposeDraftId && typeof snapshot.officialDocumentId === "string" && /^OD-[a-zA-Z0-9-]{1,150}$/.test(snapshot.officialDocumentId)) {
+    const id = `COMPOSE-RESTORED-${snapshot.officialDocumentId}`;
+    dispatchDocs.unshift({ id, officialDocumentId: snapshot.officialDocumentId, contentRevision: snapshot.officialContentRevision, no: values["#dispatchNo"] || "", status: "草稿", subject: values["#subject"] || "" });
+    currentComposeDraftId = id;
+  }
   composeDraftRequestId = /^OD-[0-9a-f-]{36}$/i.test(snapshot.draftRequestId || "") ? snapshot.draftRequestId : "";
+  composeCloudDraftId = /^OD-[0-9a-f-]{36}$/i.test(snapshot.cloudDraftId || "") ? snapshot.cloudDraftId : "";
+  composeOfficialContentRevision = Number.isInteger(snapshot.officialContentRevision) ? snapshot.officialContentRevision : null;
   syncComposeElectronicExchangeMode();
   draftConfirmed = false;
   draftSigned = false;
@@ -7376,6 +7516,10 @@ function renderComposeSaveStatus() {
   if (!target) return;
   target.dataset.tone = composeSaveState.tone || "idle";
   target.innerHTML = `<strong>${escapeHtml(composeSaveState.title || "尚未儲存到系統")}</strong><span>${escapeHtml(composeSaveState.detail || "請按暫存草稿完成後端保存。")}</span>`;
+  const actions = document.querySelector("#composeSaveRecovery");
+  if (actions) actions.hidden = composeSaveState.tone !== "error";
+  const fork = document.querySelector("#composeKeepNewDraftBtn");
+  if (fork) fork.hidden = !composeCloudConflict && !/版本|裝置|修改/.test(composeSaveState.title || "");
 }
 
 function renderComposeCompanyOptions(preferAccount = false) {
@@ -7856,6 +8000,7 @@ function setAiDraftStatus(text, tone = "") {
 }
 
 async function generateAiDraft() {
+  if (composeAiOperation) return;
   const plainText = document.querySelector("#documentPurpose")?.value.trim()
     || document.querySelector("#aiPlainText")?.value.trim()
     || "";
@@ -7866,6 +8011,10 @@ async function generateAiDraft() {
   const button = document.querySelector("#generateFromPurposeBtn") || document.querySelector("#aiGenerateDraftBtn");
   button.disabled = true;
   const originalLabel = button.textContent;
+  const scope = composeRequestScope();
+  const before = { subject: document.querySelector("#subject")?.value || "", body: document.querySelector("#bodyText")?.value || "", purpose: plainText };
+  const operation = {};
+  composeAiOperation = operation;
   button.textContent = "正在產生...";
   setAiDraftStatus("生成中", "loading");
   try {
@@ -7882,10 +8031,15 @@ async function generateAiDraft() {
         role: activeRole()
       })
     });
-    const subjectInput = document.querySelector("#subject");
-    const bodyInput = document.querySelector("#bodyText");
-    if (subjectInput) subjectInput.value = result.subject || "";
-    if (bodyInput) bodyInput.value = result.body || "";
+    if (scope !== composeRequestScope() || composeAiOperation !== operation) return;
+    const changed = before.subject !== (document.querySelector("#subject")?.value || "") || before.body !== (document.querySelector("#bodyText")?.value || "") || before.purpose !== (document.querySelector("#documentPurpose")?.value.trim() || document.querySelector("#aiPlainText")?.value.trim() || "");
+    composeAiSuggestion = { scope, subject: result.subject || "", body: result.body || "" };
+    if (changed) {
+      renderComposeAiActions();
+      setAiDraftStatus("建議已產生，等待您選擇是否套用", "ok");
+      return showToast("已保留您剛修改的文字；可檢視 AI 建議後再決定是否套用。");
+    }
+    applyComposeAiSuggestion();
     const purposeHint = document.querySelector("#documentPurposeHint");
     if (purposeHint) purposeHint.textContent = result.usedOpenAI
       ? `已由 ${result.model} 產生並填入主旨與說明，可繼續編輯。`
@@ -7895,14 +8049,52 @@ async function generateAiDraft() {
     addDispatchAudit("AI 生成函稿", result.usedOpenAI ? `已使用 ${result.model} 產生主旨與內文。` : result.notice || "已使用本機模板產生主旨與內文。");
     showToast(result.usedOpenAI ? "已產生並填入公文主旨與說明。" : "已用公文模板產生並填入主旨與說明。");
   } catch (error) {
+    if (scope !== composeRequestScope() || composeAiOperation !== operation) return;
     const reason = error?.message || "未知錯誤";
     setAiDraftStatus("生成失敗", "error");
     addDispatchAudit("AI 生成失敗", reason);
     showToast(`AI 生成失敗：${reason}`);
   } finally {
-    button.disabled = false;
-    button.textContent = originalLabel;
+    if (scope === composeRequestScope() && composeAiOperation === operation) {
+      composeAiOperation = null;
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
   }
+}
+
+function renderComposeAiActions() {
+  const visible = Boolean(composeAiSuggestion && composeAiSuggestion.scope === composeRequestScope());
+  const panel = document.querySelector("#composeAiSuggestion");
+  if (panel) panel.hidden = !visible;
+  if (visible) {
+    document.querySelector("#composeAiSuggestionSubject").textContent = composeAiSuggestion.subject;
+    document.querySelector("#composeAiSuggestionBody").textContent = composeAiSuggestion.body;
+  }
+  const undo = document.querySelector("#composeAiUndoBtn");
+  if (undo) undo.hidden = !composeAiUndo || composeAiUndo.scope !== composeRequestScope();
+}
+
+function applyComposeAiSuggestion() {
+  if (!composeAiSuggestion || composeAiSuggestion.scope !== composeRequestScope()) return;
+  const subject = document.querySelector("#subject"), body = document.querySelector("#bodyText");
+  composeAiUndo = { scope: composeRequestScope(), subject: subject.value, body: body.value, appliedSubject: composeAiSuggestion.subject, appliedBody: composeAiSuggestion.body };
+  subject.value = composeAiSuggestion.subject;
+  body.value = composeAiSuggestion.body;
+  composeAiSuggestion = null;
+  markDraftDirty();
+  renderComposeAiActions();
+}
+
+function undoComposeAiSuggestion() {
+  if (!composeAiUndo || composeAiUndo.scope !== composeRequestScope()) return;
+  const subject = document.querySelector("#subject"), body = document.querySelector("#bodyText");
+  if ((subject.value !== composeAiUndo.appliedSubject || body.value !== composeAiUndo.appliedBody) && !window.confirm("AI 套用後您又修改了文字，復原將取代這些修改。確定復原嗎？")) return;
+  subject.value = composeAiUndo.subject;
+  body.value = composeAiUndo.body;
+  composeAiUndo = null;
+  markDraftDirty();
+  renderComposeAiActions();
 }
 
 function applyAiDraftToCompose() {
@@ -9146,8 +9338,13 @@ function beginComposeOfficialCorrection(item) {
     "目前撰寫畫面還有未送出的內容。繼續會改載入所選案件；若要保留目前內容，請先取消並按「暫存草稿」。"
   )) return false;
 
+  const attachments = document.querySelector("#attachments");
+  if (attachments) attachments.value = "";
+  document.querySelector("#composeAttachmentUploadStatus")?.replaceChildren();
   editingOfficialDocumentId = "";
   renderComposeCompanyOptions(true);
+  resetComposeAsyncScope();
+  composeOfficialContentRevision = Number(item.content_revision || 0);
   renderApprovalCategorySelect(
     "#composeApprovalCategorySelect",
     item.document_category || metadata.document_category || "",
@@ -9216,6 +9413,7 @@ function beginComposeOfficialCorrection(item) {
     body: item.description || "",
     status: "草稿",
     officialDocumentId: item.id,
+    contentRevision: Number(item.content_revision || 0),
     requiresResubmit: item.current_status === "rejected",
     owner: item.applicant_name || authState?.user?.name || "",
     attachments: officialApplicationFiles(item).map((file) => file.file_name).filter(Boolean),
@@ -9245,14 +9443,17 @@ async function beginOfficialCorrection(item = officialCurrentItem()) {
   if (!item?.id || !officialDocumentIsApplicant(item) || !["draft", "rejected"].includes(item.current_status)) {
     return showToast("只有申請人可以編輯草稿或退回案件。");
   }
+  const requestScope = composeRequestScope();
   try {
     const detail = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}`);
+    if (requestScope !== composeRequestScope()) return;
     if (detail?.id === item.id) {
       item = detail;
       const index = officialWorkflowItems.findIndex((entry) => entry.id === item.id);
       if (index >= 0) officialWorkflowItems[index] = item;
     }
   } catch (error) {
+    if (requestScope !== composeRequestScope()) return;
     showToast(`草稿載入失敗：${error.message}`);
     return;
   }
@@ -10353,6 +10554,7 @@ async function officialFormPayload(submit = true) {
   const sealId = document.querySelector("#officialSealSelect").value;
   const stampPositions = normalizeOfficialStampPositions().map((position, index) => officialStampPositionPayload(position, sealId, index));
   const payload = {
+    expected_content_revision: editingOfficialDocumentId ? Number(officialWorkflowItems.find(item => item.id === editingOfficialDocumentId)?.content_revision || 0) : undefined,
     source_type: sourceType,
     document_category: approvalSelection.documentCategory,
     document_category_group: approvalSelection.documentCategoryGroup,
@@ -10402,8 +10604,30 @@ async function officialFormPayload(submit = true) {
 
 async function uploadOfficialDocumentAttachments(documentId, files = []) {
   const uploaded = [];
+  const scope = frontendSessionScope();
+  const statuses = files.map(file => ({ name: file.name, status: "等待上傳" }));
+  const render = () => {
+    if (scope !== frontendSessionScope()) return;
+    const target = document.querySelector("#composeAttachmentUploadStatus");
+    if (target) target.innerHTML = statuses.map(item => `<div>${escapeHtml(item.name)}：${escapeHtml(item.status)}</div>`).join("");
+  };
   for (const file of files) {
+    const status = statuses[files.indexOf(file)];
+    try {
+    if (scope !== frontendSessionScope()) throw new Error("登入身分已切換，已停止附件上傳。");
     requireInlineJsonUploadSize(file, "補充附件");
+    const bytes = await file.arrayBuffer();
+    const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(value => value.toString(16).padStart(2, "0")).join("");
+    const idDigest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${file.name}\n${file.type}\n${digest}`)))].map(value => value.toString(16).padStart(2, "0")).join("");
+    const key = `${scope}|${documentId}|${idDigest}`;
+    if (officialAttachmentUploadCache.has(key)) {
+      uploaded.push(officialAttachmentUploadCache.get(key));
+      status.status = "已上傳，不重複傳送";
+      render();
+      continue;
+    }
+    status.status = "正在檢查與上傳";
+    render();
     if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
       try {
         await inspectPdfFileA4(file);
@@ -10411,15 +10635,28 @@ async function uploadOfficialDocumentAttachments(documentId, files = []) {
         throw new Error(`${file.name}：${pdfA4UiErrorMessage(error)}`);
       }
     }
+    if (scope !== frontendSessionScope()) throw new Error("登入身分已切換，已停止附件上傳。");
+    const content = await fileToBase64(file);
+    if (scope !== frontendSessionScope()) throw new Error("登入身分已切換，已停止附件上傳。");
     const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/files`, {
       method: "POST",
       body: JSON.stringify({
         file_name: file.name,
         file_mime_type: file.type || "application/octet-stream",
-        content_base64: await fileToBase64(file)
+        content_base64: content,
+        upload_id: `UP-${idDigest}`
       })
     });
+    if (scope !== frontendSessionScope()) throw new Error("登入身分已切換，已停止附件上傳。");
+    officialAttachmentUploadCache.set(key, result.file);
     uploaded.push(result.file);
+    status.status = result.upload_replayed ? "先前已上傳，已確認成功" : "上傳完成";
+    render();
+    } catch (error) {
+      status.status = "上傳未完成，重試只處理未成功的附件";
+      render();
+      throw error;
+    }
   }
   return uploaded;
 }
@@ -10438,7 +10675,7 @@ async function createOfficialWorkflow(submit = true) {
       const action = correctionId ? "resubmit" : "submit";
       result = await backendRequest(`/official-documents/${encodeURIComponent(result.id)}/${action}`, {
         method: "POST",
-        body: JSON.stringify({ comment: correctionId ? "申請人完成補正並重新送簽" : "申請人確認附件完整後送出" })
+        body: JSON.stringify({ expected_content_revision: Number(result.content_revision || 0), comment: correctionId ? "申請人完成補正並重新送簽" : "申請人確認附件完整後送出" })
       });
     }
     const attachmentInput = document.querySelector("#officialAttachmentsInput");
@@ -11563,6 +11800,8 @@ function composeSealCategory(sealType) {
 }
 
 async function createOfficialApplicationFromCompose(doc, data, options = {}) {
+  const requestScope = composeRequestScope();
+  const requireScope = () => { if (requestScope !== composeRequestScope()) throw new Error("登入身分或公文已切換，已停止後續保存與送簽。"); };
   const company = composeCompanyForOfficialApplication(data.companyName);
   if (!company?.id) throw new Error("登入帳號尚未連動 Finance 公司，請先聯絡管理員更新人員主檔。");
   const requiresStamp = data.outputMode !== "electronic";
@@ -11660,21 +11899,34 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
     submit: false
   };
   const documentId = options.documentId || doc.officialDocumentId || "";
+  requireScope();
+  // A recovered snapshot's token is authoritative, even when the dashboard
+  // cache already knows about a newer version edited on another device.
+  if (documentId) payload.expected_content_revision = composeOfficialContentRevision ?? doc.contentRevision;
   let result = documentId
     ? await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`, { method: "PATCH", body: JSON.stringify(payload) })
     : await backendRequest("/official-documents", { method: "POST", body: JSON.stringify(payload) });
+  requireScope();
   if (result.create_replayed) {
     if (result.current_status !== "draft") {
       throw new Error("這份公文已送簽，不能再以草稿覆寫；請從簽核紀錄查看目前狀態。");
     }
     doc.officialDocumentId = result.id;
+    if (composeOfficialContentRevision === null && Number(result.content_revision || 0) > 0) {
+      const conflict = new Error("這份公文已由其他裝置修改，請載入最新版本或保留為新草稿。");
+      conflict.status = 409;
+      throw conflict;
+    }
     // A timed-out create may already have committed. Preserve its number, but
     // explicitly save any edits made since that request before reporting success.
     result = await backendRequest(`/official-documents/${encodeURIComponent(result.id)}`, {
-      method: "PATCH", body: JSON.stringify(payload)
+      method: "PATCH", body: JSON.stringify({ ...payload, expected_content_revision: composeOfficialContentRevision ?? Number(result.content_revision || 0) })
     });
+    requireScope();
   }
   doc.officialDocumentId = result.id;
+  doc.contentRevision = Number(result.content_revision || 0);
+  composeOfficialContentRevision = doc.contentRevision;
   const assignedNo = result.dispatch_no || officialComposeMetadata(result).dispatch_no || "";
   if (!assignedNo) throw new Error("後端尚未完成發文字號配號，請稍後重試；不會改用本機流水號。");
   doc.no = assignedNo;
@@ -11683,6 +11935,7 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
   const attachments = [...(document.querySelector("#attachments")?.files || [])];
   if (attachments.length) {
     await uploadOfficialDocumentAttachments(result.id, attachments);
+    requireScope();
     const attachmentInput = document.querySelector("#attachments");
     if (attachmentInput) attachmentInput.value = "";
   }
@@ -11691,11 +11944,13 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
     result = await backendRequest(`/official-documents/${encodeURIComponent(result.id)}/${action}`, {
       method: "POST",
       body: JSON.stringify({
+        expected_content_revision: doc.contentRevision,
         comment: options.resubmit
           ? "申請人已完成退回案件補正，確認函稿與附件完整後重新送簽"
           : "申請人確認函稿與附件完整後送出"
       })
     });
+    requireScope();
   }
   return result;
 }
@@ -11734,6 +11989,7 @@ async function performCreateDispatchFromForm(status = "草稿") {
     return null;
   }
   ensureComposeDraftRequestId();
+  const requestScope = composeRequestScope();
   writeComposeAutosave();
   const existingComposeDraft = dispatchDocs.find((item) => item.id === currentComposeDraftId && item.status === "草稿");
   const existingDoc = existingComposeDraft || null;
@@ -11799,6 +12055,7 @@ async function performCreateDispatchFromForm(status = "草稿") {
       submit: status !== "草稿",
       resubmit: Boolean(existingDoc?.requiresResubmit)
     });
+    if (requestScope !== composeRequestScope()) return null;
     doc.requiresResubmit = false;
     doc.officialDocumentId = officialApplication.id;
     selectedOfficialDocumentId = officialApplication.id;
@@ -11806,6 +12063,7 @@ async function performCreateDispatchFromForm(status = "草稿") {
     if (officialIndex >= 0) officialWorkflowItems[officialIndex] = officialApplication;
     else officialWorkflowItems.unshift(officialApplication);
   } catch (error) {
+    if (requestScope !== composeRequestScope()) return null;
     if (!existingDoc && !doc.officialDocumentId) {
       const insertedIndex = dispatchDocs.indexOf(doc);
       if (insertedIndex >= 0) dispatchDocs.splice(insertedIndex, 1);
@@ -11817,7 +12075,7 @@ async function performCreateDispatchFromForm(status = "草稿") {
     draftSigned = false;
     composeSaveState = {
       tone: "error",
-      title: "草稿尚未保存",
+      title: error?.status === 409 || /compose_content_revision/.test(error?.message || "") ? "公文版本已由其他裝置修改" : "草稿尚未保存",
       detail: `${error.message || "後端保存失敗"}；目前輸入仍保留在此瀏覽器，請勿關閉頁面並稍後重試。`
     };
     renderComposeSaveStatus();
@@ -11827,6 +12085,10 @@ async function performCreateDispatchFromForm(status = "草稿") {
   selectedDispatchId = doc.id;
   if (status === "草稿") currentComposeDraftId = doc.id;
   if (status !== "草稿") {
+    await saveComposeCloudDraft({ archived: true });
+    if (requestScope !== composeRequestScope()) return null;
+    resetComposeAsyncScope();
+    composeOfficialContentRevision = null;
     currentComposeDraftId = "";
     composeDraftRequestId = "";
     clearComposeAutosave();
@@ -11854,6 +12116,18 @@ async function performCreateDispatchFromForm(status = "草稿") {
 }
 
 async function saveComposeDraft() {
+  // This scope excludes IDs assigned by this save, but changes whenever the
+  // user/account/company/draft is explicitly switched.
+  const scope = () => `${frontendSessionScope()}|${authState?.token || ""}|${composeCloudEpoch}|${document.querySelector("#composeCompanySelect")?.value || ""}`;
+  const savingScope = scope();
+  const selection = approvalSelectionForSelect("#composeApprovalCategorySelect");
+  if (!selection.documentCategory || !selection.approvalRouteCode || !isValidComposeDispatchDate(document.querySelector("#dispatchDate")?.value)) {
+    writeComposeAutosave();
+    const cloud = await saveComposeCloudDraft();
+    if (savingScope !== scope()) return null;
+    if (cloud) showToast("未完成資料已保存至私人雲端草稿；補齊後再建立正式公文與送簽。");
+    return cloud;
+  }
   const activeButton = document.activeElement?.matches?.("#saveDispatchDraftBtn, #composeInlineSaveDraftBtn")
     ? document.activeElement
     : null;
@@ -11867,8 +12141,16 @@ async function saveComposeDraft() {
   try {
     const existingDraft = dispatchDocs.find((item) => item.id === currentComposeDraftId && item.status === "草稿");
     const doc = await createDispatchFromForm("草稿");
+    if (savingScope !== scope()) return null;
     if (doc) {
-      clearComposeAutosave();
+      writeComposeAutosave();
+      await saveComposeCloudDraft();
+      if (savingScope !== scope()) return null;
+      if (composeCloudConflict || composeSaveState.tone === "error") {
+        renderComposeSaveStatus();
+        showToast("公文已保存，但私人雲端草稿尚未同步，請依上方提示處理。");
+        return doc;
+      }
       composeSaveState = {
         tone: "saved",
         title: existingDraft ? `草稿已更新 ${doc.no}` : `草稿已儲存 ${doc.no}`,
@@ -11886,6 +12168,7 @@ async function saveComposeDraft() {
     }
     return doc;
   } catch (error) {
+    if (savingScope !== scope()) return null;
     writeComposeAutosave();
     composeSaveState = {
       tone: "error",
@@ -19787,6 +20070,17 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     seal_file_antivirus_rejected: "印章檔案未通過防毒掃描，系統未將它設為可用版本。",
     editor_antivirus_not_ready: "正式防毒服務尚未就緒，系統已阻止檔案上傳。",
     editor_antivirus_scan_failed: "正式防毒掃描失敗，系統未將檔案設為可用版本。",
+    editor_a4_conversion_confirmation_required: "請先確認要等比例轉成 A4，再繼續操作。",
+    editor_a4_conversion_not_required: "這份檔案不需要再次轉換，請重新開啟目前版本。",
+    editor_a4_conversion_page_count_mismatch: "轉換前後頁數不一致，系統未採用轉換版，原稿仍保留。",
+    editor_a4_original_missing: "A4 轉換版缺少保留原稿，請重新開啟案件。",
+    editor_a4_lineage_invalid: "原稿與 A4 轉換版的關聯驗證失敗，已停止用印。",
+    editor_seam_group_invalid: "騎縫章資料不完整，請刪除此組並重新建立。",
+    editor_seam_group_incomplete: "騎縫章必須包含同組的左右半章，請重新建立此組。",
+    editor_seam_seal_mismatch: "同組騎縫章的印章版本或尺寸不一致，請重新建立此組。",
+    editor_seam_rotation_locked: "騎縫章方向已固定，只能調整同組位置。",
+    editor_seam_position_mismatch: "騎縫章兩個半章的位置或鎖定資料不一致，系統已停止操作。",
+    editor_seam_pages_not_adjacent: "騎縫章配對頁面已不相鄰，請在整理頁序後重新建立該組。",
     editor_runtime_maintenance: "電子用印正在進行資料庫與檔案庫切換，系統已先停止建立草稿、上傳與產生確認版。登入及既有案件查閱不受影響；請稍後重試，若持續出現請通知系統管理員。",
     official_file_antivirus_required: "公文來源檔或附件尚未通過防毒掃描，不能送簽、預覽用印或下載。",
     official_file_antivirus_rejected: "公文來源檔或附件未通過防毒掃描，系統未保存為可用檔案。",
@@ -24733,8 +25027,14 @@ async function calculateUploadedEditorManifest(state = uploadedSealEditorState) 
 }
 
 async function refreshUploadedEditorManifest() {
-  uploadedSealEditorState.manifestSha256 = await calculateUploadedEditorManifest(uploadedSealEditorState);
-  return uploadedSealEditorState.manifestSha256;
+  const state = uploadedSealEditorState;
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const manifestSha256 = await calculateUploadedEditorManifest(state);
+  if (!uploadedSealApplicationScopeIsCurrent(scope) || state !== uploadedSealEditorState) {
+    throw new Error("登入或草稿已切換，已忽略先前的檔案驗證結果。");
+  }
+  state.manifestSha256 = manifestSha256;
+  return manifestSha256;
 }
 
 function setUploadedEditorSaveStatus(kind, message) {
@@ -24854,7 +25154,7 @@ function markUploadedEditorDirty() {
   const preflight = document.querySelector("#uploadedEditorPreflightStatus");
   if (preflight) preflight.textContent = "內容已變更，送簽前需重新產生確認版";
   if (uploadedSealEditorRuntime.conflict) {
-    setUploadedEditorSaveStatus("conflict", "版本衝突：請先保留本機版本或重新載入");
+    setUploadedEditorSaveStatus("conflict", "另一裝置已更新，請保留為新草稿或使用最新版");
     document.querySelector("#uploadedEditorConflictCopyBtn")?.toggleAttribute("hidden", false);
     document.querySelector("#uploadedEditorResolveConflictBtn")?.toggleAttribute("hidden", false);
     return;
@@ -24879,11 +25179,21 @@ function commitUploadedEditorMutation(mutator, { render = true } = {}) {
   if (uploadedSealEditorRuntime.uploading) return showToast("PDF 正在更換，完成前暫停編輯。");
   if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再修改內容。");
   const previous = cloneUploadedEditorValue(uploadedSealEditorState);
+  const previousPageId = uploadedSealEditorRuntime.currentPageId;
   mutator(uploadedSealEditorState);
+  const pageOrderChanged = previous.pages.map(page => page.pageId).join("|") !== uploadedSealEditorState.pages.map(page => page.pageId).join("|");
+  const invalidatedSeams = pageOrderChanged ? globalThis.EDOCSeam?.invalidatedGroups(uploadedSealEditorState) || [] : [];
+  if (invalidatedSeams.length && !window.confirm(`調整頁面後有 ${invalidatedSeams.length} 組騎縫章不再相鄰，將移除這些組，其他文字與印章保留。完成頁面整理後可重新批次建立；也可用「復原」還原。確定繼續嗎？`)) {
+    uploadedSealEditorState = previous;
+    uploadedSealEditorRuntime.currentPageId = previousPageId;
+    if (render) renderUploadedSealWorkbench();
+    return false;
+  }
   uploadedSealEditorState.elements = uploadedSealEditorState.elements
     .filter((element) => PDF_EDITOR_ALLOWED_KINDS.has(element.kind) && uploadedSealEditorState.pages.some((page) => page.pageId === element.pageId))
     .slice(0, PDF_EDITOR_MAX_ELEMENTS);
   normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
+  globalThis.EDOCSeam?.reconcile(uploadedSealEditorState, previous);
   normalizeUploadedEditorElementLayers(uploadedSealEditorState);
   // Selection clicks, clamped drags and property updates can resolve to the
   // exact same state. They must not consume a revision or invalidate a valid
@@ -25010,8 +25320,16 @@ async function ensureUploadedEditorDraft() {
 }
 
 async function requestEditorUpload(file, assetKind = "source_pdf") {
+  const requestScope = uploadedSealApplicationScopeSnapshot();
   const documentId = await ensureUploadedEditorDraft();
+  // Draft creation may set the document ID, but must never adopt a different
+  // session/epoch or an unrelated draft after its awaited result arrives.
+  if (!uploadedSealApplicationScopeIsCurrent(requestScope, false) || documentId !== uploadedSealEditorRuntime.documentId) {
+    throw new Error("登入或草稿已切換，請重新上傳。");
+  }
+  const scope = uploadedSealApplicationScopeSnapshot();
   const sha256 = await hashBlob(file);
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，請重新上傳。");
   const intent = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/editor-uploads`, {
     method: "POST",
     body: JSON.stringify({
@@ -25022,7 +25340,12 @@ async function requestEditorUpload(file, assetKind = "source_pdf") {
       sha256
     })
   });
-  return { ...intent, sha256, documentId, assetKind };
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，已停止先前的上傳。");
+  return { ...intent, sha256, documentId, assetKind, scope };
+}
+
+function assertEditorUploadCurrent(intent) {
+  if (intent?.scope && !uploadedSealApplicationScopeIsCurrent(intent.scope)) throw new Error("登入或草稿已切換，已停止先前的上傳。");
 }
 
 function tusMetadataValue(value) {
@@ -25177,6 +25500,7 @@ async function editorTusRemoteOffset(uploadUrl, baseHeaders) {
 }
 
 async function performTusUpload(file, intent, onProgress = () => {}) {
+  assertEditorUploadCurrent(intent);
   if (!intent?.upload_url || !["tus", "local_direct"].includes(intent.protocol)) throw new Error("後端未提供有效的 TUS 直傳資格。");
   if (intent.protocol === "local_direct") {
     const baseHeaders = {};
@@ -25311,6 +25635,7 @@ function editorUploadFailureCode(error) {
 
 async function reportEditorUploadFailure(intent, error) {
   if (!intent?.documentId || !intent?.upload_id) return;
+  if (intent.scope && !uploadedSealApplicationScopeIsCurrent(intent.scope)) return;
   // A production cutover/outage is not an asset validation failure. Preserve
   // the durable pending lifecycle job so the server can expire or resume it;
   // do not incorrectly quarantine this upload because readiness closed.
@@ -25325,17 +25650,21 @@ async function reportEditorUploadFailure(intent, error) {
   }
 }
 
-async function finalizeEditorUpload(intent, file) {
-  return backendRequest(`/official-documents/${encodeURIComponent(intent.documentId)}/editor-uploads/${encodeURIComponent(intent.upload_id)}/finalize`, {
+async function finalizeEditorUpload(intent, file, options = {}) {
+  assertEditorUploadCurrent(intent);
+  const result = await backendRequest(`/official-documents/${encodeURIComponent(intent.documentId)}/editor-uploads/${encodeURIComponent(intent.upload_id)}/finalize`, {
     method: "POST",
-    body: JSON.stringify({ sha256: intent.sha256, size_bytes: file.size })
+    body: JSON.stringify({ sha256: intent.sha256, size_bytes: file.size, ...(options.allowA4Conversion ? { allowA4Conversion: true } : {}) })
   });
+  assertEditorUploadCurrent(intent);
+  return result;
 }
 
-async function validateUploadedPdfDocument(pdfDocument) {
+async function validateUploadedPdfDocument(pdfDocument, { allowNonA4 = false } = {}) {
   if (pdfDocument.numPages > PDF_EDITOR_MAX_PAGES) throw new Error(`PDF 最多 ${PDF_EDITOR_MAX_PAGES} 頁。`);
   if (pdfDocument.isPureXfa) throw new Error("第一版不接受 XFA PDF，請先轉為一般 PDF。");
-  const a4Report = requirePdfPagesA4(await readPdfA4Pages(pdfDocument));
+  const pageGeometry = await readPdfA4Pages(pdfDocument);
+  const a4Report = pdfA4PageReport(pageGeometry);
   const javaScript = typeof pdfDocument.getJavaScript === "function" ? await pdfDocument.getJavaScript() : [];
   if (Array.isArray(javaScript) && javaScript.some(Boolean)) throw new Error("PDF 含 JavaScript，已依安全規則阻擋。");
   const attachments = typeof pdfDocument.getAttachments === "function" ? await pdfDocument.getAttachments() : null;
@@ -25351,14 +25680,66 @@ async function validateUploadedPdfDocument(pdfDocument) {
       throw new Error("PDF 含既有數位簽章或內嵌附件，已依安全規則阻擋。");
     }
   }
+  if (!allowNonA4) requirePdfPagesA4(pageGeometry);
   return { a4Report };
 }
 
+async function confirmUploadedPdfConversion(file) {
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const report = await inspectPdfFileA4(file, { allowNonA4: true });
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，請重新上傳。");
+  if (report.valid) return true;
+  return showEditorA4Dialog({ report, isCurrent: () => uploadedSealApplicationScopeIsCurrent(scope) });
+}
+
+async function resolveUploadedPdfConversion(file, intent, finalized) {
+  assertEditorUploadCurrent(intent);
+  if (!finalized?.a4Conversion?.required) return { file, intent, finalized };
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const checkScope = () => uploadedSealApplicationScopeIsCurrent(scope);
+  const baseRevisionNo = Number(finalized.editor_revision?.revisionNo ?? finalized.editor_revision?.revision_no);
+  setUploadedEditorSaveStatus("checking", "正在等比例轉成 A4，原稿會完整保留");
+  const converted = await backendRequest(`/official-documents/${encodeURIComponent(intent.documentId)}/editor-uploads/${encodeURIComponent(intent.upload_id)}/convert-a4`, {
+    method: "POST", body: JSON.stringify({ confirm: true, sourceSha256: finalized.a4Conversion.sourceSha256, baseRevisionNo })
+  });
+  if (!checkScope()) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  const result = await backendRequest(`/official-documents/${encodeURIComponent(intent.documentId)}/editor-state`);
+  if (!checkScope()) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  const asset = converted.asset;
+  const source = (converted.editor_state?.sourceFiles || []).find((item) => item.assetId === asset.id) || { assetId: asset.id };
+  const blob = await fetchEditorAuthorizedBlob(editorAuthorizedAssetUrl(source, result));
+  if (!checkScope()) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  const convertedFile = new File([blob], asset.fileName || file.name.replace(/\.pdf$/i, "-A4.pdf"), { type: "application/pdf" });
+  if (await hashBlob(convertedFile) !== asset.sha256) throw new Error("A4 轉換版檔案驗證失敗，請重新開啟案件。");
+  if (!checkScope()) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  // The conversion is an immutable asset, but adopting its pages still needs
+  // explicit visual confirmation. Cancelling preserves current page edits.
+  const accepted = await showEditorA4Dialog({ file: convertedFile, isCurrent: checkScope });
+  if (!checkScope()) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  applyEditorRevisionFromResponse(converted);
+  const sources = new Map(uploadedSealEditorState.sourceFiles.map((item) => [item.assetId, item]));
+  (converted.editor_state?.sourceFiles || []).forEach((item) => sources.set(item.assetId, item));
+  uploadedSealEditorState.sourceFiles = [...sources.values()];
+  if (!accepted) {
+    markUploadedEditorDirty();
+    await saveUploadedEditorState({ immediate: true });
+    if (!checkScope()) throw new Error("登入或草稿已切換，請重新開啟案件。");
+    if (uploadedSealEditorRuntime.conflict || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration) throw new Error("轉換版未採用，但目前內容尚未保存。請先處理保存狀態或版本衝突。");
+    setUploadedEditorSaveStatus("saved", "未採用轉換版；目前編輯內容保持不變");
+    return null;
+  }
+  return { file: convertedFile, intent: { ...intent, asset_id: asset.id, assetKind: source.kind || "import_pdf", sha256: asset.sha256 }, finalized: converted };
+}
+
 async function loadPdfJsAsset(file, assetId, serverPages = []) {
+  const loadScope = uploadedSealApplicationScopeSnapshot();
   const pdfjsLib = await ensurePdfJsLibrary();
+  if (!uploadedSealApplicationScopeIsCurrent(loadScope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
   if (!pdfjsLib?.getDocument) throw new Error("PDF.js 尚未載入，請重新整理頁面。");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!uploadedSealApplicationScopeIsCurrent(loadScope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
   const loadingTask = pdfjsLib.getDocument({
-    data: new Uint8Array(await file.arrayBuffer()),
+    data: bytes,
     enableXfa: false,
     isEvalSupported: false,
     useSystemFonts: true
@@ -25373,6 +25754,7 @@ async function loadPdfJsAsset(file, assetId, serverPages = []) {
   try {
     pdfDocument = await loadingTask.promise;
   } catch (error) {
+    void loadingTask.destroy?.();
     if (passwordProtected || error?.name === "PasswordException") throw new Error("密碼加密 PDF 不接受編輯，請提供未加密版本。");
     throw new Error("PDF 無法解析或已損毀，請重新輸出後再上傳。");
   }
@@ -25398,6 +25780,7 @@ async function loadPdfJsAsset(file, assetId, serverPages = []) {
       });
       stagedPageProxies.set(pageId, { proxy, userUnit: unit, assetId });
     }
+    if (!uploadedSealApplicationScopeIsCurrent(loadScope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
     const previousDocument = uploadedSealEditorRuntime.pdfDocuments.get(assetId);
     if (previousDocument && previousDocument !== pdfDocument) void previousDocument.destroy?.();
     const previousUrl = uploadedSealEditorRuntime.assetUrls.get(assetId);
@@ -25453,6 +25836,8 @@ function applyUploadedEditorCanonicalSaveResponse(result, savingGeneration) {
 }
 
 async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = false } = {}) {
+  assertEditorUploadCurrent(intent);
+  const loadingScope = uploadedSealApplicationScopeSnapshot();
   const previousState = append ? cloneUploadedEditorValue(uploadedSealEditorState) : null;
   const asset = finalized?.asset || {};
   const assetId = asset.id || asset.asset_id || intent.asset_id || `asset-${crypto.randomUUID?.() || Date.now()}`;
@@ -25461,6 +25846,7 @@ async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = fal
     .filter((page) => (page.sourceAssetId || page.source_asset_id) === assetId)
     .sort((left, right) => Number(left.sourcePageIndex ?? left.source_page_index ?? 0) - Number(right.sourcePageIndex ?? right.source_page_index ?? 0));
   const incomingPages = await loadPdfJsAsset(file, assetId, canonicalPages.length ? canonicalPages : finalized?.pages || []);
+  assertEditorUploadCurrent(intent);
   const combinedCount = (append ? uploadedSealEditorState.pages.length : 0) + incomingPages.length;
   if (combinedCount > PDF_EDITOR_MAX_PAGES) {
     void uploadedSealEditorRuntime.pdfDocuments.get(assetId)?.destroy?.();
@@ -25497,13 +25883,15 @@ async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = fal
     fileName: file.name,
     mimeType: file.type || "application/pdf",
     sizeBytes: file.size,
-    sha256: intent.sha256
+    sha256: intent.sha256,
+    ...(asset.a4Conversion ? { a4Conversion: asset.a4Conversion } : {})
   };
+  const auditSources = (finalizedState.sourceFiles || []).filter((source) => source.a4Conversion);
   if (!append) {
     uploadedSealEditorState = {
       ...emptyUploadedSealEditorState(),
       revisionNo: uploadedSealEditorState.revisionNo,
-      sourceFiles: [sourceEntry],
+      sourceFiles: [...new Map([...auditSources, sourceEntry].map((source) => [source.assetId, source])).values()],
       pages: incomingPages,
       elements: []
     };
@@ -25511,7 +25899,7 @@ async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = fal
     uploadedSealEditorRuntime.redoStack = [];
     uploadedSealEditorRuntime.selectedIds.clear();
   } else {
-    uploadedSealEditorState.sourceFiles.push(sourceEntry);
+    uploadedSealEditorState.sourceFiles = [...new Map([...uploadedSealEditorState.sourceFiles, ...auditSources, sourceEntry].map((source) => [source.assetId, source])).values()];
     uploadedSealEditorState.pages.push(...incomingPages);
     pushUploadedEditorHistory(previousState);
   }
@@ -25522,6 +25910,8 @@ async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = fal
   uploadedSealPageCount = uploadedSealEditorState.pages.length;
   syncLegacyUploadedEditorCollections();
   await refreshUploadedEditorManifest();
+  if (!uploadedSealApplicationScopeIsCurrent(loadingScope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
+  assertEditorUploadCurrent(intent);
   markUploadedEditorDirty();
   renderUploadedSealWorkbench();
   return { assetId, pages: incomingPages };
@@ -25646,6 +26036,71 @@ function addUploadedEditorElement(kind, point = null, properties = {}, pageIds =
   });
   uploadedSealEditorRuntime.selectedIds = new Set(created.map((element) => element.id));
   renderUploadedSealWorkbench();
+}
+
+function addUploadedSeamGroups() {
+  const seal = selectedUploadedSeal();
+  if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇可用的印章版本。");
+  const binding = companySealCurrentVersionSnapshot(seal);
+  if (!binding.sealFileId || !binding.sealFileSha256) return showToast("印章版本資料不完整，請重新整理後再建立騎縫章。");
+  const raw = document.querySelector("#uploadedEditorSeamPages")?.value.trim() || "";
+  if (raw && (!/^\d+(?:\s*-\s*\d+)?(?:\s*,\s*\d+(?:\s*-\s*\d+)?)*$/.test(raw)
+    || raw.match(/\d+/g).some((value) => Number(value) < 1 || Number(value) > uploadedSealEditorState.pages.length))) {
+    return showToast("請填寫有效頁碼，例如 1-5 或 1,2,4,5。");
+  }
+  const numbers = raw ? parseUploadedEditorPageRange(raw) : uploadedSealEditorState.pages.map((_, index) => index + 1);
+  const pairs = numbers.slice(1).map((number, index) => [numbers[index], number]).filter(([left, right]) => right === left + 1);
+  if (!pairs.length) return showToast("請選擇至少兩個相鄰頁面。");
+  const existing = [...globalThis.EDOCSeam.groups(uploadedSealEditorState).values()];
+  const missing = pairs.filter(([left, right]) => !existing.some((members) => members.length === 2
+    && members.some((item) => item.pageId === uploadedSealEditorState.pages[left - 1].pageId)
+    && members.some((item) => item.pageId === uploadedSealEditorState.pages[right - 1].pageId)
+    && members[0].properties.sealId === seal.id));
+  if (!missing.length) return showToast("選取的頁面已有這枚印章的騎縫章，可直接調整各組位置。");
+  if (uploadedSealEditorState.elements.length + missing.length * 2 > PDF_EDITOR_MAX_ELEMENTS) return showToast("騎縫章每組使用兩個物件，加入後將超過 1,000 個物件上限。");
+  const changed = commitUploadedEditorMutation((state) => {
+    missing.forEach(([left, right], index) => {
+      const id = `seam-${crypto.randomUUID()}`;
+      const members = [left, right].map((number, part) => editorDefaultElement("seal", state.pages[number - 1], null, {
+        seamGroupId: id, seamMode: "pair", seamPartCount: 2, seamPartIndex: part
+      }));
+      state.elements.push(...members);
+      const commonHeight = Math.min(...[left, right].map((number) => globalThis.EDOCSeam.displayHeight(state.pages[number - 1])));
+      globalThis.EDOCSeam.position(state, id, globalThis.EDOCSeam.initialTopMm(commonHeight - members[0].height, index, missing.length));
+    });
+  });
+  if (changed) showToast(`已建立 ${missing.length} 組騎縫章，預設錯開高度；各組仍可獨立調整。`);
+}
+
+function renderUploadedSeamGroups() {
+  const target = document.querySelector("#uploadedEditorSeamGroups");
+  if (!target || !globalThis.EDOCSeam) return;
+  const groups = [...globalThis.EDOCSeam.groups(uploadedSealEditorState)];
+  const locked = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited";
+  document.querySelector("#uploadedEditorSeamAddBtn")?.toggleAttribute("disabled", locked || uploadedSealEditorState.pages.length < 2);
+  document.querySelector("#uploadedEditorSeamPages")?.toggleAttribute("disabled", locked);
+  const status = document.querySelector("#uploadedEditorSeamStatus");
+  if (status) status.textContent = groups.length ? `共 ${groups.length} 組。可輸入距頁首高度，或在 PDF 拖曳半章；同組另一半會同步。` : "尚未建立騎縫章；至少需要兩頁 PDF。";
+  target.innerHTML = groups.map(([id, members], index) => {
+    const first = members[0];
+    const page = uploadedSealEditorState.pages.find((item) => item.pageId === first.pageId);
+    if (!page) return "";
+    const pages = members.map((item) => uploadedSealEditorState.pages.findIndex((entry) => entry.pageId === item.pageId) + 1).sort((a, b) => a - b);
+    const topMm = globalThis.EDOCSeam.topPt(page, first) / globalThis.EDOCSeam.ptPerMm;
+    const maxMm = Math.min(...members.map((item) => (globalThis.EDOCSeam.displayHeight(uploadedSealEditorState.pages.find((entry) => entry.pageId === item.pageId)) - item.height) / globalThis.EDOCSeam.ptPerMm));
+    return `<article class="pdf-editor-seam-group"><strong>第 ${index + 1} 組 · 第 ${pages.join(" ↔ ")} 頁</strong><label>距頁首（mm）<input type="number" min="0" max="${maxMm.toFixed(2)}" step="0.1" inputmode="decimal" value="${topMm.toFixed(1)}" data-seam-position="${escapeDraftHtml(id)}"${locked ? " disabled" : ""}></label><button class="secondary-button" type="button" data-seam-locate="${escapeDraftHtml(first.id)}">查看位置</button><button class="text-button" type="button" data-seam-delete="${escapeDraftHtml(id)}"${locked ? " disabled" : ""}>刪除此組</button></article>`;
+  }).join("");
+  target.querySelectorAll("[data-seam-position]").forEach((input) => input.addEventListener("change", () => {
+    if (!input.reportValidity()) return;
+    commitUploadedEditorMutation((state) => globalThis.EDOCSeam.position(state, input.dataset.seamPosition, Number(input.value)));
+  }));
+  target.querySelectorAll("[data-seam-locate]").forEach((button) => button.addEventListener("click", () => {
+    const element = editorElementById(button.dataset.seamLocate);
+    if (element) { setUploadedSealPage(element.pageId); selectUploadedEditorElement(element.id); }
+  }));
+  target.querySelectorAll("[data-seam-delete]").forEach((button) => button.addEventListener("click", () => {
+    commitUploadedEditorMutation((state) => { state.elements = state.elements.filter((item) => globalThis.EDOCSeam.groupId(item) !== button.dataset.seamDelete); });
+  }));
 }
 
 function addUploadedStamp(scope = "current_page", placement = null) {
@@ -25804,11 +26259,12 @@ function appendEditorElementVisual(group, element, rect) {
   if (element.kind === "seal") {
     const previewBinding = uploadedEditorSealPreviewBinding(properties);
     const preview = activeUploadedEditorSealPreviewUrl(previewBinding);
-    if (preview) group.append(svgEditorNode("image", { href: preview, x: rect.left, y: rect.top, width: rect.width, height: rect.height, preserveAspectRatio: "xMidYMid meet" }));
+    if (preview && properties.seamGroupId) appendUploadedSeamPreview(group, element, preview, rect);
+    else if (preview) group.append(svgEditorNode("image", { href: preview, x: rect.left, y: rect.top, width: rect.width, height: rect.height, preserveAspectRatio: "xMidYMid meet" }));
     else {
       group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, rx: 5, class: "editor-seal-placeholder" }));
       const label = svgEditorNode("text", { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, "text-anchor": "middle", "dominant-baseline": "middle", class: "editor-seal-label" });
-      label.textContent = properties.sealName || "印章預覽";
+      label.textContent = properties.seamGroupId ? "騎縫半章預覽" : properties.sealName || "印章預覽";
       group.append(label);
       void loadSealPreviewUrl(previewBinding.sealId, previewBinding.sealFileId, previewBinding.sealFileSha256);
     }
@@ -25837,9 +26293,11 @@ function appendEditorElementVisual(group, element, rect) {
         group.append(svgEditorNode("circle", { cx: rect.left + rect.width, cy: rect.top + rect.height, r: 22, class: "editor-handle-hit", "data-editor-handle": "resize", "data-editor-element-id": element.id }));
         group.append(svgEditorNode("circle", { cx: rect.left + rect.width, cy: rect.top + rect.height, r: 7, class: "editor-resize-handle", "data-editor-handle": "resize", "data-editor-element-id": element.id }));
       }
+      if (!properties.seamGroupId) {
       group.append(svgEditorNode("line", { x1: rect.left + rect.width / 2, y1: rect.top, x2: rect.left + rect.width / 2, y2: rect.top - 18, class: "editor-rotate-stem" }));
       group.append(svgEditorNode("circle", { cx: rect.left + rect.width / 2, cy: rect.top - 22, r: 22, class: "editor-handle-hit", "data-editor-handle": "rotate", "data-editor-element-id": element.id }));
       group.append(svgEditorNode("circle", { cx: rect.left + rect.width / 2, cy: rect.top - 22, r: 7, class: "editor-rotate-handle", "data-editor-handle": "rotate", "data-editor-element-id": element.id }));
+      }
     }
   }
 }
@@ -25883,6 +26341,20 @@ function renderUploadedEditorSvgLayer() {
     });
 }
 
+function appendUploadedSeamPreview(group, element, preview, rect) {
+  // Seam halves stay upright on the displayed page, including PDF /Rotate.
+  const local = svgEditorNode("g", { transform: `translate(${rect.left} ${rect.top})` });
+  const half = rect.width / 2;
+  const leftPart = element.properties.seamPartIndex === 0;
+  const clipId = `seam-clip-${element.id.replace(/[^A-Za-z0-9_-]/g, "")}`;
+  const clip = svgEditorNode("clipPath", { id: clipId });
+  clip.append(svgEditorNode("rect", { x: leftPart ? half : 0, y: 0, width: half, height: rect.height }));
+  local.append(clip);
+  local.append(svgEditorNode("image", { href: preview, x: leftPart ? half : -half, y: 0, width: rect.width, height: rect.height,
+    "clip-path": `url(#${clipId})`, preserveAspectRatio: "none" }));
+  group.append(local);
+}
+
 function calculateUploadedEditorFitScale(pageRuntime, rotation) {
   const scroll = document.querySelector("#uploadedEditorScroll");
   if (!scroll || !pageRuntime) return 1;
@@ -25890,6 +26362,35 @@ function calculateUploadedEditorFitScale(pageRuntime, rotation) {
   const availableWidth = Math.max(280, scroll.clientWidth - 34);
   const availableHeight = Math.max(360, Math.min(window.innerHeight * 0.72, 920));
   return Math.max(0.25, Math.min(2, availableWidth / baseViewport.width, availableHeight / baseViewport.height));
+}
+
+async function ensureUploadedOriginalPdfProxy(page, runtime) {
+  const source = uploadedSealEditorState.sourceFiles.find((item) => item.assetId === page.sourceAssetId);
+  const sourceAssetId = source?.a4Conversion?.converted ? source.a4Conversion.sourceAssetId : "";
+  if (!sourceAssetId) return runtime.proxy;
+  const original = uploadedSealEditorState.sourceFiles.find((item) => item.assetId === sourceAssetId);
+  if (!original) throw new Error("找不到轉換前原稿的保存紀錄，請重新開啟案件。");
+  const key = `original:${sourceAssetId}`;
+  let pdf = uploadedSealEditorRuntime.pdfDocuments.get(key);
+  if (!pdf) {
+    const scope = uploadedSealApplicationScopeSnapshot();
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(scope.documentId)}/editor-state`);
+    if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，已停止讀取原稿。");
+    const blob = await fetchEditorAuthorizedBlob(editorAuthorizedAssetUrl(original, result));
+    if (await hashBlob(blob) !== original.sha256) throw new Error("原稿雜湊不一致，已停止顯示。");
+    const library = await ensurePdfJsLibrary();
+    const task = library.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), enableXfa: false, isEvalSupported: false });
+    task.onPassword = () => { void task.destroy(); };
+    pdf = await task.promise;
+    try {
+      await validateUploadedPdfDocument(pdf, { allowNonA4: true });
+      if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，已停止讀取原稿。");
+      const existing = uploadedSealEditorRuntime.pdfDocuments.get(key);
+      if (existing) { void pdf.destroy(); pdf = existing; }
+      else uploadedSealEditorRuntime.pdfDocuments.set(key, pdf);
+    } catch (error) { void pdf.destroy(); throw error; }
+  }
+  return pdf.getPage(Number(page.sourcePageIndex) + 1);
 }
 
 async function renderUploadedPdfPage() {
@@ -25921,7 +26422,9 @@ async function renderUploadedPdfPage() {
     }
   }
   if (reviewMode === "original" && runtime) {
-    return renderUploadedReadOnlyPdfProxy(runtime.proxy, runtime.proxy.rotate, "不可變原稿", renderNonce, reviewMode);
+    const originalProxy = await ensureUploadedOriginalPdfProxy(page, runtime);
+    if (renderNonce !== uploadedSealEditorRuntime.renderNonce || uploadedSealEditorRuntime.reviewMode !== reviewMode) return;
+    return renderUploadedReadOnlyPdfProxy(originalProxy, originalProxy.rotate, "不可變原稿", renderNonce, reviewMode);
   }
   if (!page || !runtime) {
     canvas.hidden = true;
@@ -26336,6 +26839,7 @@ function beginUploadedEditorPointer(event) {
     if (!element || !startPoint) return;
     const requestedAction = handle?.dataset.editorHandle || "move";
     if (element.kind === "seal" && requestedAction === "resize") return;
+    if (element.properties?.seamGroupId && requestedAction !== "move") return;
     const selectedStartElements = [...uploadedSealEditorRuntime.selectedIds]
       .map(editorElementById)
       .filter((item) => item?.pageId === element.pageId)
@@ -26392,6 +26896,7 @@ function moveUploadedEditorPointer(event) {
       selectedElement.x = roundEditorPoint(Math.max(0, Math.min(selectedPage.widthPt - selectedElement.width, startElement.x + deltaX)));
       selectedElement.y = roundEditorPoint(Math.max(0, Math.min(selectedPage.heightPt - selectedElement.height, startElement.y + deltaY)));
     });
+    globalThis.EDOCSeam?.reconcile(uploadedSealEditorState, action.previousState);
     uploadedSealEditorRuntime.guides = snapped.guides;
   } else if (action.type === "resize") {
     if (element.kind !== "seal") {
@@ -26458,6 +26963,9 @@ function renderUploadedEditorProperties() {
   setValue("#uploadedEditorPropertyColor", element.properties?.color || "#111827");
   setValue("#uploadedEditorPropertyShapeType", element.properties?.shapeType || "rectangle");
   const sealSizeLocked = selected.length === 1 && element.kind === "seal";
+  const seamLocked = Boolean(element.properties?.seamGroupId);
+  document.querySelector("#uploadedEditorPropertyRotation")?.toggleAttribute("disabled", seamLocked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.reviewMode !== "edited");
+  document.querySelector("#uploadedEditorPropertyX")?.toggleAttribute("disabled", seamLocked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.reviewMode !== "edited");
   ["#uploadedEditorPropertyWidth", "#uploadedEditorPropertyHeight"].forEach((selector) => {
     const input = document.querySelector(selector);
     if (!input) return;
@@ -26474,7 +26982,7 @@ function renderUploadedEditorProperties() {
     if (sealSizeLocked) {
       const geometry = uploadedEditorImmutableSealGeometry(element)
         || companySealFixedGeometry(uploadedEditorSealRecord(element) || element, element.width);
-      sizeLock.textContent = `尺寸已鎖定：${geometry.label} ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（${formatCompanySealMeasurement(geometry.widthPt)} × ${formatCompanySealMeasurement(geometry.heightPt)} pt）。印章只能移動或旋轉。`;
+      sizeLock.textContent = `尺寸已鎖定：${geometry.label} ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（${formatCompanySealMeasurement(geometry.widthPt)} × ${formatCompanySealMeasurement(geometry.heightPt)} pt）。${seamLocked ? "騎縫章只調整同組高度，尺寸與方向固定。" : "印章只能移動或旋轉。"}`;
     }
   }
   document.querySelector(".editor-property-text")?.toggleAttribute("hidden", !["text", "replacement"].includes(element.kind));
@@ -26518,12 +27026,14 @@ function deleteUploadedEditorSelection() {
 }
 
 function copyUploadedEditorSelection() {
+  if ([...uploadedSealEditorRuntime.selectedIds].some((id) => globalThis.EDOCSeam?.groupId(editorElementById(id)))) return showToast("騎縫章請使用批次建立，避免只複製半枚印章。");
   uploadedSealEditorRuntime.clipboard = [...uploadedSealEditorRuntime.selectedIds].map(editorElementById).filter(Boolean).map(cloneUploadedEditorValue);
   showToast(`已複製 ${uploadedSealEditorRuntime.clipboard.length} 個物件。`);
 }
 
 function pasteUploadedEditorSelection(pageId = currentUploadedEditorPage()?.pageId) {
   if (!uploadedSealEditorRuntime.clipboard.length || !pageId) return;
+  if (uploadedSealEditorRuntime.clipboard.some((item) => globalThis.EDOCSeam?.groupId(item))) return showToast("騎縫章請使用批次建立，不能單獨貼上半章。");
   let copies = [];
   commitUploadedEditorMutation((state) => {
     copies = uploadedSealEditorRuntime.clipboard.map((element) => ({ ...cloneUploadedEditorValue(element), id: `editor-${element.kind}-${crypto.randomUUID?.() || Date.now()}`, pageId, x: element.x + 8, y: element.y + 8, zIndex: state.elements.length + 1 }));
@@ -26547,6 +27057,7 @@ function parseUploadedEditorPageRange(value) {
 
 function copyUploadedEditorSelectionToPages() {
   const selected = [...uploadedSealEditorRuntime.selectedIds].map(editorElementById).filter(Boolean);
+  if (selected.some((item) => globalThis.EDOCSeam?.groupId(item))) return showToast("騎縫章請使用批次建立，讓每組保留完整左右半章。");
   const pages = parseUploadedEditorPageRange(document.querySelector("#uploadedEditorCopyPages")?.value);
   if (!selected.length || !pages.length) return showToast("請先選取物件並輸入有效頁面範圍。");
   commitUploadedEditorMutation((state) => {
@@ -26601,6 +27112,11 @@ function runUploadedEditorPageAction(action) {
 
 async function handleUploadedEditorImportPdf(files) {
   if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再匯入 PDF。");
+  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.locked) return showToast("目前無法匯入，請等待上傳完成或開啟可編輯草稿。");
+  const importScope = uploadedSealApplicationScopeSnapshot();
+  uploadedSealEditorRuntime.uploading = true;
+  renderUploadedSealWorkbench();
+  try {
   for (const file of files) {
     if (!file || (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf"))) return showToast("匯入只接受 PDF。");
     if (file.size > PDF_EDITOR_MAX_FILE_BYTES) return showToast("單一 PDF 不得超過 50 MB。");
@@ -26608,14 +27124,26 @@ async function handleUploadedEditorImportPdf(files) {
     try {
       clearUploadedEditorUploadError();
       setUploadedPdfA4Status("checking", `正在檢查 ${file.name} 的每一頁是否為 A4…`);
+      const confirmed = await confirmUploadedPdfConversion(file);
+      if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
+      if (!confirmed) { setUploadedEditorSaveStatus("saved", "已取消匯入，目前內容保持不變"); return; }
+      await saveUploadedEditorState({ immediate: true });
+      if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
+      if (uploadedSealEditorRuntime.conflict) throw new Error("請先處理版本衝突，再匯入 PDF。");
       setUploadedEditorSaveStatus("uploading", "合併 PDF 直傳中 0%");
       intent = await requestEditorUpload(file, "import_pdf");
-      await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `合併 PDF 直傳中 ${Math.round(progress * 100)}%`));
+      await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(importScope, false)) setUploadedEditorSaveStatus("uploading", `合併 PDF 直傳中 ${Math.round(progress * 100)}%`); });
+      assertEditorUploadCurrent(intent);
       setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
-      const finalized = await finalizeEditorUpload(intent, file);
-      await loadUploadedPdfIntoEditor(file, intent, finalized, { append: true });
+      const finalized = await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+      const resolved = await resolveUploadedPdfConversion(file, intent, finalized);
+      if (!resolved) return;
+      await loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: true });
+      assertEditorUploadCurrent(intent);
     } catch (error) {
+      if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
       await reportEditorUploadFailure(intent, error);
+      if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
       const retrySameFile = error?.detail === "editor_runtime_maintenance"
         || error?.retryable === true
         || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
@@ -26628,6 +27156,9 @@ async function handleUploadedEditorImportPdf(files) {
     }
   }
   ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
+  } finally {
+    if (uploadedSealApplicationScopeIsCurrent(importScope, false)) { uploadedSealEditorRuntime.uploading = false; renderUploadedSealWorkbench(); }
+  }
 }
 
 async function handleUploadedEditorImage(file) {
@@ -26635,14 +27166,19 @@ async function handleUploadedEditorImage(file) {
   if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再插入圖片。");
   if (!["image/png", "image/jpeg"].includes(file.type)) return showToast("圖片只接受 PNG 或 JPEG。");
   if (file.size > PDF_EDITOR_MAX_IMAGE_BYTES) return showToast("單張圖片不得超過 10 MB。");
+  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.locked) return showToast("目前無法插入圖片，請等待上傳完成或開啟可編輯草稿。");
+  const imageScope = uploadedSealApplicationScopeSnapshot();
+  uploadedSealEditorRuntime.uploading = true;
   let intent = null;
   try {
     clearUploadedEditorUploadError();
     setUploadedEditorSaveStatus("uploading", "圖片直傳中 0%");
     intent = await requestEditorUpload(file, "image");
-    await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `圖片直傳中 ${Math.round(progress * 100)}%`));
+    await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(imageScope, false)) setUploadedEditorSaveStatus("uploading", `圖片直傳中 ${Math.round(progress * 100)}%`); });
+    assertEditorUploadCurrent(intent);
     setUploadedEditorSaveStatus("checking", "圖片掃毒中");
     const finalized = await finalizeEditorUpload(intent, file);
+    assertEditorUploadCurrent(intent);
     applyEditorRevisionFromResponse(finalized);
     const asset = finalized.asset || {};
     const assetId = asset.id || asset.asset_id || intent.asset_id;
@@ -26663,19 +27199,25 @@ async function handleUploadedEditorImage(file) {
     uploadedSealEditorRuntime.selectedIds = new Set(element ? [element.id] : []);
     renderUploadedSealWorkbench();
   } catch (error) {
+    if (!uploadedSealApplicationScopeIsCurrent(imageScope, false)) return;
     await reportEditorUploadFailure(intent, error);
+    if (!uploadedSealApplicationScopeIsCurrent(imageScope, false)) return;
     setUploadedEditorSaveStatus("error", "圖片上傳失敗");
     showUploadedEditorUploadError(error, () => handleUploadedEditorImage(file), "重新上傳圖片");
     showToast(`圖片上傳失敗：${error.message}`);
   } finally {
-    const input = document.querySelector("#uploadedEditorImageInput");
-    if (input) input.value = "";
+    if (uploadedSealApplicationScopeIsCurrent(imageScope, false)) {
+      uploadedSealEditorRuntime.uploading = false;
+      const input = document.querySelector("#uploadedEditorImageInput");
+      if (input) input.value = "";
+      renderUploadedSealWorkbench();
+    }
   }
 }
 
 async function saveUploadedEditorState({ immediate = false } = {}) {
   window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
-  if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return null;
+  if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.conflict) return null;
   if (!navigator.onLine) {
     uploadedSealEditorRuntime.offlineDirty = true;
     setUploadedEditorSaveStatus("offline", "離線中，尚未同步");
@@ -26754,41 +27296,127 @@ async function saveUploadedEditorState({ immediate = false } = {}) {
 }
 
 function handleUploadedEditorConflict(error) {
-  uploadedSealEditorRuntime.conflict = { at: Date.now(), revisionNo: uploadedSealEditorState.revisionNo, detail: error?.detail || "editor_revision_conflict", localState: cloneUploadedEditorValue(uploadedSealEditorState) };
-  setUploadedEditorSaveStatus("conflict", "版本衝突：另一裝置已有新版本");
+  uploadedSealEditorRuntime.conflict = { at: Date.now(), revisionNo: uploadedSealEditorState.revisionNo, detail: error?.detail || "editor_revision_conflict", localState: cloneUploadedEditorValue(uploadedSealEditorState), requestId: crypto.randomUUID(), application: editorDraftPayload() };
+  window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
+  setUploadedEditorSaveStatus("conflict", "另一裝置已更新。你的內容仍保留在畫面，請選擇如何繼續。");
   document.querySelector("#uploadedEditorConflictCopyBtn")?.toggleAttribute("hidden", false);
   document.querySelector("#uploadedEditorResolveConflictBtn")?.toggleAttribute("hidden", false);
-  showToast("偵測到另一裝置已更新草稿；系統未覆蓋任何內容，請重新載入確認。");
+  document.querySelector("#uploadedEditorConflictBackupBtn")?.toggleAttribute("hidden", false);
+  showToast("未覆蓋任何版本。可保留你的內容為新草稿，或改用最新版。");
 }
 
 async function copyUploadedEditorConflictVersion() {
-  const state = uploadedSealEditorRuntime.conflict?.localState || uploadedSealEditorState;
+  if (uploadedSealEditorRuntime.conflictRecoveryPromise) return uploadedSealEditorRuntime.conflictRecoveryPromise;
+  if (!uploadedSealEditorRuntime.conflict || !uploadedSealEditorRuntime.documentId) return;
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const current = uploadedSealEditorRuntime.conflict;
+  const state = cloneUploadedEditorValue(uploadedSealEditorState);
+  const application = editorDraftPayload();
+  const payloadKey = JSON.stringify({ state, application });
+  // Retries of an uncertain response keep their key, edits start a new copy.
+  if (current.payloadKey && current.payloadKey !== payloadKey) current.requestId = crypto.randomUUID();
+  current.payloadKey = payloadKey;
+  current.localState = state;
+  current.application = application;
+  renderUploadedEditorConflictBusy(true);
+  const operation = (async () => {
+    await Promise.resolve();
+    try {
+      const result = await backendRequest(`/official-documents/${encodeURIComponent(scope.documentId)}/editor-conflict-copy`, {
+        method: "POST", body: JSON.stringify({ requestId: current.requestId, state, application })
+      });
+      if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
+      const newId = result.document_id || result.id;
+      if (!newId || newId === scope.documentId) throw new Error("新草稿尚未建立，原內容仍保留。");
+      current.createdDocumentId = newId;
+      // Do not throw away typing performed while the copy request was running.
+      if (JSON.stringify({ state: uploadedSealEditorState, application: editorDraftPayload() }) !== payloadKey) {
+        showToast("已建立新草稿；你又做了其他修改，畫面內容仍保留。再次按下即可另存最新修改。");
+        return;
+      }
+      await installUploadedEditorRecovery(result, newId, scope);
+      if (uploadedSealEditorRuntime.documentId === newId) showToast("已保留為新草稿。原案件與另一裝置的版本都沒有改動。");
+    } catch (error) {
+      if (uploadedSealApplicationScopeIsCurrent(scope)) {
+        setUploadedEditorSaveStatus("conflict", "另存未完成，你的內容仍保留，可再試一次。");
+        showToast(`另存未完成：${error.message}`);
+      }
+    } finally {
+      if (uploadedSealEditorRuntime.conflictRecoveryPromise === operation) {
+        uploadedSealEditorRuntime.conflictRecoveryPromise = null;
+        renderUploadedEditorConflictBusy(false);
+      }
+    }
+  })();
+  uploadedSealEditorRuntime.conflictRecoveryPromise = operation;
+  return operation;
+}
+
+function renderUploadedEditorConflictBusy(busy) {
+  for (const id of ["uploadedEditorConflictCopyBtn", "uploadedEditorResolveConflictBtn", "uploadedEditorConflictBackupBtn"]) {
+    const button = document.querySelector(`#${id}`);
+    if (button) button.disabled = busy;
+  }
+  const copy = document.querySelector("#uploadedEditorConflictCopyBtn");
+  if (copy) copy.textContent = busy ? "保留內容中…" : "保留我的內容為新草稿";
+}
+
+async function downloadUploadedEditorConflictBackup() {
+  const state = uploadedSealEditorState;
   const recovery = canonicalEditorJson({
     schemaVersion: PDF_EDITOR_SCHEMA_VERSION,
     documentId: uploadedSealEditorRuntime.documentId,
     capturedAt: new Date().toISOString(),
-    state
+    state, application: editorDraftPayload()
   });
-  try {
-    await navigator.clipboard.writeText(recovery);
-    showToast("本機衝突版本已複製；重新載入後可交由管理員協助還原。");
-  } catch (error) {
-    const blob = new Blob([recovery], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `pdf-editor-recovery-${uploadedSealEditorRuntime.documentId || "draft"}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    showToast("已下載本機衝突版本備份。");
-  }
+  const blob = new Blob([recovery], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `pdf-editor-recovery-${uploadedSealEditorRuntime.documentId || "draft"}.json`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast("已下載備份；內含你的編輯內容，請妥善保管。");
 }
 
 async function reloadUploadedEditorServerState() {
-  if (!uploadedSealEditorRuntime.documentId) return;
-  const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/editor-state`);
+  if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.conflictRecoveryPromise) return;
+  if (uploadedSealEditorRuntime.conflict && !window.confirm("使用最新版會換掉畫面上尚未保存的修改。要保留兩份內容，請取消並選「保留我的內容為新草稿」。確定使用最新版？")) return;
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const generation = uploadedSealEditorRuntime.dirtyGeneration;
+  const applicationKey = uploadedSealApplicationKey();
+  const result = await backendRequest(`/official-documents/${encodeURIComponent(scope.documentId)}/editor-state`);
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
+  if (generation !== uploadedSealEditorRuntime.dirtyGeneration || applicationKey !== uploadedSealApplicationKey()) {
+    showToast("你剛才又修改了內容，尚未切換版本。請確認後再試一次。");
+    return;
+  }
+  await installUploadedEditorRecovery(result, scope.documentId, scope);
+}
+
+async function installUploadedEditorRecovery(result, documentId, scope) {
   const state = result.state || result.editor_state;
   if (!state || Number(state.schemaVersion || state.schema_version) !== PDF_EDITOR_SCHEMA_VERSION) throw new Error("伺服器草稿版本不相容。");
+  const generation = uploadedSealEditorRuntime.dirtyGeneration;
+  const applicationKey = uploadedSealApplicationKey();
+  const application = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
+  const readyFiles = [];
+  // Fetch everything before clearing local content. A failed GET leaves the
+  // old editable state, application fields and conflict action intact.
+  for (const source of state.sourceFiles || []) {
+    if (source.a4Conversion?.required && !(state.pages || []).some((page) => page.sourceAssetId === source.assetId)) continue;
+    const url = editorAuthorizedAssetUrl(source, result);
+    const blob = await fetchEditorAuthorizedBlob(url);
+    readyFiles.push({ source, file: new File([blob], source.fileName || "document.pdf", { type: source.mimeType || blob.type }) });
+  }
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
+  if (generation !== uploadedSealEditorRuntime.dirtyGeneration || applicationKey !== uploadedSealApplicationKey()) {
+    showToast("你剛才又修改了內容，尚未切換版本。請確認後再試一次。");
+    return;
+  }
+  clearUploadedEditorSensitivePreviews();
+  uploadedSealEditorRuntime.documentId = documentId;
+  const installedScope = uploadedSealApplicationScopeSnapshot();
   uploadedSealEditorState = { ...emptyUploadedSealEditorState(), ...cloneUploadedEditorValue(state), revisionNo: Number(result.revisionNo ?? state.revisionNo ?? 0), manifestSha256: result.manifestSha256 || state.manifestSha256 || "" };
   const sealGeometryNormalized = normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
   uploadedSealEditorRuntime.revisionId = result.revision_id || result.revisionId || "";
@@ -26804,11 +27432,21 @@ async function reloadUploadedEditorServerState() {
   uploadedSealEditorRuntime.savedGeneration = 0;
   uploadedSealEditorRuntime.saveQueued = false;
   uploadedSealEditorRuntime.conflict = null;
+  uploadedSealEditorRuntime.locked = true;
+  restoreUploadedSealApplication(application);
   rememberUploadedEditorSavedSealBindings(uploadedSealEditorState);
   document.querySelector("#uploadedEditorConflictCopyBtn")?.toggleAttribute("hidden", true);
   document.querySelector("#uploadedEditorResolveConflictBtn")?.toggleAttribute("hidden", true);
+  document.querySelector("#uploadedEditorConflictBackupBtn")?.toggleAttribute("hidden", true);
   syncLegacyUploadedEditorCollections();
-  await hydrateUploadedEditorAuthorizedAssets(result);
+  for (const { source, file } of readyFiles) {
+    if (!uploadedSealApplicationScopeIsCurrent(installedScope)) return;
+    if (source.kind === "image") uploadedSealEditorRuntime.imageUrls.set(source.assetId, URL.createObjectURL(file));
+    else await loadPdfJsAsset(file, source.assetId, uploadedSealEditorState.pages.filter((page) => page.sourceAssetId === source.assetId).sort((a, b) => a.sourcePageIndex - b.sourcePageIndex));
+  }
+  if (!uploadedSealApplicationScopeIsCurrent(installedScope)) return;
+  uploadedSealEditorRuntime.locked = ["locked", "submitted", "approved"].includes(result.status) || !["draft", "rejected"].includes(application.current_status) || !officialDocumentIsApplicant(application);
+  uploadedSealApplicationRuntime.editable = !uploadedSealEditorRuntime.locked;
   if (sealGeometryNormalized && !uploadedSealEditorRuntime.locked) markUploadedEditorDirty();
   else setUploadedEditorSaveStatus("saved", `已載入 revision ${uploadedSealEditorState.revisionNo}`);
   renderUploadedSealWorkbench();
@@ -26856,12 +27494,21 @@ async function fetchEditorAuthorizedBlob(url) {
 }
 
 async function hydrateUploadedEditorAuthorizedAssets(result = {}) {
-  for (const source of uploadedSealEditorState.sourceFiles) {
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const state = uploadedSealEditorState;
+  const assertHydrationCurrent = () => {
+    if (!uploadedSealApplicationScopeIsCurrent(scope) || state !== uploadedSealEditorState) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
+  };
+  for (const source of state.sourceFiles) {
+    assertHydrationCurrent();
     const assetId = source.assetId || source.asset_id || source.id || "";
     if (!assetId || uploadedSealEditorRuntime.assetFiles.has(assetId) || uploadedSealEditorRuntime.imageUrls.has(assetId)) continue;
+    // A preserved non-A4 original is for audit/download, never editor geometry.
+    if (source.kind !== "image" && !uploadedSealEditorState.pages.some((page) => page.sourceAssetId === assetId)) continue;
     const authorizedUrl = editorAuthorizedAssetUrl(source, result);
     if (!authorizedUrl) continue;
     const blob = await fetchEditorAuthorizedBlob(authorizedUrl);
+    assertHydrationCurrent();
     const file = new File([blob], source.fileName || source.file_name || `asset-${assetId}`, { type: source.mimeType || source.mime_type || blob.type || "application/octet-stream" });
     if (String(source.kind || "").includes("image") || file.type.startsWith("image/")) {
       uploadedSealEditorRuntime.imageUrls.set(assetId, URL.createObjectURL(file));
@@ -26869,6 +27516,7 @@ async function hydrateUploadedEditorAuthorizedAssets(result = {}) {
     }
     const serverPages = uploadedSealEditorState.pages.filter((page) => page.sourceAssetId === assetId).sort((a, b) => a.sourcePageIndex - b.sourcePageIndex);
     await loadPdfJsAsset(file, assetId, serverPages);
+    assertHydrationCurrent();
   }
 }
 
@@ -27042,6 +27690,7 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     input.value = "";
     return showToast("已有 PDF 正在上傳，請等待完成。");
   }
+  const uploadScope = uploadedSealApplicationScopeSnapshot();
   uploadedSealEditorRuntime.uploading = true;
   clearUploadedEditorUploadError();
   const fileName = document.querySelector("#uploadedPdfFileName");
@@ -27055,16 +27704,27 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     ) {
       setUploadedEditorSaveStatus("saving", "正在保存目前版本，再更換 PDF");
       await saveUploadedEditorState({ immediate: true });
+      if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
       if (uploadedSealEditorRuntime.conflict) throw new Error("目前草稿有版本衝突，請先重新載入或保留本機版本。");
     }
     setUploadedPdfA4Status("checking", "正在檢查每一頁是否為 A4…");
+    const confirmed = await confirmUploadedPdfConversion(file);
+    if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
+    if (!confirmed) {
+      setUploadedEditorSaveStatus("saved", "已取消上傳，目前內容保持不變");
+      return;
+    }
     setUploadedEditorSaveStatus("uploading", "TUS 私密直傳中 0%");
     intent = await requestEditorUpload(file, "source_pdf");
-    await performTusUpload(file, intent, (progress) => setUploadedEditorSaveStatus("uploading", `TUS 私密直傳中 ${Math.round(progress * 100)}%`));
+    await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) setUploadedEditorSaveStatus("uploading", `TUS 私密直傳中 ${Math.round(progress * 100)}%`); });
+    assertEditorUploadCurrent(intent);
     setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
-    const finalized = await finalizeEditorUpload(intent, file);
-    await loadUploadedPdfIntoEditor(file, intent, finalized, { append: false });
-    uploadedSealPdf = { file, name: file.name, size: file.size, hash: intent.sha256, assetId: finalized.asset?.id || finalized.asset?.asset_id || intent.asset_id };
+    const finalized = await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+    const resolved = await resolveUploadedPdfConversion(file, intent, finalized);
+    if (!resolved) return;
+    await loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: false });
+    assertEditorUploadCurrent(intent);
+    uploadedSealPdf = { file: resolved.file, name: resolved.file.name, size: resolved.file.size, hash: resolved.intent.sha256, assetId: resolved.finalized.asset?.id || resolved.finalized.asset?.asset_id || resolved.intent.asset_id };
     uploadedSealObjectUrl = uploadedSealEditorRuntime.assetUrls.get(uploadedSealPdf.assetId) || "";
     const title = document.querySelector("#uploadedSealTitle");
     if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
@@ -27073,7 +27733,9 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     clearUploadedEditorUploadError();
     showToast(`PDF 已安全載入，共 ${uploadedSealPageCount} 頁。`);
   } catch (error) {
+    if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
     await reportEditorUploadFailure(intent, error);
+    if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
     setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
     setUploadedEditorSaveStatus("error", "PDF 未通過上傳或預檢");
     const retrySameFile = error?.detail === "editor_runtime_maintenance"
@@ -27086,9 +27748,11 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     );
     showToast(`PDF 無法開啟：${pdfA4UiErrorMessage(error)}`);
   } finally {
-    uploadedSealEditorRuntime.uploading = false;
-    input.value = "";
-    renderUploadedSealWorkbench();
+    if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) {
+      uploadedSealEditorRuntime.uploading = false;
+      input.value = "";
+      renderUploadedSealWorkbench();
+    }
   }
 }
 
@@ -27240,7 +27904,8 @@ function renderUploadedSealWorkbench() {
   }
   const fileName = document.querySelector("#uploadedPdfFileName");
   if (fileName && !uploadedSealEditorRuntime.uploading) {
-    fileName.textContent = uploadedSealPdf?.name || uploadedSealEditorState.sourceFiles.find((item) => item.kind === "source_pdf")?.fileName || "尚未選擇檔案";
+    const activeSource = uploadedSealEditorState.sourceFiles.find((item) => item.assetId === uploadedSealEditorState.pages[0]?.sourceAssetId);
+    fileName.textContent = (activeSource?.fileName || uploadedSealPdf?.name || "尚未選擇檔案") + (activeSource?.a4Conversion?.converted ? "（A4 編輯版，原稿另存）" : "");
   }
   const saveStatus = document.querySelector("#uploadedEditorSaveStatus");
   if (uploadedSealEditorRuntime.directoryLoading) {
@@ -27326,14 +27991,16 @@ function renderUploadedSealWorkbench() {
   document.querySelector("#uploadedEditorRedoBtn")?.toggleAttribute("disabled", !uploadedSealEditorRuntime.redoStack.length || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || reviewReadOnly);
   renderUploadedEditorThumbnails();
   renderUploadedEditorProperties();
+  renderUploadedSeamGroups();
   const markerCount = uploadedSealEditorState.elements.length;
   const summary = document.querySelector("#uploadedStampSummary");
   if (summary) {
     summary.innerHTML = markerCount
       ? uploadedSealEditorState.elements.map((element, index) => {
           const pageNumber = uploadedSealEditorState.pages.findIndex((pageItem) => pageItem.pageId === element.pageId) + 1;
-          const label = element.kind === "seal" ? element.properties?.sealName || "印章" : element.kind === "replacement" ? `取代：${element.properties?.text || ""}` : element.kind === "text" ? element.properties?.text || "文字" : ({ image: "圖片", shape: "形狀", checkmark: "勾選", highlight: "螢光", redaction: "安全遮蔽" }[element.kind] || element.kind);
-          return `<article class="uploaded-stamp-summary-item"><button type="button" data-editor-summary-id="${escapeDraftHtml(element.id)}"><span class="uploaded-stamp-number">${index + 1}</span><span><strong>${escapeDraftHtml(label)}</strong><small>第 ${pageNumber} 頁 · X ${Math.round(element.x)} / Y ${Math.round(element.y)} · ${Math.round(element.width)} × ${Math.round(element.height)} pt</small></span></button><button class="icon-button" type="button" data-editor-summary-delete="${escapeDraftHtml(element.id)}" aria-label="刪除物件"${reviewReadOnly || uploadedSealEditorRuntime.locked ? " disabled" : ""}>×</button></article>`;
+          const seam = Boolean(element.properties?.seamGroupId);
+          const label = seam ? `騎縫章 · ${element.properties.seamPartIndex === 0 ? "左半" : "右半"} · ${element.properties?.sealName || "印章"}` : element.kind === "seal" ? element.properties?.sealName || "印章" : element.kind === "replacement" ? `取代：${element.properties?.text || ""}` : element.kind === "text" ? element.properties?.text || "文字" : ({ image: "圖片", shape: "形狀", checkmark: "勾選", highlight: "螢光", redaction: "安全遮蔽" }[element.kind] || element.kind);
+          return `<article class="uploaded-stamp-summary-item"><button type="button" data-editor-summary-id="${escapeDraftHtml(element.id)}"><span class="uploaded-stamp-number">${index + 1}</span><span><strong>${escapeDraftHtml(label)}</strong><small>第 ${pageNumber} 頁 · X ${Math.round(element.x)} / Y ${Math.round(element.y)} · ${Math.round(element.width)} × ${Math.round(element.height)} pt</small></span></button><button class="icon-button" type="button" data-editor-summary-delete="${escapeDraftHtml(element.id)}" aria-label="${seam ? "刪除整組騎縫章" : "刪除物件"}"${reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading ? " disabled" : ""}>×</button></article>`;
         }).join("")
       : `<p class="empty-text">尚未加入編輯物件；請從工具列選擇印章、文字或進階工具。</p>`;
     summary.querySelectorAll("[data-editor-summary-id]").forEach((button) => button.addEventListener("click", () => {
@@ -29109,6 +29776,20 @@ document.querySelector("#clearDispatchLogBtn").addEventListener("click", () => {
   clearLogWithConfirm(dispatchAuditLog, renderDispatchAuditLog, "發文操作紀錄");
 });
 document.querySelector("#saveDispatchDraftBtn").addEventListener("click", saveComposeDraft);
+document.querySelector("#composeCloudRetryBtn")?.addEventListener("click", () => { void saveComposeCloudDraft(); });
+document.querySelector("#composeKeepNewDraftBtn")?.addEventListener("click", keepComposeAsNewCloudDraft);
+document.querySelector("#composeCloudRefreshBtn")?.addEventListener("click", () => { void refreshComposeCloudDrafts(); });
+document.querySelector("#composeCloudLoadBtn")?.addEventListener("click", () => { void loadComposeCloudDraft(); });
+document.querySelector("#composeAiApplyBtn")?.addEventListener("click", applyComposeAiSuggestion);
+document.querySelector("#composeAiDiscardBtn")?.addEventListener("click", () => { composeAiSuggestion = null; renderComposeAiActions(); });
+document.querySelector("#composeAiUndoBtn")?.addEventListener("click", undoComposeAiSuggestion);
+window.addEventListener("online", () => { scheduleComposeCloudSave(); });
+window.addEventListener("beforeunload", (event) => {
+  if (composeCloudOperation || (composeCloudDraftId && composeCloudSavedSnapshots.get(composeCloudDraftId) !== JSON.stringify(composeRawSnapshot()))) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
 document.querySelector("#aiGenerateDraftBtn")?.addEventListener("click", generateAiDraft);
 document.querySelector("#generateFromPurposeBtn")?.addEventListener("click", generateAiDraft);
 document.querySelector("#aiApplyDraftBtn")?.addEventListener("click", applyAiDraftToCompose);
@@ -29404,6 +30085,13 @@ function syncUploadedEditorMobileDrawer() {
   if (!uploadedEditorMobileDrawerIsCompact()) closeUploadedEditorMobileDrawer({ restoreFocus: false });
 }
 
+document.querySelector("#uploadedEditorSeamToggleBtn")?.addEventListener("click", (event) => {
+  const panel = document.querySelector("#uploadedEditorSeamPanel");
+  panel.hidden = !panel.hidden;
+  event.currentTarget.setAttribute("aria-expanded", String(!panel.hidden));
+  if (!panel.hidden) { setUploadedEditorTool("seal"); renderUploadedSeamGroups(); panel.scrollIntoView({ block: "nearest" }); }
+});
+document.querySelector("#uploadedEditorSeamAddBtn")?.addEventListener("click", addUploadedSeamGroups);
 document.querySelector("#addSelectedStampBtn")?.addEventListener("click", () => addUploadedStamp(document.querySelector("#uploadedSealStampType")?.value || "current_page"));
 document.querySelector("#addUploadedTextBtn")?.addEventListener("click", () => addUploadedTextAtPoint());
 document.querySelector("#uploadedSealCompany")?.addEventListener("change", async (event) => {
@@ -29564,6 +30252,7 @@ document.querySelector("[data-editor-copy-selected]")?.addEventListener("click",
 document.querySelector("[data-editor-delete-selected]")?.addEventListener("click", deleteUploadedEditorSelection);
 document.querySelector("#uploadedEditorCopyPagesBtn")?.addEventListener("click", copyUploadedEditorSelectionToPages);
 document.querySelector("#uploadedEditorConflictCopyBtn")?.addEventListener("click", () => void copyUploadedEditorConflictVersion());
+document.querySelector("#uploadedEditorConflictBackupBtn")?.addEventListener("click", () => void downloadUploadedEditorConflictBackup());
 document.querySelector("#uploadedEditorResolveConflictBtn")?.addEventListener("click", () => void reloadUploadedEditorServerState().catch((error) => showToast(`重新載入失敗：${error.message}`)));
 window.addEventListener("online", () => {
   if (uploadedSealEditorRuntime.offlineDirty) void saveUploadedEditorState();

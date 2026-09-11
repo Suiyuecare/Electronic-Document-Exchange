@@ -58,6 +58,8 @@
     "20260907131606_edoc_private_monitoring_schedule.sql",
     "20260907132959_edoc_monitor_secure_http_transport.sql",
     "20260908135730_immutable_official_document_numbering.sql",
-    "20260908135911_compose_electronic_output_dispatch_date.sql"
+    "20260908135911_compose_electronic_output_dispatch_date.sql",
+    "20260911133144_compose_resilience_drafts_revision.sql",
+    "20260911133603_editor_conflict_copy_atomic.sql"
   ]
 }

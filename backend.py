@@ -50,6 +50,8 @@ from typing import Any, Dict, Iterable, List, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 from runtime_observability import capture_runtime_error, error_tracking_status
 from edoc_numbering import SQLITE_NUMBERING_SQL, install_sqlite_numbering
+from compose_resilience import SQLITE_COMPOSE_DRAFT_SQL, draft_payload as compose_draft_payload, public_draft, save_sqlite_draft, attachment_id, require_content_revision
+from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position
 
 from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
 from finance_bridge import (
@@ -147,6 +149,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_commit_official_document_submission",
     "edoc_complete_official_document_dispatch",
     "edoc_complete_official_document_stamp",
+    "edoc_copy_editor_conflict",
     "edoc_create_company_seal_file_version",
     "edoc_create_finance_login_session_v2",
     "edoc_create_official_document_dispatch_record",
@@ -160,6 +163,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_resolve_portal_finance_user",
     "edoc_revalidate_finance_session_v2",
     "edoc_revoke_official_workflow_delegation",
+    "edoc_save_compose_draft",
     "edoc_set_current_company_seal_file",
 )
 # These server-only tables are the minimum immutable PDF Editor V2 contract.
@@ -172,6 +176,7 @@ EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES = (
     "file_objects",
     "official_documents",
     "official_document_files",
+    "official_document_compose_drafts",
     "official_document_editor_assets",
     "official_document_editor_revisions",
     "official_document_editor_storage_jobs",
@@ -230,6 +235,10 @@ EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
 # immutable, non-sensitive business codes may cross the transport boundary as
 # application errors.  Everything else remains an opaque machine-code marker.
 POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
+    "editor_conflict_copy_request_conflict",
+    "editor_locked_after_submit",
+    "compose_draft_revision_conflict",
+    "compose_content_revision_conflict",
     "finance_member_sync_event_id_conflict",
     "finance_organization_revision_conflict",
     "editor_upload_new_intent_required",
@@ -279,6 +288,10 @@ POSTGREST_BUSINESS_CONFLICT_CODES = (
     | POSTGREST_23505_BUSINESS_CONFLICT_CODES
 )
 API_CONFLICT_ERROR_CODES = POSTGREST_BUSINESS_CONFLICT_CODES | frozenset({
+    "compose_draft_revision_conflict",
+    "compose_content_revision_conflict",
+    "compose_content_revision_required",
+    "official_attachment_upload_id_conflict",
     "editor_locked_after_submit",
     "official_dispatch_record_locked",
     "internal_dispatch_closed",
@@ -2110,7 +2123,8 @@ CREATE TABLE IF NOT EXISTS seal_usage_logs (
 );
 
 CREATE TABLE IF NOT EXISTS official_documents (
-  id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY,
+    content_revision INTEGER NOT NULL DEFAULT 0,
   dispatch_no TEXT,
   company_id TEXT NOT NULL,
   document_type TEXT NOT NULL DEFAULT 'outgoing_official_document',
@@ -3818,6 +3832,7 @@ CREATE INDEX IF NOT EXISTS idx_compliance_attestations_signed ON compliance_atte
 
 
 SCHEMA += SQLITE_NUMBERING_SQL
+SCHEMA += SQLITE_COMPOSE_DRAFT_SQL
 
 SEED_DOCUMENTS = [
     {
@@ -4408,7 +4423,9 @@ def _probe_main_supabase_query(timeout: float) -> Dict[str, Any]:
     try:
         if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
             raise RuntimeError("database_runtime_config_missing")
-        query = urllib.parse.urlencode({"select": "id", "limit": "1"})
+        # Selecting the version column also fails closed on a partially applied
+        # compose migration, even when the table itself remains accessible.
+        query = urllib.parse.urlencode({"select": "id,content_revision", "limit": "1"})
         payload = _readiness_http_json(
             f"{SUPABASE_URL.rstrip('/')}/rest/v1/official_documents?{query}",
             headers=supabase_headers({"Accept": "application/json"}),
@@ -12893,6 +12910,7 @@ def connect() -> sqlite3.Connection:
         install_sqlite_numbering(conn)
         conn.executescript(SCHEMA)
         ensure_column(conn, "official_documents", "output_mode", "TEXT NOT NULL DEFAULT 'physical'")
+        ensure_column(conn, "official_documents", "content_revision", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "official_documents", "dispatch_date", "TEXT")
         ensure_local_company_seal_file_integrity(conn)
         ensure_local_official_dispatch_integrity(conn)
@@ -19577,15 +19595,19 @@ def official_stamp_positions_payload(payload: Dict[str, Any], seal_id: str) -> L
             key in item and item.get(key) not in (None, "")
             for key in binding_keys
         )
+        page_ref = str(item.get("page_ref") or item.get("pageRef") or item.get("pageId") or "")
+        # V2 manifests use four-decimal PDF points. Rounding those locked page
+        # coordinates to the legacy two decimals breaks the seam integrity check.
+        coordinate_precision = 4 if page_ref else 2
         positions.append({
             "id": str(item.get("id") or item.get("position_id") or item.get("positionId") or ""),
             "seal_id": item.get("seal_id") or seal_id,
             "page": max(1, int(pdf_safe_float(item.get("page", item.get("stamp_page", 1)), 1))),
-            "page_ref": str(item.get("page_ref") or item.get("pageRef") or item.get("pageId") or ""),
-            "x": round(pdf_safe_float(item.get("x", item.get("stamp_x", 420)), 420), 2),
-            "y": round(pdf_safe_float(item.get("y", item.get("stamp_y", 130)), 130), 2),
-            "width": round(width, 2),
-            "height": round(height, 2),
+            "page_ref": page_ref,
+            "x": round(pdf_safe_float(item.get("x", item.get("stamp_x", 420)), 420), coordinate_precision),
+            "y": round(pdf_safe_float(item.get("y", item.get("stamp_y", 130)), 130), coordinate_precision),
+            "width": round(width, coordinate_precision),
+            "height": round(height, coordinate_precision),
             "rotation": round(pdf_safe_float(item.get("rotation"), 0) % 360, 2),
             "opacity": max(0.0, min(1.0, round(pdf_safe_float(item.get("opacity"), 1), 4))),
             "z_index": int(pdf_safe_float(item.get("z_index", item.get("zIndex")), index)),
@@ -20967,6 +20989,13 @@ def upload_official_document_attachment(conn: sqlite3.Connection, document_id: s
         raise ValueError("official_document_attachment_too_large")
     file_name = Path(payload.get("file_name") or "attachment.pdf").name
     mime_type = normalized_official_attachment_mime(payload, file_name)
+    upload_file_id = attachment_id(document_id, payload.get("upload_id"))
+    if upload_file_id:
+        previous = conn.execute("SELECT * FROM official_document_files WHERE id = ? AND document_id = ?", (upload_file_id, document_id)).fetchone()
+        if previous:
+            if previous["file_hash"] != sha256_bytes(data) or previous["file_name"] != file_name or previous["file_mime_type"] != mime_type:
+                raise ValueError("official_attachment_upload_id_conflict")
+            return {"file": official_file_metadata(dict(previous)), "document": official_document_detail(conn, document_id, session), "upload_replayed": True}
     if mime_type == "application/pdf":
         inspect_editor_pdf(data)
     scan_status, scan_signature = scan_official_upload_bytes(data, file_name)
@@ -20987,7 +21016,7 @@ def upload_official_document_attachment(conn: sqlite3.Connection, document_id: s
         scan_signature,
         official_actor_name(user),
     )
-    official_file = insert_official_document_file(conn, document_id, "attachment", file_row, official_actor_name(user))
+    official_file = insert_official_document_file(conn, document_id, "attachment", file_row, official_actor_name(user), attachment_file_id=upload_file_id)
     insert_official_log(
         conn,
         document_id,
@@ -21058,13 +21087,14 @@ def insert_official_document_file(
     *,
     stamp_request_id: str = "",
     stamp_claim_token: str = "",
+    attachment_file_id: str = "",
 ) -> Dict[str, Any]:
     next_version = conn.execute(
         "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM official_document_files WHERE document_id = ? AND file_type = ?",
         (document_id, file_type),
     ).fetchone()["version"]
     row = {
-        "id": f"ODFILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "id": attachment_file_id or f"ODFILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
         "document_id": document_id,
         "file_object_id": file_row.get("id"),
         "file_type": file_type,
@@ -21843,6 +21873,45 @@ def require_official_seal_classification(payload: Dict[str, Any], *, allow_elect
     return seal_context
 
 
+def compose_draft_user(session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = official_session_user(session)
+    if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
+        raise PermissionError("official_document_create_forbidden")
+    require_official_creation_company(user, user.get("company_id"))
+    if not launch_company_in_scope(user.get("company_id")):
+        raise PermissionError("company_not_in_launch_scope")
+    return user
+
+
+def list_compose_drafts(conn: sqlite3.Connection, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    user = compose_draft_user(session)
+    return [public_draft(row) for row in conn.execute(
+        "SELECT * FROM official_document_compose_drafts WHERE applicant_id=? AND company_id=? AND archived=0 ORDER BY updated_at DESC LIMIT 20",
+        (user["id"], user["company_id"]),
+    ).fetchall()]
+
+
+def save_compose_draft(conn: sqlite3.Connection, draft_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    return save_sqlite_draft(conn, draft_id, payload, compose_draft_user(session), now())
+
+
+def supabase_list_compose_drafts(session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    user = compose_draft_user(session)
+    rows = supabase_filter_rows("official_document_compose_drafts", {"applicant_id": user["id"], "company_id": user["company_id"], "archived": False}, limit=20, order="updated_at.desc")
+    return [public_draft(row) for row in rows]
+
+
+def supabase_save_compose_draft(draft_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    user = compose_draft_user(session)
+    revision, encoded, digest = compose_draft_payload(draft_id, payload, user)
+    raw = supabase_request("POST", "rpc/edoc_save_compose_draft", {
+        "p_id": draft_id, "p_applicant_id": user["id"], "p_company_id": user["company_id"],
+        "p_expected_revision": revision, "p_snapshot": json.loads(encoded), "p_hash": digest,
+        "p_archived": bool(payload.get("archived")),
+    })
+    return public_draft(raw[0] if isinstance(raw, list) else raw)
+
+
 def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
     if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
@@ -22005,7 +22074,11 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
         replace_official_text_overlays(conn, stamp_request["id"], payload)
     insert_official_log(conn, document_id, "create", user, document["request_reason"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
     if payload.get("submit", True):
-        return submit_official_document(conn, document_id, payload, session)
+        # This is the initial create+submit operation, so use the server-created
+        # revision. Subsequent external submit requests must supply their token.
+        return submit_official_document(conn, document_id, {
+            **payload, "expected_content_revision": int(document.get("content_revision") or 0),
+        }, session)
     return official_document_detail(conn, document_id, session)
 
 
@@ -22393,6 +22466,7 @@ def update_official_document_correction(
         raise PermissionError("only_applicant_can_correct")
     if document.get("current_status") not in {"draft", "rejected"}:
         raise ValueError("official_document_correction_locked")
+    require_content_revision(document, payload)
     stamp_request = official_document_stamp_request(conn, document_id)
     source_pages: List[Dict[str, Any]] = []
     if not OFFICIAL_CORRECTION_FILE_FIELDS.intersection(payload):
@@ -22448,10 +22522,12 @@ def update_official_document_correction(
     conn.execute("SAVEPOINT official_document_correction")
     try:
         assignments = ", ".join(f"{key} = ?" for key in plan["updates"])
-        conn.execute(
-            f"UPDATE official_documents SET {assignments}, updated_at = ? WHERE id = ?",
-            [*plan["updates"].values(), now(), document_id],
-        )
+        changed = conn.execute(
+            f"UPDATE official_documents SET {assignments}, content_revision = content_revision + 1, updated_at = ? WHERE id = ? AND content_revision = ? AND current_status IN ('draft', 'rejected')",
+            [*plan["updates"].values(), now(), document_id, int(document.get("content_revision") or 0)],
+        ).rowcount
+        if changed != 1:
+            raise ValueError("compose_content_revision_conflict")
         updated_document = official_document_row(conn, document_id)
         position = plan["positions"][0] if plan["positions"] else None
         request_id = str((stamp_request or {}).get("id") or "")
@@ -22653,6 +22729,7 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
         raise PermissionError("only_applicant_can_submit")
     if document["current_status"] not in {"draft", "rejected"}:
         raise ValueError("official_document_not_submittable")
+    require_content_revision(document, payload)
     # SQLite rejection cloning is synchronous and shares the rejection
     # transaction.  The durable rejection job gate below is Supabase-only;
     # consulting it here would incorrectly couple local/offline operation to a
@@ -22696,6 +22773,16 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
     require_official_creation_company(user, document.get("company_id"))
     # The live Finance snapshot and complete exact actor plan are resolved
     # before AV/editor/seal locks mutate the application.
+    # Claim SQLite's write transaction with a no-op compare-and-swap before any
+    # derived-file/approval changes. An edit committed while Finance was being
+    # resolved must not cause submission of a stale in-memory document.
+    claimed = conn.execute(
+        "UPDATE official_documents SET content_revision = content_revision "
+        "WHERE id = ? AND content_revision = ? AND current_status = ?",
+        (document_id, int(document.get("content_revision") or 0), document["current_status"]),
+    )
+    if claimed.rowcount != 1:
+        raise ValueError("compose_content_revision_conflict")
     assert_official_document_uploads_av_clean(conn, document)
     lock_official_editor_submission(conn, document, payload, user)
     stamp_request = official_document_stamp_request(conn, document_id)
@@ -23856,6 +23943,8 @@ def verify_locked_editor_for_stamp(conn: sqlite3.Connection, document: Dict[str,
 def stamp_prepared_pdf_with_locked_seals(locked: Dict[str, Any]) -> Tuple[bytes, str, Dict[str, Any]]:
     import fitz  # type: ignore
 
+    validate_seam_groups(locked.get("state") or {})
+    validate_seam_positions(locked.get("state") or {}, locked.get("positions") or [])
     document = fitz.open(stream=locked["prepared_bytes"], filetype="pdf")
     try:
         ordered_pages = sorted((locked.get("state") or {}).get("pages") or [], key=lambda item: int(item.get("order") or 0))
@@ -23872,14 +23961,19 @@ def stamp_prepared_pdf_with_locked_seals(locked: Dict[str, Any]) -> Tuple[bytes,
             asset = locked["seal_assets"].get(str(position.get("locked_seal_file_id") or ""))
             if not asset:
                 raise ValueError("editor_locked_seal_version_missing")
+            seam_element = seam_element_for_position(locked.get("state") or {}, position)
+            seal_data = asset["data"]
+            seal_mime = str(asset.get("mime_type") or "image/png")
             transformed, transformed_width, transformed_height = _editor_transformed_image(
-                asset["data"],
-                str(asset.get("mime_type") or "image/png"),
+                seal_data,
+                seal_mime,
                 float(rect.width),
                 float(rect.height),
                 pdf_safe_float(position.get("rotation"), 0),
                 max(0.0, min(1.0, pdf_safe_float(position.get("opacity"), 1))),
             )
+            if seam_element:
+                transformed = split_seal_raster(transformed, seam_element["properties"]["seamPartIndex"], int(ordered_pages[page_index].get("rotation") or 0))
             placed_rect = _editor_centered_rect(rect, transformed_width, transformed_height)
             page.insert_image(
                 placed_rect,
@@ -23928,6 +24022,7 @@ def stamp_prepared_pdf_with_locked_seals(locked: Dict[str, Any]) -> Tuple[bytes,
         return result, "pymupdf-editor-v2-multi-seal", {
             "page_count": document.page_count,
             "seal_count": len(locked.get("positions") or []),
+            "seam_group_count": len(validate_seam_groups(locked.get("state") or {})),
             "distinct_seal_versions": len(locked.get("seal_assets") or {}),
             "front_text_repaint_count": front_text_repaint_count,
             "layer_policy": (
@@ -24619,6 +24714,7 @@ def validate_editor_state(state: Dict[str, Any]) -> Dict[str, Any]:
         element["zIndex"] = int(round(z_index))
         if not isinstance(element.get("properties"), dict):
             element["properties"] = {}
+    validate_seam_groups(state)
     state["manifestSha256"] = canonical_editor_manifest(state)
     return state
 
@@ -24806,6 +24902,7 @@ def validate_editor_seal_placements(
         # preflight recheck is idempotent and never creates a phantom revision.
         element["width"] = round(width, 4)
         element["height"] = round(height, 4)
+    validate_seam_groups(state)
 
 
 def validate_supabase_editor_seal_placements(
@@ -24852,6 +24949,7 @@ def validate_supabase_editor_seal_placements(
         )
         element["width"] = round(width, 4)
         element["height"] = round(height, 4)
+    validate_seam_groups(state)
 
 
 def _pdf_resolved(value: Any) -> Any:
@@ -24862,7 +24960,42 @@ def _pdf_resolved(value: Any) -> Any:
     return None if resolved is None or type(resolved).__name__ == "NullObject" else resolved
 
 
-def inspect_editor_pdf(data: bytes) -> Dict[str, Any]:
+def _inspect_editor_pdf_object_safety(root: Any) -> None:
+    """Reject active payloads also in indirect/nested dictionaries.
+
+    Raw byte searches alone miss escaped PDF names and compressed objects.
+    Walk only the reachable object graph, not decoded page content streams.
+    """
+    pending = [root]
+    seen: set[Any] = set()
+    while pending:
+        raw = pending.pop()
+        identity = ("ref", raw.idnum, raw.generation) if hasattr(raw, "idnum") else ("obj", id(raw))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if len(seen) > 200000:
+            raise ValueError("editor_pdf_structure_too_complex")
+        value = _pdf_resolved(raw)
+        if isinstance(value, dict):
+            if str(value.get("/FT") or "") == "/Sig" or value.get("/ByteRange") is not None:
+                raise ValueError("editor_pdf_digital_signature_not_supported")
+            if value.get("/XFA") is not None:
+                raise ValueError("editor_pdf_xfa_not_supported")
+            if (value.get("/EmbeddedFiles") is not None or value.get("/EF") is not None
+                    or str(value.get("/Subtype") or "") == "/FileAttachment"):
+                raise ValueError("editor_pdf_embedded_files_not_supported")
+            if str(value.get("/S") or "") == "/Launch":
+                raise ValueError("editor_pdf_launch_action_not_supported")
+            if (str(value.get("/S") or "") == "/JavaScript" or value.get("/JS") is not None
+                    or value.get("/JavaScript") is not None or value.get("/AA") is not None):
+                raise ValueError("editor_pdf_javascript_not_supported")
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+
+
+def inspect_editor_pdf(data: bytes, *, allow_non_a4: bool = False) -> Dict[str, Any]:
     """Strictly inspect an editor PDF without executing any embedded action."""
     if not data.startswith(b"%PDF"):
         raise ValueError("editor_pdf_invalid_header")
@@ -24875,6 +25008,7 @@ def inspect_editor_pdf(data: bytes) -> Dict[str, Any]:
         if reader.is_encrypted:
             raise ValueError("editor_pdf_encrypted")
         root = _pdf_resolved(reader.trailer.get("/Root")) or {}
+        _inspect_editor_pdf_object_safety(root)
         names = _pdf_resolved(root.get("/Names")) or {}
         if root.get("/OpenAction") is not None or root.get("/AA") is not None:
             action = _pdf_resolved(root.get("/OpenAction")) or _pdf_resolved(root.get("/AA")) or {}
@@ -24909,6 +25043,7 @@ def inspect_editor_pdf(data: bytes) -> Dict[str, Any]:
         if len(reader.pages) > EDOC_EDITOR_MAX_PAGES:
             raise ValueError("editor_pdf_page_limit_exceeded")
         pages: List[Dict[str, Any]] = []
+        non_a4_pages: List[Dict[str, Any]] = []
         for index, page in enumerate(reader.pages):
             if page.get("/AA") is not None:
                 raise ValueError("editor_pdf_javascript_not_supported")
@@ -24922,6 +25057,8 @@ def inspect_editor_pdf(data: bytes) -> Dict[str, Any]:
             crop = page.cropbox
             media = page.mediabox
             user_unit = pdf_safe_float(page.get("/UserUnit"), 1.0)
+            if not math.isfinite(user_unit) or user_unit <= 0 or user_unit > 75000:
+                raise ValueError("editor_pdf_invalid_geometry")
             raw_rotation = pdf_safe_float(page.get("/Rotate"), 0)
             if (
                 not math.isfinite(raw_rotation)
@@ -24931,9 +25068,20 @@ def inspect_editor_pdf(data: bytes) -> Dict[str, Any]:
                 raise ValueError("editor_page_rotation_invalid")
             width = float(crop.width) * user_unit
             height = float(crop.height) * user_unit
-            if width <= 0 or height <= 0:
+            if not math.isfinite(width) or not math.isfinite(height) or width <= 0 or height <= 0:
                 raise ValueError("editor_pdf_invalid_geometry")
-            require_a4_pdf_page(width, height, index + 1)
+            try:
+                require_a4_pdf_page(width, height, index + 1)
+            except ValueError as geometry_error:
+                if not allow_non_a4 or not str(geometry_error).startswith("pdf_page_not_a4:"):
+                    raise
+                non_a4_pages.append({
+                    "pageNumber": index + 1,
+                    "widthPt": round(width, 4), "heightPt": round(height, 4),
+                    "widthMm": round(width / 72 * 25.4, 2),
+                    "heightMm": round(height / 72 * 25.4, 2),
+                    "rotation": int(round(raw_rotation)) % 360,
+                })
             pages.append({
                 "sourcePageIndex": index,
                 "widthPt": round(width, 4),
@@ -24947,6 +25095,8 @@ def inspect_editor_pdf(data: bytes) -> Dict[str, Any]:
             "ok": True,
             "pageCount": len(pages),
             "pages": pages,
+            "nonA4Pages": non_a4_pages,
+            "requiresA4Conversion": bool(non_a4_pages),
             "flags": {
                 "encrypted": False,
                 "digitallySigned": False,
@@ -24960,6 +25110,68 @@ def inspect_editor_pdf(data: bytes) -> Dict[str, Any]:
         raise
     except Exception as exc:
         raise ValueError(f"editor_pdf_corrupt:{type(exc).__name__}") from exc
+
+
+def convert_editor_pdf_to_a4(data: bytes) -> Tuple[bytes, Dict[str, Any]]:
+    """Fit each visible source page onto A4, keeping immutable input bytes intact.
+
+    Security inspection always precedes normalization. Rotation, CropBox and
+    UserUnit are resolved by MuPDF; no untrusted document action is executed.
+    Existing visible annotations/forms are baked before vector-page placement.
+    """
+    import fitz  # type: ignore
+    from pypdf import PdfReader, PdfWriter  # type: ignore
+
+    inspection = inspect_editor_pdf(data, allow_non_a4=True)
+    # Bake annotations before pypdf transforms page content. MuPDF 1.26.5's
+    # remove_rotation() can shift content for a nonzero CropBox at 180 degrees;
+    # transfer_rotation_to_content preserves every visible corner in that case.
+    with fitz.open(stream=data, filetype="pdf") as appearance_source:
+        appearance_source.bake(annots=True, widgets=True)
+        baked = appearance_source.tobytes(garbage=4, deflate=True, no_new_id=True)
+    writer = PdfWriter()
+    writer.append(PdfReader(io.BytesIO(baked), strict=True))
+    for page in writer.pages:
+        if page.rotation:
+            page.transfer_rotation_to_content()
+    unrotated = io.BytesIO()
+    writer.write(unrotated)
+    source = fitz.open(stream=unrotated.getvalue(), filetype="pdf")
+    output = fitz.open()
+    transformations: List[Dict[str, Any]] = []
+    try:
+        for index in range(source.page_count):
+            page = source[index]
+            visible = fitz.Rect(page.rect)
+            if visible.is_empty or visible.is_infinite:
+                raise ValueError("editor_pdf_invalid_geometry")
+            portrait = visible.width <= visible.height
+            width, height = ((EDOC_A4_WIDTH_PT, EDOC_A4_HEIGHT_PT) if portrait
+                             else (EDOC_A4_HEIGHT_PT, EDOC_A4_WIDTH_PT))
+            target = output.new_page(width=width, height=height)
+            # Empty pages have no content stream and show_pdf_page rejects them.
+            if page.get_contents():
+                target.show_pdf_page(target.rect, source, index, keep_proportion=True)
+            scale = min(width / visible.width, height / visible.height)
+            transformations.append({
+                "pageNumber": index + 1,
+                "sourceWidthPt": round(visible.width, 4),
+                "sourceHeightPt": round(visible.height, 4),
+                "targetWidthPt": round(width, 4), "targetHeightPt": round(height, 4),
+                "scale": round(scale, 8),
+                "offsetXPt": round((width - visible.width * scale) / 2, 4),
+                "offsetYPt": round((height - visible.height * scale) / 2, 4),
+            })
+        output.set_metadata({})
+        converted = output.tobytes(garbage=4, deflate=True, clean=True, no_new_id=True)
+        checked = inspect_editor_pdf(converted)
+        if checked["pageCount"] != inspection["pageCount"]:
+            raise ValueError("editor_a4_conversion_page_count_mismatch")
+        return converted, {"method": "fit_center_no_crop", "pageCount": checked["pageCount"],
+                           "nonA4Pages": inspection["nonA4Pages"], "transformations": transformations}
+    finally:
+        source.close()
+        output.close()
 
 
 def inspect_editor_image(data: bytes, mime_type: str) -> Dict[str, Any]:
@@ -25653,6 +25865,158 @@ def create_official_editor_draft(conn: sqlite3.Connection, payload: Dict[str, An
     return {"id": document_id, "document_id": document_id, "company_id": company["id"], "editor_revision": public_revision, "editor_state": public_revision["state"]}
 
 
+def _editor_conflict_copy_identity(document_id: str, payload: Dict[str, Any], user: Dict[str, Any]) -> Tuple[str, str]:
+    request_id = str(payload.get("requestId") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,100}", request_id):
+        raise ValueError("editor_conflict_copy_request_id_required")
+    digest = canonical_json_hash({"source": document_id, "actor": user["id"], "request": request_id})
+    return "ODCOPY-" + digest[:32], canonical_json_hash({"state": payload.get("state"), "application": payload.get("application")})
+
+
+def _editor_conflict_copy_existing(existing: Dict[str, Any] | None, source_id: str, request_hash: str, user: Dict[str, Any]) -> bool:
+    if not existing:
+        return False
+    recovery = parse_json_field(existing.get("metadata_json")).get("conflict_recovery") or {}
+    if existing.get("applicant_id") != user.get("id") or recovery.get("source_document_id") != source_id or recovery.get("request_hash") != request_hash:
+        raise ValueError("editor_conflict_copy_request_conflict")
+    return True
+
+
+def _editor_conflict_copy_bundle(document: Dict[str, Any], payload: Dict[str, Any], user: Dict[str, Any], company: Dict[str, Any], state: Dict[str, Any], assets: List[Dict[str, Any]], objects: List[Dict[str, Any]], files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Only server-read, validated rows enter this atomic persistence bundle."""
+    new_id, request_hash = _editor_conflict_copy_identity(document["id"], payload, user)
+    incoming = payload.get("application") or {}
+    if not isinstance(incoming, dict):
+        raise ValueError("editor_conflict_copy_application_invalid")
+    if incoming.get("company_id") not in (None, "", document["company_id"]):
+        raise PermissionError("official_editor_company_forbidden")
+    category = incoming.get("document_category") or (official_seal_context_from_document(document) or {}).get("document_category")
+    creation = {key: incoming[key] for key in ("title", "description", "request_reason", "handler_name", "dispatch_unit") if key in incoming}
+    creation.update({"company_id": document["company_id"], "document_category": category, "dispatch_method": "no_dispatch_required"})
+    for key in ("title", "description", "request_reason", "handler_name", "dispatch_unit"):
+        creation.setdefault(key, document.get(key) or "")
+        if not isinstance(creation[key], str) or len(creation[key]) > 20000:
+            raise ValueError("editor_conflict_copy_application_invalid")
+    department = authoritative_applicant_department(user, creation)
+    creation["applicant_department_name"] = department["name"]
+    metadata, _, workflow = official_editor_draft_metadata(creation, user, company)
+    metadata["conflict_recovery"] = {"source_document_id": document["id"], "request_hash": request_hash}
+    ts = now()
+    new_document = {
+        "id": new_id, "company_id": document["company_id"], "document_type": document["document_type"], "source_type": "uploaded_pdf",
+        "title": creation["title"], "subject": creation["title"], "description": creation["description"], "method": "", "recipient": document.get("recipient") or "",
+        "dispatch_unit": department["name"], "handler_name": creation["handler_name"], "applicant_id": user["id"], "applicant_name": user.get("name") or "",
+        "applicant_department_id": department["id"], "applicant_department_name": department["name"], "workflow_template_key": workflow,
+        "dispatch_method": "no_dispatch_required", "requires_stamp": True, "current_status": "draft", "current_step": "", "request_reason": creation["request_reason"],
+        "output_mode": "physical", "content_revision": 0, "correction_missing_items_json": "[]",
+        "retention_until": (datetime.now() + timedelta(days=3653)).isoformat(timespec="seconds"), "retention_policy_version": "EDOC-RETENTION-2026-10Y",
+        "legal_hold": False, "disposition_status": "retained",
+        "stamped_file_id": None, "metadata_json": json.dumps(metadata, ensure_ascii=False), "created_at": ts, "updated_at": ts,
+    }
+    suffix = secrets.token_hex(8).upper()
+    asset_map = {asset["id"]: f"ODASSET-COPY-{suffix}-{index}" for index, asset in enumerate(assets)}
+    page_map = {page["pageId"]: f"PAGE-COPY-{suffix}-{index}" for index, page in enumerate(state.get("pages") or [])}
+    id_map = {**asset_map, **page_map}
+    # Keep seam groups paired by remapping only stable page/asset identifiers.
+    def remap(value: Any) -> Any:
+        if isinstance(value, list):
+            return [remap(item) for item in value]
+        if isinstance(value, dict):
+            return {key: remap(item) for key, item in value.items()}
+        return id_map.get(value, value) if isinstance(value, str) else value
+    state = remap(state)
+    state["revisionNo"] = 1
+    state["manifestSha256"] = canonical_editor_manifest(state)
+    revision_id = f"ODREV-COPY-{suffix}"
+    revision = {"id": revision_id, "document_id": new_id, "revision_no": 1, "parent_revision_id": None, "schema_version": EDOC_EDITOR_SCHEMA_VERSION,
+                "editor_state_json": json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")), "manifest_sha256": state["manifestSha256"],
+                "renderer_version": EDOC_EDITOR_RENDERER_VERSION, "created_by": user["id"], "created_at": ts}
+    object_by_id = {item["id"]: item for item in objects}
+    file_by_id = {item["id"]: item for item in files}
+    new_assets, new_objects, new_files = [], [], []
+    for index, asset in enumerate(assets):
+        original_object = object_by_id[asset["file_object_id"]]
+        new_object = {**original_object, "id": f"FILE-COPY-{suffix}-{index}", "document_id": new_id,
+                      "storage_key": f"editor-final/{new_id}/{asset_map[asset['id']]}/{asset['sha256'].upper()}-{Path(asset['file_name']).name}", "created_by": user["id"], "created_at": ts,
+                      "signed_url_expires_at": None, "last_download_at": None}
+        new_objects.append(new_object)
+        original_file = file_by_id.get(asset.get("official_file_id"))
+        new_file = None
+        if original_file:
+            new_file = {**original_file, "id": f"ODFILE-COPY-{suffix}-{index}", "document_id": new_id, "file_object_id": new_object["id"], "file_storage_key": new_object["storage_key"],
+                        "uploaded_by": user["id"], "created_at": ts, "stamp_request_id": None, "stamp_claim_token": None}
+            new_files.append(new_file)
+        new_asset = {**asset, "id": asset_map[asset["id"]], "document_id": new_id, "editor_revision_id": revision_id, "file_object_id": new_object["id"],
+                     "official_file_id": new_file["id"] if new_file else None, "storage_path": new_object["storage_key"], "created_by": user["id"], "created_at": ts,
+                     "metadata_json": json.dumps(remap(parse_json_field(asset.get("metadata_json"))), ensure_ascii=False)}
+        new_assets.append(new_asset)
+    return {"source_document_id": document["id"], "actor_id": user["id"], "request_hash": request_hash, "document": new_document, "revision": revision,
+            "assets": new_assets, "file_objects": new_objects, "files": new_files}
+
+
+def _editor_conflict_copy_validate_sources(state: Dict[str, Any], assets: List[Dict[str, Any]]) -> None:
+    by_id = {asset["id"]: asset for asset in assets}
+    for source in state.get("sourceFiles") or []:
+        asset = by_id.get(source.get("assetId"))
+        if not asset or asset.get("asset_kind") not in {"source_pdf", "import_pdf", "image"}:
+            raise ValueError("editor_source_asset_missing")
+        if str(source.get("sha256") or "").upper() != str(asset["sha256"]).upper():
+            raise ValueError("editor_asset_hash_mismatch")
+        for key, column in (("fileName", "file_name"), ("mimeType", "mime_type"), ("sizeBytes", "size_bytes"), ("kind", "asset_kind")):
+            source[key] = asset[column]
+        for key in ("url", "authorizedUrl", "authorized_url", "downloadUrl", "download_url"):
+            source.pop(key, None)
+
+
+def copy_official_editor_conflict(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    document = official_document_row(conn, document_id)
+    user = _editor_assert_document_access(conn, document, session, write=True)
+    if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
+        raise PermissionError("official_document_create_forbidden")
+    new_id, request_hash = _editor_conflict_copy_identity(document_id, payload, user)
+    existing_row = conn.execute("SELECT * FROM official_documents WHERE id = ?", (new_id,)).fetchone()
+    if _editor_conflict_copy_existing(dict(existing_row) if existing_row else None, document_id, request_hash, user):
+        return {**get_official_editor_state(conn, new_id, session), "id": new_id, "document_id": new_id, "idempotent": True}
+    state = validate_editor_state(json.loads(json.dumps(payload.get("state") or {})))
+    _, assets = _editor_local_asset_bytes(conn, document_id, state)
+    _editor_conflict_copy_validate_sources(state, assets)
+    previous = parse_json_any((_editor_latest_revision_row(conn, document_id) or {}).get("editor_state_json"), {}) or {}
+    validate_editor_seal_placements(conn, document["company_id"], state, previous_state=previous)
+    objects = [dict(conn.execute("SELECT * FROM file_objects WHERE id = ?", (asset["file_object_id"],)).fetchone()) for asset in assets]
+    files = [dict(row) for row in conn.execute("SELECT * FROM official_document_files WHERE document_id = ?", (document_id,)).fetchall()]
+    bundle = _editor_conflict_copy_bundle(document, payload, user, official_company_row(conn, document["company_id"]), state, assets, objects, files)
+    created_paths = []
+    conn.execute("SAVEPOINT editor_conflict_copy")
+    try:
+        for original, copied in zip(objects, bundle["file_objects"]):
+            source = (STORAGE_DIR / original["storage_key"]).resolve()
+            target = (STORAGE_DIR / copied["storage_key"]).resolve()
+            if STORAGE_DIR.resolve() not in source.parents or STORAGE_DIR.resolve() not in target.parents:
+                raise ValueError("editor_upload_path_invalid")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+            created_paths.append(target)
+        insert_row(conn, "official_documents", bundle["document"])
+        insert_row(conn, "official_document_editor_revisions", bundle["revision"])
+        for key, table in (("file_objects", "file_objects"), ("files", "official_document_files"), ("assets", "official_document_editor_assets")):
+            for row in bundle[key]:
+                inserted = {name: value for name, value in row.items() if name in {column[1] for column in conn.execute(f"PRAGMA table_info({table})")}}
+                if table == "official_document_editor_assets":
+                    inserted["upload_status"] = "uploaded"
+                insert_row(conn, table, inserted)
+                if table == "official_document_editor_assets":
+                    conn.execute("UPDATE official_document_editor_assets SET upload_status='finalized' WHERE id=?", (row["id"],))
+        insert_official_log(conn, new_id, "editor_conflict_copy", user, f"source_document_id={document_id};manifest={bundle['revision']['manifest_sha256']};elements={len(state.get('elements') or [])}")
+        conn.execute("RELEASE SAVEPOINT editor_conflict_copy")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT editor_conflict_copy")
+        conn.execute("RELEASE SAVEPOINT editor_conflict_copy")
+        for target in created_paths:
+            target.unlink(missing_ok=True)
+        raise
+    return {**get_official_editor_state(conn, new_id, session), "id": new_id, "document_id": new_id, "idempotent": False}
+
+
 def _validate_editor_upload_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
     asset_kind = str(payload.get("asset_kind") or payload.get("assetKind") or "source_pdf")
     if asset_kind not in EDOC_EDITOR_ALLOWED_ASSET_KINDS - {"prepared_pdf"}:
@@ -25676,7 +26040,7 @@ def _validate_editor_upload_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"asset_kind": asset_kind, "file_name": file_name, "mime_type": mime_type, "size_bytes": size_bytes, "expected_sha256": expected_sha256}
 
 
-def create_official_editor_upload_intent(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+def create_official_editor_upload_intent(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None, *, internal_metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
     document = official_document_row(conn, document_id)
     user = _editor_assert_document_access(conn, document, session, write=True)
     cleanup_stale_official_editor_uploads(conn, document_id=document_id)
@@ -25684,9 +26048,11 @@ def create_official_editor_upload_intent(conn: sqlite3.Connection, document_id: 
     latest = _editor_latest_revision_row(conn, document_id)
     if not latest:
         raise ValueError("editor_revision_not_found")
+    if internal_metadata and int(internal_metadata.get("a4_source_revision_no") or 0) != int(latest["revision_no"]):
+        raise ValueError("editor_revision_conflict")
     asset_id = f"ODASSET-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}"
     storage_path = f"editor/{document_id}/{asset_id}-{meta['file_name']}"
-    metadata = {"base_revision_no": int(latest["revision_no"]), "expires_at": (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")}
+    metadata = {**(internal_metadata or {}), "base_revision_no": int(latest["revision_no"]), "expires_at": (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")}
     row = {
         "id": asset_id,
         "document_id": document_id,
@@ -25910,7 +26276,61 @@ def _editor_asset_public(row: Dict[str, Any] | sqlite3.Row) -> Dict[str, Any]:
         "pageCount": int(data.get("page_count") or 0),
         "officialFileId": data.get("official_file_id"),
         "finalizedAt": data.get("finalized_at"),
+        "a4Conversion": _editor_asset_a4_conversion(data),
     }
+
+
+def _editor_asset_a4_conversion(asset: Dict[str, Any]) -> Dict[str, Any] | None:
+    metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
+    conversion = metadata.get("a4_conversion")
+    if not isinstance(conversion, dict):
+        return None
+    return {**conversion, "sourceAssetId": conversion.get("sourceAssetId") or asset.get("id"),
+            "sourceSha256": conversion.get("sourceSha256") or asset.get("sha256")}
+
+
+def _validate_editor_a4_source_lineage(state: Dict[str, Any], assets: List[Dict[str, Any]]) -> None:
+    """Restore A4 provenance from immutable assets, never client-written links.
+
+    A revision retaining a derivative must retain its source too, so submission
+    source hashes and final byte verification cover the original and A4 file.
+    """
+    by_id = {str(asset.get("id") or ""): asset for asset in assets}
+    sources = {str(source.get("assetId") or ""): source for source in state.get("sourceFiles") or []}
+    for asset_id, source in sources.items():
+        asset = by_id.get(asset_id)
+        conversion = _editor_asset_a4_conversion(asset) if asset else None
+        if not conversion:
+            source.pop("a4Conversion", None)
+            continue
+        if asset.get("upload_status") != "finalized" or asset.get("scan_status") != "passed" or asset.get("preflight_status") != "passed":
+            raise ValueError("editor_asset_not_ready")
+        if str(source.get("sha256") or "").upper() != str(asset.get("sha256") or "").upper():
+            raise ValueError("editor_asset_hash_mismatch")
+        if conversion.get("converted") is True:
+            original_id = str(conversion.get("sourceAssetId") or "")
+            original = by_id.get(original_id)
+            original_source = sources.get(original_id)
+            if not original or not original_source:
+                raise ValueError("editor_a4_original_missing")
+            original_conversion = _editor_asset_a4_conversion(original) or {}
+            if (original_id == asset_id or original.get("document_id") != asset.get("document_id")
+                    or original_conversion.get("required") is not True or original_conversion.get("converted") is True):
+                raise ValueError("editor_a4_lineage_invalid")
+            if (str(conversion.get("sourceSha256") or "").upper() != str(original.get("sha256") or "").upper()
+                    or str(original_source.get("sha256") or "").upper() != str(original.get("sha256") or "").upper()):
+                raise ValueError("editor_asset_hash_mismatch")
+        source["a4Conversion"] = json.loads(json.dumps(conversion, ensure_ascii=False))
+
+
+def _editor_inspection_metadata(metadata: Dict[str, Any], inspection: Dict[str, Any], asset: Dict[str, Any], digest: str) -> Dict[str, Any]:
+    result = {**metadata, "inspection_flags": inspection.get("flags") or {},
+              "renderer_version": EDOC_EDITOR_RENDERER_VERSION}
+    if inspection.get("requiresA4Conversion"):
+        result["a4_conversion"] = {"required": True, "sourceAssetId": asset["id"],
+            "sourceSha256": digest, "pageCount": inspection["pageCount"],
+            "nonA4Pages": inspection["nonA4Pages"], "method": "fit_center_no_crop"}
+    return result
 
 
 def _editor_asset_access_token(document_id: str, asset_id: str, expires: int) -> str:
@@ -26020,10 +26440,11 @@ def _editor_state_with_asset(latest: Dict[str, Any], asset: Dict[str, Any], insp
         "mimeType": asset["mime_type"],
         "sizeBytes": int(asset["size_bytes"]),
         "sha256": asset["sha256"],
+        **({"a4Conversion": _editor_asset_a4_conversion(asset)} if _editor_asset_a4_conversion(asset) else {}),
     })
     state["sourceFiles"] = source_files
     pages = list(state.get("pages") or [])
-    for page in (inspection or {}).get("pages") or []:
+    for page in ([] if (inspection or {}).get("requiresA4Conversion") else (inspection or {}).get("pages") or []):
         page_id = f"PAGE-{asset['id']}-{int(page['sourcePageIndex']) + 1}"
         pages.append({
             "pageId": page_id,
@@ -26048,7 +26469,7 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
     asset = row_to_dict(row)
     if asset.get("upload_status") == "finalized":
         latest_public = get_official_editor_state(conn, document_id, session)
-        return {"asset": _editor_asset_public(asset), "pages": latest_public["state"].get("pages") or [], "editor_state": latest_public["state"], "editor_revision": latest_public}
+        return {"asset": _editor_asset_public(asset), "pages": latest_public["state"].get("pages") or [], "editor_state": latest_public["state"], "editor_revision": latest_public, "a4Conversion": _editor_asset_a4_conversion(asset)}
     if asset.get("upload_status") != "uploaded":
         raise ValueError("editor_upload_new_intent_required" if asset.get("upload_status") in {"failed", "quarantined"} else "editor_local_upload_incomplete")
     metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
@@ -26077,7 +26498,7 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
         _local_editor_asset_failure(conn, asset, "editor_asset_quarantined", quarantine=True)
         raise ValueError("editor_asset_quarantined")
     try:
-        inspection = inspect_editor_pdf(data) if asset["asset_kind"] in {"source_pdf", "import_pdf"} else inspect_editor_image(data, asset["mime_type"])
+        inspection = inspect_editor_pdf(data, allow_non_a4=payload.get("allowA4Conversion") is True) if asset["asset_kind"] in {"source_pdf", "import_pdf"} else inspect_editor_image(data, asset["mime_type"])
     except Exception:
         _local_editor_asset_failure(conn, asset, "editor_asset_preflight_failed", quarantine=True)
         raise
@@ -26100,7 +26521,7 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
         "scan_status": "passed",
         "preflight_status": "passed",
         "page_count": int((inspection or {}).get("pageCount") or 0),
-        "metadata_json": json.dumps({**metadata, "inspection_flags": (inspection or {}).get("flags") or {}, "renderer_version": EDOC_EDITOR_RENDERER_VERSION}, ensure_ascii=False),
+        "metadata_json": json.dumps(_editor_inspection_metadata(metadata, inspection, asset, digest), ensure_ascii=False),
         "finalized_at": now(),
     })
     new_state = _editor_state_with_asset(latest, asset, inspection)
@@ -26119,7 +26540,71 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
         target.unlink()
     insert_official_log(conn, document_id, "finalize_editor_upload", user, f"asset_id={upload_id};sha256={digest};pages={asset['page_count']};scan=passed")
     public_revision = _editor_revision_public(revision)
-    return {"asset": _editor_asset_public(asset), "pages": inspection.get("pages") if inspection else [], "editor_state": public_revision["state"], "editor_revision": public_revision}
+    return {"asset": _editor_asset_public(asset), "pages": [] if inspection.get("requiresA4Conversion") else inspection.get("pages") or [], "editor_state": public_revision["state"], "editor_revision": public_revision, "a4Conversion": _editor_asset_a4_conversion(asset)}
+
+
+def _validate_editor_a4_conversion_request(asset: Dict[str, Any], payload: Dict[str, Any], latest: Dict[str, Any]) -> None:
+    if payload.get("confirm") is not True:
+        raise ValueError("editor_a4_conversion_confirmation_required")
+    if str(payload.get("sourceSha256") or "").upper() != str(asset.get("sha256") or "").upper():
+        raise ValueError("editor_upload_hash_mismatch")
+    conversion = _editor_asset_a4_conversion(asset) or {}
+    if asset.get("asset_kind") not in {"source_pdf", "import_pdf"} or not conversion.get("required"):
+        raise ValueError("editor_a4_conversion_not_required")
+    if asset.get("upload_status") != "finalized" or asset.get("scan_status") != "passed" or asset.get("preflight_status") != "passed":
+        raise ValueError("editor_asset_not_ready")
+    state = parse_json_any(latest.get("editor_state_json"), {}) or {}
+    if not any(str(item.get("assetId")) == str(asset["id"]) for item in state.get("sourceFiles") or []):
+        raise ValueError("editor_source_asset_missing")
+
+
+def _editor_a4_derivative_metadata(asset: Dict[str, Any], details: Dict[str, Any], latest: Dict[str, Any]) -> Dict[str, Any]:
+    return {"a4_source_revision_no": int(latest["revision_no"]), "a4_conversion": {
+        **details, "required": False, "converted": True,
+        "sourceAssetId": asset["id"], "sourceSha256": asset["sha256"],
+    }}
+
+
+def _editor_a4_completed_derivative(assets: List[Dict[str, Any]], source_asset: Dict[str, Any], latest: Dict[str, Any]) -> Dict[str, Any] | None:
+    state = parse_json_any(latest.get("editor_state_json"), {}) or {}
+    active_ids = {str(item.get("assetId")) for item in state.get("sourceFiles") or []}
+    for item in assets:
+        conversion = _editor_asset_a4_conversion(item) or {}
+        if (item.get("upload_status") == "finalized" and str(item.get("id")) in active_ids
+                and conversion.get("converted") is True
+                and conversion.get("sourceAssetId") == source_asset["id"]
+                and conversion.get("sourceSha256") == source_asset["sha256"]):
+            return item
+    return None
+
+
+def convert_official_editor_upload_a4(conn: sqlite3.Connection, document_id: str, upload_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    document = official_document_row(conn, document_id)
+    _editor_assert_document_access(conn, document, session, write=True)
+    row = conn.execute("SELECT * FROM official_document_editor_assets WHERE id = ? AND document_id = ?", (upload_id, document_id)).fetchone()
+    if not row:
+        raise ValueError("editor_upload_not_found")
+    asset = row_to_dict(row)
+    latest = _editor_latest_revision_row(conn, document_id)
+    if not latest:
+        raise ValueError("editor_revision_not_found")
+    _validate_editor_a4_conversion_request(asset, payload, latest)
+    candidates = [row_to_dict(item) for item in conn.execute("SELECT * FROM official_document_editor_assets WHERE document_id = ? AND asset_kind = 'import_pdf' AND upload_status = 'finalized'", (document_id,)).fetchall()]
+    completed = _editor_a4_completed_derivative(candidates, asset, latest)
+    if completed:
+        return finalize_official_editor_upload(conn, document_id, completed["id"], {}, session)
+    if int(payload.get("baseRevisionNo") or 0) != int(latest["revision_no"]):
+        raise ValueError("editor_revision_conflict")
+    _, original = read_file_object_bytes(conn, str(asset.get("file_object_id") or ""))
+    if sha256_bytes(original) != asset["sha256"]:
+        raise ValueError("editor_asset_hash_mismatch")
+    converted, details = convert_editor_pdf_to_a4(original)
+    intent = create_official_editor_upload_intent(conn, document_id, {
+        "asset_kind": "import_pdf", "file_name": f"{Path(asset['file_name']).stem}-A4.pdf",
+        "mime_type": "application/pdf", "size_bytes": len(converted), "sha256": sha256_bytes(converted),
+    }, session, internal_metadata=_editor_a4_derivative_metadata(asset, details, latest))
+    store_official_editor_local_upload(conn, document_id, intent["upload_id"], converted, session, "application/pdf")
+    return finalize_official_editor_upload(conn, document_id, intent["upload_id"], {"sha256": sha256_bytes(converted)}, session)
 
 
 def get_official_editor_state(conn: sqlite3.Connection, document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -26168,6 +26653,9 @@ def save_official_editor_state(conn: sqlite3.Connection, document_id: str, paylo
     if not isinstance(state, dict):
         raise ValueError("editor_state_invalid")
     state = validate_editor_state(json.loads(json.dumps(state, ensure_ascii=False)))
+    _validate_editor_a4_source_lineage(state, [row_to_dict(row) for row in conn.execute(
+        "SELECT * FROM official_document_editor_assets WHERE document_id = ?", (document_id,)
+    ).fetchall()])
     previous_state = parse_json_any(latest["editor_state_json"], {}) or {}
     validate_editor_seal_placements(
         conn,
@@ -26202,6 +26690,7 @@ def _editor_local_asset_bytes(conn: sqlite3.Connection, document_id: str, state:
             raise ValueError("editor_asset_hash_mismatch")
         result[asset_id] = data
         assets.append(asset)
+    _validate_editor_a4_source_lineage(state, assets)
     return result, assets
 
 
@@ -26220,6 +26709,9 @@ def preflight_official_editor(conn: sqlite3.Connection, document_id: str, payloa
         raise ValueError("editor_source_pdf_required")
     assert_official_document_uploads_av_clean(conn, document)
     state_before_binding = canonical_json_hash(state)
+    _validate_editor_a4_source_lineage(state, [row_to_dict(row) for row in conn.execute(
+        "SELECT * FROM official_document_editor_assets WHERE document_id = ?", (document_id,)
+    ).fetchall()])
     validate_editor_seal_placements(
         conn,
         str(document.get("company_id") or ""),
@@ -26335,12 +26827,15 @@ def official_editor_change_summary(conn: sqlite3.Connection, document_id: str, s
 
 def _editor_source_bundle_sha256(conn: sqlite3.Connection, document_id: str, state: Dict[str, Any]) -> str:
     rows: List[Dict[str, str]] = []
+    assets = []
     for item in state.get("sourceFiles") or []:
         asset_id = str(item.get("assetId") or "")
-        row = conn.execute("SELECT id, sha256 FROM official_document_editor_assets WHERE id = ? AND document_id = ? AND upload_status = 'finalized'", (asset_id, document_id)).fetchone()
+        row = conn.execute("SELECT * FROM official_document_editor_assets WHERE id = ? AND document_id = ? AND upload_status = 'finalized'", (asset_id, document_id)).fetchone()
         if not row or not row["sha256"]:
             raise ValueError("editor_source_asset_missing")
         rows.append({"assetId": row["id"], "sha256": row["sha256"]})
+        assets.append(row_to_dict(row))
+    _validate_editor_a4_source_lineage(json.loads(json.dumps(state)), assets)
     return sha256_bytes(json.dumps(sorted(rows, key=lambda item: item["assetId"]), sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
@@ -34908,6 +35403,13 @@ def supabase_upload_official_document_attachment(document_id: str, payload: Dict
         raise ValueError("official_document_attachment_too_large")
     file_name = Path(payload.get("file_name") or "attachment.pdf").name
     mime_type = normalized_official_attachment_mime(payload, file_name)
+    upload_file_id = attachment_id(document_id, payload.get("upload_id"))
+    if upload_file_id:
+        previous = supabase_get("official_document_files", upload_file_id)
+        if previous:
+            if previous.get("document_id") != document_id or previous.get("file_hash") != sha256_bytes(data) or previous.get("file_name") != file_name or previous.get("file_mime_type") != mime_type:
+                raise ValueError("official_attachment_upload_id_conflict")
+            return {"file": official_file_metadata(previous), "document": supabase_official_document_detail(document_id, session), "upload_replayed": True}
     if mime_type == "application/pdf":
         inspect_editor_pdf(data)
     scan_status, scan_signature = scan_official_upload_bytes(data, file_name)
@@ -34926,7 +35428,16 @@ def supabase_upload_official_document_attachment(document_id: str, payload: Dict
         scan_signature,
         official_actor_name(user),
     )
-    official_file = supabase_insert_official_document_file(document_id, "attachment", file_row, official_actor_name(user))
+    try:
+        official_file = supabase_insert_official_document_file(document_id, "attachment", file_row, official_actor_name(user), attachment_file_id=upload_file_id)
+    except Exception:
+        # A simultaneous retry may already have committed this exact upload ID.
+        previous = supabase_get("official_document_files", upload_file_id) if upload_file_id else None
+        if not previous or previous.get("document_id") != document_id or previous.get("file_hash") != sha256_bytes(data) or previous.get("file_name") != file_name or previous.get("file_mime_type") != mime_type:
+            raise
+        if previous.get("file_object_id") != file_row["id"]:
+            _supabase_cleanup_uncommitted_correction_file(document_id, file_row)
+        return {"file": official_file_metadata(previous), "document": supabase_official_document_detail(document_id, session), "upload_replayed": True}
     supabase_insert_official_log(
         document_id,
         "upload_attachment",
@@ -34998,11 +35509,12 @@ def supabase_insert_official_document_file(
     *,
     stamp_request_id: str = "",
     stamp_claim_token: str = "",
+    attachment_file_id: str = "",
 ) -> Dict[str, Any]:
     versions = supabase_official_raw_document_files(document_id, file_type)
     next_version = max([int(item.get("version") or 0) for item in versions] or [0]) + 1
     row = {
-        "id": f"ODFILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
+        "id": attachment_file_id or f"ODFILE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
         "document_id": document_id,
         "file_object_id": file_row.get("id"),
         "file_type": file_type,
@@ -35737,7 +36249,7 @@ def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
     return token
 
 
-def supabase_create_official_editor_upload_intent(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+def supabase_create_official_editor_upload_intent(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None, *, internal_metadata: Dict[str, Any] | None = None, issue_upload_capability: bool = True) -> Dict[str, Any]:
     require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
@@ -35746,11 +36258,13 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
     latest = _supabase_editor_latest_revision(document_id)
     if not latest:
         raise ValueError("editor_revision_not_found")
+    if internal_metadata and int(internal_metadata.get("a4_source_revision_no") or 0) != int(latest["revision_no"]):
+        raise ValueError("editor_revision_conflict")
     asset_id = f"ODASSET-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}"
     storage_path = f"editor/{document_id}/{asset_id}-{meta['file_name']}"
     expires_at = (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")
-    upload_url = _supabase_storage_direct_tus_url()
-    storage_publishable_key = _supabase_storage_public_upload_key()
+    upload_url = _supabase_storage_direct_tus_url() if issue_upload_capability else ""
+    storage_publishable_key = _supabase_storage_public_upload_key() if issue_upload_capability else ""
     row = supabase_insert("official_document_editor_assets", {
         "id": asset_id,
         "document_id": document_id,
@@ -35769,7 +36283,7 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
         "scan_status": "pending",
         "preflight_status": "pending",
         "page_count": 0,
-        "metadata_json": json.dumps({"base_revision_no": int(latest["revision_no"]), "expires_at": expires_at}, ensure_ascii=False),
+        "metadata_json": json.dumps({**(internal_metadata or {}), "base_revision_no": int(latest["revision_no"]), "expires_at": expires_at}, ensure_ascii=False),
         "created_by": user.get("id") or "",
         "created_at": now(),
         "finalized_at": None,
@@ -35811,7 +36325,7 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
         token = _supabase_create_signed_upload_token(
             storage_path,
             EDOC_STORAGE_BUCKET,
-        )
+        ) if issue_upload_capability else ""
     except Exception:
         _supabase_editor_asset_failure(row, "editor_signed_upload_failed")
         raise
@@ -36113,6 +36627,7 @@ def _supabase_finalized_editor_upload_result(
         "pages": latest_public["state"].get("pages") or [],
         "editor_state": latest_public["state"],
         "editor_revision": latest_public,
+        "a4Conversion": _editor_asset_a4_conversion(asset),
     }
 
 
@@ -36375,7 +36890,7 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
             return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_asset_quarantined")
     try:
-        inspection = inspect_editor_pdf(data) if asset["asset_kind"] in {"source_pdf", "import_pdf"} else inspect_editor_image(data, asset["mime_type"])
+        inspection = inspect_editor_pdf(data, allow_non_a4=payload.get("allowA4Conversion") is True) if asset["asset_kind"] in {"source_pdf", "import_pdf"} else inspect_editor_image(data, asset["mime_type"])
     except Exception:
         failed_asset = _supabase_editor_asset_failure(asset, "editor_asset_preflight_failed", quarantine=True)
         if failed_asset.get("upload_status") == "finalized":
@@ -36470,9 +36985,7 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         "storage_bucket": storage_bucket,
         "storage_path": final_storage_path,
         "metadata_json": json.dumps({
-            **metadata,
-            "inspection_flags": (inspection or {}).get("flags") or {},
-            "renderer_version": EDOC_EDITOR_RENDERER_VERSION,
+            **_editor_inspection_metadata(metadata, inspection, asset, digest),
             "promoted_at": timestamp,
             "staging_storage_path_sha256": sha256_bytes(staging_storage_path.encode("utf-8")),
         }, ensure_ascii=False),
@@ -36619,7 +37132,85 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
                 error=redact_text(str(cleanup_error)),
             )
     public = _editor_revision_public(revision)
-    return {"asset": _editor_asset_public(asset), "pages": inspection.get("pages") if inspection else [], "editor_state": public["state"], "editor_revision": public}
+    return {"asset": _editor_asset_public(asset), "pages": [] if inspection.get("requiresA4Conversion") else inspection.get("pages") or [], "editor_state": public["state"], "editor_revision": public, "a4Conversion": _editor_asset_a4_conversion(asset)}
+
+
+def supabase_convert_official_editor_upload_a4(document_id: str, upload_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
+    document = supabase_official_document_row(document_id)
+    _supabase_editor_assert_document_access(document, session, write=True)
+    rows = supabase_filter_rows("official_document_editor_assets", {"id": upload_id, "document_id": document_id}, limit=1)
+    if not rows:
+        raise ValueError("editor_upload_not_found")
+    asset = rows[0]
+    latest = _supabase_editor_latest_revision(document_id)
+    if not latest:
+        raise ValueError("editor_revision_not_found")
+    _validate_editor_a4_conversion_request(asset, payload, latest)
+    candidates = supabase_filter_rows("official_document_editor_assets", {"document_id": document_id, "asset_kind": "import_pdf", "upload_status": "finalized"}, limit=500)
+    completed = _editor_a4_completed_derivative(candidates, asset, latest)
+    if completed:
+        return _supabase_finalized_editor_upload_result(document_id, completed, session)
+    if int(payload.get("baseRevisionNo") or 0) != int(latest["revision_no"]):
+        raise ValueError("editor_revision_conflict")
+    file_object = _supabase_assert_finalized_editor_asset_immutable(document_id, asset)
+    original = supabase_storage_download(str(file_object["storage_key"]), str(file_object.get("bucket") or EDOC_STORAGE_BUCKET))
+    if sha256_bytes(original) != asset["sha256"]:
+        raise ValueError("editor_asset_hash_mismatch")
+    converted, details = convert_editor_pdf_to_a4(original)
+    digest = sha256_bytes(converted)
+    intent = supabase_create_official_editor_upload_intent(document_id, {
+        "asset_kind": "import_pdf", "file_name": f"{Path(asset['file_name']).stem}-A4.pdf",
+        "mime_type": "application/pdf", "size_bytes": len(converted), "sha256": digest,
+    }, session, internal_metadata=_editor_a4_derivative_metadata(asset, details, latest), issue_upload_capability=False)
+    # Server-to-private-Storage bytes never traverse the function response and
+    # no browser upload capability is minted for the generated derivative.
+    supabase_storage_upload(intent["path"], converted, "application/pdf", intent["bucket"])
+    return supabase_finalize_official_editor_upload(document_id, intent["upload_id"], {"sha256": digest}, session)
+
+
+def supabase_copy_official_editor_conflict(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
+    document = supabase_official_document_row(document_id)
+    user = _supabase_editor_assert_document_access(document, session, write=True)
+    if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
+        raise PermissionError("official_document_create_forbidden")
+    new_id, request_hash = _editor_conflict_copy_identity(document_id, payload, user)
+    existing = supabase_get("official_documents", new_id)
+    if _editor_conflict_copy_existing(existing, document_id, request_hash, user):
+        return {**supabase_get_official_editor_state(new_id, session), "id": new_id, "document_id": new_id, "idempotent": True}
+    state = validate_editor_state(json.loads(json.dumps(payload.get("state") or {})))
+    asset_bytes, assets = _supabase_editor_asset_bytes(document_id, state)
+    _editor_conflict_copy_validate_sources(state, assets)
+    previous = parse_json_any((_supabase_editor_latest_revision(document_id) or {}).get("editor_state_json"), {}) or {}
+    validate_supabase_editor_seal_placements(document["company_id"], state, previous_state=previous)
+    objects = [supabase_get("file_objects", asset["file_object_id"]) for asset in assets]
+    files = supabase_filter_rows("official_document_files", {"document_id": document_id}, limit=1000)
+    bundle = _editor_conflict_copy_bundle(document, payload, user, supabase_official_company_row(document["company_id"]), state, assets, objects, files)
+    uploaded = []
+    try:
+        for asset, copied in zip(assets, bundle["file_objects"]):
+            supabase_storage_upload(copied["storage_key"], asset_bytes[asset["id"]], copied["mime_type"], copied["bucket"])
+            uploaded.append(copied)
+        result = supabase_request("POST", "rpc/edoc_copy_editor_conflict", {"p_bundle": bundle})
+        if isinstance(result, list):
+            result = result[0] if result else {}
+        if not isinstance(result, dict) or result.get("document_id") != new_id:
+            raise RuntimeError("editor_conflict_copy_invalid_response")
+        if result.get("idempotent"):
+            for copied in uploaded:
+                supabase_storage_delete(copied["storage_key"], copied["bucket"])
+        return {**supabase_get_official_editor_state(new_id, session), "id": new_id, "document_id": new_id, "idempotent": bool(result.get("idempotent"))}
+    except Exception:
+        # If the RPC committed but its response was lost, do not delete any
+        # committed file. Retry uses the same request key and returns the copy.
+        for copied in uploaded:
+            try:
+                if not supabase_get("file_objects", copied["id"]):
+                    supabase_storage_delete(copied["storage_key"], copied["bucket"])
+            except Exception:
+                log_structured("error", "editor_conflict_copy_cleanup_pending", document_id=new_id, file_id=copied["id"])
+        raise
 
 
 def supabase_get_official_editor_state(document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -36651,6 +37242,19 @@ def supabase_get_official_editor_state(document_id: str, session: Dict[str, Any]
     return public
 
 
+def _supabase_editor_a4_lineage_assets(document_id: str, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    assets = supabase_filter_rows("official_document_editor_assets", {"document_id": document_id}, limit=1000)
+    loaded = {str(asset.get("id") or "") for asset in assets}
+    # Old/cancelled upload records can exceed PostgREST's page cap. Never treat
+    # a source absent from the first result page as an ordinary unconverted PDF.
+    for source in state.get("sourceFiles") or []:
+        asset_id = str(source.get("assetId") or "")
+        if asset_id and asset_id not in loaded:
+            assets.extend(supabase_filter_rows("official_document_editor_assets", {"document_id": document_id, "id": asset_id}, limit=1))
+            loaded.add(asset_id)
+    return assets
+
+
 def supabase_save_official_editor_state(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
@@ -36665,6 +37269,7 @@ def supabase_save_official_editor_state(document_id: str, payload: Dict[str, Any
     if not isinstance(state, dict):
         raise ValueError("editor_state_invalid")
     state = validate_editor_state(json.loads(json.dumps(state, ensure_ascii=False)))
+    _validate_editor_a4_source_lineage(state, _supabase_editor_a4_lineage_assets(document_id, state))
     previous_state = parse_json_any(latest["editor_state_json"], {}) or {}
     validate_supabase_editor_seal_placements(
         str(document.get("company_id") or ""),
@@ -36710,6 +37315,7 @@ def _supabase_editor_asset_bytes(document_id: str, state: Dict[str, Any]) -> Tup
             raise ValueError("editor_asset_hash_mismatch")
         result[asset_id] = data
         assets.append(asset)
+    _validate_editor_a4_source_lineage(state, assets)
     return result, assets
 
 
@@ -36729,6 +37335,7 @@ def supabase_preflight_official_editor(document_id: str, payload: Dict[str, Any]
         raise ValueError("editor_source_pdf_required")
     supabase_assert_official_document_uploads_av_clean(document)
     state_before_binding = canonical_json_hash(state)
+    _validate_editor_a4_source_lineage(state, _supabase_editor_a4_lineage_assets(document_id, state))
     validate_supabase_editor_seal_placements(
         str(document.get("company_id") or ""),
         state,
@@ -36902,12 +37509,15 @@ def supabase_editor_asset_download(document_id: str, asset_id: str, expires: int
 
 def _supabase_editor_source_bundle_sha256(document_id: str, state: Dict[str, Any]) -> str:
     hashes: List[Dict[str, str]] = []
+    assets = []
     for item in state.get("sourceFiles") or []:
         asset_id = str(item.get("assetId") or "")
         rows = supabase_filter_rows("official_document_editor_assets", {"id": asset_id, "document_id": document_id, "upload_status": "finalized"}, limit=1)
         if not rows or not rows[0].get("sha256"):
             raise ValueError("editor_source_asset_missing")
         hashes.append({"assetId": asset_id, "sha256": str(rows[0]["sha256"])})
+        assets.append(rows[0])
+    _validate_editor_a4_source_lineage(json.loads(json.dumps(state)), assets)
     return sha256_bytes(json.dumps(sorted(hashes, key=lambda item: item["assetId"]), sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
@@ -37341,7 +37951,11 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
         supabase_replace_official_text_overlays(stamp_request["id"], payload)
     supabase_insert_official_log(document_id, "create", user, document["request_reason"], ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
     if payload.get("submit", True):
-        return supabase_submit_official_document(document_id, payload, session)
+        # Initial create+submit owns this newly-created version; never infer a
+        # latest version for an external edit or resubmit request.
+        return supabase_submit_official_document(document_id, {
+            **payload, "expected_content_revision": int(document.get("content_revision") or 0),
+        }, session)
     return supabase_official_document_detail(document_id, session)
 
 
@@ -37481,6 +38095,7 @@ def supabase_update_official_document_correction(
         raise PermissionError("only_applicant_can_correct")
     if document.get("current_status") not in {"draft", "rejected"}:
         raise ValueError("official_document_correction_locked")
+    require_content_revision(document, payload)
     require_official_creation_company(user, document.get("company_id"))
     stamp_request = supabase_official_document_stamp_request(document_id)
     source_pages: List[Dict[str, Any]] = []
@@ -37639,7 +38254,7 @@ def supabase_update_official_document_correction(
             "p_document_id": document_id,
             "p_applicant_id": user["id"],
             "p_company_id": document["company_id"],
-            "p_patch": plan["updates"],
+            "p_patch": {**plan["updates"], "_expected_content_revision": int(document.get("content_revision") or 0)},
             "p_seal_id": plan["seal_id"],
             "p_stamp_positions": plan["positions"],
             "p_text_overlays": plan["text_overlays"],
@@ -37958,6 +38573,7 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
             return supabase_official_document_detail(document_id, session)
         raise ValueError("official_document_not_submittable")
     electronic_output = official_compose_electronic_output(document)
+    require_content_revision(document, payload)
     if not bool(document.get("requires_stamp", True)) and not electronic_output:
         raise PermissionError("official_document_stamp_required")
     expected_status = str(document["current_status"])
@@ -38154,6 +38770,7 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         "company_id": document["company_id"],
         "expected_status": expected_status,
         "expected_updated_at": expected_updated_at,
+        "expected_content_revision": int(document.get("content_revision") or 0),
         "submitted_at": submitted_at,
         "document_patch": document_patch,
         "stamp_request": stamp_request_row,
@@ -45835,6 +46452,12 @@ class Handler(SimpleHTTPRequestHandler):
                     scoped_query = {**query, "scope": ["todo"]}
                     self.send_json(supabase_list_official_documents(scoped_query, session))
                     return
+                if parts == ["compose-drafts"] and method == "GET":
+                    self.send_json(supabase_list_compose_drafts(supabase_current_session(self.bearer_token())))
+                    return
+                if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
+                    self.send_json(supabase_save_compose_draft(parts[1], self.read_json(), supabase_current_session(self.bearer_token())))
+                    return
                 if method == "GET" and parts == ["official-documents", "my-requests"]:
                     session = supabase_current_session(self.bearer_token())
                     if not self.require_table_access(session, "official_documents"):
@@ -45890,8 +46513,14 @@ class Handler(SimpleHTTPRequestHandler):
                     if method == "POST" and len(parts) == 3 and parts[2] == "editor-uploads":
                         self.send_json(supabase_create_official_editor_upload_intent(document_id, self.read_json(), session), 201)
                         return
+                    if method == "POST" and len(parts) == 3 and parts[2] == "editor-conflict-copy":
+                        self.send_json(supabase_copy_official_editor_conflict(document_id, self.read_json(), session), 201)
+                        return
                     if method == "POST" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "finalize":
                         self.send_json(supabase_finalize_official_editor_upload(document_id, parts[3], self.read_json(), session))
+                        return
+                    if method == "POST" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "convert-a4":
+                        self.send_json(supabase_convert_official_editor_upload_a4(document_id, parts[3], self.read_json(), session))
                         return
                     if method == "POST" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "fail":
                         self.send_json(supabase_fail_official_editor_upload(document_id, parts[3], self.read_json(), session))
@@ -46850,6 +47479,14 @@ class Handler(SimpleHTTPRequestHandler):
                     scoped_query = {**query, "scope": ["todo"]}
                     self.send_json(list_official_documents(conn, scoped_query, session))
                     return
+                if parts == ["compose-drafts"] and method == "GET":
+                    self.send_json(list_compose_drafts(conn, current_session(conn, self.bearer_token())))
+                    return
+                if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
+                    result = save_compose_draft(conn, parts[1], self.read_json(), current_session(conn, self.bearer_token()))
+                    conn.commit()
+                    self.send_json(result)
+                    return
                 if method == "GET" and parts == ["official-documents", "my-requests"]:
                     session = current_session(conn, self.bearer_token())
                     if not self.require_table_access(session, "official_documents"):
@@ -46920,6 +47557,11 @@ class Handler(SimpleHTTPRequestHandler):
                         conn.commit()
                         self.send_json(result, 201)
                         return
+                    if method == "POST" and len(parts) == 3 and parts[2] == "editor-conflict-copy":
+                        result = copy_official_editor_conflict(conn, document_id, self.read_json(), session)
+                        conn.commit()
+                        self.send_json(result, 201)
+                        return
                     if method == "PUT" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "content":
                         result = store_official_editor_local_upload(
                             conn,
@@ -46934,6 +47576,11 @@ class Handler(SimpleHTTPRequestHandler):
                         return
                     if method == "POST" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "finalize":
                         result = finalize_official_editor_upload(conn, document_id, parts[3], self.read_json(), session)
+                        conn.commit()
+                        self.send_json(result)
+                        return
+                    if method == "POST" and len(parts) == 5 and parts[2] == "editor-uploads" and parts[4] == "convert-a4":
+                        result = convert_official_editor_upload_a4(conn, document_id, parts[3], self.read_json(), session)
                         conn.commit()
                         self.send_json(result)
                         return

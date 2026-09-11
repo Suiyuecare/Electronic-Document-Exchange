@@ -176,13 +176,16 @@ jobs:
           python -m pip install --disable-pip-version-check pglast==7.14
 
       - name: Compile Python backend
-        run: python -m py_compile backend.py api/index.py
+        run: python -m py_compile backend.py api/index.py compose_resilience.py editor_seam.py
 
       - name: Reject embedded private credentials without printing their values
         run: python tools/verify_no_embedded_credentials.py
 
       - name: Check frontend JavaScript
-        run: node --check app.js
+        run: |
+          node --check app.js
+          node --check editor-a4.js
+          node --check editor-seam.js
 
       - name: Replay five-account acceptance with alternate seed
         env:

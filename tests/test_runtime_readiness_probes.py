@@ -1,6 +1,7 @@
 import json
 import unittest
 import urllib.error
+import urllib.parse
 from unittest import mock
 
 import backend
@@ -37,6 +38,25 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
         self.assertIs(result, configured)
         urlopen.assert_not_called()
         create_connection.assert_not_called()
+
+    def test_compose_editor_repair_migration_is_required_for_readiness(self):
+        self.assertIn("official_document_compose_drafts", backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES)
+        self.assertIn("edoc_save_compose_draft", backend.EDOC_READINESS_REQUIRED_RPC_NAMES)
+        self.assertIn("edoc_copy_editor_conflict", backend.EDOC_READINESS_REQUIRED_RPC_NAMES)
+        with self.production_runtime_config(), mock.patch.object(
+            backend, "_readiness_http_json", return_value=[],
+        ) as fetch:
+            self.assertTrue(backend._probe_main_supabase_query(0.25)["ready"])
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(fetch.call_args.args[0]).query)
+        self.assertEqual(query["select"], ["id,content_revision"])
+
+    def test_missing_compose_content_column_cannot_report_ready(self):
+        with self.production_runtime_config(), mock.patch.object(
+            backend, "_readiness_http_json", side_effect=RuntimeError("column does not exist"),
+        ):
+            result = backend._probe_main_supabase_query(0.25)
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["errorCode"], "database_query_unavailable")
 
     def test_main_supabase_probes_never_follow_redirects(self):
         rpc_paths = {

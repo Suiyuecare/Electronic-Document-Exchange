@@ -23,7 +23,7 @@ with required_tables(table_name) as (
     ('official_document_approval_logs'), ('official_document_approval_steps'),
     ('official_document_archive_exports'), ('official_document_dispatch_events'),
     ('official_document_dispatch_records'), ('official_document_editor_assets'),
-    ('official_document_editor_revisions'),
+    ('official_document_editor_revisions'), ('official_document_compose_drafts'),
     ('official_document_editor_storage_jobs'), ('official_document_files'),
     ('official_document_rejection_jobs'),
     ('official_document_stamp_positions'), ('official_document_stamp_requests'),
@@ -149,7 +149,7 @@ with backend_tables(table_name) as (
     'official_document_approval_logs', 'official_document_approval_steps',
     'official_document_archive_exports', 'official_document_dispatch_events',
     'official_document_dispatch_records', 'official_document_editor_assets',
-    'official_document_editor_revisions',
+    'official_document_editor_revisions', 'official_document_compose_drafts',
     'official_document_editor_storage_jobs', 'official_document_files',
     'official_document_number_counters', 'official_document_number_allocations',
     'official_document_stamp_positions', 'official_document_stamp_requests',
@@ -179,7 +179,7 @@ with backend_tables(table_name) as (
     'login_events', 'module_account_links', 'notification_deliveries',
     'notifications', 'official_document_approval_logs',
     'official_document_approval_steps', 'official_document_editor_assets',
-    'official_document_editor_revisions',
+    'official_document_editor_revisions', 'official_document_compose_drafts',
     'official_document_editor_storage_jobs', 'official_document_files',
     'official_document_number_counters', 'official_document_number_allocations',
     'official_document_stamp_positions', 'official_document_stamp_requests',
@@ -192,6 +192,7 @@ with backend_tables(table_name) as (
 ), update_tables(table_name) as (
   select unnest(array[
     'auth_sessions', 'background_jobs', 'companies', 'company_registry',
+    'official_document_compose_drafts',
     'company_seals', 'documents', 'exchange_inbox', 'exchange_outbox',
     'exchange_tasks', 'file_objects', 'inbound_documents',
     'internal_dispatch_recipients', 'internal_dispatches',
@@ -206,7 +207,7 @@ with backend_tables(table_name) as (
   ]::text[])
 ), delete_tables(table_name) as (
   select unnest(array[
-    'file_objects', 'finance_member_sync_nonces',
+    'file_objects', 'finance_member_sync_nonces', 'official_document_compose_drafts',
     'official_document_stamp_positions', 'official_document_text_overlays'
   ]::text[])
 ), expected_grants as (
@@ -286,6 +287,8 @@ with required_rpcs(signature) as (
     ('public.edoc_resolve_portal_finance_user(uuid,text)'),
     ('public.edoc_register_official_archive_export(text,text,text,text,text,integer,bigint,text,text,text)'),
     ('public.edoc_commit_official_document_submission(jsonb)'),
+    ('public.edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)'),
+    ('public.edoc_copy_editor_conflict(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
 ), resolved as (
   select signature, pg_catalog.to_regprocedure(signature) as oid
@@ -329,6 +332,8 @@ with required_rpcs(signature) as (
     ('public.edoc_resolve_portal_finance_user(uuid,text)'),
     ('public.edoc_register_official_archive_export(text,text,text,text,text,integer,bigint,text,text,text)'),
     ('public.edoc_commit_official_document_submission(jsonb)'),
+    ('public.edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)'),
+    ('public.edoc_copy_editor_conflict(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
 ), resolved as (
   select signature, pg_catalog.to_regprocedure(signature) as oid
@@ -360,6 +365,8 @@ with allowed(signature) as (
     ('public.edoc_claim_official_document_rejection_v3(text,text,text,text,text,jsonb)'),
     ('public.edoc_claim_official_document_stamp(text,text,text,text,integer)'),
     ('public.edoc_commit_official_document_submission(jsonb)'),
+    ('public.edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)'),
+    ('public.edoc_copy_editor_conflict(jsonb)'),
     ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_complete_official_document_stamp(text,text,text,text)'),
     ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)'),
@@ -784,6 +791,13 @@ with required_columns(table_name, column_name, data_type, nullable) as (
     ('official_documents', 'correction_due_at', 'timestamp with time zone', true),
     ('official_documents', 'correction_requested_at', 'timestamp with time zone', true),
     ('official_documents', 'correction_resubmitted_at', 'timestamp with time zone', true),
+    ('official_documents', 'content_revision', 'integer', false),
+    ('official_document_compose_drafts', 'revision', 'integer', false),
+    ('official_document_compose_drafts', 'company_id', 'text', false),
+    ('official_document_compose_drafts', 'applicant_id', 'text', false),
+    ('official_document_compose_drafts', 'snapshot_json', 'jsonb', false),
+    ('official_document_compose_drafts', 'snapshot_hash', 'text', false),
+    ('official_document_compose_drafts', 'archived', 'boolean', false),
     ('official_documents', 'retention_until', 'timestamp with time zone', false),
     ('official_documents', 'retention_policy_version', 'text', false),
     ('official_documents', 'legal_hold', 'boolean', false),
@@ -908,6 +922,9 @@ with required_constraints(table_name, constraint_name) as (
     ('official_document_text_overlays', 'official_document_text_overlays_text_content_check'),
     ('official_document_text_overlays', 'official_document_text_overlays_x_check'),
     ('official_document_text_overlays', 'official_document_text_overlays_y_check'),
+    ('official_document_compose_drafts', 'official_document_compose_drafts_pkey'),
+    ('official_document_compose_drafts', 'official_document_compose_drafts_company_id_fkey'),
+    ('official_document_compose_drafts', 'official_document_compose_drafts_applicant_id_fkey'),
     ('official_document_editor_revisions', 'official_document_editor_revisions_pkey'),
     ('official_document_editor_revisions', 'official_document_editor_revisions_document_id_fkey'),
     ('official_document_editor_revisions', 'official_document_editor_revisions_parent_revision_id_fkey'),
@@ -1875,6 +1892,7 @@ with required_indexes(index_name) as (
     ('idx_official_editor_storage_jobs_document'),
     ('idx_official_editor_storage_jobs_final_file'),
     ('idx_official_stamp_positions_seal'),
+    ('idx_compose_draft_owner'),
     ('idx_official_rejection_jobs_expected_step'),
     ('idx_official_rejection_jobs_source_revision'),
     ('idx_official_rejection_jobs_target_revision'),

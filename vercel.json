@@ -9,6 +9,8 @@
         "maxDuration": 180,
         "includeFiles": [
           "edoc_numbering.py",
+          "editor_seam.py",
+          "compose_resilience.py",
           "assets/fonts/edukai-5.1_20251208.ttf",
           "assets/fonts/LXGWWenKaiTC-Regular.ttf",
           "supabase/verification/production_cutover_checks.sql",
@@ -20,6 +22,8 @@
     { "src": "entry-bootstrap.js", "use": "@vercel/static" },
     { "src": "pdfjs-bootstrap.mjs", "use": "@vercel/static" },
     { "src": "app.js", "use": "@vercel/static" },
+    { "src": "editor-seam.js", "use": "@vercel/static" },
+    { "src": "editor-a4.js", "use": "@vercel/static" },
     { "src": "styles.css", "use": "@vercel/static" },
     { "src": "vendor/pdfjs/pdf.min.mjs", "use": "@vercel/static" },
     { "src": "vendor/pdfjs/pdf.worker.min.mjs", "use": "@vercel/static" },
