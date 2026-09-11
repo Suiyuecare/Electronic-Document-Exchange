@@ -103,7 +103,8 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
     def test_load_cloud_draft_drops_previous_documents_local_file_selection(self):
         setup = '''
           const oldFiles={value:"old-draft.pdf"},status={replaceChildren:()=>{status.cleared=true}};
-          const composeCloudRows=[{id:"B",revision:4,snapshot:{values:{"#subject":"B"}}}];
+          const authState={user:{id:"U",company_id:"CO"}};
+          const composeCloudRows=[{id:"B",revision:4,snapshot:{userId:"U",companyId:"CO",values:{"#subject":"B"}}}];
           const composeRawSnapshot=()=>({}),composeSnapshotHasMeaningfulContent=()=>true,resetComposeAsyncScope=()=>{},restoreComposeAutosave=()=>{},showToast=()=>{};
           let composeAutosaveRestoredForIdentity="A",composeCloudDraftId="A";
           const composeAutosaveStorageKey="fixture",composeCloudRevisions=new Map(),composeCloudSavedSnapshots=new Map();

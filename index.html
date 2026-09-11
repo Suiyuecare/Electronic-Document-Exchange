@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
-    <link rel="stylesheet" href="styles.css?v=20260911-compose-editor-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260912-audit-fixes-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
@@ -196,6 +196,20 @@
               <span class="status-pill" id="dailyActionCount">0 件</span>
             </div>
             <div class="daily-action-grid" id="dailyActionGrid"></div>
+            <div class="home-task-footer">
+              <button class="text-button" id="dailyActionExpandBtn" type="button" hidden>顯示全部待辦</button>
+            </div>
+          </section>
+
+          <section class="panel home-my-cases" id="homeMyCases">
+            <div class="panel-heading">
+              <h3>我的案件</h3>
+              <div class="quick-actions">
+                <button class="primary-button" data-target="compose" type="button">撰寫公文</button>
+                <button class="secondary-button" data-target="electronicSeal" type="button">電子用印</button>
+              </div>
+            </div>
+            <div id="homeMyCasesList"></div>
           </section>
 
           <section class="panel role-perspective-review" id="rolePerspectiveReview" hidden>
@@ -426,9 +440,10 @@
               <div class="address-results" id="approvalLogList"></div>
             </section>
 
-            <aside class="panel approval-log-detail-panel">
+            <aside class="panel approval-log-detail-panel" id="approvalLogDetailPanel">
               <div class="panel-heading">
-                <h3>簽核軌跡</h3>
+                <h3>案件檢閱</h3>
+                <button class="text-button approval-list-return" id="approvalLogBackBtn" type="button">返回清單</button>
                 <button class="text-button" id="approvalLogOpenWorkflowBtn" type="button">查看完整案件</button>
               </div>
               <div id="approvalLogDetail"></div>
@@ -652,17 +667,17 @@
               <p class="eyebrow">收文與歸檔</p>
               <h3>公文收錄</h3>
             </div>
-            <button class="primary-button" id="openInboundArchiveBtn" type="button">新增收錄</button>
           </div>
 
           <div class="inbound-workspace-tabs" role="tablist" aria-label="公文收錄工作區">
             <button class="flow-step-chip active" type="button" role="tab" data-inbound-section="records">收錄清單</button>
-            <button class="flow-step-chip" type="button" role="tab" data-inbound-section="archive">新增收錄</button>
+            <button class="flow-step-chip" id="openInboundArchiveBtn" type="button" role="tab" data-inbound-section="archive">新增收錄</button>
             <button class="flow-step-chip" type="button" role="tab" data-inbound-section="dispatch">內部派發</button>
           </div>
 
           <div data-inbound-section-panel="records">
             <div class="inbound-toolbar panel">
+              <label class="toolbar-search compact">搜尋<input id="inboundSearch" type="search" placeholder="搜尋來文單位、主旨或收文號" /></label>
               <div class="inbound-simple-flow" role="group" aria-label="收錄狀態篩選">
                 <button class="flow-step-chip active" type="button" data-inbound-filter="all">全部</button>
                 <button class="flow-step-chip" type="button" data-inbound-filter="已歸檔">已歸檔</button>
@@ -670,7 +685,6 @@
                 <button class="flow-step-chip" type="button" data-inbound-filter="已收文">辦理中</button>
                 <button class="flow-step-chip issue" type="button" data-inbound-filter="異常待處理">異常</button>
               </div>
-              <label class="toolbar-search compact">搜尋<input id="inboundSearch" type="search" placeholder="搜尋來文單位、主旨或收文號" /></label>
             </div>
 
             <div class="inbound-layout">
@@ -1042,6 +1056,13 @@
             <button type="button" class="secondary-button" id="composeCloudRetryBtn">重試保存</button>
             <button type="button" class="secondary-button" id="composeKeepNewDraftBtn" hidden>保留我的內容為新草稿</button>
           </div>
+          <section class="compose-resume-draft" id="composeResumeDraft" hidden aria-labelledby="composeResumeDraftTitle">
+            <div><strong id="composeResumeDraftTitle">繼續上次草稿？</strong><p id="composeResumeDraftDescription"></p></div>
+            <div class="form-actions">
+              <button class="primary-button" type="button" id="composeResumeDraftBtn">繼續上次草稿</button>
+              <button class="secondary-button" type="button" id="composeStartFreshBtn">先寫新公文</button>
+            </div>
+          </section>
           <details class="compose-cloud-drafts">
             <summary>雲端草稿 · 換裝置繼續填寫</summary>
             <div class="form-actions">
@@ -1079,7 +1100,11 @@
                       </select>
                     </label>
                   </div>
-                  <div class="compose-field-grid compose-contact-fields" aria-label="寄件聯絡資訊">
+                  <div class="compose-contact-summary">
+                    <div><strong>寄件資訊</strong><p id="composeContactSummaryText">依登入帳號帶入，可自行修改。</p></div>
+                    <button class="secondary-button" id="composeContactToggleBtn" type="button" aria-expanded="false" aria-controls="composeContactFields">修改寄件資訊</button>
+                  </div>
+                  <div class="compose-field-grid compose-contact-fields" id="composeContactFields" aria-label="寄件聯絡資訊">
                     <label class="span-all">
                       寄件人地址
                       <input id="contactAddress" placeholder="依登入帳號所屬公司預設，可編輯" />
@@ -1088,7 +1113,7 @@
                       寄件承辦人
                       <input id="contactOwner" placeholder="依登入帳號姓名預設，可編輯" />
                     </label>
-                    <label>
+                    <label class="compose-contact-required">
                       寄件人電話（請在 # 後填寫分機）
                       <input id="contactPhone" type="tel" inputmode="tel" autocomplete="tel" maxlength="24" pattern="02-66045432\s*#\s*[0-9]+" value="02-66045432 #" />
                     </label>
@@ -1536,13 +1561,13 @@
             <section class="panel electronic-seal-form-panel electronic-seal-application-panel" id="uploadedSealApplicationPanel" aria-labelledby="uploadedSealApplicationTitle">
               <div class="panel-heading tight">
                 <div>
-                  <p class="eyebrow">申請資料</p>
                   <h3 id="uploadedSealApplicationTitle">申請資訊</h3>
                 </div>
-                <span class="status-pill">六項資料</span>
+                <button class="text-button" id="uploadedSealApplicationToggleBtn" type="button" aria-expanded="true" aria-controls="uploadedSealApplicationFields" hidden>收起資料，專心編輯 PDF</button>
               </div>
+              <p class="electronic-seal-application-summary" id="uploadedSealApplicationSummary" hidden></p>
               <form class="compact-form" id="uploadedSealForm">
-                <div class="electronic-seal-application-grid">
+                <div class="electronic-seal-application-grid" id="uploadedSealApplicationFields">
                   <label>申請人<input id="uploadedSealApplicant" autocomplete="name" placeholder="請輸入姓名" required /></label>
                   <div class="electronic-seal-document-type-field" id="uploadedSealApprovalRouteSection">
                     <label>用印文件類型
@@ -1580,7 +1605,6 @@
             <section class="panel electronic-seal-workspace-panel pdf-editor-v2" id="uploadedPdfEditor" data-editor-mode="general" data-editor-locked="false" data-has-document="false" aria-labelledby="uploadedSealWorkspaceTitle">
               <div class="electronic-seal-toolbar pdf-editor-commandbar">
                 <div>
-                  <p class="eyebrow">文件編輯</p>
                   <h3 id="uploadedSealWorkspaceTitle">電子用印編輯</h3>
                   <p id="uploadedSealWorkspaceDescription">上傳後可直接加文字、選擇印章並拖曳到正確位置；原稿不會被覆寫。</p>
                 </div>
@@ -1740,13 +1764,18 @@
                     <label class="editor-property-text">內容<textarea id="uploadedEditorPropertyText" rows="3" maxlength="1000"></textarea></label>
                     <label class="editor-property-shape" hidden>形狀類型<select id="uploadedEditorPropertyShapeType"><option value="rectangle">矩形</option><option value="line">線條</option></select></label>
                     <p class="editor-seal-size-lock" id="uploadedEditorSealSizeLock" hidden></p>
-                    <div class="editor-property-grid">
+                    <details class="editor-precision-settings">
+                      <summary>精準位置與尺寸</summary>
+                      <div class="editor-property-grid">
                       <label>X（pt）<input id="uploadedEditorPropertyX" type="number" step="0.1" /></label>
                       <label>Y（pt）<input id="uploadedEditorPropertyY" type="number" step="0.1" /></label>
                       <label>寬（pt）<input id="uploadedEditorPropertyWidth" type="number" min="1" step="0.1" /></label>
                       <label>高（pt）<input id="uploadedEditorPropertyHeight" type="number" min="1" step="0.1" /></label>
                       <label>旋轉<input id="uploadedEditorPropertyRotation" type="number" min="-359" max="359" step="1" /></label>
                       <label>透明度<input id="uploadedEditorPropertyOpacity" type="number" min="0.05" max="1" step="0.05" /></label>
+                      </div>
+                    </details>
+                    <div class="editor-property-grid">
                       <label>字級<input id="uploadedEditorPropertyFontSize" type="number" min="6" max="144" step="1" /></label>
                       <label>顏色<input id="uploadedEditorPropertyColor" type="color" value="#111827" /></label>
                     </div>
@@ -1776,7 +1805,10 @@
                   <button class="primary-button" id="submitUploadedSealBtn" type="button">確認編輯並送出簽核</button>
                 </div>
               </div>
-              <div class="uploaded-stamp-list" id="uploadedStampSummary"></div>
+              <details class="editor-object-disclosure">
+                <summary>編輯物件清單 <span id="uploadedEditorObjectCount">0 個</span></summary>
+                <div class="uploaded-stamp-list" id="uploadedStampSummary"></div>
+              </details>
             </section>
           </div>
         </section>
@@ -4157,6 +4189,6 @@
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
     <script src="editor-seam.js?v=20260911-r1"></script>
     <script src="editor-a4.js?v=20260911-r1"></script>
-    <script src="app.js?v=20260911-compose-editor-r1"></script>
+    <script src="app.js?v=20260912-audit-fixes-r1"></script>
   </body>
 </html>

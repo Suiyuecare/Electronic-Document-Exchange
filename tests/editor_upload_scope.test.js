@@ -241,6 +241,8 @@ for (const handler of ['main', 'import']) {
 }
 test('image finalize after logout cannot apply a revision or release a newer upload gate', async () => {
   const h = harness(); const gate = deferred(); let reached = false;
+  // Image insertion requires an already loaded destination PDF page.
+  h.context.uploadedSealEditorState.pages = [{ pageId: 'PAGE-A', widthPt: 595.276, heightPt: 841.89 }];
   h.context.requestEditorUpload = async () => h.intent();
   h.context.finalizeEditorUpload = () => (reached = true, gate.promise);
   const pending = h.context.handleUploadedEditorImage(new File(['png'], 'test.png', { type: 'image/png' }));
