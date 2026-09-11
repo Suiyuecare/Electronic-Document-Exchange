@@ -20424,6 +20424,25 @@ def official_dispatch_method(value: str | None) -> str:
     return method
 
 
+def locked_legacy_official_seal_assets(
+    conn: sqlite3.Connection,
+    document: Dict[str, Any],
+    stamp_request: Dict[str, Any],
+) -> List[Tuple[Dict[str, Any], bytes]]:
+    """Validate every placement before rendering any output; keep submit-time versions."""
+    positions = stamp_request.get("stamp_positions") or []
+    if not positions:
+        raise ValueError("official_locked_seal_version_missing")
+    assets = []
+    for position in positions:
+        seal_id = str(position.get("seal_id") or stamp_request.get("seal_id") or "")
+        validate_official_document_seal(conn, seal_id, str(document.get("company_id") or ""), require_current=False)
+        # The single-version verifier checks AV, bytes, hash and calibrated
+        # physical dimensions. Never reuse the primary seal for another slot.
+        assets.append(locked_legacy_official_seal_asset(conn, {**stamp_request, "stamp_positions": [position]}))
+    return assets
+
+
 def official_document_dispatch_method(source_type: str, value: str | None = None) -> str:
     """Keep outgoing letters in-system and return seal-only PDFs to the applicant."""
     if source_type == "uploaded_pdf":
@@ -24390,9 +24409,9 @@ def auto_stamp_official_document(conn: sqlite3.Connection, document_id: str, pay
         # Re-verify the locked revision/seal version and physical dimensions
         # even when recovering an already-written stamped candidate.
         prevalidated_editor = verify_locked_editor_for_stamp(conn, document, stamp_request)
-        prevalidated_legacy_asset: Tuple[Dict[str, Any], bytes] | None = None
+        prevalidated_legacy_assets: List[Tuple[Dict[str, Any], bytes]] = []
         if not prevalidated_editor:
-            prevalidated_legacy_asset = locked_legacy_official_seal_asset(conn, stamp_request)
+            prevalidated_legacy_assets = locked_legacy_official_seal_assets(conn, document, stamp_request)
         candidate = official_stamp_candidate_file(conn, document_id, stamp_request["id"])
         if candidate:
             stamped_file, _ = candidate
@@ -24412,9 +24431,9 @@ def auto_stamp_official_document(conn: sqlite3.Connection, document_id: str, pay
                 seal_file = {"file_hash": "", "file_mime_type": ""}
                 seal_bytes = b""
             else:
-                if not prevalidated_legacy_asset:
+                if not prevalidated_legacy_assets:
                     raise ValueError("official_locked_seal_version_missing")
-                seal_file, seal_bytes = prevalidated_legacy_asset
+                seal_file, seal_bytes = prevalidated_legacy_assets[0]
             source_file = locked_editor["prepared_file"] if locked_editor else official_latest_source_file(conn, document)
             if locked_editor:
                 original_pdf = locked_editor["prepared_bytes"]
@@ -24430,12 +24449,12 @@ def auto_stamp_official_document(conn: sqlite3.Connection, document_id: str, pay
             if locked_editor:
                 stamped_pdf, engine, layout = stamp_prepared_pdf_with_locked_seals(locked_editor)
             else:
-                stamped_pdf, engine, layout = stamp_uploaded_pdf_bytes(
+                stamped_pdf, engine, layout = stamp_legacy_pdf_with_locked_seals(
                     original_pdf,
-                    [{**item, "stamp_no": stamp_no} for item in positions],
+                    positions,
                     stamp_no,
                     text_overlays,
-                    {"data": seal_bytes, "mime_type": seal_file.get("file_mime_type") or ""},
+                    prevalidated_legacy_assets,
                     source_text_on_top=document.get("source_type") == "blank_editor",
                 )
             # Renew immediately before the durable output write.  A worker
@@ -25190,7 +25209,7 @@ def inspect_editor_image(data: bytes, mime_type: str) -> Dict[str, Any]:
         return {"ok": True, "format": actual_format, "widthPx": width, "heightPx": height, "pages": [], "pageCount": 0, "flags": {"executable": False}}
     except ValueError:
         raise
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+    except (UnidentifiedImageError, OSError, EOFError, SyntaxError, Image.DecompressionBombError) as exc:
         raise ValueError("editor_image_invalid") from exc
 
 
@@ -28692,6 +28711,39 @@ def write_stamp_overlay_pdf(
         pdf += f"{offset:010d} 00000 n \n"
     pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF"
     return pdf.encode("latin-1", "replace")
+
+
+def stamp_legacy_pdf_with_locked_seals(
+    original: bytes,
+    positions: List[Dict[str, Any]],
+    stamp_no: str,
+    text_overlays: List[Dict[str, Any]],
+    assets: List[Tuple[Dict[str, Any], bytes]],
+    source_text_on_top: bool = False,
+) -> Tuple[bytes, str, Dict[str, Any]]:
+    """Render each legacy placement with its own validated Seal Vault asset."""
+    if not positions or len(positions) != len(assets):
+        raise ValueError("official_locked_seal_asset_count_mismatch")
+    layers = list(zip(positions, assets))
+    # An underlay is inserted below prior layers. Reverse traversal preserves
+    # saved order while keeping the original letter text above both seals.
+    if source_text_on_top:
+        layers.reverse()
+    output = original
+    engine = ""
+    layout: Dict[str, Any] = {}
+    for index, (position, (seal_file, seal_bytes)) in enumerate(layers):
+        output, engine, layout = stamp_uploaded_pdf_bytes(
+            output,
+            [{**position, "stamp_no": stamp_no}],
+            stamp_no,
+            text_overlays if index == len(layers) - 1 else [],
+            {"data": seal_bytes, "mime_type": seal_file.get("file_mime_type") or ""},
+            source_text_on_top=source_text_on_top,
+        )
+    layout["seal_placement_count"] = len(positions)
+    layout["seal_version_count"] = len({str(item[0].get("id") or item[0].get("file_hash") or "") for item in assets})
+    return output, engine, layout
 
 
 def stamp_uploaded_pdf_bytes(
@@ -35076,6 +35128,22 @@ def supabase_official_stamp_positions(request_id: str) -> List[Dict[str, Any]]:
     return supabase_filter_rows("official_document_stamp_positions", {"request_id": request_id}, order="order_index.asc", limit=100)
 
 
+def supabase_locked_legacy_official_seal_assets(
+    document: Dict[str, Any],
+    stamp_request: Dict[str, Any],
+) -> List[Tuple[Dict[str, Any], bytes]]:
+    """Supabase parity: validate each immutable seal independently before rendering."""
+    positions = stamp_request.get("stamp_positions") or []
+    if not positions:
+        raise ValueError("official_locked_seal_version_missing")
+    assets = []
+    for position in positions:
+        seal_id = str(position.get("seal_id") or stamp_request.get("seal_id") or "")
+        supabase_validate_official_document_seal(seal_id, str(document.get("company_id") or ""), require_current=False)
+        assets.append(supabase_locked_legacy_official_seal_asset({**stamp_request, "stamp_positions": [position]}))
+    return assets
+
+
 def supabase_replace_official_stamp_positions(
     request_id: str,
     seal_id: str,
@@ -39469,9 +39537,9 @@ def supabase_auto_stamp_official_document(document_id: str, payload: Dict[str, A
         # Candidate recovery is still a finalization path; never skip locked
         # manifest, hash, AV and dimension verification.
         prevalidated_editor = supabase_verify_locked_editor_for_stamp(document, stamp_request)
-        prevalidated_legacy_asset: Tuple[Dict[str, Any], bytes] | None = None
+        prevalidated_legacy_assets: List[Tuple[Dict[str, Any], bytes]] = []
         if not prevalidated_editor:
-            prevalidated_legacy_asset = supabase_locked_legacy_official_seal_asset(stamp_request)
+            prevalidated_legacy_assets = supabase_locked_legacy_official_seal_assets(document, stamp_request)
         candidate = supabase_official_stamp_candidate_file(document_id, stamp_request["id"])
         if candidate:
             stamped_file, _ = candidate
@@ -39493,9 +39561,9 @@ def supabase_auto_stamp_official_document(document_id: str, payload: Dict[str, A
                 source_file = locked_editor["prepared_file"]
                 original_pdf = locked_editor["prepared_bytes"]
             else:
-                if not prevalidated_legacy_asset:
+                if not prevalidated_legacy_assets:
                     raise ValueError("official_locked_seal_version_missing")
-                seal_file, seal_bytes = prevalidated_legacy_asset
+                seal_file, seal_bytes = prevalidated_legacy_assets[0]
                 source_file = supabase_official_latest_source_file(document)
                 source_object = supabase_get("file_objects", source_file.get("file_object_id") or "") if source_file.get("file_object_id") else None
                 if not source_object:
@@ -39508,12 +39576,12 @@ def supabase_auto_stamp_official_document(document_id: str, payload: Dict[str, A
             if locked_editor:
                 stamped_pdf, engine, layout = stamp_prepared_pdf_with_locked_seals(locked_editor)
             else:
-                stamped_pdf, engine, layout = stamp_uploaded_pdf_bytes(
+                stamped_pdf, engine, layout = stamp_legacy_pdf_with_locked_seals(
                     original_pdf,
-                    [{**item, "stamp_no": stamp_no} for item in positions],
+                    positions,
                     stamp_no,
                     text_overlays,
-                    {"data": seal_bytes, "mime_type": seal_file.get("file_mime_type") or ""},
+                    prevalidated_legacy_assets,
                     source_text_on_top=document.get("source_type") == "blank_editor",
                 )
             renewed = supabase_claim_official_document_stamp(

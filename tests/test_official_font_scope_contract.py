@@ -53,13 +53,14 @@ class OfficialFontScopeContractTest(unittest.TestCase):
         self.assertIn('faces.length > 0 && faces.every((face) => face.status === "loaded")', javascript)
         self.assertIn("教育部標準楷書載入失敗，已停止列印", javascript)
         self.assertIn('if (!composeView?.classList.contains("active")) return;', javascript)
-        self.assertIn('if (activeMajorRoute === "compose") scheduleOfficialDraftFontRerender();', javascript)
+        self.assertRegex(javascript, r'if \(activeMajorRoute === "compose"\)\s*\{\s*scheduleOfficialDraftFontRerender\(\);')
         self.assertIn('composeView.dataset.officialFontState = "loading";', javascript)
         self.assertIn("font-display: block", css)
         self.assertIn("official_pdf_font_missing_glyphs", javascript)
         self.assertIn("內容含教育部標準楷書不支援的罕見字元", javascript)
-        for asset in ("entry-bootstrap.js", "styles.css", "app.js"):
-            self.assertTrue(asset + "?v=20260911-compose-editor-r1" in html, f"{asset}: shared release tag missing")
+        self.assertIn("entry-bootstrap.js?v=20260911-compose-editor-r1", html)
+        for asset in ("styles.css", "app.js"):
+            self.assertIn(asset + "?v=20260912-audit-fixes-r1", html, f"{asset}: current release tag missing")
 
         editor_rule = css[css.index("#uploadedSealTextInput") : css.index(".draft-preview-heading-actions")]
         self.assertIn("EDoc LXGW WenKai TC", editor_rule)

@@ -37,10 +37,20 @@ class EditorConflictCopyTest(Fixture):
 
     def test_copy_preserves_content_and_assets_but_not_source_revision(self):
         session, source_id, payload = self.source()
-        before = backend.get_official_editor_state(self.conn, source_id, session)
+        with patch.object(backend.time, "time", return_value=1_800_000_000):
+            before = backend.get_official_editor_state(self.conn, source_id, session)
         result = backend.copy_official_editor_conflict(self.conn, source_id, payload, session)
         self.assertNotEqual(result["id"], source_id)
-        self.assertEqual(backend.get_official_editor_state(self.conn, source_id, session), before)
+        with patch.object(backend.time, "time", return_value=1_800_000_001):
+            after = backend.get_official_editor_state(self.conn, source_id, session)
+        # Read responses refresh short-lived capabilities. Crossing a second
+        # must not be mistaken for mutation of the immutable source revision.
+        self.assertNotEqual(after["assets"][0]["url"], before["assets"][0]["url"])
+        for response in (before, after):
+            for asset in response["assets"]:
+                self.assertTrue(asset.pop("url").startswith(f"/api/official-documents/{source_id}/editor-assets/"))
+                self.assertTrue(asset.pop("expiresAt"))
+        self.assertEqual(after, before)
         reopened = backend.get_official_editor_state(self.conn, result["id"], session)
         self.assertEqual(reopened["state"], result["state"])
         self.assertEqual(len(reopened["state"]["elements"]), 2)

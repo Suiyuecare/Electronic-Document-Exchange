@@ -924,6 +924,8 @@ let composeCloudEpoch = 0;
 let composeCloudDraftId = "";
 let composeCloudConflict = false;
 let composeCloudRows = [];
+let composeRecoveryCandidate = null;
+let composeRecoveryDismissedIdentity = "";
 const composeCloudRevisions = new Map();
 const composeCloudSavedSnapshots = new Map();
 let composeOfficialContentRevision = null;
@@ -2727,7 +2729,10 @@ function setView(target) {
   if (activeNavItem && navList && mobileNavigationIsCompact()) closeMobileNavigation({ restoreFocus: false });
   document.querySelector("#pageTitle").textContent = simpleRouteTitle(activeMajorRoute);
   updateHeaderStatus();
-  if (activeMajorRoute === "compose") scheduleOfficialDraftFontRerender();
+  if (activeMajorRoute === "compose") {
+    scheduleOfficialDraftFontRerender();
+    prepareComposeDraftRecovery();
+  }
   if (target === "approvalLog" && hasAuthenticatedBackendSession()) void loadApprovalProgressFromBackend();
   if (target === "archive" && hasAuthenticatedBackendSession()) void loadArchiveRecordsFromBackend();
   if (target === "contractSeal" || target === "electronicSeal") {
@@ -3147,7 +3152,7 @@ const mergedNavigationParents = Object.freeze({
 
 const integratedMajorPageGroups = Object.freeze({
   dashboard: [
-    ["notifications", "全部待辦與通知", true]
+    ["notifications", "通知紀錄", false]
   ],
   compose: [],
   electronicSeal: [],
@@ -3219,13 +3224,15 @@ function initializeIntegratedMajorPages() {
       const baseContent = document.createElement("div");
       baseContent.className = "integrated-page-content integrated-settings-base";
       Array.from(parent.children)
-        .filter((child) => !child.classList.contains("section-header"))
+        .filter((child) => !child.classList.contains("section-header") && !child.classList.contains("settings-governance-summary"))
         .forEach((child) => baseContent.append(child));
       const baseDetails = document.createElement("details");
       baseDetails.className = "integrated-page-section";
       baseDetails.dataset.integratedBase = "settings";
-      baseDetails.append(integratedPageSummary("一般設定"), baseContent);
-      setIntegratedSectionState(baseDetails, true);
+      baseDetails.append(integratedPageSummary("API、交換中心與進階設定"), baseContent);
+      setIntegratedSectionState(baseDetails, false);
+      const baseControls = parent.querySelector("[data-settings-base-controls]");
+      if (baseControls) baseContent.prepend(baseControls);
       baseDetails.addEventListener("toggle", () => {
         setIntegratedSectionState(baseDetails, baseDetails.open);
         if (!baseDetails.open) return;
@@ -3262,6 +3269,17 @@ function initializeIntegratedMajorPages() {
     });
     parent.append(host);
   });
+  const notifications = document.querySelector("#notifications");
+  if (notifications && !notifications.querySelector(".notification-secondary-overview")) {
+    const overview = document.createElement("details");
+    overview.className = "notification-secondary-overview";
+    overview.append(integratedPageSummary("提醒分類與通道狀態"));
+    [".metrics-grid", ".reminder-board", ".jagent-status-strip"].forEach((selector) => {
+      const content = notifications.querySelector(`:scope > ${selector}`);
+      if (content) overview.append(content);
+    });
+    notifications.append(overview);
+  }
 }
 
 let settingsProgressiveDisclosureInitialized = false;
@@ -3272,10 +3290,10 @@ function initializeSettingsProgressiveDisclosure() {
   if (!host) return;
   settingsProgressiveDisclosureInitialized = true;
   const definitions = [
-    ["company_people", "公司與人員", ["__base__", "accounts", "seals"]],
+    ["company_people", "公司與人員", ["accounts", "seals"]],
     ["approval_rules", "簽核與公文規則", ["workflow"]],
     ["notifications_dispatch", "通知與寄送", ["exchange"]],
-    ["security_operations", "安全與維運", ["security", "fileSecurity", "jobs", "database", "complianceOps", "ops"]]
+    ["security_operations", "安全與維運", ["__base__", "security", "fileSecurity", "jobs", "database", "complianceOps", "ops"]]
   ];
   const groupsHost = document.createElement("div");
   groupsHost.className = "settings-governance-groups";
@@ -3288,6 +3306,14 @@ function initializeSettingsProgressiveDisclosure() {
     summary.className = "settings-governance-summary";
     summary.textContent = label;
     group.append(summary);
+    if (key === "company_people") {
+      const syncSummary = document.createElement("div");
+      syncSummary.className = "settings-finance-sync-summary";
+      syncSummary.id = "settingsFinanceSyncSummary";
+      syncSummary.setAttribute("role", "status");
+      syncSummary.setAttribute("aria-live", "polite");
+      group.append(syncSummary);
+    }
     routes.forEach((route) => {
       const section = route === "__base__"
         ? host.querySelector('.integrated-page-section[data-integrated-base="settings"]')
@@ -3303,6 +3329,17 @@ function initializeSettingsProgressiveDisclosure() {
     groupsHost.append(group);
   });
   host.append(groupsHost);
+  const notificationPanel = document.querySelector("#settingsNotificationPanel");
+  const notificationGroup = groupsHost.querySelector('[data-settings-governance-group="notifications_dispatch"]');
+  if (notificationPanel && notificationGroup) {
+    const notificationDetails = document.createElement("details");
+    notificationDetails.className = "integrated-page-section";
+    notificationDetails.dataset.integratedBase = "settings";
+    notificationDetails.append(integratedPageSummary("通知規則與派送通道"), notificationPanel);
+    notificationGroup.append(notificationDetails);
+    notificationDetails.addEventListener("toggle", () => setIntegratedSectionState(notificationDetails, notificationDetails.open));
+  }
+  renderFinanceDirectorySyncStatus();
 }
 
 function applySettingsGovernanceAccess() {
@@ -3728,7 +3765,7 @@ function dailyActionForFlow(flow) {
   };
 }
 
-function dailyActionItems() {
+function dailyActionItems(limit = 3) {
   const role = activeRole();
   const kind = identityKindForRole(role);
   const flows = kind === "executive"
@@ -3854,7 +3891,7 @@ function dailyActionItems() {
   }
   return unique
     .sort((a, b) => b.priority - a.priority || String(a.meta).localeCompare(String(b.meta), "zh-Hant"))
-    .slice(0, 3);
+    .slice(0, limit);
 }
 
 function openDailyAction(index) {
@@ -3889,6 +3926,7 @@ function openDailyAction(index) {
       approvalLogFilter = official.delegation_id ? "delegated" : approvalRecordIsOverdue({ officialDocument: official }) ? "overdue" : "my_pending";
       setView("approvalLog");
       renderApprovalLog();
+      openApprovalLogMobileDetail();
       void ensureOfficialDocumentDetail(official.id).then(renderApprovalLog);
     } else if (official && officialDocumentHasEditorV2(official)) {
       void openOfficialDocumentEditorReview(official.id, "edited");
@@ -3907,26 +3945,56 @@ function openDailyAction(index) {
   setView(isRouteAllowed(item.target) ? item.target : "notifications");
 }
 
+let dailyActionExpanded = false;
+
+function renderHomeMyCases() {
+  const list = document.querySelector("#homeMyCasesList");
+  if (!list) return;
+  const userId = authState?.user?.id;
+  const records = approvalLogRecords()
+    .filter((record) => userId && record.officialDocument?.applicant_id === userId)
+    .sort((left, right) => String(right.officialDocument.updated_at || right.officialDocument.created_at || "").localeCompare(String(left.officialDocument.updated_at || left.officialDocument.created_at || "")))
+    .slice(0, 3);
+  list.innerHTML = records.length ? records.map((record) => `<button class="home-case-row" type="button" data-home-case="${escapeHtml(record.task.id)}"><strong>${escapeHtml(record.doc?.subject || record.task.title)}</strong><span>${escapeHtml(record.task.status)}</span><small>${escapeHtml(record.currentStep?.title || record.task.step)}</small></button>`).join("") : '<p class="empty-text">尚無公文或用印申請；建立後可在這裡接續查看。</p>';
+  list.querySelectorAll("[data-home-case]").forEach((button) => button.addEventListener("click", () => {
+    const record = records.find((entry) => entry.task.id === button.dataset.homeCase);
+    if (!record) return;
+    selectedWorkflowTaskId = record.task.id;
+    approvalLogFilter = approvalProgressCategory(record);
+    setView("approvalLog");
+    renderApprovalLog();
+    openApprovalLogMobileDetail();
+  }));
+}
+
 function renderDailyActionCenter() {
   const grid = document.querySelector("#dailyActionGrid");
   const count = document.querySelector("#dailyActionCount");
   if (!grid || !count) return;
-  dailyActionCache = dailyActionItems();
-  const issueCount = dailyActionCache.filter((item) => item.tone === "issue").length;
-  count.textContent = issueCount ? `先處理 ${dailyActionCache.length} 件 · ${issueCount} 急` : `先處理 ${dailyActionCache.length} 件`;
+  const allItems = dailyActionItems(Infinity);
+  dailyActionCache = dailyActionExpanded ? allItems : allItems.slice(0, 5);
+  const issueCount = allItems.filter((item) => item.tone === "issue").length;
+  count.textContent = issueCount ? `${allItems.length} 件 · ${issueCount} 件需優先處理` : `${allItems.length} 件`;
+  const expandButton = document.querySelector("#dailyActionExpandBtn");
+  if (expandButton) {
+    expandButton.hidden = allItems.length <= 5;
+    expandButton.textContent = dailyActionExpanded ? "收合待辦" : `顯示全部 ${allItems.length} 件`;
+    expandButton.setAttribute("aria-expanded", String(dailyActionExpanded));
+    expandButton.onclick = () => { dailyActionExpanded = !dailyActionExpanded; renderDailyActionCenter(); };
+  }
   grid.innerHTML = dailyActionCache.length ? dailyActionCache.map((item, index) => `
     <button class="daily-action-item ${item.tone === "issue" ? "issue" : ""}" type="button" data-daily-action="${index}">
       <span class="daily-action-rank">${index + 1}</span>
-      <span class="identity-item-badge">${item.badge}</span>
-      <strong>${item.title}</strong>
-      <small>${item.meta}</small>
-      <p>${item.body}</p>
-      <em>${item.action}</em>
+      <span class="identity-item-badge">${escapeHtml(item.badge)}</span>
+      <strong>${escapeHtml(item.title)}</strong>
+      <small>${escapeHtml(item.meta)}</small>
+      <p>${escapeHtml(item.body)}</p>
+      <em>${escapeHtml(item.action)}</em>
     </button>
   `).join("") : `
     <article class="daily-action-empty">
       <strong>目前沒有待辦</strong>
-      <button class="secondary-button" type="button" data-daily-action-empty="compose">撰寫公文</button>
+      <p>新的簽核、退回與派文會顯示在這裡。</p>
     </article>
   `;
   if (internalDispatchLoadStatus === "error") {
@@ -3936,7 +4004,7 @@ function renderDailyActionCenter() {
   document.querySelectorAll("[data-daily-action]").forEach((button) => {
     button.addEventListener("click", () => openDailyAction(button.dataset.dailyAction));
   });
-  document.querySelector("[data-daily-action-empty]")?.addEventListener("click", () => setView("compose"));
+  renderHomeMyCases();
 }
 
 function dashboardRoleData() {
@@ -5473,6 +5541,12 @@ function formatFinanceDirectoryTime(value) {
 }
 
 function renderFinanceDirectorySyncStatus() {
+  const home = document.querySelector("#settingsFinanceSyncSummary");
+  if (home) {
+    const label = { idle: "等待同步", syncing: "同步中", synced: "Finance 已同步", error: "同步失敗" }[financeDirectoryState.status] || "等待同步";
+    home.classList.toggle("issue", financeDirectoryState.status === "error");
+    home.innerHTML = `<strong>${escapeHtml(label)}</strong><span>公司、部門與人員只需在會計系統維護。</span><small>最後同步：${escapeHtml(formatFinanceDirectoryTime(financeDirectoryState.syncedAt))}</small>${financeDirectoryState.error ? `<p>${escapeHtml(financeDirectoryState.error)}</p>` : ""}`;
+  }
   const source = document.querySelector("#financeDirectorySource");
   const syncedAt = document.querySelector("#financeDirectoryLastSynced");
   const status = document.querySelector("#financeDirectoryStatus");
@@ -7267,7 +7341,8 @@ function writeComposeAutosave() {
   }
   const saved = {
     updatedAt: new Date().toISOString(),
-    snapshot
+    snapshot,
+    cloudRevision: composeCloudDraftId ? composeCloudRevisions.get(composeCloudDraftId) ?? null : null
   };
   try {
     localStorage.setItem(composeAutosaveStorageKey, JSON.stringify(saved));
@@ -7297,6 +7372,8 @@ function resetComposeAsyncScope() {
   composeCloudOperation = null;
   composeCloudDraftId = "";
   composeCloudConflict = false;
+  composeRecoveryCandidate = null;
+  composeRecoveryDismissedIdentity = composeAutosaveIdentity();
   composeAiOperation = null;
   composeAiSuggestion = null;
   composeAiUndo = null;
@@ -7332,6 +7409,13 @@ async function saveComposeCloudDraft({ archived = false } = {}) {
       if (!valid()) return null;
       composeCloudRevisions.set(draftId, result.revision);
       composeCloudSavedSnapshots.set(draftId, serialized);
+      // Keep the local recovery token in sync without triggering another
+      // autosave. It must never be inferred from a newer cloud/dashboard row.
+      try {
+        localStorage.setItem(composeAutosaveStorageKey, JSON.stringify({
+          updatedAt: new Date().toISOString(), snapshot: composeRawSnapshot(), cloudRevision: result.revision
+        }));
+      } catch (_) { /* Cloud is saved even when local storage is unavailable. */ }
       composeSaveState = { tone: "saved", title: "私人雲端草稿已保存", detail: "可在其他裝置從「雲端草稿」繼續；尚未送簽。未上傳的附件請在原裝置完成上傳。" };
       renderComposeSaveStatus();
       return result;
@@ -7361,14 +7445,18 @@ async function refreshComposeCloudDrafts() {
     const select = document.querySelector("#composeCloudDraftSelect");
     if (select) select.innerHTML = `<option value="">選擇私人雲端草稿</option>` + composeCloudRows.map(row => `<option value="${escapeHtml(row.id)}">${escapeHtml(row.snapshot?.values?.["#subject"] || row.snapshot?.values?.["#documentPurpose"] || "尚未命名")} · ${escapeHtml(row.updatedAt || "")}</option>`).join("");
     document.querySelector("#composeCloudDraftNotice")?.replaceChildren(document.createTextNode(`共 ${composeCloudRows.length} 份私人草稿；不會自動蓋掉目前輸入。`));
+    renderComposeRecoveryPrompt();
   } catch (_) {
     if (scope === identity()) document.querySelector("#composeCloudDraftNotice")?.replaceChildren(document.createTextNode("雲端草稿暫時無法讀取，請按重新載入。"));
   }
 }
 
-async function loadComposeCloudDraft() {
-  const row = composeCloudRows.find(item => item.id === document.querySelector("#composeCloudDraftSelect")?.value);
+async function loadComposeCloudDraft(draftId = document.querySelector("#composeCloudDraftSelect")?.value) {
+  const row = composeCloudRows.find(item => item.id === draftId);
   if (!row) return showToast("請先選擇一份雲端草稿。");
+  if (row.snapshot?.userId !== authState?.user?.id || row.snapshot?.companyId !== authState?.user?.company_id) {
+    return showToast("登入身分或公司已切換，請重新載入私人草稿清單。");
+  }
   if (composeSnapshotHasMeaningfulContent(composeRawSnapshot()) && !window.confirm("載入雲端草稿會取代目前畫面。請先確認目前內容已保存；是否繼續？")) return;
   // A FileList belongs to the currently open draft, never to the snapshot
   // selected from another device/document. Do not carry it across this switch.
@@ -7376,13 +7464,70 @@ async function loadComposeCloudDraft() {
   if (attachments) attachments.value = "";
   document.querySelector("#composeAttachmentUploadStatus")?.replaceChildren();
   resetComposeAsyncScope();
-  localStorage.setItem(composeAutosaveStorageKey, JSON.stringify({ updatedAt: row.updatedAt, snapshot: { ...row.snapshot, cloudDraftId: row.id } }));
+  const saved = { updatedAt: row.updatedAt, snapshot: { ...row.snapshot, cloudDraftId: row.id }, cloudRevision: row.revision };
+  try { localStorage.setItem(composeAutosaveStorageKey, JSON.stringify(saved)); } catch (_) { /* Recovery still works without local storage. */ }
   composeAutosaveRestoredForIdentity = "";
-  restoreComposeAutosave();
+  restoreComposeAutosave(saved);
   composeCloudDraftId = row.id;
   composeCloudRevisions.set(row.id, row.revision);
   composeCloudSavedSnapshots.set(row.id, JSON.stringify(composeRawSnapshot()));
   showToast("已載入私人雲端草稿；尚未上傳的附件請重新選擇。");
+}
+
+function renderComposeRecoveryPrompt() {
+  const target = document.querySelector("#composeResumeDraft");
+  if (!target) return;
+  const identity = composeAutosaveIdentity();
+  target.hidden = true;
+  composeRecoveryCandidate = null;
+  if (!identity || identity === composeRecoveryDismissedIdentity || currentComposeDraftId || composeCloudDraftId
+      || composeSnapshotHasMeaningfulContent(composeRawSnapshot())) return;
+  const saved = readComposeAutosave();
+  const cloud = composeCloudRows.find(row => row.snapshot?.userId === authState?.user?.id
+    && row.snapshot?.companyId === authState?.user?.company_id);
+  if (!saved && !cloud) return;
+  composeRecoveryCandidate = { identity, token: authState?.token || "", saved, cloudId: cloud?.id || "" };
+  const snapshot = saved?.snapshot || cloud.snapshot;
+  const title = snapshot.values?.["#subject"] || snapshot.values?.["#documentPurpose"] || "尚未命名公文";
+  const description = document.querySelector("#composeResumeDraftDescription");
+  if (description) description.textContent = `${String(title).slice(0, 80)} · ${saved ? "此瀏覽器上次內容" : "私人雲端草稿"}。不會自動取代目前輸入；尚未上傳的附件須重新選擇。`;
+  target.hidden = false;
+}
+
+function prepareComposeDraftRecovery() {
+  if (!authState?.token) return;
+  renderComposeRecoveryPrompt();
+  void refreshComposeCloudDrafts();
+}
+
+async function resumeComposeDraft() {
+  const candidate = composeRecoveryCandidate;
+  if (!candidate || candidate.identity !== composeAutosaveIdentity() || candidate.token !== (authState?.token || "")) return;
+  if (!candidate.saved) return loadComposeCloudDraft(candidate.cloudId);
+  if (candidate.saved.snapshot?.cloudDraftId && !Number.isInteger(candidate.saved.cloudRevision)) {
+    // Older clients did not persist their optimistic-lock token. Only an exact
+    // snapshot match can recover that token; never adopt a newer edited row.
+    const scope = composeRequestScope();
+    await refreshComposeCloudDrafts();
+    if (scope !== composeRequestScope() || candidate.identity !== composeAutosaveIdentity() || candidate.token !== (authState?.token || "")
+        || composeRecoveryDismissedIdentity === candidate.identity) return;
+  }
+  if (composeSnapshotHasMeaningfulContent(composeRawSnapshot()) && !window.confirm("目前已有輸入，是否以選擇的上次草稿取代？")) return;
+  const saved = candidate.saved;
+  resetComposeAsyncScope();
+  const attachments = document.querySelector("#attachments");
+  if (attachments) attachments.value = "";
+  document.querySelector("#composeAttachmentUploadStatus")?.replaceChildren();
+  composeAutosaveRestoredForIdentity = "";
+  restoreComposeAutosave(saved);
+  showToast("已接回上次草稿。尚未上傳的附件請重新選擇；不同裝置版本有衝突時不會覆蓋。");
+}
+
+function dismissComposeRecovery() {
+  composeRecoveryDismissedIdentity = composeAutosaveIdentity();
+  composeRecoveryCandidate = null;
+  document.querySelector("#composeResumeDraft")?.setAttribute("hidden", "");
+  // The previous private draft remains available in the cloud selector.
 }
 
 function keepComposeAsNewCloudDraft() {
@@ -7443,14 +7588,32 @@ function clampComposePlacement(value, fallback) {
   return Number.isFinite(number) ? Math.min(96, Math.max(4, number)) : fallback;
 }
 
-function restoreComposeAutosave() {
+function composePersistedSnapshotKey(snapshot = {}) {
+  // Match compose_resilience.draft_payload's persisted data, excluding only
+  // client-only route/role/cache hints. Every form field and stamp position is
+  // compared; a different saved edit must retain conflict protection.
+  return canonicalEditorJson({
+    schemaVersion: 2,
+    userId: snapshot.userId || "",
+    companyId: snapshot.companyId || "",
+    values: snapshot.values || {},
+    draftRequestId: String(snapshot.draftRequestId || "").slice(0, 160),
+    currentComposeDraftId: String(snapshot.currentComposeDraftId || "").slice(0, 160),
+    officialContentRevision: snapshot.officialContentRevision ?? null,
+    officialDocumentId: String(snapshot.officialDocumentId || "").slice(0, 160),
+    sealPlacements: snapshot.sealPlacements || {}
+  });
+}
+
+function restoreComposeAutosave(savedOverride = null) {
   const identity = composeAutosaveIdentity();
   if (!identity || composeAutosaveRestoredForIdentity === identity) return false;
   composeAutosaveRestoredForIdentity = identity;
   void refreshComposeCloudDrafts();
-  const saved = readComposeAutosave();
+  const saved = savedOverride || readComposeAutosave();
   if (!saved) return false;
   const snapshot = saved.snapshot;
+  if (`${snapshot?.userId || ""}:${snapshot?.companyId || ""}` !== identity) return false;
   const values = snapshot.values || {};
   const approvalCategory = String(values["#composeApprovalCategorySelect"] || snapshot.approval?.documentCategory || "").slice(0, 300);
   renderApprovalCategorySelect("#composeApprovalCategorySelect", approvalCategory, { requireSelection: true });
@@ -7487,6 +7650,10 @@ function restoreComposeAutosave() {
   }
   composeDraftRequestId = /^OD-[0-9a-f-]{36}$/i.test(snapshot.draftRequestId || "") ? snapshot.draftRequestId : "";
   composeCloudDraftId = /^OD-[0-9a-f-]{36}$/i.test(snapshot.cloudDraftId || "") ? snapshot.cloudDraftId : "";
+  if (composeCloudDraftId) {
+    const matchingCloud = composeCloudRows.find(row => row.id === composeCloudDraftId && composePersistedSnapshotKey(row.snapshot) === composePersistedSnapshotKey(snapshot));
+    composeCloudRevisions.set(composeCloudDraftId, Number.isInteger(saved.cloudRevision) ? saved.cloudRevision : Number(matchingCloud?.revision) || 0);
+  }
   composeOfficialContentRevision = Number.isInteger(snapshot.officialContentRevision) ? snapshot.officialContentRevision : null;
   syncComposeElectronicExchangeMode();
   draftConfirmed = false;
@@ -7520,6 +7687,7 @@ function renderComposeSaveStatus() {
   if (actions) actions.hidden = composeSaveState.tone !== "error";
   const fork = document.querySelector("#composeKeepNewDraftBtn");
   if (fork) fork.hidden = !composeCloudConflict && !/版本|裝置|修改/.test(composeSaveState.title || "");
+  renderComposeRecoveryPrompt();
 }
 
 function renderComposeCompanyOptions(preferAccount = false) {
@@ -7992,6 +8160,31 @@ function applyComposeContactDefaults(force = false) {
   renderDraftPreview();
 }
 
+function renderComposeContactSummary() {
+  const fields = document.querySelector("#composeContactFields");
+  const toggle = document.querySelector("#composeContactToggleBtn");
+  const summary = document.querySelector("#composeContactSummaryText");
+  if (!fields || !toggle || !summary) return;
+  const value = selector => document.querySelector(selector)?.value.trim() || "";
+  const owner = value("#contactOwner"), address = value("#contactAddress"), email = value("#contactEmail");
+  const hasMissing = !owner || !address || !email || document.querySelector("#contactEmail")?.validity?.typeMismatch === true;
+  const hasError = [...fields.querySelectorAll("input")].some(input => input.id !== "contactPhone" && input.getAttribute("aria-invalid") === "true");
+  const expanded = toggle.getAttribute("aria-expanded") === "true" || hasMissing || hasError;
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.textContent = expanded ? "收合寄件資訊" : "修改寄件資訊";
+  summary.textContent = [owner, email, address].filter(Boolean).join(" · ") || "請補齊寄件資訊。";
+  fields.querySelectorAll("label").forEach(label => {
+    label.hidden = !expanded && !label.classList.contains("compose-contact-required");
+  });
+}
+
+function toggleComposeContactSummary() {
+  const toggle = document.querySelector("#composeContactToggleBtn");
+  if (!toggle) return;
+  toggle.setAttribute("aria-expanded", String(toggle.getAttribute("aria-expanded") !== "true"));
+  renderComposeContactSummary();
+}
+
 function setAiDraftStatus(text, tone = "") {
   const status = document.querySelector("#aiDraftStatus");
   if (!status) return;
@@ -8461,6 +8654,10 @@ function renderComposeValidationSummary(invalid = []) {
 function focusComposeValidationField(selector) {
   const element = document.querySelector(selector);
   if (!element) return;
+  if (element.closest("#composeContactFields")) {
+    document.querySelector("#composeContactToggleBtn")?.setAttribute("aria-expanded", "true");
+    renderComposeContactSummary();
+  }
   element.scrollIntoView({ behavior: "smooth", block: "center" });
   if (typeof element.focus === "function") element.focus({ preventScroll: true });
   element.classList.add("attention-pulse");
@@ -8693,6 +8890,7 @@ function renderComposeStepper() {
   const action = document.querySelector("#composeNextAction");
   if (!stepper) return;
   renderComposeFieldHints();
+  renderComposeContactSummary();
   const steps = composeStepState();
   const activeIndex = composeStepIndex();
   stepper.innerHTML = `
@@ -8701,7 +8899,7 @@ function renderComposeStepper() {
         <button class="compose-progress-step ${item.done ? "done" : ""} ${index === activeIndex ? "active" : ""}" type="button" data-compose-step="${item.key}">
           <span>${index + 1}</span>
           <strong>${item.label}</strong>
-          <small>${item.body}</small>
+          <small class="sr-only">${item.body}</small>
         </button>
       `).join("")}
     </div>
@@ -11805,29 +12003,54 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
   const company = composeCompanyForOfficialApplication(data.companyName);
   if (!company?.id) throw new Error("登入帳號尚未連動 Finance 公司，請先聯絡管理員更新人員主檔。");
   const requiresStamp = data.outputMode !== "electronic";
+  const documentId = options.documentId || doc.officialDocumentId || "";
+  if (requiresStamp && documentId && !Array.isArray(doc.officialStampPositions)) {
+    const existing = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
+    requireScope();
+    doc.officialStampPositions = existing.stamp_request?.stamp_positions || [];
+    // This read is only for immutable stamp identities, never for upgrading
+    // the expected content revision held by this editing session.
+  }
+  const existingPositions = doc.officialStampPositions || [];
   let sealId = "";
   let stampPositions = [];
   if (requiresStamp) {
-    const primaryKind = data.largeSealType !== "無" ? "large" : data.smallSealType !== "無" ? "small" : "";
-    if (!primaryKind && options.submit !== false) throw new Error("實體公文請選擇要使用的印章。");
-    if (primaryKind) {
-      const sealType = primaryKind === "large" ? data.largeSealType : data.smallSealType;
+    const selectedKinds = ["large", "small"].filter(kind => {
+      const value = kind === "large" ? data.largeSealType : data.smallSealType;
+      return value && value !== "無";
+    });
+    if (!selectedKinds.length && options.submit !== false) throw new Error("實體公文請選擇要使用的印章。");
+    const seals = selectedKinds.length ? await backendRequest(`/companies/${encodeURIComponent(company.id)}/seals`) : [];
+    requireScope();
+    for (const kind of selectedKinds) {
+      const sealType = kind === "large" ? data.largeSealType : data.smallSealType;
       const category = composeSealCategory(sealType);
-      const sizeType = primaryKind === "large" ? "large_seal" : "small_seal";
-      const seals = await backendRequest(`/companies/${encodeURIComponent(company.id)}/seals`);
+      const sizeType = kind === "large" ? "large_seal" : "small_seal";
       const matchingSeals = (Array.isArray(seals) ? seals : []).filter((item) => (
         item.seal_category === category
         && item.seal_size_type === sizeType
         && item.is_active !== false
         && item.is_active !== 0
       ));
-      const seal = matchingSeals.find(officialSealHasCurrentFile) || (options.submit === false ? matchingSeals[0] : null);
-      if (!seal && options.submit !== false) throw new Error(`${sealType}${primaryKind === "large" ? "大章" : "小章"}尚未上傳可用版本，請先由總務至印章檔案庫上傳。`);
+      const seal = matchingSeals.find(item => existingPositions.some(position => position.seal_id === item.id && position.locked_seal_file_id))
+        || matchingSeals.find(officialSealHasCurrentFile) || (options.submit === false ? matchingSeals[0] : null);
+      if (!seal && options.submit !== false) throw new Error(`${sealType}${kind === "large" ? "大章" : "小章"}尚未上傳可用版本，請先由總務至印章檔案庫上傳。`);
       if (seal) {
-        sealId = seal.id;
-        const placement = data.sealPlacements[primaryKind];
-        const geometry = companySealFixedGeometry(seal || sizeType);
-        stampPositions = [{
+        if (!sealId) sealId = seal.id;
+        const placement = data.sealPlacements[kind];
+        const previous = existingPositions.find(position => position.seal_id === seal.id && !stampPositions.some(item => item.id === position.id));
+        const geometry = previous?.locked_seal_file_id
+          ? { widthPt: previous.width, heightPt: previous.height, sealSizeType: seal.seal_size_type }
+          : companySealFixedGeometry(seal || sizeType);
+        stampPositions.push({
+          ...(previous ? {
+            id: previous.id,
+            locked_seal_file_id: previous.locked_seal_file_id || "",
+            locked_seal_sha256: previous.locked_seal_sha256 || "",
+            locked_render_width_pt: previous.locked_render_width_pt,
+            locked_render_height_pt: previous.locked_render_height_pt,
+            locked_dimension_policy_version: previous.locked_dimension_policy_version || ""
+          } : {}),
           seal_id: seal.id,
           page: Math.max(1, Number(placement.page) || 1),
           x: Math.round((Number(placement.x) || 70) / 100 * 595),
@@ -11836,9 +12059,17 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
           height: geometry.heightPt,
           seal_size_type: geometry.sealSizeType,
           size_locked: true,
-          order_index: 1
-        }];
+          order_index: stampPositions.length + 1
+        });
       }
+    }
+    const removed = existingPositions.some(previous => !stampPositions.some(position => position.id === previous.id));
+    const replacements = stampPositions.filter(position => !position.id);
+    if (removed && replacements.length) {
+      if (!window.confirm("已變更印章選擇。新的章位將綁定目前印章版本與核定尺寸；保留的章位仍沿用原版本。是否確認變更？")) {
+        throw new Error("已取消印章變更，尚未保存；原草稿與印章版本仍保留。");
+      }
+      replacements.forEach(position => { position.rebind_current = true; });
     }
   }
   const payload = {
@@ -11898,7 +12129,6 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
     },
     submit: false
   };
-  const documentId = options.documentId || doc.officialDocumentId || "";
   requireScope();
   // A recovered snapshot's token is authoritative, even when the dashboard
   // cache already knows about a newer version edited on another device.
@@ -11925,6 +12155,7 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
     requireScope();
   }
   doc.officialDocumentId = result.id;
+  doc.officialStampPositions = result.stamp_request?.stamp_positions || [];
   doc.contentRevision = Number(result.content_revision || 0);
   composeOfficialContentRevision = doc.contentRevision;
   const assignedNo = result.dispatch_no || officialComposeMetadata(result).dispatch_no || "";
@@ -14184,7 +14415,7 @@ function renderFileSecurityRows() {
   document.querySelector("#fileSecurityCount").textContent = `${rows.length} 筆`;
   document.querySelector("#fileSecurityRows").innerHTML = rows.map((item) => `
     <tr class="${item.id === selectedFileSecurityId ? "selected-row" : ""}">
-      <td><input class="file-security-check" type="checkbox" value="${item.id}" /></td>
+      <td><label class="settings-row-selection"><input class="file-security-check" type="checkbox" value="${escapeDraftHtml(item.id)}" aria-label="選取檔案 ${escapeDraftHtml(item.fileName)}" /></label></td>
       <td><button class="text-button row-select" type="button" data-file-select="${item.id}">${item.fileName}</button><small>${item.version} · ${item.hash}</small></td>
       <td>${item.docNo}<small>${item.agency}</small></td>
       <td>${item.sizeMb.toFixed(1)} MB<small>${isFileOverLimit(item) ? "超過限制" : "符合限制"}</small></td>
@@ -15007,7 +15238,7 @@ function renderAccountRows() {
   document.querySelector("#accountListCount").textContent = `${rows.length} 筆`;
   document.querySelector("#accountRows").innerHTML = rows.map((account) => `
     <tr class="${account.id === selectedAccountId ? "selected-row" : ""}">
-      <td><input class="account-check" type="checkbox" value="${account.id}" /></td>
+      <td><label class="settings-row-selection"><input class="account-check" type="checkbox" value="${escapeDraftHtml(account.id)}" aria-label="選取帳號 ${escapeDraftHtml(account.name)}" /></label></td>
       <td><button class="text-button row-select" type="button" data-account-select="${account.id}">${account.name}</button><small>${account.email}</small></td>
       <td>${account.unit}<small>${account.title} · ${accountJobLevel(account)}</small></td>
       <td>${account.role}</td>
@@ -19258,6 +19489,12 @@ function renderNotificationSummary() {
   document.querySelector("#noticeDueSoonCount").textContent = reminderItems("dueSoon").length;
   document.querySelector("#noticeReturnedCount").textContent = reminderItems("returned").length;
   document.querySelector("#noticeFailedCount").textContent = reminderItems("failed").length;
+  const notificationSummary = document.querySelector('[data-integrated-route="notifications"] > summary > span');
+  if (notificationSummary) {
+    const unread = notificationItems.filter((item) => item.status === "未讀").length;
+    const attention = reminderItems("dueSoon").length + reminderItems("returned").length + reminderItems("failed").length;
+    notificationSummary.textContent = `通知紀錄 · ${unread} 則未讀${attention ? ` · ${attention} 則需留意` : ""}`;
+  }
   document.querySelector("#reminderActiveLabel").textContent = labels[notificationFilter] || labels.all;
   document.querySelectorAll("[data-reminder-filter]").forEach((card) => {
     card.classList.toggle("active", card.dataset.reminderFilter === notificationFilter);
@@ -21820,6 +22057,18 @@ function approvalRecordTimeMeta({ officialDocument, submittedAt, doneCount = 0, 
   };
 }
 
+function openApprovalLogMobileDetail() {
+  const page = document.querySelector("#approvalLog");
+  if (!page) return;
+  page.dataset.mobileDetail = "true";
+  if (window.matchMedia("(max-width: 760px)").matches) {
+    const panel = document.querySelector("#approvalLogDetailPanel");
+    panel?.setAttribute("tabindex", "-1");
+    panel?.focus({ preventScroll: true });
+    panel?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+}
+
 function renderApprovalLog() {
   const list = document.querySelector("#approvalLogList");
   const detail = document.querySelector("#approvalLogDetail");
@@ -21856,12 +22105,11 @@ function renderApprovalLog() {
   document.querySelector("#approvalLogScope").textContent = canSeeCompanyWideDocs() ? "全公司" : "依部門/角色";
   if (records.length && !records.some(({ task }) => task.id === selectedWorkflowTaskId)) selectedWorkflowTaskId = records[0].task.id;
   list.innerHTML = records.length ? records.map(({ task, doc, currentStep, doneCount, totalSteps, submittedAt, officialDocument }) => `
-    <article class="address-card ${task.id === selectedWorkflowTaskId ? "selected-card" : ""}">
+    <article class="address-card approval-case-card ${task.id === selectedWorkflowTaskId ? "selected-card" : ""}">
       <strong>${escapeHtml(doc?.no || task.id)}</strong>
       <span>${escapeHtml(doc?.subject || task.title)}</span>
       <p>${escapeHtml(currentStep?.title || task.step)} · ${escapeHtml(task.role)} · ${escapeHtml(task.status)}</p>
-      ${officialDocument ? renderOfficialHumanProgress(officialDocument, true) : ""}
-      <small>${escapeHtml(approvalRecordTimeMeta({ officialDocument, submittedAt, doneCount, totalSteps }).progress)} · ${escapeHtml(approvalRecordTimeMeta({ officialDocument, submittedAt }).label)} ${escapeHtml(approvalRecordTimeMeta({ officialDocument, submittedAt }).value)}</small>
+      <small>${escapeHtml(approvalRecordTimeMeta({ officialDocument, submittedAt, doneCount, totalSteps }).progress)}${approvalRecordIsOverdue({ officialDocument, task }) ? " · 已逾期，請優先處理" : ""}</small>
       <div class="row-actions">
         <button class="segment" type="button" data-approval-log-select="${escapeHtml(task.id)}">檢視</button>
       </div>
@@ -21870,8 +22118,17 @@ function renderApprovalLog() {
 
   const selected = records.find(({ task }) => task.id === selectedWorkflowTaskId) || records[0];
   if (fullCaseButton) fullCaseButton.disabled = !selected;
+  const detailPanel = document.querySelector("#approvalLogDetailPanel");
+  if (detailPanel) detailPanel.hidden = !selected;
+  document.querySelector(".approval-log-layout")?.classList.toggle("is-empty", !selected);
+  const backButton = document.querySelector("#approvalLogBackBtn");
+  if (backButton) backButton.onclick = () => {
+    document.querySelector("#approvalLog")?.removeAttribute("data-mobile-detail");
+    list.querySelector(`[data-approval-log-select="${CSS.escape(selectedWorkflowTaskId || "")}"]`)?.focus({ preventScroll: true });
+  };
   if (!selected) {
-    detail.innerHTML = `<div class="ux-empty-state"><strong>尚未有可檢視的流程</strong><p>送出申請後，這裡會顯示目前負責人、等待時間、下一步與完整附件。</p></div>`;
+    detail.innerHTML = "";
+    document.querySelector("#approvalLog")?.removeAttribute("data-mobile-detail");
   } else {
     const { task, doc, currentStep, doneCount, totalSteps, steps, submittedAt, requester, officialDocument } = selected;
     const timeMeta = approvalRecordTimeMeta(selected);
@@ -21896,21 +22153,19 @@ function renderApprovalLog() {
           <strong>${escapeHtml(doc?.subject || task.title)}</strong>
         </div>
         <p>目前停在「${escapeHtml(currentStep?.title || task.step)}」，負責角色：${escapeHtml(task.role)}，狀態：${escapeHtml(task.status)}。</p>
+        ${/退回|駁回/.test(task.status || "") && task.lastComment ? `<p class="approval-return-reason" role="status">退回原因：${escapeHtml(task.lastComment)}</p>` : ""}
         ${officialDocument ? renderOfficialHumanProgress(officialDocument) : ""}
-        <dl class="approval-log-meta">
+        <details class="approval-secondary-meta"><summary>申請資料與最近簽核意見</summary><dl class="approval-log-meta">
           <div><dt>公司</dt><dd>${escapeHtml(doc?.companyName || "歲悅長照股份有限公司")}</dd></div>
           <div><dt>${escapeHtml(timeMeta.actorLabel)}</dt><dd>${escapeHtml(requester)}</dd></div>
           <div><dt>${escapeHtml(timeMeta.label)}</dt><dd>${escapeHtml(timeMeta.value)}</dd></div>
           <div><dt>進度</dt><dd>${escapeHtml(timeMeta.progress)}</dd></div>
           <div><dt>最近時間戳</dt><dd>${escapeHtml(task.lastSignedAt || "尚未簽核")}</dd></div>
           <div><dt>簽核意見</dt><dd>${escapeHtml(task.lastComment || "尚未填寫")}</dd></div>
-        </dl>
+        </dl></details>
         ${officialDocument && !officialDetailReady ? `<div class="official-action-bar"><span class="status-pill">正在載入完整申請資料、版本與附件…</span></div>` : ""}
-        ${officialDocument && officialDetailReady && officialDocumentHasEditorV2(officialDocument) ? `<div class="official-action-bar"><button class="secondary-button" type="button" data-open-editor-review="${escapeDraftHtml(officialDocument.id)}">查看 PDF 編輯版</button></div>` : ""}
-        ${canActOfficial ? `<div class="official-action-bar"><button class="primary-button" type="button" data-progress-official-action="approve" data-progress-official-id="${escapeHtml(officialDocument.id)}">核准</button><button class="secondary-button" type="button" data-progress-official-action="reject" data-progress-official-id="${escapeHtml(officialDocument.id)}">駁回</button></div>` : ""}
-        ${canCorrectOfficial ? `<div class="official-action-bar"><button class="primary-button" type="button" data-correct-official-id="${escapeHtml(officialDocument.id)}">${officialDocument.current_status === "rejected" ? "補正並重新送簽" : "繼續編輯草稿"}</button></div>` : ""}
-        ${officialDocument && officialDetailReady ? renderOfficialFinalStampedDownload(officialDocument) : ""}
       </article>
+      ${officialDocument ? `<section class="approval-review-evidence"><h4>申請單附件與文件</h4>${officialDetailReady ? renderOfficialFiles(officialApplicationFiles(officialDocument), officialDocument.id) : `<p class="empty-text">完整附件清單載入中，載入完成前不開放簽核。</p>`}${officialDetailReady && officialDocumentHasEditorV2(officialDocument) ? `<div class="official-action-bar"><button class="secondary-button" type="button" data-open-editor-review="${escapeDraftHtml(officialDocument.id)}">查看 PDF 編輯版</button></div>` : ""}${officialDetailReady ? renderOfficialFinalStampedDownload(officialDocument) : ""}</section>` : ""}
       <ol class="approval-log-trail">
         ${steps.map((step) => `
           <li class="approval-log-step ${safeHtmlClassToken(step.state, "pending")}">
@@ -21921,13 +22176,13 @@ function renderApprovalLog() {
                 <span>${escapeHtml(step.status)}</span>
               </div>
               <p>${escapeHtml(step.owner)}</p>
-              <small>${escapeHtml(step.time)}</small>
-              <em>${escapeHtml(step.comment)}</em>
+              <details class="approval-step-history"><summary>時間與意見</summary><small>${escapeHtml(step.time)}</small><em>${escapeHtml(step.comment)}</em></details>
             </div>
           </li>
         `).join("")}
       </ol>
-      ${officialDocument ? `<h4>申請單附件</h4>${officialDetailReady ? renderOfficialFiles(officialApplicationFiles(officialDocument), officialDocument.id) : `<p class="empty-text">完整附件清單載入中，載入完成前不開放簽核。</p>`}` : ""}
+      ${canActOfficial ? `<div class="official-action-bar approval-review-decisions"><button class="primary-button" type="button" data-progress-official-action="approve" data-progress-official-id="${escapeHtml(officialDocument.id)}">核准</button><button class="secondary-button" type="button" data-progress-official-action="reject" data-progress-official-id="${escapeHtml(officialDocument.id)}">駁回</button></div>` : ""}
+      ${canCorrectOfficial ? `<div class="official-action-bar approval-review-decisions"><button class="primary-button" type="button" data-correct-official-id="${escapeHtml(officialDocument.id)}">${officialDocument.current_status === "rejected" ? "補正並重新送簽" : "繼續編輯草稿"}</button></div>` : ""}
     `;
     if (officialDocument && !officialDetailReady && !officialDocumentDetailRequests.has(officialDocument.id)) {
       void ensureOfficialDocumentDetail(officialDocument.id)
@@ -21947,6 +22202,7 @@ function renderApprovalLog() {
         }
       }
       renderApprovalLog();
+      openApprovalLogMobileDetail();
     });
   });
   list.querySelector("[data-empty-action-target]")?.addEventListener("click", (event) => setView(event.currentTarget.dataset.emptyActionTarget));
@@ -24355,7 +24611,7 @@ function renderSealRequests() {
     const seal = sealById(request.sealId);
     return `
       <tr class="${request.id === selectedSealRequestId ? "selected-row" : ""}">
-        <td><input class="seal-request-check" type="checkbox" value="${request.id}" /></td>
+        <td><label class="settings-row-selection"><input class="seal-request-check" type="checkbox" value="${escapeDraftHtml(request.id)}" aria-label="選取用印申請 ${escapeDraftHtml(doc?.no || request.docId)}" /></label></td>
         <td><button class="text-button row-select" type="button" data-seal-request="${request.id}">${doc?.no || request.docId}</button><small>${doc?.subject || "公文不存在"}</small></td>
         <td>${seal?.name || request.sealId}</td>
         <td>${request.step}</td>
@@ -25762,12 +26018,18 @@ async function loadPdfJsAsset(file, assetId, serverPages = []) {
     await validateUploadedPdfDocument(pdfDocument);
     const pages = [];
     const stagedPageProxies = new Map();
-    for (let index = 0; index < pdfDocument.numPages; index += 1) {
+    // A saved revision may retain only some source pages, in a different order.
+    // Stable page IDs must bind to their original source index, never the
+    // position in that filtered list (otherwise reopening displays wrong text).
+    const descriptors = serverPages.length ? serverPages : Array.from({ length: pdfDocument.numPages }, (_, sourcePageIndex) => ({ sourcePageIndex }));
+    for (const [position, serverPage] of descriptors.entries()) {
+      const index = Number(serverPage.sourcePageIndex ?? serverPage.source_page_index ?? position);
+      if (!Number.isInteger(index) || index < 0 || index >= pdfDocument.numPages) throw new Error("PDF 頁面對應資料無效，請重新開啟案件。");
       const proxy = await pdfDocument.getPage(index + 1);
       const unit = Number(proxy.userUnit || 1);
       const view = proxy.view.map((value) => roundEditorPoint(Number(value) * unit));
-      const serverPage = serverPages[index] || {};
       const pageId = serverPage.pageId || serverPage.page_id || `page-${assetId}-${index + 1}`;
+      if (stagedPageProxies.has(pageId)) throw new Error("PDF 頁面識別重複，請重新開啟案件。");
       pages.push({
         pageId,
         sourceAssetId: assetId,
@@ -25788,6 +26050,9 @@ async function loadPdfJsAsset(file, assetId, serverPages = []) {
     uploadedSealEditorRuntime.pdfDocuments.set(assetId, pdfDocument);
     uploadedSealEditorRuntime.assetFiles.set(assetId, file);
     uploadedSealEditorRuntime.assetUrls.set(assetId, URL.createObjectURL(file));
+    uploadedSealEditorRuntime.pageProxies.forEach((runtime, pageId) => {
+      if (runtime.assetId === assetId && !stagedPageProxies.has(pageId)) uploadedSealEditorRuntime.pageProxies.delete(pageId);
+    });
     stagedPageProxies.forEach((runtime, pageId) => uploadedSealEditorRuntime.pageProxies.set(pageId, runtime));
     committed = true;
     return pages;
@@ -26937,6 +27202,10 @@ function endUploadedEditorPointer(event) {
 
 function renderUploadedEditorProperties() {
   const selected = [...uploadedSealEditorRuntime.selectedIds].map(editorElementById).filter(Boolean);
+  const editor = document.querySelector("#uploadedPdfEditor");
+  if (editor) editor.dataset.hasSelection = String(selected.length > 0);
+  const propertiesButton = document.querySelector("#uploadedEditorPropertiesToggleBtn");
+  if (propertiesButton) propertiesButton.disabled = !selected.length;
   const form = document.querySelector("#uploadedEditorPropertyForm");
   const empty = document.querySelector("#uploadedEditorPropertyEmpty");
   const count = document.querySelector("#uploadedEditorSelectionCount");
@@ -27031,14 +27300,31 @@ function copyUploadedEditorSelection() {
   showToast(`已複製 ${uploadedSealEditorRuntime.clipboard.length} 個物件。`);
 }
 
+function uploadedEditorCopyPlacement(element, page, offset = 0) {
+  const width = Number(element.width);
+  const height = Number(element.height);
+  if (!page || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 || width > page.widthPt || height > page.heightPt) return null;
+  // Preserve physical sizes, especially fixed-size seals. Clamp placement only;
+  // objects too large for a differently oriented destination are rejected.
+  return {
+    pageId: page.pageId,
+    x: Math.max(0, Math.min(page.widthPt - width, Number(element.x) + offset)),
+    y: Math.max(0, Math.min(page.heightPt - height, Number(element.y) + offset))
+  };
+}
+
 function pasteUploadedEditorSelection(pageId = currentUploadedEditorPage()?.pageId) {
   if (!uploadedSealEditorRuntime.clipboard.length || !pageId) return;
   if (uploadedSealEditorRuntime.clipboard.some((item) => globalThis.EDOCSeam?.groupId(item))) return showToast("騎縫章請使用批次建立，不能單獨貼上半章。");
+  const page = uploadedSealEditorState.pages.find((item) => item.pageId === pageId);
+  const placements = uploadedSealEditorRuntime.clipboard.map((element) => uploadedEditorCopyPlacement(element, page, 8));
+  if (placements.some((placement) => !placement)) return showToast("物件尺寸超過目標頁面，未貼上。請改選可容納的頁面；印章尺寸不會被縮放。");
   let copies = [];
-  commitUploadedEditorMutation((state) => {
-    copies = uploadedSealEditorRuntime.clipboard.map((element) => ({ ...cloneUploadedEditorValue(element), id: `editor-${element.kind}-${crypto.randomUUID?.() || Date.now()}`, pageId, x: element.x + 8, y: element.y + 8, zIndex: state.elements.length + 1 }));
+  const committed = commitUploadedEditorMutation((state) => {
+    copies = uploadedSealEditorRuntime.clipboard.map((element, index) => ({ ...cloneUploadedEditorValue(element), ...placements[index], id: `editor-${element.kind}-${crypto.randomUUID?.() || Date.now()}`, zIndex: state.elements.length + index + 1 }));
     state.elements.push(...copies);
   });
+  if (!committed) return;
   uploadedSealEditorRuntime.selectedIds = new Set(copies.map((element) => element.id));
   renderUploadedSealWorkbench();
 }
@@ -27060,10 +27346,11 @@ function copyUploadedEditorSelectionToPages() {
   if (selected.some((item) => globalThis.EDOCSeam?.groupId(item))) return showToast("騎縫章請使用批次建立，讓每組保留完整左右半章。");
   const pages = parseUploadedEditorPageRange(document.querySelector("#uploadedEditorCopyPages")?.value);
   if (!selected.length || !pages.length) return showToast("請先選取物件並輸入有效頁面範圍。");
+  if (pages.some((number) => selected.some((element) => !uploadedEditorCopyPlacement(element, uploadedSealEditorState.pages[number - 1])))) return showToast("有物件尺寸超過目標頁面，未複製。請調整頁面範圍；印章尺寸不會被縮放。");
   commitUploadedEditorMutation((state) => {
     pages.forEach((pageNumber) => {
-      const pageId = state.pages[pageNumber - 1].pageId;
-      selected.forEach((element) => state.elements.push({ ...cloneUploadedEditorValue(element), id: `editor-${element.kind}-${crypto.randomUUID?.() || Date.now()}-${pageNumber}`, pageId, zIndex: state.elements.length + 1 }));
+      const page = state.pages[pageNumber - 1];
+      selected.forEach((element) => state.elements.push({ ...cloneUploadedEditorValue(element), ...uploadedEditorCopyPlacement(element, page), id: `editor-${element.kind}-${crypto.randomUUID?.() || Date.now()}-${pageNumber}`, zIndex: state.elements.length + 1 }));
     });
   });
 }
@@ -27167,8 +27454,11 @@ async function handleUploadedEditorImage(file) {
   if (!["image/png", "image/jpeg"].includes(file.type)) return showToast("圖片只接受 PNG 或 JPEG。");
   if (file.size > PDF_EDITOR_MAX_IMAGE_BYTES) return showToast("單張圖片不得超過 10 MB。");
   if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.locked) return showToast("目前無法插入圖片，請等待上傳完成或開啟可編輯草稿。");
+  const destinationPageId = currentUploadedEditorPage()?.pageId;
+  if (!destinationPageId) return showToast("請先載入 PDF，再插入圖片。");
   const imageScope = uploadedSealApplicationScopeSnapshot();
   uploadedSealEditorRuntime.uploading = true;
+  renderUploadedSealWorkbench();
   let intent = null;
   try {
     clearUploadedEditorUploadError();
@@ -27186,16 +27476,22 @@ async function handleUploadedEditorImage(file) {
     const previous = uploadedSealEditorRuntime.imageUrls.get(assetId);
     if (previous) URL.revokeObjectURL(previous);
     uploadedSealEditorRuntime.imageUrls.set(assetId, url);
-    const page = currentUploadedEditorPage();
+    const page = uploadedSealEditorState.pages.find((item) => item.pageId === destinationPageId);
     if (!page) throw new Error("請先載入 PDF，再插入圖片。");
     let element = null;
-    commitUploadedEditorMutation((state) => {
+    // Upload and preflight have completed and the scope/intent were rechecked.
+    // Release the interaction guard immediately before this synchronous commit:
+    // no user event or draft switch can interleave, and the normal locked/review
+    // guards remain enforced. Never expose a general upload-bypass parameter.
+    uploadedSealEditorRuntime.uploading = false;
+    const committed = commitUploadedEditorMutation((state) => {
       if (!state.sourceFiles.some((source) => source.assetId === assetId)) {
         state.sourceFiles.push({ assetId, kind: "image", fileName: file.name, mimeType: file.type, sizeBytes: file.size, sha256: intent.sha256 });
       }
       element = editorDefaultElement("image", page, null, { assetId, sha256: intent.sha256, mimeType: file.type });
       state.elements.push(element);
     });
+    if (!committed) throw new Error("圖片已上傳，但目前版本無法編輯；請回到可編輯草稿後重試。");
     uploadedSealEditorRuntime.selectedIds = new Set(element ? [element.id] : []);
     renderUploadedSealWorkbench();
   } catch (error) {
@@ -27766,16 +28062,18 @@ function electronicSealWorkflowItems() {
 function ensureElectronicSealWorkQueue() {
   const applicationPanel = document.querySelector("#uploadedSealApplicationPanel");
   if (!applicationPanel || document.querySelector("#electronicSealWorkQueue")) return;
-  const queue = document.createElement("section");
+  const queue = document.createElement("details");
   queue.className = "panel electronic-seal-work-queue";
   queue.id = "electronicSealWorkQueue";
   queue.innerHTML = `
-    <div class="panel-heading">
-      <div><h3>電子用印案件</h3><span>待簽、待用印與已完成檔案集中在這裡</span></div>
+    <summary class="panel-heading">
+      <strong>查看既有案件與下載檔案</strong>
       <span class="status-pill" id="electronicSealWorkQueueCount">0 件</span>
-    </div>
+    </summary>
+    <label class="electronic-seal-queue-search">搜尋案件<input id="electronicSealWorkQueueSearch" type="search" placeholder="主旨、申請人、公司或狀態" autocomplete="off" /></label>
     <div class="address-results" id="electronicSealWorkQueueList"></div>
   `;
+  queue.querySelector("#electronicSealWorkQueueSearch")?.addEventListener("input", renderElectronicSealWorkQueue);
   applicationPanel.parentElement?.insertBefore(queue, applicationPanel);
 }
 
@@ -27786,7 +28084,9 @@ function renderElectronicSealWorkQueue() {
   if (!list || !count) return;
   const items = electronicSealWorkflowItems();
   count.textContent = `${items.length} 件`;
-  list.innerHTML = items.length ? items.map((item) => {
+  const query = String(document.querySelector("#electronicSealWorkQueueSearch")?.value || "").trim().toLocaleLowerCase();
+  const visibleItems = items.filter((item) => !query || [item.id, item.title, item.subject, item.applicant_name, item.company_name, officialStatusLabel(item.current_status)].join(" ").toLocaleLowerCase().includes(query));
+  list.innerHTML = visibleItems.length ? visibleItems.map((item) => {
     const stamped = latestOfficialStampedFile(item);
     return `
       <article class="address-card">
@@ -27801,7 +28101,7 @@ function renderElectronicSealWorkQueue() {
         </div>
       </article>
     `;
-  }).join("") : `<p class="empty-text">目前沒有電子用印案件；可在下方先填申請資料或直接上傳 A4 PDF。</p>`;
+  }).join("") : `<p class="empty-text">${query ? "沒有符合搜尋條件的案件；請調整關鍵字。" : "目前沒有電子用印案件；可在下方先填申請資料或直接上傳 A4 PDF。"}</p>`;
   list.querySelectorAll("[data-electronic-seal-open]").forEach((button) => {
     button.addEventListener("click", () => void openOfficialDocumentEditorReview(button.dataset.electronicSealOpen, "edited"));
   });
@@ -27848,6 +28148,21 @@ function renderUploadedSealAvailabilityNotice(hasUsableSeal) {
   });
 }
 
+function renderUploadedSealApplicationDisclosure() {
+  const fields = document.querySelector("#uploadedSealApplicationFields");
+  const toggle = document.querySelector("#uploadedSealApplicationToggleBtn");
+  const summary = document.querySelector("#uploadedSealApplicationSummary");
+  if (!fields || !toggle || !summary) return;
+  const controls = [...fields.querySelectorAll("input, select, textarea")];
+  const complete = controls.every((control) => String(control.value || "").trim());
+  if (!complete) fields.hidden = false;
+  toggle.hidden = !complete;
+  toggle.setAttribute("aria-expanded", String(!fields.hidden));
+  toggle.textContent = fields.hidden ? "修改申請資料" : "收起資料，專心編輯 PDF";
+  summary.hidden = !fields.hidden;
+  summary.textContent = [document.querySelector("#uploadedSealTitle")?.value, document.querySelector("#uploadedSealApplicant")?.value, document.querySelector("#uploadedSealCompany")?.selectedOptions?.[0]?.textContent].filter(Boolean).join(" · ");
+}
+
 function renderUploadedSealWorkbench() {
   renderUploadedSealApplicationSaveStatus();
   ["#uploadedSealApplicant", "#uploadedSealTitle", "#uploadedSealReason"].forEach((selector) => {
@@ -27861,6 +28176,7 @@ function renderUploadedSealWorkbench() {
   if (applicantInput && !applicantInput.value) applicantInput.value = authState?.user?.name || "";
   if (emailInput && !emailInput.value) emailInput.value = authState?.user?.email || "";
   if (phoneInput && !phoneInput.value) phoneInput.value = "02-66045432 #";
+  renderUploadedSealApplicationDisclosure();
   const companySelect = document.querySelector("#uploadedSealCompany");
   if (companySelect && !companySelect.options.length) renderUploadedSealCompanyOptions();
   if (departmentInput && (
@@ -27993,6 +28309,8 @@ function renderUploadedSealWorkbench() {
   renderUploadedEditorProperties();
   renderUploadedSeamGroups();
   const markerCount = uploadedSealEditorState.elements.length;
+  const objectCount = document.querySelector("#uploadedEditorObjectCount");
+  if (objectCount) objectCount.textContent = `${markerCount} 個`;
   const summary = document.querySelector("#uploadedStampSummary");
   if (summary) {
     summary.innerHTML = markerCount
@@ -29465,7 +29783,6 @@ document.querySelectorAll("[data-inbound-section]").forEach((button) => {
 document.querySelector("#inboundReloadBtn")?.addEventListener("click", () => {
   void loadInboundDocuments(false).catch(() => {});
 });
-document.querySelector("#openInboundArchiveBtn")?.addEventListener("click", () => setInboundSection("archive"));
 document.querySelector("#inboundArchiveForm")?.addEventListener("submit", (event) => {
   event.preventDefault();
   void createInboundArchiveFromForm();
@@ -29780,6 +30097,9 @@ document.querySelector("#composeCloudRetryBtn")?.addEventListener("click", () =>
 document.querySelector("#composeKeepNewDraftBtn")?.addEventListener("click", keepComposeAsNewCloudDraft);
 document.querySelector("#composeCloudRefreshBtn")?.addEventListener("click", () => { void refreshComposeCloudDrafts(); });
 document.querySelector("#composeCloudLoadBtn")?.addEventListener("click", () => { void loadComposeCloudDraft(); });
+document.querySelector("#composeResumeDraftBtn")?.addEventListener("click", () => { void resumeComposeDraft(); });
+document.querySelector("#composeStartFreshBtn")?.addEventListener("click", dismissComposeRecovery);
+document.querySelector("#composeContactToggleBtn")?.addEventListener("click", toggleComposeContactSummary);
 document.querySelector("#composeAiApplyBtn")?.addEventListener("click", applyComposeAiSuggestion);
 document.querySelector("#composeAiDiscardBtn")?.addEventListener("click", () => { composeAiSuggestion = null; renderComposeAiActions(); });
 document.querySelector("#composeAiUndoBtn")?.addEventListener("click", undoComposeAiSuggestion);
@@ -30084,6 +30404,21 @@ function setUploadedEditorMobileDrawer(kind, open, trigger = null) {
 function syncUploadedEditorMobileDrawer() {
   if (!uploadedEditorMobileDrawerIsCompact()) closeUploadedEditorMobileDrawer({ restoreFocus: false });
 }
+
+document.querySelector("#uploadedSealApplicationToggleBtn")?.addEventListener("click", () => {
+  const fields = document.querySelector("#uploadedSealApplicationFields");
+  if (!fields) return;
+  fields.hidden = !fields.hidden;
+  renderUploadedSealApplicationDisclosure();
+  if (fields.hidden) document.querySelector("#uploadedPdfEditor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+document.querySelector("#uploadedSealForm")?.addEventListener("input", renderUploadedSealApplicationDisclosure);
+document.querySelector("#uploadedSealForm")?.addEventListener("change", renderUploadedSealApplicationDisclosure);
+document.querySelector("#uploadedSealForm")?.addEventListener("invalid", () => {
+  const fields = document.querySelector("#uploadedSealApplicationFields");
+  if (fields) fields.hidden = false;
+  renderUploadedSealApplicationDisclosure();
+}, true);
 
 document.querySelector("#uploadedEditorSeamToggleBtn")?.addEventListener("click", (event) => {
   const panel = document.querySelector("#uploadedEditorSeamPanel");
@@ -30980,6 +31315,7 @@ function initializeDeferredWorkspace() {
   if (dateInput && !dateInput.value) dateInput.value = composeTodayDate();
   syncComposeElectronicExchangeMode();
   applyComposeContactDefaults();
+  prepareComposeDraftRecovery();
   renderDraftPreview();
   renderQueueRows();
   renderInboundRows();
