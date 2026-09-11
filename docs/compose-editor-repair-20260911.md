@@ -51,4 +51,7 @@ PostgreSQL 測試需由 `EDOC_COMPOSE_TEST_PG_PORT` 指向隔離的本機 Postgr
 - `20260911133603_editor_conflict_copy_atomic.sql`
 - 共用 Supabase 採對應的 `20260911135434_shared_compose_editor_resilience.sql` forward migration，避免誤改 Finance 表。
 
+- 已開啟的舊版公文撰寫頁須重新整理，才能傳送新的內容版本欄位；舊頁遭拒絕不代表已存資料遺失。
+- 新版產生騎縫章案件後，不可直接回滾至不支援半章 metadata 的舊 backend，否則舊 renderer 可能把半章位置輸出成整章。故障復原應採保留新版騎縫章 renderer 的向前修正版；資料庫備份不是舊 binary 可安全回滾的保證。
+
 本輪瀏覽器驗收涵蓋桌機與 390px 手機版面；不等同 iPhone／Android 實機、正式 Google SSO、正式 Supabase TUS、正式用印或寄送驗收，也不構成 50 MB／300 頁手機效能保證。
