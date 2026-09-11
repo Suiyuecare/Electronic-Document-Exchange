@@ -66,6 +66,7 @@ class FourPageSimplificationTests(unittest.TestCase):
         for name, checkbox, label in (
             ("renderAccountRows", "account-check", "選取帳號"),
             ("renderSealRequests", "seal-request-check", "選取用印申請"),
+            ("renderFileSecurityRows", "file-security-check", "選取檔案"),
         ):
             body = function(self.js, name)
             self.assertRegex(body, r'<label class="settings-row-selection"><input class="' + checkbox + r'"[^>]*aria-label="' + label)

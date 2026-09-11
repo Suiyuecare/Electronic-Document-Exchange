@@ -14415,7 +14415,7 @@ function renderFileSecurityRows() {
   document.querySelector("#fileSecurityCount").textContent = `${rows.length} 筆`;
   document.querySelector("#fileSecurityRows").innerHTML = rows.map((item) => `
     <tr class="${item.id === selectedFileSecurityId ? "selected-row" : ""}">
-      <td><input class="file-security-check" type="checkbox" value="${item.id}" /></td>
+      <td><label class="settings-row-selection"><input class="file-security-check" type="checkbox" value="${escapeDraftHtml(item.id)}" aria-label="選取檔案 ${escapeDraftHtml(item.fileName)}" /></label></td>
       <td><button class="text-button row-select" type="button" data-file-select="${item.id}">${item.fileName}</button><small>${item.version} · ${item.hash}</small></td>
       <td>${item.docNo}<small>${item.agency}</small></td>
       <td>${item.sizeMb.toFixed(1)} MB<small>${isFileOverLimit(item) ? "超過限制" : "符合限制"}</small></td>
