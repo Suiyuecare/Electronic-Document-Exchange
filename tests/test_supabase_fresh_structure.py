@@ -610,16 +610,21 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         numbering_matrix = {
             "official_document_number_counters": "siu",
             "official_document_number_allocations": "si",
+            "official_document_compose_drafts": "siud",
         }
         numbering_sql = OFFICIAL_NUMBERING.read_text(encoding="utf-8").lower()
         for table, operations in numbering_matrix.items():
             with self.subTest(numbering_table=table):
                 self.assertEqual(expected_matrix[table], operations)
                 privileges = ", ".join(
-                    name for name, marker in (("select", "s"), ("insert", "i"), ("update", "u"))
+                    name for name, marker in (("select", "s"), ("insert", "i"), ("update", "u"), ("delete", "d"))
                     if marker in operations
                 )
-                self.assertIn(f"grant {privileges} on public.{table} to service_role;", numbering_sql)
+                forward_sql = (
+                    (MIGRATIONS / "20260911133144_compose_resilience_drafts_revision.sql").read_text(encoding="utf-8").lower()
+                    if table == "official_document_compose_drafts" else numbering_sql
+                )
+                self.assertIn(f"grant {privileges} on public.{table} to service_role;", forward_sql)
         self.assertEqual(set(expected_matrix), granted_select | later_select | set(numbering_matrix))
         for privilege, marker in (("insert", "i"), ("update", "u"), ("delete", "d")):
             block = re.search(
@@ -658,11 +663,44 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                 sql,
             )
         )
+        # The historical hardening migration remains immutable. New RPCs must
+        # add narrow service-role grants and revoke every browser/public role
+        # in their own forward migration; they cannot inherit auto-exposure.
+        repair_rpcs = {
+            "edoc_save_compose_draft": "20260911133144_compose_resilience_drafts_revision.sql",
+            "edoc_copy_editor_conflict": "20260911133603_editor_conflict_copy_atomic.sql",
+        }
+        later_granted_rpc_names: set[str] = set()
+        for rpc_name, migration_name in repair_rpcs.items():
+            repair_sql = (MIGRATIONS / migration_name).read_text(encoding="utf-8").lower()
+            with self.subTest(repair_rpc=rpc_name):
+                self.assertRegex(
+                    repair_sql,
+                    rf"grant execute on function public\.{rpc_name}\([^;]*\)\s+to service_role;",
+                )
+                revoke = re.search(
+                    rf"revoke all on function public\.{rpc_name}\([^;]*\)\s+from\s+([^;]+);",
+                    repair_sql,
+                )
+                self.assertIsNotNone(revoke)
+                self.assertEqual(
+                    {role.strip() for role in revoke.group(1).split(",")},
+                    {"public", "anon", "authenticated"},
+                )
+                self.assertNotRegex(
+                    repair_sql,
+                    r"grant execute on (?:all functions|function [^;]+)\s+to\s+(?:public|anon|authenticated)\b",
+                )
+                later_granted_rpc_names |= set(re.findall(
+                    r"grant execute on function public\.(edoc_[a-z0-9_]+)\([^;]*\)\s+to service_role;",
+                    repair_sql,
+                ))
+        self.assertEqual(later_granted_rpc_names, set(repair_rpcs))
         self.assertEqual(
-            granted_rpc_names - {"edoc_company_seal_dimensions_are_valid"},
+            (granted_rpc_names - {"edoc_company_seal_dimensions_are_valid"}) | later_granted_rpc_names,
             required_rpc_names,
         )
-        self.assertEqual(len(required_rpc_names), 23)
+        self.assertEqual(len(required_rpc_names), 25)
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
         fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
         self.assertIn("from information_schema.table_privileges", cutover)

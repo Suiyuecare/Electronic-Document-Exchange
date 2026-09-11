@@ -531,6 +531,7 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
             detail["id"],
             {
                 "description": "第二版已增補副本單位。",
+                "expected_content_revision": detail["content_revision"],
                 "metadata": {
                     "source": "compose_form",
                     "company_name": "歲悅股份有限公司",
@@ -569,7 +570,7 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
         resubmitted = backend.resubmit_official_document(
             self.conn,
             detail["id"],
-            {"comment": "已增補副本並重新送簽。"},
+            {"comment": "已增補副本並重新送簽。", "expected_content_revision": detail["content_revision"]},
             employee,
         )
         self.assertEqual(resubmitted["metadata"]["extra"]["contact_fax"], "N/A")

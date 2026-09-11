@@ -4,6 +4,73 @@
 
 begin;
 
+-- Read-only repair gate; mirrored for the isolated shared backend cutover.
+do $compose_editor_resilience_gate$
+declare
+  v_schema text := 'public';
+  v_backend text := 'service_role';
+  v_denied text[] := array['anon','authenticated'];
+  v_table regclass;
+  v_proc record;
+  v_rpc text;
+  v_role text;
+  v_signature text;
+begin
+  v_table := pg_catalog.to_regclass(pg_catalog.format('%I.official_document_compose_drafts', v_schema));
+  if v_table is null or not exists (
+    select 1 from pg_catalog.pg_class where oid=v_table and relrowsecurity
+      and pg_catalog.pg_get_userbyid(relowner)='postgres'
+  ) then raise exception 'compose_editor_draft_table_security_missing'; end if;
+  if not exists (
+    select 1 from pg_catalog.pg_attribute where attrelid=pg_catalog.to_regclass(pg_catalog.format('%I.official_documents',v_schema))
+      and attname='content_revision' and atttypid='integer'::regtype and attnotnull and not attisdropped
+  ) then raise exception 'compose_editor_content_revision_missing'; end if;
+  if (select count(*) from pg_catalog.pg_constraint where conrelid=v_table and contype='f' and convalidated
+       and confrelid in (pg_catalog.to_regclass(pg_catalog.format('%I.users',v_schema)),pg_catalog.to_regclass(pg_catalog.format('%I.companies',v_schema)))) <> 2
+     or pg_catalog.to_regclass(pg_catalog.format('%I.idx_compose_draft_owner',v_schema)) is null then
+    raise exception 'compose_editor_draft_relationships_missing';
+  end if;
+  foreach v_role in array array['SELECT','INSERT','UPDATE','DELETE'] loop
+    if not pg_catalog.has_table_privilege(v_backend,v_table,v_role) then
+      raise exception 'compose_editor_backend_table_grant_missing';
+    end if;
+  end loop;
+  if pg_catalog.has_table_privilege(v_backend,v_table,'TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'compose_editor_backend_table_extra_grant';
+  end if;
+  foreach v_role in array v_denied loop
+    if pg_catalog.has_table_privilege(v_role,v_table,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception 'compose_editor_browser_table_grant';
+    end if;
+  end loop;
+  if exists (select 1 from pg_catalog.pg_class c, lateral pg_catalog.aclexplode(coalesce(c.relacl,pg_catalog.acldefault('r',c.relowner))) a where c.oid=v_table and a.grantee=0) then
+    raise exception 'compose_editor_public_table_grant';
+  end if;
+  if v_backend <> 'service_role' and not exists (
+    select 1 from pg_catalog.pg_policies where schemaname=v_schema and tablename='official_document_compose_drafts'
+      and v_backend::name=any(roles) and qual='true' and with_check='true'
+  ) then raise exception 'compose_editor_backend_row_policy_missing'; end if;
+  foreach v_rpc in array array['edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)','edoc_copy_editor_conflict(jsonb)'] loop
+    v_signature := v_schema || '.' || v_rpc;
+    select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_signature);
+    if not found then raise exception 'compose_editor_rpc_missing'; end if;
+    if v_proc.prosecdef or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+       or not coalesce(v_proc.proconfig @> array[case when v_rpc like 'edoc_save_%' then 'search_path=""' else 'search_path=pg_catalog, ' || v_schema end],false)
+       or not pg_catalog.has_function_privilege(v_backend,v_proc.oid,'EXECUTE') then
+      raise exception 'compose_editor_rpc_security_mismatch';
+    end if;
+    foreach v_role in array v_denied loop
+      if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+        raise exception 'compose_editor_browser_rpc_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,pg_catalog.acldefault('f',v_proc.proowner))) a where a.grantee=0 and a.privilege_type='EXECUTE') then
+      raise exception 'compose_editor_public_rpc_grant';
+    end if;
+  end loop;
+end;
+$compose_editor_resilience_gate$;
+
 do $$
 begin
   if pg_catalog.current_setting('server_version_num')::integer < 160000 then

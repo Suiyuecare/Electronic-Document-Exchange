@@ -47,6 +47,10 @@ class _Response:
 
 class SensitiveTransportHardeningTests(unittest.TestCase):
     POSTGREST_PT409_CONFLICTS = {
+        "compose_draft_revision_conflict",
+        "compose_content_revision_conflict",
+        "editor_conflict_copy_request_conflict",
+        "editor_locked_after_submit",
         "finance_member_sync_event_id_conflict",
         "finance_organization_revision_conflict",
         "editor_upload_new_intent_required",

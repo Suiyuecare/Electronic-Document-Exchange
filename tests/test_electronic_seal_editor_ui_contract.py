@@ -219,8 +219,10 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         for operation in (
             "requestEditorUpload(file, \"source_pdf\")",
             "performTusUpload(file, intent",
-            "finalizeEditorUpload(intent, file)",
-            "loadUploadedPdfIntoEditor(file, intent, finalized, { append: false })",
+            "confirmUploadedPdfConversion(file)",
+            "finalizeEditorUpload(intent, file, { allowA4Conversion: true })",
+            "resolveUploadedPdfConversion(file, intent, finalized)",
+            "loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: false })",
             "ensureUploadedEditorPagesA4(uploadedSealEditorState.pages)",
         ):
             self.assertIn(operation, handler)
@@ -291,7 +293,12 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         self.assertIn('setUploadedEditorSaveStatus("error", "PDF 未通過上傳或預檢")', handler)
 
         validation = javascript_function(self.js, "validateUploadedPdfDocument")
-        self.assertIn("requirePdfPagesA4(await readPdfA4Pages(pdfDocument))", validation)
+        self.assertIn("allowNonA4 = false", validation)
+        self.assertIn("if (!allowNonA4) requirePdfPagesA4(pageGeometry)", validation)
+        resolver = javascript_function(self.js, "resolveUploadedPdfConversion")
+        self.assertIn("showEditorA4Dialog({ file: convertedFile", resolver)
+        self.assertIn("if (!accepted)", resolver)
+        self.assertIn("await saveUploadedEditorState({ immediate: true })", resolver)
 
         loader = javascript_function(self.js, "loadUploadedPdfIntoEditor")
         validate_at = loader.index("const incomingPages = await loadPdfJsAsset")

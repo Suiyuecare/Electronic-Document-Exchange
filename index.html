@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>公文收發電子用印系統</title>
-    <script src="entry-bootstrap.js?v=20260908-launch-six-items-r1"></script>
+    <script src="entry-bootstrap.js?v=20260911-compose-editor-r1"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png?v=20260713" />
@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
-    <link rel="stylesheet" href="styles.css?v=20260908-launch-six-items-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260911-compose-editor-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
@@ -1036,8 +1036,21 @@
           <div class="compose-progress-strip compact" id="composeStepper" aria-label="撰寫公文頁面"></div>
           <div class="compose-save-status" id="composeSaveStatus" data-tone="idle" role="status" aria-live="polite">
             <strong>尚未儲存到系統</strong>
-            <span>輸入期間會先保留在此瀏覽器；請按「暫存草稿」完成後端保存。</span>
+            <span>輸入後約兩秒自動保存至私人雲端草稿；未上傳的附件仍保留在原裝置。</span>
           </div>
+          <div class="form-actions" id="composeSaveRecovery" hidden>
+            <button type="button" class="secondary-button" id="composeCloudRetryBtn">重試保存</button>
+            <button type="button" class="secondary-button" id="composeKeepNewDraftBtn" hidden>保留我的內容為新草稿</button>
+          </div>
+          <details class="compose-cloud-drafts">
+            <summary>雲端草稿 · 換裝置繼續填寫</summary>
+            <div class="form-actions">
+              <label>私人草稿<select id="composeCloudDraftSelect"><option value="">選擇私人雲端草稿</option></select></label>
+              <button class="secondary-button" type="button" id="composeCloudLoadBtn">載入所選草稿</button>
+              <button class="secondary-button" type="button" id="composeCloudRefreshBtn">重新載入</button>
+            </div>
+            <p id="composeCloudDraftNotice" role="status"></p>
+          </details>
           <div class="next-action-card compose-hidden-action" id="composeNextAction" hidden></div>
 
           <form class="compose-form-shell official-document-entry" id="composeForm" novalidate>
@@ -1115,6 +1128,8 @@
                   <label>
                     附件
                     <input id="attachments" type="file" multiple />
+                    <span class="field-hint">每份附件上限 3 MB；PDF 須為 A4。附件文字可另行編輯，重試不會重複上傳已成功的檔案。</span>
+                    <div id="composeAttachmentUploadStatus" role="status" aria-live="polite"></div>
                     <span class="field-hint">送出後附件會保留在同一張公文申請單，後續每一位指定簽核人都可檢視與下載。</span>
                   </label>
                   <label>
@@ -1128,6 +1143,14 @@
                     <textarea id="documentPurpose" rows="4" placeholder="先用自己的話寫要辦理的事情、原因、希望對方採取的行動，以及重要期限。"></textarea>
                     <span class="field-hint" id="documentPurposeHint">內容只用來協助產生函稿，不會直接出現在正式 PDF。</span>
                     <button class="primary-button compose-purpose-generate" id="generateFromPurposeBtn" type="button">AI產生公文主旨與說明</button>
+                    <div id="composeAiSuggestion" hidden role="status">
+                      <p>產生期間您已修改內容，AI 建議尚未覆蓋原文。</p>
+                      <p id="composeAiSuggestionSubject"></p>
+                      <pre id="composeAiSuggestionBody"></pre>
+                      <button type="button" class="secondary-button" id="composeAiApplyBtn">套用這份 AI 建議</button>
+                      <button type="button" class="secondary-button" id="composeAiDiscardBtn">保留我的文字</button>
+                    </div>
+                    <button type="button" class="secondary-button" id="composeAiUndoBtn" hidden>復原上次 AI 套用</button>
                   </label>
                   <label>
                     主旨
@@ -1567,8 +1590,9 @@
                     <button id="uploadedEditorModeAdvanced" type="button" data-editor-mode="advanced" aria-pressed="false">進階</button>
                   </div>
                   <span class="pdf-editor-save-status idle" id="uploadedEditorSaveStatus" role="status" aria-live="polite">尚未建立草稿</span>
-                  <button class="text-button pdf-editor-conflict-action" id="uploadedEditorConflictCopyBtn" type="button" hidden>複製本機版本</button>
-                  <button class="text-button pdf-editor-conflict-action" id="uploadedEditorResolveConflictBtn" type="button" hidden>重新載入伺服器版本</button>
+                  <button class="primary-button pdf-editor-conflict-action" id="uploadedEditorConflictCopyBtn" type="button" hidden>保留我的內容為新草稿</button>
+                  <button class="secondary-button pdf-editor-conflict-action" id="uploadedEditorResolveConflictBtn" type="button" hidden>使用最新版</button>
+                  <button class="text-button pdf-editor-conflict-action" id="uploadedEditorConflictBackupBtn" type="button" hidden>下載技術備份</button>
                 </div>
               </div>
 
@@ -1581,8 +1605,8 @@
                 <input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="uploadedPdfA4Rule" hidden />
               </div>
               <div class="pdf-a4-rule pdf-editor-a4-rule" id="uploadedPdfA4Rule" data-state="idle">
-                <strong>只接受 A4 PDF（直式或橫式）</strong>
-                <span>支援多頁，且每一頁都必須是 A4；上限 50 MB／300 頁。</span>
+                <strong>編輯與送簽使用 A4 PDF（直式或橫式）</strong>
+                <span>非 A4 可先等比例轉換並確認預覽；原稿保留。上限 50 MB／300 頁。</span>
                 <em id="uploadedPdfA4Status" role="status" aria-live="polite">尚未檢查 PDF 頁面尺寸。</em>
               </div>
               <div class="pdf-editor-upload-error" id="uploadedEditorUploadError" role="alert" aria-live="assertive" hidden>
@@ -1600,6 +1624,7 @@
                 <div class="pdf-editor-tool-group" role="group" aria-label="物件工具">
                   <button class="active" type="button" data-editor-tool="select" title="選取與移動">選取</button>
                   <button type="button" data-editor-tool="seal" title="放置公司印章">印章</button>
+                  <button id="uploadedEditorSeamToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorSeamPanel">騎縫章</button>
                   <button type="button" data-editor-tool="text" title="新增文字">文字</button>
                   <button class="advanced-only" type="button" data-editor-tool="replacement" title="安全移除原文後取代">取代文字</button>
                   <button class="advanced-only" type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
@@ -1624,6 +1649,16 @@
                 </div>
               </div>
 
+              <section class="pdf-editor-seam-panel" id="uploadedEditorSeamPanel" hidden aria-label="批次騎縫章">
+                <h4>批次騎縫章</h4>
+                <p>每組將同一枚章分成左右半章，放在兩頁接縫；各組可獨立調整高度，尺寸不變。請先在下方選擇印章。</p>
+                <div class="pdf-editor-seam-actions">
+                  <label>頁面範圍<input id="uploadedEditorSeamPages" inputmode="numeric" placeholder="例如 1-5，留白為全部頁" /></label>
+                  <button class="primary-button" id="uploadedEditorSeamAddBtn" type="button">為相鄰頁建立騎縫章</button>
+                </div>
+                <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">至少需要兩頁 PDF。</p>
+                <div id="uploadedEditorSeamGroups"></div>
+              </section>
               <div class="electronic-seal-tools pdf-editor-general-options" id="uploadedEditorGeneralOptions">
                 <label>印章<select id="uploadedSealSealSelect"></select></label>
                 <label>套用頁面<select id="uploadedSealStampType">
@@ -4120,6 +4155,8 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
-    <script src="app.js?v=20260908-launch-six-items-r1"></script>
+    <script src="editor-seam.js?v=20260911-r1"></script>
+    <script src="editor-a4.js?v=20260911-r1"></script>
+    <script src="app.js?v=20260911-compose-editor-r1"></script>
   </body>
 </html>
