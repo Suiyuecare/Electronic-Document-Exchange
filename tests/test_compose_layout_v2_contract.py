@@ -110,10 +110,10 @@ class ComposeLayoutV2ContractTest(unittest.TestCase):
         self.assertIn("recipientHint", self.dom.elements)
         self.assertIn("submitDispatchBtn", self.dom.elements)
 
-    def test_contact_block_is_wider_without_changing_official_document_font(self):
+    def test_contact_block_respects_textbook_body_margin_without_changing_font(self):
         rule = re.findall(r'\.draft-preview-panel\.live \.official-draft-preview \.draft-contact-block\s*\{([^}]+)\}', self.css)[-1]
-        self.assertIn("width: 42cqw", rule)
-        self.assertIn("margin-right: -5.5cqw", rule)
+        self.assertIn("width: 37.22cqw", rule)
+        self.assertIn("margin-right: 0", rule)
         self.assertIn('font-family: "EDoc MOE EduKai", "標楷體"', self.css)
 
 

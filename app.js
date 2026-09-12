@@ -932,6 +932,7 @@ let composeOfficialContentRevision = null;
 let composeAiOperation = null;
 let composeAiSuggestion = null;
 let composeAiUndo = null;
+let composeAiReview = null;
 const officialAttachmentUploadCache = new Map();
 let composeSaveState = {
   tone: "idle",
@@ -7377,6 +7378,7 @@ function resetComposeAsyncScope() {
   composeAiOperation = null;
   composeAiSuggestion = null;
   composeAiUndo = null;
+  composeAiReview = null;
   const aiButton = document.querySelector("#generateFromPurposeBtn");
   if (aiButton) { aiButton.disabled = false; aiButton.textContent = "AI產生公文主旨與說明"; }
   renderComposeAiActions();
@@ -7829,7 +7831,9 @@ function draftPageMainFits(data, content, pageNumber, attachmentsText, terminal 
   if (!main || !pageNumberNode) return true;
   const mainRect = main.getBoundingClientRect();
   const pageNumberRect = pageNumberNode.getBoundingClientRect();
-  return mainRect.bottom <= pageNumberRect.top - 18;
+  const pageRect = measure.querySelector(".draft-page").getBoundingClientRect();
+  const contentBottom = pageRect.top + pageRect.width * (297 - 25) / 210;
+  return mainRect.bottom <= Math.min(contentBottom, pageNumberRect.top - 18);
 }
 
 function preferredDraftBreak(text, limit) {
@@ -7891,7 +7895,8 @@ function chunkTextByLength(text, firstLimit = 235, nextLimit = 390) {
 
 function fallbackDraftContentPages(data) {
   const subjectChunks = chunkTextByLength(draftSubjectSource(data.subject), 110, 230);
-  const bodyChunks = chunkTextByLength(draftBodySource(data.body), 190, 330);
+  const bodySource = draftBodySource(data.body);
+  const bodyChunks = chunkTextByLength(bodySource, 190, 330);
   const pages = [];
   subjectChunks.forEach((subject, index) => {
     pages.push({
@@ -7901,20 +7906,24 @@ function fallbackDraftContentPages(data) {
       bodyContinued: false
     });
   });
+  let bodyOffset = 0;
   bodyChunks.forEach((body, index) => {
     pages.push({
       subject: "",
       body,
       subjectContinued: false,
-      bodyContinued: index > 0
+      bodyContinued: index > 0,
+      bodyContext: officialDraftBodyContinuationContext(bodySource, bodyOffset)
     });
+    bodyOffset += body.length;
   });
   return pages;
 }
 
 function splitDraftContentIntoPages(data, attachmentsText) {
   let subjectRemaining = draftSubjectSource(data.subject);
-  let bodyRemaining = draftBodySource(data.body);
+  const bodySource = draftBodySource(data.body);
+  let bodyRemaining = bodySource;
   if (!ensureDraftMeasurePreview()) return fallbackDraftContentPages(data);
   const pages = [];
   let pageNumber = 1;
@@ -7927,7 +7936,8 @@ function splitDraftContentIntoPages(data, attachmentsText) {
       subject: "",
       body: "",
       subjectContinued: subjectStarted,
-      bodyContinued: bodyStarted
+      bodyContinued: bodyStarted,
+      bodyContext: officialDraftBodyContinuationContext(bodySource, bodySource.length - bodyRemaining.length)
     };
 
     if (subjectRemaining) {
@@ -8192,6 +8202,18 @@ function setAiDraftStatus(text, tone = "") {
   status.dataset.tone = tone;
 }
 
+function composeAiContext(data) {
+  return {
+    docType: data.type,
+    priority: data.priority,
+    recipient: data.recipient,
+    attachments: data.attachments,
+    attachmentDetails: data.attachmentDetails,
+    documentDate: data.dispatchDate,
+    issuerName: data.companyName
+  };
+}
+
 async function generateAiDraft() {
   if (composeAiOperation) return;
   const plainText = document.querySelector("#documentPurpose")?.value.trim()
@@ -8211,26 +8233,28 @@ async function generateAiDraft() {
   button.textContent = "正在產生...";
   setAiDraftStatus("生成中", "loading");
   try {
-    const data = composePayload();
+    const context = composeAiContext(composePayload());
     const result = await backendRequest("/ai/compose", {
       method: "POST",
       body: JSON.stringify({
         plainText,
-        docType: data.type,
-        priority: data.priority,
-        recipient: data.recipient,
-        attachments: data.attachments,
-        attachmentDetails: data.attachmentDetails,
+        ...context,
         role: activeRole()
       })
     });
     if (scope !== composeRequestScope() || composeAiOperation !== operation) return;
-    const changed = before.subject !== (document.querySelector("#subject")?.value || "") || before.body !== (document.querySelector("#bodyText")?.value || "") || before.purpose !== (document.querySelector("#documentPurpose")?.value.trim() || document.querySelector("#aiPlainText")?.value.trim() || "");
-    composeAiSuggestion = { scope, subject: result.subject || "", body: result.body || "" };
-    if (changed) {
+    const changed = before.subject !== (document.querySelector("#subject")?.value || "") || before.body !== (document.querySelector("#bodyText")?.value || "") || before.purpose !== (document.querySelector("#documentPurpose")?.value.trim() || document.querySelector("#aiPlainText")?.value.trim() || "") || JSON.stringify(context) !== JSON.stringify(composeAiContext(composePayload()));
+    const warnings = Array.isArray(result.warnings) ? result.warnings.filter(item => typeof item === "string" && item.trim()).slice(0, 12) : [];
+    composeAiSuggestion = { scope, subject: result.subject || "", body: result.body || "", warnings, usedOpenAI: result.usedOpenAI === true };
+    composeAiReview = { scope, warnings };
+    if (changed || warnings.length) {
+      const purposeHint = document.querySelector("#documentPurposeHint");
+      if (purposeHint) purposeHint.textContent = result.usedOpenAI
+        ? `已由 ${result.model} 產生建議，尚未套用。`
+        : result.notice || "已由本機撰寫規則產生建議（非 AI 生成），尚未套用。";
       renderComposeAiActions();
-      setAiDraftStatus("建議已產生，等待您選擇是否套用", "ok");
-      return showToast("已保留您剛修改的文字；可檢視 AI 建議後再決定是否套用。");
+      setAiDraftStatus(result.usedOpenAI ? (warnings.length ? "請先核對生成內容" : "建議已產生，等待您選擇是否套用") : "本機規則已生成，請核對後套用", warnings.length || !result.usedOpenAI ? "fallback" : "ok");
+      return showToast(warnings.length ? "內容有待核對事項，尚未自動套用；請先檢視下方提醒。" : "已保留您剛修改的文字；可檢視生成建議後再決定是否套用。");
     }
     applyComposeAiSuggestion();
     const purposeHint = document.querySelector("#documentPurposeHint");
@@ -8248,7 +8272,9 @@ async function generateAiDraft() {
     addDispatchAudit("AI 生成失敗", reason);
     showToast(`AI 生成失敗：${reason}`);
   } finally {
-    if (scope === composeRequestScope() && composeAiOperation === operation) {
+    // A company change invalidates the response, but must not leave its button busy.
+    // An explicitly reset/newer operation still owns its own button state.
+    if (composeAiOperation === operation) {
       composeAiOperation = null;
       button.disabled = false;
       button.textContent = originalLabel;
@@ -8263,6 +8289,21 @@ function renderComposeAiActions() {
   if (visible) {
     document.querySelector("#composeAiSuggestionSubject").textContent = composeAiSuggestion.subject;
     document.querySelector("#composeAiSuggestionBody").textContent = composeAiSuggestion.body;
+    const reason = document.querySelector("#composeAiSuggestionReason");
+    if (reason) reason.textContent = (composeAiSuggestion.usedOpenAI ? "" : "本機撰寫規則（非 AI 生成）。") + (composeAiSuggestion.warnings?.length
+      ? "內容有待核對事項，尚未自動套用。確認後可套用，再繼續編輯。"
+      : "產生期間您已修改內容，建議尚未覆蓋原文。");
+  }
+  const review = document.querySelector("#composeAiReview");
+  const warningList = document.querySelector("#composeAiReviewWarnings");
+  const warnings = composeAiReview?.scope === composeRequestScope() ? composeAiReview.warnings : [];
+  if (review) review.hidden = !warnings.length;
+  if (warningList) {
+    warningList.replaceChildren(...warnings.map(warning => {
+      const item = document.createElement("li");
+      item.textContent = warning;
+      return item;
+    }));
   }
   const undo = document.querySelector("#composeAiUndoBtn");
   if (undo) undo.hidden = !composeAiUndo || composeAiUndo.scope !== composeRequestScope();
@@ -8279,6 +8320,12 @@ function applyComposeAiSuggestion() {
   renderComposeAiActions();
 }
 
+function discardComposeAiSuggestion() {
+  composeAiSuggestion = null;
+  composeAiReview = null;
+  renderComposeAiActions();
+}
+
 function undoComposeAiSuggestion() {
   if (!composeAiUndo || composeAiUndo.scope !== composeRequestScope()) return;
   const subject = document.querySelector("#subject"), body = document.querySelector("#bodyText");
@@ -8286,6 +8333,7 @@ function undoComposeAiSuggestion() {
   subject.value = composeAiUndo.subject;
   body.value = composeAiUndo.body;
   composeAiUndo = null;
+  composeAiReview = null;
   markDraftDirty();
   renderComposeAiActions();
 }
@@ -8310,6 +8358,72 @@ function clearAiDraft() {
   showToast("AI 公文助理欄位已清除。");
 }
 
+function officialDraftBodyItem(value) {
+  const numbered = value.match(/^([一二三四五六七八九十百]+、|[（(][一二三四五六七八九十百]+[）)]|[0-9０-９]+[、.]|[（(][0-9０-９]+[）)])\s*(.*)$/);
+  if (!numbered) return null;
+  const marker = numbered[1];
+  const parenthesized = /^[（(]/.test(marker);
+  const numeric = /[0-9０-９]/.test(marker);
+  const level = numeric ? (parenthesized ? 3 : 2) : (parenthesized ? 1 : 0);
+  const markerWidth = [...marker].reduce((sum, char) => sum + (/^[\x20-\x7e]$/.test(char) ? 0.5 : 1), 0);
+  return { marker, level, markerWidth, text: numbered[2] };
+}
+
+function officialDraftBodyContinuationContext(source, offset) {
+  // Layout-only metadata: the complete source remains unchanged in the form,
+  // autosave and API payload. A page cut must not turn a wrapped list item into
+  // a new unindented paragraph (or a five-column section into three columns).
+  let start = offset;
+  while (start < source.length && /\s/.test(source[start])) start += 1;
+  const lineStart = Math.max(source.lastIndexOf("\n", start - 1), source.lastIndexOf("\r", start - 1)) + 1;
+  const remainingLineBreak = source.slice(start).search(/[\r\n]/);
+  const lineEnd = remainingLineBreak < 0 ? source.length : start + remainingLineBreak;
+  let paragraphStart = lineStart;
+  let sectionColumns = 3;
+  for (const match of source.matchAll(/^[ \t]*(說明|辦法|擬辦|核復事項)[ \t]*[：:][ \t]*/gm)) {
+    if (match.index > start) break;
+    sectionColumns = Math.max(3, [...match[1]].length + 1);
+    if (match.index >= lineStart) paragraphStart = match.index + match[0].length;
+  }
+  while (paragraphStart < source.length && /[ \t\r]/.test(source[paragraphStart])) paragraphStart += 1;
+  const paragraph = source.slice(paragraphStart, lineEnd);
+  const item = officialDraftBodyItem(paragraph);
+  const paragraphIndentEm = start > paragraphStart
+    ? (item ? item.level + item.markerWidth : 0)
+    : null;
+  return { sectionColumns, paragraphIndentEm };
+}
+
+function renderOfficialDraftBody(text, continued = false, context = null) {
+  const source = String(text || "").replace(/\r\n?/g, "\n").trim();
+  if (!source) return "";
+  const matches = [...source.matchAll(/^[ \t]*(說明|辦法|擬辦|核復事項)[ \t]*[：:][ \t]*/gm)];
+  const sections = [];
+  const prefix = matches.length ? source.slice(0, matches[0].index).trim() : source;
+  if (prefix) sections.push({ label: continued ? "續" : "說明", text: prefix, context });
+  matches.forEach((match, index) => {
+    const value = source.slice(match.index + match[0].length, matches[index + 1]?.index ?? source.length).trim();
+    if (value) sections.push({ label: match[1], text: value });
+  });
+  return sections.map(section => {
+    const paragraphs = section.text.split("\n").map((line, index) => {
+      const value = line.trim();
+      if (!value) return '<p class="draft-body-paragraph draft-body-blank" aria-hidden="true">　</p>';
+      const indentation = section.context?.paragraphIndentEm;
+      if (index === 0 && typeof indentation === "number" && Number.isFinite(indentation) && indentation >= 0) {
+        return `<p class="draft-body-paragraph draft-body-continuation" style="margin-left:${indentation}em">${escapeDraftHtml(value)}</p>`;
+      }
+      const item = officialDraftBodyItem(value);
+      if (!item) return `<p class="draft-body-paragraph">${escapeDraftHtml(value)}</p>`;
+      return `<p class="draft-body-paragraph draft-body-item" style="--item-level:${item.level};--item-marker-width:${item.markerWidth}em"><span class="draft-item-marker">${escapeDraftHtml(item.marker)}</span><span>${escapeDraftHtml(item.text)}</span></p>`;
+    }).join("");
+    const inheritedColumns = section.context?.sectionColumns;
+    const columns = Number.isInteger(inheritedColumns) && inheritedColumns >= 3 && inheritedColumns <= 5
+      ? inheritedColumns : Math.max(3, [...section.label].length + 1);
+    return `<div class="draft-content-row draft-description" style="--section-label-width:${columns}em"><span>${escapeDraftHtml(section.label)}：</span><div class="draft-body">${paragraphs}</div></div>`;
+  }).join("");
+}
+
 function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, attachmentsText) {
   const [year, month, day] = (isValidComposeDispatchDate(data.dispatchDate) ? data.dispatchDate : composeTodayDate()).split("-").map(Number);
   const rocDate = `中華民國${year - 1911}年${month}月${day}日`;
@@ -8326,7 +8440,8 @@ function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, atta
         subject: String(content?.subject || ""),
         body: String(content?.body || ""),
         subjectContinued: Boolean(content?.subjectContinued),
-        bodyContinued: Boolean(content?.bodyContinued)
+        bodyContinued: Boolean(content?.bodyContinued),
+        bodyContext: content?.bodyContext || null
       };
   return `
     <section class="draft-page" data-page-number="${pageNumber}" role="document" aria-label="正式函稿第 ${pageNumber} 頁，共 ${totalPages} 頁">
@@ -8376,12 +8491,7 @@ function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, atta
             <strong>${escapeDraftHtml(pageContent.subject)}</strong>
           </div>
         ` : ""}
-        ${pageContent.body ? `
-          <div class="draft-content-row draft-description">
-            <span>${pageContent.bodyContinued ? "續：" : "說明："}</span>
-            <div class="draft-body">${escapeDraftHtml(pageContent.body)}</div>
-          </div>
-        ` : ""}
+        ${renderOfficialDraftBody(pageContent.body, pageContent.bodyContinued, pageContent.bodyContext)}
         ${isLastPage ? `
           <section class="draft-distribution-block" aria-label="正本與副本">
             <div><span>正本：</span><strong>${escapeDraftHtml(data.recipient)}</strong></div>
@@ -30110,7 +30220,7 @@ document.querySelector("#composeResumeDraftBtn")?.addEventListener("click", () =
 document.querySelector("#composeStartFreshBtn")?.addEventListener("click", dismissComposeRecovery);
 document.querySelector("#composeContactToggleBtn")?.addEventListener("click", toggleComposeContactSummary);
 document.querySelector("#composeAiApplyBtn")?.addEventListener("click", applyComposeAiSuggestion);
-document.querySelector("#composeAiDiscardBtn")?.addEventListener("click", () => { composeAiSuggestion = null; renderComposeAiActions(); });
+document.querySelector("#composeAiDiscardBtn")?.addEventListener("click", discardComposeAiSuggestion);
 document.querySelector("#composeAiUndoBtn")?.addEventListener("click", undoComposeAiSuggestion);
 window.addEventListener("online", () => { scheduleComposeCloudSave(); });
 window.addEventListener("beforeunload", (event) => {

@@ -22,6 +22,12 @@ PACKAGED_SUPABASE_FILES = {
 
 
 class VercelPackagingTestCase(unittest.TestCase):
+    def test_official_writing_rules_are_included_in_runtime_bundle(self) -> None:
+        config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
+        python_build = next(item for item in config["builds"] if item.get("src") == "api/index.py")
+        self.assertIn("official_writing.py", python_build["config"]["includeFiles"])
+        self.assertTrue((ROOT / "official_writing.py").is_file())
+
     def test_production_env_template_includes_dedicated_app_secret(self) -> None:
         values = {}
         template = (ROOT / ".env.production.example").read_text(encoding="utf-8")

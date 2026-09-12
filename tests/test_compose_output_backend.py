@@ -179,13 +179,42 @@ class ComposeOutputBackendTest(unittest.TestCase):
             backend.create_official_document(self.conn, self.payload(), other_session)
 
     def test_contact_block_is_wider_but_stays_inside_a4(self):
+        from reportlab.pdfbase import pdfmetrics
+
+        email = "document.operator@example.test"
         info = backend.official_pdf_info({
-            "contact_email": "document.operator@example.test", "subject": "測試", "body": "去識別化測試",
+            "contact_email": email, "subject": "測試", "body": "去識別化測試",
         }, "歲悅正式函")
         layout = backend.paginate_official_pdf(info)
         lines = layout["header"]["contact_lines"]
-        self.assertIn("電子信箱：document.operator@example.test", lines)
-        self.assertLess(302.85 + 250, backend.A4_WIDTH_PT - 40)
+        email_start = next(index for index, line in enumerate(lines) if line.startswith("電子信箱："))
+        email_lines = lines[email_start:]
+        expected_email_text = f"電子信箱：{email}"
+        self.assertGreater(len(email_lines), 1)
+        self.assertEqual("".join(email_lines), expected_email_text)
+        self.assertEqual(sum(len(line) for line in email_lines), len(expected_email_text))
+
+        right_edge = backend.A4_WIDTH_PT - 25 / 25.4 * 72
+        contact_x = layout["header"]["contact_x"]
+        font_name = layout["font_profile"]["name"]
+        self.assertEqual(contact_x, 302.85)
+        for line in lines:
+            self.assertLessEqual(contact_x + pdfmetrics.stringWidth(line, font_name, 12), right_edge + 0.01)
+
+        # Verify the real PDF still emits every wrapped line at 12 pt and
+        # inside the manual's 25 mm right margin, not only the layout model.
+        pdf = backend.write_official_pdf_document(info, layout, [])
+        emitted_email_lines = []
+        def check_text(text, _cm, tm, _font, font_size):
+            text = text.rstrip("\n")
+            if text in email_lines:
+                emitted_email_lines.append(text)
+                self.assertEqual(font_size, 12)
+                self.assertAlmostEqual(tm[4], contact_x, places=2)
+                self.assertLessEqual(tm[4] + pdfmetrics.stringWidth(text, font_name, font_size), right_edge + 0.01)
+        for page in PdfReader(io.BytesIO(pdf)).pages:
+            page.extract_text(visitor_text=check_text)
+        self.assertEqual(emitted_email_lines, email_lines)
 
     def test_missing_number_fails_before_pdf_in_both_create_backends(self):
         original_row = backend.official_document_row
