@@ -98,8 +98,20 @@ openApprovalLogMobileDetail();assert.equal(page.dataset.mobileDetail,'true');ass
 mobile=false;openApprovalLogMobileDetail();assert.equal(focused,1);assert.equal(scrolled,1);
 ''')
 
+    def test_mobile_detail_return_reveals_selected_case_and_preserves_desktop_scroll(self):
+        self.run_js(["closeApprovalLogMobileDetail"], r'''
+let mobile=true,selectedWorkflowTaskId='case-12',removed=0,focused=0,scrolled=0,hasSelection=true;
+const page={removeAttribute(name){assert.equal(name,'data-mobile-detail');removed++}};
+const button={focus(options){assert.deepEqual(options,{preventScroll:true});focused++},scrollIntoView(options){assert.equal(removed,1);assert.deepEqual(options,{block:'center',behavior:'instant'});scrolled++}};
+const list={querySelector(selector){assert.equal(selector,'[data-approval-log-select="case-12"]');return hasSelection?button:null}};
+const CSS={escape:value=>value},window={matchMedia:()=>({matches:mobile})},document={querySelector:selector=>({'#approvalLog':page,'#approvalLogList':list}[selector]||null)};
+closeApprovalLogMobileDetail();assert.equal(removed,1);assert.equal(focused,1);assert.equal(scrolled,1);
+mobile=false;closeApprovalLogMobileDetail();assert.equal(removed,2);assert.equal(focused,2);assert.equal(scrolled,1);
+mobile=true;hasSelection=false;closeApprovalLogMobileDetail();assert.equal(removed,3);assert.equal(focused,2);assert.equal(scrolled,1);
+''')
+
     def test_approval_evidence_precedes_decision_and_empty_has_one_surface(self):
-        self.run_js(["renderApprovalLog"], r'''
+        self.run_js(["closeApprovalLogMobileDetail", "renderApprovalLog"], r'''
 const node=()=>({innerHTML:'',textContent:'',hidden:false,dataset:{},classList:{toggle(){}},querySelectorAll:()=>[],querySelector:()=>null,removeAttribute(){}});
 const list=node(),detail=node(),full=node(),panel=node(),page=node(),layout=node(),back=node();full.parentElement=node();
 const nodes={'#approvalLogList':list,'#approvalLogDetail':detail,'#approvalLogOpenWorkflowBtn':full,'#approvalLogCount':node(),'#approvalLogScope':node(),'#approvalLogDetailPanel':panel,'.approval-log-layout':layout,'#approvalLogBackBtn':back,'#approvalLog':page};

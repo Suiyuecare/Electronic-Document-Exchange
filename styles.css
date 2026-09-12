@@ -12211,7 +12211,8 @@ body[data-session-state="revalidating"] .workspace::after {
 /* Electronic sealing stays task-first: existing cases and precision controls
    are disclosures; authorization, save state and approval risks stay visible. */
 #electronicSealWorkQueue { padding: 0 18px; }
-#electronicSealWorkQueue > summary { cursor: pointer; min-height: 58px; margin: 0; gap: 12px; }
+#electronicSealWorkQueue > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; cursor: pointer; min-height: 58px; margin: 0; gap: 12px; }
+#electronicSealWorkQueue > summary strong { min-width: 0; overflow-wrap: anywhere; }
 #electronicSealWorkQueue > summary::after { content: "展開"; color: var(--primary, #bc5100); font-size: 14px; }
 #electronicSealWorkQueue[open] > summary::after { content: "收起"; }
 #electronicSealWorkQueue .electronic-seal-queue-search { display: grid; gap: 6px; padding-bottom: 12px; }
@@ -12231,8 +12232,9 @@ body[data-session-state="revalidating"] .workspace::after {
 }
 @media (max-width: 820px) {
   #electronicSealWorkQueue { padding: 0 12px; }
-  #electronicSealWorkQueue > summary { flex-wrap: wrap; padding: 10px 0; }
-  #electronicSealWorkQueue > summary strong { flex: 1 1 180px; }
+  /* Do not inherit the column panel-heading flex layout: a title flex-basis
+     would become vertical empty space while this native details is closed. */
+  #electronicSealWorkQueue > summary { padding: 10px 0; gap: 8px; }
   #uploadedSealApplicationPanel .panel-heading { flex-wrap: wrap; gap: 8px; }
   #uploadedSealApplicationToggleBtn { text-align: left; padding-left: 0; }
   #uploadedPdfEditor .pdf-editor-commandbar { gap: 8px; }

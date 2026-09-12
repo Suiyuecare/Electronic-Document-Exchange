@@ -22069,6 +22069,18 @@ function openApprovalLogMobileDetail() {
   }
 }
 
+function closeApprovalLogMobileDetail() {
+  document.querySelector("#approvalLog")?.removeAttribute("data-mobile-detail");
+  const selectedButton = document.querySelector("#approvalLogList")
+    ?.querySelector(`[data-approval-log-select="${CSS.escape(selectedWorkflowTaskId || "")}"]`);
+  selectedButton?.focus({ preventScroll: true });
+  // Revealing the long list does not restore the scroll position lost when it
+  // was hidden. Keep the original mobile case visible, not just focused offscreen.
+  if (window.matchMedia("(max-width: 760px)").matches) {
+    selectedButton?.scrollIntoView({ block: "center", behavior: "instant" });
+  }
+}
+
 function renderApprovalLog() {
   const list = document.querySelector("#approvalLogList");
   const detail = document.querySelector("#approvalLogDetail");
@@ -22122,10 +22134,7 @@ function renderApprovalLog() {
   if (detailPanel) detailPanel.hidden = !selected;
   document.querySelector(".approval-log-layout")?.classList.toggle("is-empty", !selected);
   const backButton = document.querySelector("#approvalLogBackBtn");
-  if (backButton) backButton.onclick = () => {
-    document.querySelector("#approvalLog")?.removeAttribute("data-mobile-detail");
-    list.querySelector(`[data-approval-log-select="${CSS.escape(selectedWorkflowTaskId || "")}"]`)?.focus({ preventScroll: true });
-  };
+  if (backButton) backButton.onclick = closeApprovalLogMobileDetail;
   if (!selected) {
     detail.innerHTML = "";
     document.querySelector("#approvalLog")?.removeAttribute("data-mobile-detail");
