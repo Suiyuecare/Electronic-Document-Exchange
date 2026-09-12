@@ -11631,11 +11631,14 @@ def roc_date_string(value: Any = None) -> str:
     return f"中華民國{parsed.year - 1911}年{parsed.month}月{parsed.day}日"
 
 
-OFFICIAL_PDF_RENDERER_VERSION = "reportlab-4.4.9-formal-tw-v4-edukai-5.1"
-OFFICIAL_PDF_CONTENT_LEFT = 70.35
-OFFICIAL_PDF_CONTENT_RIGHT = 520.10
-OFFICIAL_PDF_BODY_INDENT = 119.85
-OFFICIAL_PDF_COPY_INDENT = 106.35
+OFFICIAL_PDF_RENDERER_VERSION = "reportlab-4.4.9-formal-tw-v5-manual-edukai-5.1"
+# The supplied official-writing manual reserves 25 mm on all four sides of
+# the A4 body, including 15 mm binding space plus 10 mm on the left.
+OFFICIAL_PDF_CONTENT_LEFT = 25 / 25.4 * 72
+OFFICIAL_PDF_CONTENT_RIGHT = A4_WIDTH_PT - OFFICIAL_PDF_CONTENT_LEFT
+OFFICIAL_PDF_CONTENT_BOTTOM = A4_HEIGHT_PT - OFFICIAL_PDF_CONTENT_LEFT
+OFFICIAL_PDF_BODY_INDENT = OFFICIAL_PDF_CONTENT_LEFT + 48.0
+OFFICIAL_PDF_COPY_INDENT = OFFICIAL_PDF_CONTENT_LEFT + 36.0
 OFFICIAL_PDF_FONT_FILE = "edukai-5.1_20251208.ttf"
 OFFICIAL_PDF_FONT_SHA256 = "e2b6b1bd1d6303672a68d5057a1f1e4b5361e3d8842373ff3bd1c71fb9ea9b98"
 _OFFICIAL_PDF_FONT_PROFILE: Dict[str, Any] | None = None
@@ -11821,7 +11824,7 @@ def official_pdf_body_sections(value: Any) -> List[Dict[str, str]]:
     source = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not source:
         return []
-    matches = list(re.finditer(r"(?m)^\s*(說明|辦法)\s*[：:]\s*", source))
+    matches = list(re.finditer(r"(?m)^[ \t]*(說明|辦法|擬辦|核復事項)[ \t]*[：:][ \t]*", source))
     if not matches:
         return [{"label": "說明", "text": source}]
     sections: List[Dict[str, str]] = []
@@ -11933,7 +11936,7 @@ def validate_official_pdf_font_coverage(info: Dict[str, Any]) -> None:
         raise ValueError("official_pdf_font_missing_glyphs")
 
 
-def content_bottom_for_pdf_stamps(stamps: List[Dict[str, Any]] | None, page_number: int, fallback: float = 788.0) -> float:
+def content_bottom_for_pdf_stamps(stamps: List[Dict[str, Any]] | None, page_number: int, fallback: float = OFFICIAL_PDF_CONTENT_BOTTOM) -> float:
     bottom = fallback
     for stamp in stamps or []:
         if stamp.get("page") not in {page_number, "all"}:
@@ -11958,31 +11961,80 @@ def official_pdf_wrap_text(
     source = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
     wrapped: List[str] = []
     closing_punctuation = "，。；：、）》】」』！？％,.!?;:)]}"
+    opening_punctuation = "（《【「『([{"
     for paragraph in source.split("\n"):
+        paragraph = paragraph.strip()
         if not paragraph:
             wrapped.append("")
             continue
-        current = ""
-        current_width = 0.0
-        for char in paragraph.strip():
-            char_width = pdfmetrics.stringWidth(char, font_name, font_size)
+        start = 0
+        while start < len(paragraph):
             limit = first_width if not wrapped else continuation_width
-            if current and current_width + char_width > limit:
-                if char in closing_punctuation:
-                    current += char
-                    wrapped.append(current)
-                    current = ""
-                    current_width = 0.0
-                else:
-                    wrapped.append(current)
-                    current = char
-                    current_width = char_width
-            else:
-                current += char
-                current_width += char_width
-        if current or not wrapped:
-            wrapped.append(current)
+            end, width = start, 0.0
+            while end < len(paragraph):
+                next_width = pdfmetrics.stringWidth(paragraph[end], font_name, font_size)
+                if end > start and width + next_width > limit:
+                    break
+                width += next_width
+                end += 1
+            # Carry the preceding character with closing punctuation instead
+            # of hanging punctuation into the required 25 mm right margin.
+            if end < len(paragraph):
+                if paragraph[end] in closing_punctuation and end - start > 1:
+                    while end - start > 1 and paragraph[end - 1] in closing_punctuation:
+                        end -= 1
+                    if end - start > 1:
+                        end -= 1
+                while end - start > 1 and paragraph[end - 1] in opening_punctuation:
+                    end -= 1
+            wrapped.append(paragraph[start:end])
+            start = end
     return wrapped or [""]
+
+
+def official_pdf_body_paragraph_lines(value: Any, font_name: str, font_size: float, base_x: float) -> List[Dict[str, Any]]:
+    """Lay out the manual's four list levels without rewriting stored text.
+
+    Each nested marker starts one CJK character farther in. Wrapped text
+    aligns with the text after its marker, not with the marker itself.
+    """
+    from reportlab.pdfbase import pdfmetrics  # type: ignore
+
+    chinese_number = "一二三四五六七八九十百千零〇"
+    marker_patterns = (
+        (1, rf"^[{chinese_number}]+、[ \t]*"),
+        (2, rf"^[（(][{chinese_number}]+[）)][ \t]*"),
+        (3, r"^[0-9０-９]+、[ \t]*"),
+        (4, r"^[（(][0-9０-９]+[）)][ \t]*"),
+    )
+    lines: List[Dict[str, Any]] = []
+    for paragraph in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        paragraph = paragraph.strip()
+        first_x = base_x
+        continuation_x = base_x
+        for level, pattern in marker_patterns:
+            match = re.match(pattern, paragraph)
+            if match:
+                first_x += (level - 1) * font_size
+                continuation_x = first_x + pdfmetrics.stringWidth(match.group(), font_name, font_size)
+                break
+        wrapped = official_pdf_wrap_text(
+            paragraph,
+            OFFICIAL_PDF_CONTENT_RIGHT - first_x,
+            OFFICIAL_PDF_CONTENT_RIGHT - continuation_x,
+            font_name,
+            font_size,
+        )
+        for index, text_value in enumerate(wrapped):
+            # Keep short paragraphs together; longer paragraphs may split,
+            # but never leave a single first/last line alone on a page.
+            keep_line_count = min(3, len(wrapped)) if index == 0 else 2 if index == len(wrapped) - 2 else 1
+            lines.append({
+                "text": text_value,
+                "text_x": first_x if index == 0 else continuation_x,
+                "keep_line_count": keep_line_count,
+            })
+    return lines
 
 
 def paginate_official_pdf(
@@ -11995,6 +12047,18 @@ def paginate_official_pdf(
     main_font_size = 16.0
     main_leading = 28.5
     meta_font_size = 12.0
+    title_top = OFFICIAL_PDF_CONTENT_LEFT
+    title_leading = 28.0
+    title_lines = official_pdf_wrap_text(
+        f"{info['company']}　{info['doc_type']}",
+        OFFICIAL_PDF_CONTENT_RIGHT - OFFICIAL_PDF_CONTENT_LEFT,
+        OFFICIAL_PDF_CONTENT_RIGHT - OFFICIAL_PDF_CONTENT_LEFT,
+        font_name,
+        20.0,
+    )
+    contact_x = 302.85
+    contact_top = title_top + len(title_lines) * title_leading + 1.52
+    contact_width = OFFICIAL_PDF_CONTENT_RIGHT - contact_x
 
     contact_lines: List[str] = []
     for label, value in (
@@ -12005,7 +12069,7 @@ def paginate_official_pdf(
         ("電子信箱", info.get("contact_email")),
     ):
         if value:
-            contact_lines.extend(official_pdf_wrap_text(f"{label}：{value}", 250.0, 250.0, font_name, 12.0))
+            contact_lines.extend(official_pdf_wrap_text(f"{label}：{value}", contact_width, contact_width, font_name, 12.0))
 
     recipient_lines = official_pdf_wrap_text(
         f"受文者：{info['recipient']}",
@@ -12014,7 +12078,7 @@ def paginate_official_pdf(
         font_name,
         16.0,
     )
-    recipient_top = max(193.85, 105.82 + max(1, len(contact_lines)) * 15.0 + 18.0)
+    recipient_top = max(193.85, contact_top + max(1, len(contact_lines)) * 15.0 + 18.0)
     meta_top = recipient_top + max(1, len(recipient_lines)) * 18.0 + 14.0
     metadata_values = [
         f"發文日期：{info['date']}",
@@ -12024,15 +12088,19 @@ def paginate_official_pdf(
         f"附件：{info['attachments']}",
     ]
     metadata_lines: List[str] = []
+    metadata_items: List[Dict[str, Any]] = []
     for value in metadata_values:
-        metadata_lines.extend(
-            official_pdf_wrap_text(
-                value,
-                OFFICIAL_PDF_CONTENT_RIGHT - OFFICIAL_PDF_CONTENT_LEFT,
-                OFFICIAL_PDF_CONTENT_RIGHT - OFFICIAL_PDF_BODY_INDENT,
-                font_name,
-                meta_font_size,
-            )
+        lines = official_pdf_wrap_text(
+            value,
+            OFFICIAL_PDF_CONTENT_RIGHT - OFFICIAL_PDF_CONTENT_LEFT,
+            OFFICIAL_PDF_CONTENT_RIGHT - OFFICIAL_PDF_BODY_INDENT,
+            font_name,
+            meta_font_size,
+        )
+        metadata_lines.extend(lines)
+        metadata_items.extend(
+            {"text": line, "text_x": OFFICIAL_PDF_CONTENT_LEFT if index == 0 else OFFICIAL_PDF_BODY_INDENT}
+            for index, line in enumerate(lines)
         )
     first_content_top = max(313.10, meta_top + max(1, len(metadata_lines)) * 15.0 + 12.25)
 
@@ -12056,19 +12124,22 @@ def paginate_official_pdf(
         )
     body_line_count = 0
     for section in info.get("body_sections") or []:
-        section_lines = official_pdf_wrap_text(
+        label = str(section.get("label") or "說明")
+        section_base_x = OFFICIAL_PDF_CONTENT_LEFT + (len(label) + 1) * main_font_size
+        section_lines = official_pdf_body_paragraph_lines(
             section.get("text"),
-            OFFICIAL_PDF_CONTENT_RIGHT - OFFICIAL_PDF_BODY_INDENT,
-            OFFICIAL_PDF_CONTENT_RIGHT - OFFICIAL_PDF_BODY_INDENT,
             font_name,
             main_font_size,
+            section_base_x,
         )
         for index, line in enumerate(section_lines):
             flow_items.append(
                 {
                     "kind": "body",
-                    "label": str(section.get("label") or "說明") if index == 0 else "",
-                    "text": line,
+                    "label": label if index == 0 else "",
+                    "text": line["text"],
+                    "text_x": line["text_x"],
+                    "keep_line_count": line["keep_line_count"],
                     "font_size": main_font_size,
                     "leading": main_leading,
                 }
@@ -12086,7 +12157,7 @@ def paginate_official_pdf(
             "body_lines": [],
             "body_top": start_top,
             "content_start_top": start_top,
-            "bottom_top": content_bottom_for_pdf_stamps(stamps, number, 786.0),
+            "bottom_top": content_bottom_for_pdf_stamps(stamps, number),
             "distribution_top": None,
             "distribution_bottom_top": None,
         }
@@ -12096,7 +12167,8 @@ def paginate_official_pdf(
     page = append_page()
     cursor = float(page["content_start_top"])
     for item in flow_items:
-        if cursor + float(item["font_size"]) > float(page["bottom_top"]) and page["items"]:
+        required_height = float(item["font_size"]) + (int(item.get("keep_line_count", 1)) - 1) * float(item["leading"])
+        if cursor + required_height > float(page["bottom_top"]) and page["items"]:
             page = append_page()
             cursor = float(page["content_start_top"])
         placed = dict(item)
@@ -12167,13 +12239,19 @@ def paginate_official_pdf(
         "line_height": main_leading,
         "body_text_x": OFFICIAL_PDF_BODY_INDENT,
         "label_x": OFFICIAL_PDF_CONTENT_LEFT,
-        "bottom_top": 786.0,
+        "bottom_top": OFFICIAL_PDF_CONTENT_BOTTOM,
         "font_profile": font_profile,
         "header": {
+            "title_lines": title_lines,
+            "title_top": title_top,
+            "title_leading": title_leading,
             "contact_lines": contact_lines,
+            "contact_x": contact_x,
+            "contact_top": contact_top,
             "recipient_lines": recipient_lines,
             "recipient_top": recipient_top,
             "metadata_lines": metadata_lines,
+            "metadata_items": metadata_items,
             "metadata_top": meta_top,
             "first_content_top": first_content_top,
         },
@@ -12187,15 +12265,6 @@ def official_pdf_draw_text(pdf_canvas: Any, text: Any, x: float, top: float, siz
 
     pdf_canvas.setFont(font_name, size)
     pdf_canvas.drawString(x, A4_HEIGHT_PT - top - pdfmetrics.getAscent(font_name, size), str(text))
-
-
-def official_pdf_fit_font_size(text: str, max_width: float, preferred: float, minimum: float, font_name: str) -> float:
-    from reportlab.pdfbase import pdfmetrics  # type: ignore
-
-    width = pdfmetrics.stringWidth(text, font_name, preferred)
-    if width <= max_width or width <= 0:
-        return preferred
-    return max(minimum, preferred * max_width / width)
 
 
 def draw_official_binding_line(pdf_canvas: Any, font_name: str) -> None:
@@ -12269,16 +12338,19 @@ def draw_official_page(
     if page_number == 1:
         official_pdf_draw_text(pdf_canvas, f"檔　　號：{info['file_no']}", 408.50, 34.40, 10.0, font_name)
         official_pdf_draw_text(pdf_canvas, f"保存年限：{info['retention_period']}", 408.50, 44.40, 10.0, font_name)
-        title = f"{info['company']}　{info['doc_type']}"
-        title_size = official_pdf_fit_font_size(title, 420.0, 20.0, 13.0, font_name)
-        pdf_canvas.setFont(font_name, title_size)
-        pdf_canvas.drawCentredString(
-            A4_WIDTH_PT / 2,
-            A4_HEIGHT_PT - 76.30 - pdfmetrics.getAscent(font_name, title_size),
-            title,
-        )
+        pdf_canvas.setFont(font_name, 20.0)
+        for index, line in enumerate(layout["header"]["title_lines"]):
+            title_top = float(layout["header"]["title_top"]) + index * float(layout["header"]["title_leading"])
+            pdf_canvas.drawCentredString(
+                A4_WIDTH_PT / 2,
+                A4_HEIGHT_PT - title_top - pdfmetrics.getAscent(font_name, 20.0),
+                line,
+            )
         for index, line in enumerate(layout["header"]["contact_lines"]):
-            official_pdf_draw_text(pdf_canvas, line, 302.85, 105.82 + index * 15.0, 12.0, font_name)
+            official_pdf_draw_text(
+                pdf_canvas, line, float(layout["header"]["contact_x"]),
+                float(layout["header"]["contact_top"]) + index * 15.0, 12.0, font_name,
+            )
         for index, line in enumerate(layout["header"]["recipient_lines"]):
             x = OFFICIAL_PDF_CONTENT_LEFT if index == 0 else OFFICIAL_PDF_BODY_INDENT
             official_pdf_draw_text(
@@ -12289,12 +12361,11 @@ def draw_official_page(
                 16.0,
                 font_name,
             )
-        for index, line in enumerate(layout["header"]["metadata_lines"]):
-            x = OFFICIAL_PDF_CONTENT_LEFT if index == 0 or "：" in line else OFFICIAL_PDF_BODY_INDENT
+        for index, item in enumerate(layout["header"]["metadata_items"]):
             official_pdf_draw_text(
                 pdf_canvas,
-                line,
-                x,
+                item["text"],
+                float(item["text_x"]),
                 float(layout["header"]["metadata_top"]) + index * 15.0,
                 12.0,
                 font_name,
@@ -12329,7 +12400,7 @@ def draw_official_page(
         if kind in {"subject", "body"}:
             if label:
                 official_pdf_draw_text(pdf_canvas, f"{label}：", OFFICIAL_PDF_CONTENT_LEFT, top, size, font_name)
-            official_pdf_draw_text(pdf_canvas, item.get("text"), OFFICIAL_PDF_BODY_INDENT, top, size, font_name)
+            official_pdf_draw_text(pdf_canvas, item.get("text"), float(item.get("text_x", OFFICIAL_PDF_BODY_INDENT)), top, size, font_name)
         else:
             if label:
                 official_pdf_draw_text(pdf_canvas, f"{label}：", OFFICIAL_PDF_CONTENT_LEFT, top, size, font_name)
@@ -12399,7 +12470,7 @@ def build_official_pdf_package(doc: Dict[str, Any], stamps: List[Dict[str, Any]]
                     "body_line_count": len(page["body_lines"]),
                     "body_top": page["body_top"],
                     "content_start_top": page["content_start_top"],
-                    "bottom_top": page.get("bottom_top", 786.0),
+                    "bottom_top": page.get("bottom_top", OFFICIAL_PDF_CONTENT_BOTTOM),
                     "distribution_top": page.get("distribution_top"),
                     "distribution_bottom_top": page.get("distribution_bottom_top"),
                 }
@@ -31644,27 +31715,9 @@ def ensure_notification_for_source(conn: sqlite3.Connection, payload: Dict[str, 
 
 
 def normalize_official_date_text(value: str) -> str:
-    """Normalize common numeric dates for Taiwanese official-document wording."""
-
-    def render_date(match: re.Match[str]) -> str:
-        year = int(match.group(1))
-        month = int(match.group(2))
-        day = int(match.group(3))
-        if not 1 <= month <= 12 or not 1 <= day <= 31:
-            return match.group(0)
-        roc_year = year - 1911 if year >= 1912 else year
-        return f"民國{roc_year}年{month}月{day}日"
-
-    normalized = re.sub(
-        r"(?<!\d)(?:(?:中華)?民國\s*)?(\d{2,4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})(?!\d)",
-        render_date,
-        value,
-    )
-    return re.sub(
-        r"(?<!\d)(?<!民國)(\d{2,4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
-        render_date,
-        normalized,
-    )
+    """Normalize valid dates without repairing or inventing source dates."""
+    from official_writing import normalize_dates
+    return normalize_dates(value)
 
 
 def responsible_person_change_details(plain: str) -> Dict[str, str] | None:
@@ -31691,115 +31744,23 @@ def responsible_person_change_details(plain: str) -> Dict[str, str] | None:
 
 
 def official_subject_closing(plain: str, doc_type: str = "函") -> str:
-    if doc_type in {"簽", "簽呈"}:
-        return "請核示。"
-    if re.search(r"展延|延期|延長|延到|延至", plain) and re.search(r"申請|同意|核准", plain):
-        return "請惠予核准。"
-    if "申請" in plain:
-        return "請惠予審核。"
-    if re.search(r"詢問|洽詢|回覆|見復", plain):
-        return "請惠復。"
-    return "請查照。"
+    from official_writing import closing
+    return closing(plain, doc_type)
 
 
 def formalize_official_subject(plain: str, doc_type: str = "函") -> str:
-    """Turn purpose text into a concise subject instead of wrapping it verbatim."""
-
-    change = responsible_person_change_details(plain)
-    closing = official_subject_closing(plain, doc_type)
-    if change:
-        return f"有關本公司{change['position']}變更一案，{closing}"
-
-    normalized = normalize_official_date_text(plain)
-    normalized = re.sub(r"[\r\n]+", "，", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip(" ，。；;：:　")
-
-    extension = re.search(
-        r"(?:想請|請)?[^，,。；;]{0,24}?同意(?:把|將)?(?P<object>.+?期限)(?:延到|延至|展延至)(?P<date>[^，,。；;]+)",
-        normalized,
-    )
-    if extension:
-        topic = f"本公司申請展延{extension.group('object')}至{extension.group('date')}"
-    else:
-        first_clause = next(
-            (item.strip() for item in re.split(r"[，,。；;]", normalized) if item.strip()),
-            "本公司業務事項",
-        )
-        agency_application = re.search(r"(?:向|跟)[^，,。；;]{2,24}?(申請.+)", first_clause)
-        topic = agency_application.group(1) if agency_application else first_clause
-        topic = re.sub(r"^(?:這份公文(?:的)?用途(?:是|為)?|關於|有關)", "", topic).strip()
-        topic = re.sub(r"^(?:我們|我|本公司)?(?:想要|想|要|希望)\s*", "", topic).strip()
-        topic = topic.replace("想請問", "洽詢").replace("請問", "洽詢")
-        topic = topic.replace("更換成", "變更為").replace("換成", "變更為")
-        topic = topic.replace("幫忙", "協助").replace("你們", "貴機關")
-        if topic.startswith("申請"):
-            topic = f"本公司{topic}"
-
-    topic = topic.strip(" ，。；;：:　") or "本公司業務事項"
-    if len(topic) > 58:
-        topic = topic[:58].rstrip(" ，、。；;：:")
-    case_suffix = "" if re.search(r"(?:一案|事宜|事項|情形)$", topic) else "一案"
-    return f"有關{topic}{case_suffix}，{closing}"
+    from official_writing import formal_subject
+    return formal_subject(plain, doc_type)
 
 
 def official_subject_needs_rewrite(subject: str, plain: str) -> bool:
-    candidate = subject.strip()
-    if not candidate or "\n" in candidate or "..." in candidate:
-        return True
-    if re.search(r"要從原本的|預計會在|想請你們|我們要跟|幫我|怎麼", candidate):
-        return True
-    if not re.search(r"(?:請查照|請核示|請惠予審核|請惠予核准|請惠復|請辦理)[。.]$", candidate):
-        return True
-
-    plain_compact = re.sub(r"[\W_]+", "", plain, flags=re.UNICODE)
-    subject_compact = re.sub(r"[\W_]+", "", candidate, flags=re.UNICODE)
-    plain_is_already_formal = bool(
-        re.match(r"^有關", plain.strip())
-        and re.search(r"(?:請查照|請核示|請惠予審核|請惠予核准|請惠復)[。.]?$", plain.strip())
-    )
-    return bool(
-        len(plain_compact) >= 8
-        and plain_compact in subject_compact
-        and not plain_is_already_formal
-    )
+    from official_writing import CLOSING_RE, COLLOQUIAL_RE
+    return not subject.strip() or "\n" in subject or bool(COLLOQUIAL_RE.search(subject)) or not bool(CLOSING_RE.search(subject))
 
 
 def fallback_ai_compose(payload: Dict[str, Any]) -> Dict[str, Any]:
-    plain = str(payload.get("plainText") or payload.get("plain_text") or "").strip()
-    recipient = str(payload.get("recipient") or "").strip()
-    doc_type = str(payload.get("docType") or payload.get("doc_type") or "函").strip()
-    attachments = payload.get("attachments") or []
-    change = responsible_person_change_details(plain)
-    subject = formalize_official_subject(plain, doc_type)
-
-    if change:
-        date_phrase = f"擬自{change['date']}起" if change["date"] else "擬"
-        body_lines = [
-            f"一、依業務需要辦理本公司{change['position']}變更作業。",
-            f"二、本公司{change['position']}{date_phrase}由{change['previous']}變更為{change['next']}。",
-        ]
-    else:
-        formal_detail = normalize_official_date_text(plain).strip(" ，。；;　")
-        formal_detail = formal_detail.replace("要從原本的", "擬由原").replace("更換成", "變更為")
-        formal_detail = formal_detail.replace("預計會在", "預計於").replace("幫忙", "協助")
-        body_lines = [
-            "一、依業務需要辦理本案。",
-            f"二、{formal_detail or '相關事項說明如下'}。",
-        ]
-
-    if attachments:
-        body_lines.append("三、檢附相關資料如附件，敬請惠予查收並辦理後續事宜。")
-    elif recipient and recipient != "未指定受文者":
-        body_lines.append("三、敬請貴機關惠予辦理，俾利後續作業。")
-    else:
-        body_lines.append("三、請依相關規定辦理後續事宜。")
-    return {
-        "subject": subject,
-        "body": "\n".join(body_lines),
-        "model": "local-template",
-        "usedOpenAI": False,
-        "notice": "OPENAI_API_KEY 未設定或 OpenAI 服務暫不可用，已使用本機公文模板產生。"
-    }
+    from official_writing import fallback_draft
+    return fallback_draft(payload)
 
 
 def extract_openai_text(data: Dict[str, Any]) -> str:
@@ -31863,6 +31824,8 @@ def record_ai_compose_audit(
 
 
 def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str, Any]) -> Dict[str, Any]:
+    from official_writing import SYSTEM_PROMPT, attachment_names, quality_errors, source_facts
+
     plain = str(payload.get("plainText") or payload.get("plain_text") or "").strip()
     if len(plain) < 6:
         return {"error": "invalid_request", "detail": "白話文內容至少需要 6 個字。"}
@@ -31870,9 +31833,14 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
         "docType": payload.get("docType") or "函",
         "priority": payload.get("priority") or "普通件",
         "recipient": payload.get("recipient") or "未指定受文者",
-        "attachments": payload.get("attachments") or [],
+        "attachments": attachment_names(payload),
+        "attachmentDetails": payload.get("attachmentDetails") if isinstance(payload.get("attachmentDetails"), str) else "",
+        "documentDate": str(payload.get("documentDate") or ""),
+        "issuerName": str(payload.get("issuerName") or ""),
         "role": payload.get("role") or "業務助理"
     }
+    compose_payload = {**payload, **context}
+    facts = source_facts(compose_payload)
     if not OPENAI_API_KEY:
         result = fallback_ai_compose({**payload, **context})
         record_ai_compose_audit(conn, context["role"], "AI 公文助理產生函稿", "local-template", result["notice"])
@@ -31882,21 +31850,11 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
         "input": [
             {
                 "role": "system",
-                "content": (
-                    "你是台灣長照公司電子公文撰寫助理。"
-                    "請先抽取核心行政事項與請求動作，再把白話用途重新改寫成正式公文。"
-                    "只輸出 JSON，格式為 {\"subject\":\"...\",\"body\":\"...\"}。"
-                    "subject 必須是精簡、完整的一句公文主旨，不得逐字照抄用途，"
-                    "也不得只在原文前後加上「有關」與「請查照」；非必要姓名、日期與執行細節應放在 body。"
-                    "subject 應依意圖以「請查照」、「請核示」、「請惠予審核」、「請惠予核准」或「請惠復」等正式語氣結尾。"
-                    "body 使用中文條列「一、」「二、」「三、」，語氣正式、清楚。"
-                    "民國數字日期須改為「民國○年○月○日」；原文為預計、擬辦或尚未完成時，不得改寫成已完成。"
-                    "attachments 為空時不得聲稱檢附、檢送或另附資料；不可捏造未提供的法規、附件或事實。"
-                )
+                "content": SYSTEM_PROMPT
             },
             {
                 "role": "user",
-                "content": json.dumps({"plainText": plain, "context": context}, ensure_ascii=False)
+                "content": json.dumps({"plainText": plain, "context": context, "facts": facts}, ensure_ascii=False)
             }
         ],
         "temperature": 0.2
@@ -31919,26 +31877,22 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
             raise ValueError("openai_response_missing_subject_or_body")
         subject = normalize_official_date_text(subject)
         body = normalize_official_date_text(body)
-        subject_rewritten = bool(
-            responsible_person_change_details(plain)
-            or official_subject_needs_rewrite(subject, plain)
-        )
-        if subject_rewritten:
-            subject = formalize_official_subject(plain, context["docType"])
-        if not context["attachments"] and re.search(r"檢附|檢送|如附件|附件詳", body):
-            raise ValueError("openai_response_invented_attachment")
-        if (
-            re.search(r"預計|擬|將於|將在|要.*(?:更換|變更)", plain)
-            and not re.search(r"已(?:完成|變更|更換|辦理|核准|同意)", plain)
-            and re.search(r"已(?:完成|變更|更換|辦理|核准|同意)", body)
-        ):
-            raise ValueError("openai_response_changed_planned_status")
+        errors = quality_errors(subject, body, compose_payload)
+        if errors:
+            result = fallback_ai_compose(compose_payload)
+            result["notice"] = "AI 草稿未通過文字或事實核對，已改用本機撰寫規則產生草稿（非 AI 生成）。"
+            result["warnings"] = list(dict.fromkeys([
+                *result["warnings"], "請人工核對主旨、辦理狀態、日期、文號與附件後再套用。"
+            ]))
+            record_ai_compose_audit(conn, context["role"], "AI 公文助理備援產生函稿", "local-template", "quality_guard:" + ",".join(errors))
+            return result
         result = {
             "subject": subject,
             "body": body,
             "model": OPENAI_MODEL,
             "usedOpenAI": True,
-            "subjectRewritten": subject_rewritten,
+            "subjectRewritten": False,
+            "warnings": facts["warnings"],
         }
         record_ai_compose_audit(conn, context["role"], "AI 公文助理產生函稿", OPENAI_MODEL, f"recipient={context['recipient']}")
         return result
@@ -31946,7 +31900,7 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
         code = int(getattr(exc, "code", 0) or 0)
         _consume_http_error(exc)
         result = fallback_ai_compose({**payload, **context})
-        result["notice"] = "OpenAI 暫時無法產生，已改用本機公文模板。"
+        result["notice"] = "OpenAI 暫時無法產生，已改用本機撰寫規則產生草稿（非 AI 生成）。"
         record_ai_compose_audit(
             conn,
             context["role"],
@@ -31957,7 +31911,7 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
         return result
     except Exception:
         result = fallback_ai_compose({**payload, **context})
-        result["notice"] = "OpenAI 暫時無法產生，已改用本機公文模板。"
+        result["notice"] = "OpenAI 暫時無法產生，已改用本機撰寫規則產生草稿（非 AI 生成）。"
         record_ai_compose_audit(
             conn,
             context["role"],
@@ -31966,6 +31920,8 @@ def ai_compose_official_draft(conn: sqlite3.Connection | None, payload: Dict[str
             "openai_request_failed",
         )
         return result
+
+
 def sync_notifications_from_business_state(conn: sqlite3.Connection) -> Dict[str, Any]:
     created = 0
     items: List[Dict[str, Any]] = []

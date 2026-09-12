@@ -39,6 +39,106 @@ class ComposeOutputContractTest(unittest.TestCase):
         ''')
         self.assertEqual(result, {"today": "2026-09-09", "leap": True, "invalid": False, "empty": False, "malformed": False})
 
+    def test_official_body_renders_real_sections_and_hanging_numbered_items(self):
+        result = self.evaluate(["escapeDraftHtml", "officialDraftBodyItem", "renderOfficialDraftBody"], '''
+          const text="說明：一、依測試資料辦理。\\n(一)第一層次\\n１、第二層次\\n(１)第三層次\\n辦法：一、依所列時程辦理。\\n擬辦：一、請核示。\\n核復事項：一、依申請內容核復。";
+          console.log(JSON.stringify({html:renderOfficialDraftBody(text),continued:renderOfficialDraftBody("接續上一頁文字",true)}));
+        ''')
+        html = result["html"]
+        for label in ("說明：", "辦法：", "擬辦：", "核復事項："):
+            self.assertEqual(html.count(label), 1)
+        for level in range(4):
+            self.assertIn(f"--item-level:{level}", html)
+        self.assertIn("--section-label-width:5em", html)
+        self.assertIn("<span>續：</span>", result["continued"])
+
+    def test_official_body_escapes_content_and_preserves_plain_paragraphs(self):
+        result = self.evaluate(["escapeDraftHtml", "officialDraftBodyItem", "renderOfficialDraftBody"], '''
+          console.log(JSON.stringify({html:renderOfficialDraftBody("一、<script>alert(1)</script>\\n保留原文與社老字第11512220178號。"),empty:renderOfficialDraftBody("")}));
+        ''')
+        self.assertNotIn("<script>", result["html"])
+        self.assertIn("&lt;script&gt;", result["html"])
+        self.assertIn("保留原文與社老字第11512220178號。", result["html"])
+        self.assertEqual(result["empty"], "")
+
+    PAGINATION_FUNCTIONS = [
+        "escapeDraftHtml", "officialDraftBodyItem", "officialDraftBodyContinuationContext",
+        "renderOfficialDraftBody", "draftSubjectSource", "draftBodySource",
+        "preferredDraftBreak", "draftFitLength", "splitDraftContentIntoPages",
+        "chunkTextByLength", "fallbackDraftContentPages", "renderOfficialDraftPageHtml",
+    ]
+
+    def test_actual_split_and_render_keep_long_item_indentation_and_original_body(self):
+        # Replace only the browser measurement boundary; execute the actual
+        # splitter, continuation context and HTML renderer together.
+        result = self.evaluate(self.PAGINATION_FUNCTIONS, '''
+          const ensureDraftMeasurePreview=()=>true;
+          const draftPageMainFits=(data,content)=>content.body.length<=48;
+          const source="說明：(一)"+"甲乙丙丁".repeat(40);
+          const data={subject:"測試主旨",body:source};
+          const pages=splitDraftContentIntoPages(data,"");
+          const isValidComposeDispatchDate=()=>true,renderDraftSealLayer=()=>"";
+          console.log(JSON.stringify({
+            original:data.body, reconstructed:pages.map(p=>p.body).join(""),
+            dataKeys:Object.keys(data),
+            fullPage:renderOfficialDraftPageHtml({...data,dispatchDate:"2026-09-12"},pages[1],2,pages.length,""),
+            rows:pages.map(p=>({context:p.bodyContext,html:renderOfficialDraftBody(p.body,p.bodyContinued,p.bodyContext)}))
+          }));
+        ''')
+        self.assertEqual(result["original"], result["reconstructed"])
+        self.assertEqual(result["dataKeys"], ["subject", "body"])
+        self.assertGreater(len(result["rows"]), 2)
+        self.assertIn('class="draft-body-paragraph draft-body-continuation" style="margin-left:3em"', result["fullPage"])
+        self.assertIn("--item-level:1;--item-marker-width:2em", result["rows"][0]["html"])
+        for row in result["rows"][1:]:
+            self.assertEqual(row["context"]["paragraphIndentEm"], 3)
+            self.assertIn('class="draft-body-paragraph draft-body-continuation" style="margin-left:3em"', row["html"])
+            self.assertNotIn("draft-item-marker", row["html"])
+
+    def test_actual_split_preserves_wide_section_and_resets_at_new_paragraph_and_section(self):
+        result = self.evaluate(self.PAGINATION_FUNCTIONS, '''
+          const ensureDraftMeasurePreview=()=>true;
+          const draftPageMainFits=(data,content)=>content.body.length<=48;
+          const source="核復事項：(１)"+"甲乙丙丁".repeat(30)+"\\n二、新段落。\\n辦法：一、新節。";
+          const pages=splitDraftContentIntoPages({subject:"測試",body:source},"");
+          console.log(JSON.stringify({source,reconstructed:pages.map(p=>p.body).join(""),rows:pages.map(p=>({context:p.bodyContext,html:renderOfficialDraftBody(p.body,p.bodyContinued,p.bodyContext)}))}));
+        ''')
+        self.assertEqual(result["source"], result["reconstructed"])
+        continued = [row for row in result["rows"] if row["context"]["paragraphIndentEm"] == 5]
+        self.assertTrue(continued)
+        for row in continued:
+            self.assertIn("--section-label-width:5em", row["html"])
+            self.assertIn("margin-left:5em", row["html"])
+        html = "".join(row["html"] for row in result["rows"])
+        self.assertIn('<span class="draft-item-marker">二、</span><span>新段落。</span>', html)
+        self.assertIn('--section-label-width:3em"><span>辦法：</span>', html)
+
+    def test_continuation_context_resets_after_newline_and_does_not_invent_a_marker(self):
+        result = self.evaluate(self.PAGINATION_FUNCTIONS, '''
+          const source="核復事項：(一)甲乙1、這仍是同一段<內容>。\\r\\n二、新段落。";
+          const middle=source.indexOf("1、");
+          const next=source.indexOf("二、");
+          const context=officialDraftBodyContinuationContext(source,middle);
+          console.log(JSON.stringify({context,next:officialDraftBodyContinuationContext(source,next),html:renderOfficialDraftBody(source.slice(middle,next),true,context)}));
+        ''')
+        self.assertEqual(result["context"], {"sectionColumns": 5, "paragraphIndentEm": 3})
+        self.assertEqual(result["next"], {"sectionColumns": 5, "paragraphIndentEm": None})
+        self.assertIn("margin-left:3em", result["html"])
+        self.assertNotIn("draft-item-marker", result["html"])
+        self.assertIn("&lt;內容&gt;", result["html"])
+
+    def test_fallback_pagination_also_keeps_continuation_metadata(self):
+        result = self.evaluate(self.PAGINATION_FUNCTIONS, '''
+          const ensureDraftMeasurePreview=()=>null;
+          const source="核復事項：(１)"+"甲乙丙丁".repeat(200);
+          const pages=splitDraftContentIntoPages({subject:"測試",body:source},"").filter(p=>p.body);
+          console.log(JSON.stringify({source,reconstructed:pages.map(p=>p.body).join(""),rows:pages.map(p=>({context:p.bodyContext,html:renderOfficialDraftBody(p.body,p.bodyContinued,p.bodyContext)}))}));
+        ''')
+        self.assertEqual(result["source"], result["reconstructed"])
+        for row in result["rows"][1:]:
+            self.assertEqual(row["context"], {"sectionColumns": 5, "paragraphIndentEm": 5})
+            self.assertIn("margin-left:5em", row["html"])
+
     def test_electronic_mode_hides_disables_and_restores_physical_seal_controls(self):
         result = self.evaluate(["composeOutputMode", "syncComposeElectronicExchangeMode"], '''
           const fields = {hidden:false}, mode={value:"electronic"}, large={value:"一般章"}, small={value:"公司設立章"}, hint={dataset:{}};

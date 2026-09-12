@@ -16,11 +16,12 @@ from unittest import mock
 from urllib.parse import urlparse
 
 
-def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *, save_flow: bool = False) -> dict:
+def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *, save_flow: bool = False, writing_rules: bool = False) -> dict:
     sys.path.insert(0, str(root))
     from tools.six_role_browser_acceptance import AUDIT_JS, Browser, TELEMETRY, require_local_origin
     from tests.support.five_account_browser_fixture import isolated_browser_session
     from tests.test_five_account_http_acceptance import FiveAccountHttpAcceptanceTest, QuietAcceptanceHandler
+    import backend
 
     output.mkdir(parents=True, exist_ok=True)
     frontend = source_root or root
@@ -116,6 +117,34 @@ def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *
                 "finalStatus": final["current_status"], "noSubmission": True,
             }
 
+        def verify_writing_rules(device):
+            # Exercise real localhost HTTP -> generator -> UI using only the
+            # deterministic local fallback. Never send source text to a provider.
+            set_date("2026-09-12")
+            browser.run("fill", "#attachmentDetails", "")
+            browser.run("fill", "#subject", "保留的人工主旨")
+            browser.run("fill", "#bodyText", "保留的人工說明")
+            browser.run("fill", "#documentPurpose", "我們長照的課程要來去申請新的積分帳號，因為在115年12月11號有獲得到評鑑通過的公文，公文字號是社老字第11512000001號")
+            with mock.patch.object(backend, "OPENAI_API_KEY", ""), mock.patch.object(backend, "_urlopen_no_redirect", side_effect=AssertionError("external_provider_disabled")):
+                browser.click_visible("#generateFromPurposeBtn")
+                browser.until("!composeAiOperation&&!!composeAiSuggestion", timeout=35)
+            checks = browser.evaluate("({manualPreserved:document.querySelector('#subject').value==='保留的人工主旨'&&document.querySelector('#bodyText').value==='保留的人工說明',warningVisible:!document.querySelector('#composeAiReview').hidden,futureWarning:document.querySelector('#composeAiReviewWarnings').textContent.includes('晚於'),formalDraft:!/(我們|要來去|依業務需要辦理本案)/.test(composeAiSuggestion.subject+' '+composeAiSuggestion.body),referenceRetained:composeAiSuggestion.body.includes('11512000001')})")
+            require(all(checks.values()), "official_writing_warning_flow_failed")
+            capture("#composeAiReview", f"{phase}-{device}-official-writing-review.png")
+            browser.click_visible("#composeAiApplyBtn")
+            require(browser.evaluate("!composeAiSuggestion&&document.querySelector('#bodyText').value.includes('11512000001')&&!document.querySelector('#composeAiReview').hidden"), "explicit_writing_apply_failed")
+            capture("#draftPreview", f"{phase}-{device}-official-writing-preview.png")
+            browser.click_visible("#composeAiUndoBtn")
+            require(browser.evaluate("document.querySelector('#subject').value==='保留的人工主旨'&&document.querySelector('#bodyText').value==='保留的人工說明'&&document.querySelector('#composeAiReview').hidden"), "official_writing_undo_failed")
+            long_body = "核復事項：\n(一)" + "此為去識別化跨頁測試，須保留原有縮排與完整本文。" * 45 + "\n二、第二項測試。"
+            browser.run("fill", "#bodyText", long_body)
+            browser.evaluate("renderDraftPreview({force:true});true")
+            browser.until("document.querySelectorAll('#draftPreview .draft-page').length>1")
+            long_checks = browser.evaluate("(()=>{const pages=[...document.querySelectorAll('#draftPreview .draft-page')];const item=pages[1].querySelector('.draft-body-continuation');const row=item?.closest('.draft-description');const data=composePayload();const split=splitDraftContentIntoPages(data,'無');return {pageCount:pages.length,continuationIndented:!!item&&parseFloat(getComputedStyle(item).marginLeft)>0,sectionWidthRetained:row?.style.getPropertyValue('--section-label-width')==='5em',bodyUnchanged:split.map(p=>p.body).join('')===draftBodySource(data.body)}})()")
+            require(long_checks["continuationIndented"] and long_checks["sectionWidthRetained"] and long_checks["bodyUnchanged"], "long_body_preview_continuation_failed")
+            capture("#draftPreview .draft-page:nth-child(2)", f"{phase}-{device}-long-body-continuation.png")
+            return {**checks, "explicitApply": True, "undoRestoredManualText": True, "liveProviderCalled": False, "longBody": long_checks}
+
         try:
             auth = isolated_browser_session(fixture, "staff")
             for device, dimensions in (("desktop", (1440, 1000)), ("mobile", (390, 844))):
@@ -187,6 +216,11 @@ def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *
                         row["layoutAfterSaveFlow"] = browser.evaluate(AUDIT_JS)
                         require(not row["layoutAfterSaveFlow"]["errors"], "browser_errors_after_save_flow")
                         require(not row["layoutAfterSaveFlow"]["overflow"], "confirmation_document_overflow")
+                    if writing_rules:
+                        browser.evaluate("setComposeStep('fill');true")
+                        row["writingRules"] = verify_writing_rules(device)
+                        row["layoutAfterWriting"] = browser.evaluate(AUDIT_JS)
+                        require(not row["layoutAfterWriting"]["errors"] and not row["layoutAfterWriting"]["overflow"], "writing_ui_errors_or_overflow")
                 row["status"] = "passed"
                 report["rows"].append(row)
                 (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
@@ -215,8 +249,9 @@ if __name__ == "__main__":
     parser.add_argument("--phase", choices=("before", "after"), default="after")
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--save-flow", action="store_true", help="Exercise local draft save, stable number, reopen, and confirmation without submission.")
+    parser.add_argument("--writing-rules", action="store_true", help="Exercise local writing warnings, explicit apply and undo without a live AI provider.")
     args = parser.parse_args()
-    result = run(args.root.resolve(), args.output.resolve(), args.phase, args.source_root.resolve() if args.source_root else None, save_flow=args.save_flow)
+    result = run(args.root.resolve(), args.output.resolve(), args.phase, args.source_root.resolve() if args.source_root else None, save_flow=args.save_flow, writing_rules=args.writing_rules)
     (args.output / "report.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
     print(json.dumps({"status": result["status"], "report": str(args.output / "report.json")}), flush=True)
     raise SystemExit(0 if result["status"] == "passed" else 1)

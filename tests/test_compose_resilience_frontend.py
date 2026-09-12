@@ -16,9 +16,9 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    AI = ["generateAiDraft", "renderComposeAiActions", "applyComposeAiSuggestion", "undoComposeAiSuggestion"]
+    AI = ["composeAiContext", "generateAiDraft", "renderComposeAiActions", "applyComposeAiSuggestion", "undoComposeAiSuggestion", "discardComposeAiSuggestion"]
     AI_SETUP = '''
-      let composeAiOperation=null, composeAiSuggestion=null, composeAiUndo=null, scope="user-A", dirty=0;
+      let composeAiOperation=null, composeAiSuggestion=null, composeAiUndo=null, composeAiReview=null, scope="user-A", dirty=0;
       const nodes={"#subject":{value:"原主旨"},"#bodyText":{value:"原說明"},"#documentPurpose":{value:"六字以上的公文用途"},"#generateFromPurposeBtn":{textContent:"AI產生公文主旨與說明"},"#documentPurposeHint":{},"#composeAiSuggestion":{},"#composeAiSuggestionSubject":{},"#composeAiSuggestionBody":{},"#composeAiUndoBtn":{}};
       global.document={querySelector:key=>nodes[key]};global.window={confirm:()=>true};
       const composeRequestScope=()=>scope, hasMinimumText=()=>true, setAiDraftStatus=()=>{}, composePayload=()=>({}), activeRole=()=>"員工", addDispatchAudit=()=>{},showToast=()=>{},markDraftDirty=()=>{dirty++};
@@ -41,9 +41,52 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
         value = self.run_js(self.AI, self.AI_SETUP, '''const p=generateAiDraft();scope="user-B";composeAiOperation={};resolve({subject:"前帳號文字",body:"前帳號文字"});await p;console.log(JSON.stringify({subject:nodes["#subject"].value,suggestion:composeAiSuggestion,dirty}));''')
         self.assertEqual(value, {"subject": "原主旨", "suggestion": None, "dirty": 0})
 
+    def test_company_change_ignores_old_response_but_releases_busy_button(self):
+        value = self.run_js(self.AI, self.AI_SETUP, '''const p=generateAiDraft();scope="company-B";resolve({subject:"前公司文字",body:"前公司文字"});await p;console.log(JSON.stringify({subject:nodes["#subject"].value,suggestion:composeAiSuggestion,busy:nodes["#generateFromPurposeBtn"].disabled,operation:composeAiOperation}));''')
+        self.assertEqual(value, {"subject": "原主旨", "suggestion": None, "busy": False, "operation": None})
+
     def test_undo_refusal_preserves_post_ai_manual_changes(self):
         value = self.run_js(self.AI, self.AI_SETUP, '''const p=generateAiDraft();resolve({subject:"AI主旨",body:"AI說明"});await p;nodes["#subject"].value="最後人工修改";window.confirm=()=>false;undoComposeAiSuggestion();console.log(JSON.stringify({subject:nodes["#subject"].value,undo:!!composeAiUndo}));''')
         self.assertEqual(value, {"subject": "最後人工修改", "undo": True})
+
+    def test_ai_passes_document_date_issuer_and_attachment_description(self):
+        setup = self.AI_SETUP.replace('composePayload=()=>({})', 'composePayload=()=>({dispatchDate:"2026-09-12",companyName:"測試公司",attachmentDetails:"計畫1份",attachments:["計畫.pdf"]})').replace('const backendRequest=()=>new Promise', 'let requestPayload;const backendRequest=(path,options)=>{requestPayload=JSON.parse(options.body);return new Promise').replace('{resolve=yes;reject=no});', '{resolve=yes;reject=no})};')
+        value = self.run_js(self.AI, setup, '''const p=generateAiDraft();resolve({subject:"正式主旨",body:"正式說明"});await p;console.log(JSON.stringify(requestPayload));''')
+        self.assertEqual(value["documentDate"], "2026-09-12")
+        self.assertEqual(value["issuerName"], "測試公司")
+        self.assertEqual(value["attachmentDetails"], "計畫1份")
+        self.assertEqual(value["attachments"], ["計畫.pdf"])
+
+    def test_ai_warnings_do_not_auto_apply_and_are_rendered_as_text(self):
+        setup = self.AI_SETUP + '''
+          nodes["#composeAiReview"]={hidden:true};
+          nodes["#composeAiReviewWarnings"]={replaceChildren:(...items)=>{nodes["#composeAiReviewWarnings"].items=items}};
+          document.createElement=()=>({textContent:""});
+        '''
+        value = self.run_js(self.AI, setup, '''const p=generateAiDraft();resolve({subject:"待核對主旨",body:"待核對說明",warnings:["引用日期晚於發文日期", "<img src=x onerror=alert(1)>"]});await p;console.log(JSON.stringify({subject:nodes["#subject"].value,visible:!nodes["#composeAiReview"].hidden,warnings:nodes["#composeAiReviewWarnings"].items.map(x=>x.textContent),suggestion:composeAiSuggestion.subject}));''')
+        self.assertEqual(value["subject"], "原主旨")
+        self.assertTrue(value["visible"])
+        self.assertEqual(value["warnings"], ["引用日期晚於發文日期", "<img src=x onerror=alert(1)>"])
+        self.assertEqual(value["suggestion"], "待核對主旨")
+
+    def test_ai_changed_context_does_not_auto_apply(self):
+        setup = self.AI_SETUP.replace('composePayload=()=>({})', 'composePayload=()=>({dispatchDate:documentDate})') + 'let documentDate="2026-09-12";'
+        value = self.run_js(self.AI, setup, '''const p=generateAiDraft();documentDate="2026-12-12";resolve({subject:"舊日期主旨",body:"舊日期說明"});await p;console.log(JSON.stringify({subject:nodes["#subject"].value,suggestion:composeAiSuggestion.subject}));''')
+        self.assertEqual(value, {"subject": "原主旨", "suggestion": "舊日期主旨"})
+
+    def test_pending_fallback_is_explicitly_labeled_not_ai(self):
+        value = self.run_js(self.AI, self.AI_SETUP, '''nodes["#composeAiSuggestionReason"]={};const p=generateAiDraft();resolve({subject:"本機主旨",body:"本機說明",usedOpenAI:false,notice:"本機規則（非 AI 生成）",warnings:["請核對日期"]});await p;console.log(JSON.stringify({hint:nodes["#documentPurposeHint"].textContent,subject:nodes["#subject"].value,reason:nodes["#composeAiSuggestionReason"].textContent}));''')
+        self.assertEqual(value["hint"], "本機規則（非 AI 生成）")
+        self.assertEqual(value["subject"], "原主旨")
+        self.assertIn("非 AI 生成", value["reason"])
+
+    def test_ai_warning_draft_can_be_explicitly_applied_then_undone(self):
+        value = self.run_js(self.AI, self.AI_SETUP, '''const p=generateAiDraft();resolve({subject:"AI主旨",body:"AI說明",warnings:["請核對日期"]});await p;applyComposeAiSuggestion();const applied=nodes["#subject"].value,warningCount=composeAiReview.warnings.length;undoComposeAiSuggestion();console.log(JSON.stringify({applied,warningCount,restored:nodes["#subject"].value,review:composeAiReview}));''')
+        self.assertEqual(value, {"applied": "AI主旨", "warningCount": 1, "restored": "原主旨", "review": None})
+
+    def test_discard_clears_suggestion_and_related_warnings(self):
+        value = self.run_js(self.AI, self.AI_SETUP, '''const p=generateAiDraft();resolve({subject:"AI主旨",body:"AI說明",warnings:["請核對日期"]});await p;discardComposeAiSuggestion();console.log(JSON.stringify({subject:nodes["#subject"].value,suggestion:composeAiSuggestion,review:composeAiReview}));''')
+        self.assertEqual(value, {"subject": "原主旨", "suggestion": None, "review": None})
 
     CLOUD_SETUP = '''
       let composeCloudTimer=null,composeCloudOperation=null,composeCloudDraftId="OD-00000000-0000-4000-8000-000000000001",composeCloudConflict=false,composeSaveState={},authState={token:"fixture"},scope="A",nextSnapshot={values:{"#subject":"草稿"}};

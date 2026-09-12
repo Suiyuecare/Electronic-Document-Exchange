@@ -1168,14 +1168,18 @@
                     <textarea id="documentPurpose" rows="4" placeholder="先用自己的話寫要辦理的事情、原因、希望對方採取的行動，以及重要期限。"></textarea>
                     <span class="field-hint" id="documentPurposeHint">內容只用來協助產生函稿，不會直接出現在正式 PDF。</span>
                     <button class="primary-button compose-purpose-generate" id="generateFromPurposeBtn" type="button">AI產生公文主旨與說明</button>
+                    <div id="composeAiReview" class="compose-ai-review" hidden role="status" aria-live="polite">
+                      <strong>生成內容待核對</strong>
+                      <ul id="composeAiReviewWarnings"></ul>
+                    </div>
                     <div id="composeAiSuggestion" hidden role="status">
-                      <p>產生期間您已修改內容，AI 建議尚未覆蓋原文。</p>
+                      <p id="composeAiSuggestionReason">產生期間您已修改內容，建議尚未覆蓋原文。</p>
                       <p id="composeAiSuggestionSubject"></p>
                       <pre id="composeAiSuggestionBody"></pre>
-                      <button type="button" class="secondary-button" id="composeAiApplyBtn">套用這份 AI 建議</button>
+                      <button type="button" class="secondary-button" id="composeAiApplyBtn">套用這份建議</button>
                       <button type="button" class="secondary-button" id="composeAiDiscardBtn">保留我的文字</button>
                     </div>
-                    <button type="button" class="secondary-button" id="composeAiUndoBtn" hidden>復原上次 AI 套用</button>
+                    <button type="button" class="secondary-button" id="composeAiUndoBtn" hidden>復原上次套用</button>
                   </label>
                   <label>
                     主旨

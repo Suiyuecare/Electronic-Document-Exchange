@@ -10707,7 +10707,8 @@ textarea {
   width: 100%;
   max-width: 794px;
   overflow: hidden;
-  padding: 4% 12.63% 6.8% 11.82%;
+  /* A4 textbook body frame: 25 mm left/right/bottom; archive metadata stays above it. */
+  padding: 4% 11.904762% 11.904762%;
   border: 0;
   border-radius: 2px;
   outline: 1px solid #cfcfcf;
@@ -10779,7 +10780,7 @@ textarea {
   justify-content: stretch;
   gap: 0;
   width: 18.75cqw;
-  min-height: 8.7cqw;
+  min-height: 7.905cqw;
   margin-left: auto;
   padding: 1.77cqw 0 0;
   color: #111;
@@ -10810,21 +10811,21 @@ textarea {
 .draft-preview-panel.live .official-draft-preview .draft-official-head h1 {
   display: flex;
   flex-wrap: wrap;
-  gap: 0 3.2cqw;
+  gap: 0 3.36cqw;
   align-items: baseline;
   justify-content: center;
   margin: 0;
   color: #111;
   font-size: 3.36cqw;
   font-weight: 400;
-  line-height: 1.18;
-  letter-spacing: 0.08em;
+  line-height: 1.4;
+  letter-spacing: 0;
   text-align: center;
 }
 
 .official-draft-preview .draft-official-head h1 strong {
   font: inherit;
-  letter-spacing: 0.16em;
+  letter-spacing: 0;
 }
 
 .official-draft-preview .draft-contact-block,
@@ -10832,12 +10833,12 @@ textarea {
   display: grid;
   align-content: start;
   gap: 0;
-  /* Match the final A4 PDF: keep x near 303 pt and widen to 250 pt. */
-  width: 42cqw;
+  /* 302.85 pt to the 25 mm right body margin; never extend into the margin. */
+  width: 37.22cqw;
   min-height: 12.6cqw;
-  margin-top: 1cqw;
+  margin-top: 0.2553cqw;
   margin-left: auto;
-  margin-right: -5.5cqw;
+  margin-right: 0;
   color: #111;
   font-size: 2.02cqw;
   font-style: normal;
@@ -10851,7 +10852,7 @@ textarea {
 .draft-preview-panel.live .official-draft-preview .draft-recipient-line {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  margin-top: 2.18cqw;
+  margin-top: 3.1cqw;
   color: #111;
   font-size: 2.69cqw;
   font-weight: 400;
@@ -10898,8 +10899,9 @@ textarea {
 .official-draft-preview .draft-content-row,
 .draft-preview-panel.live .official-draft-preview .draft-content-row {
   display: grid;
-  grid-template-columns: 7.5cqw minmax(0, 1fr);
-  gap: 0.7cqw;
+  grid-template-columns: var(--section-label-width, 3em) minmax(0, 1fr);
+  gap: 0;
+  font-size: 2.69cqw;
   margin-bottom: 2.8cqw;
   line-height: 1.78125;
 }
@@ -10932,6 +10934,11 @@ textarea {
   line-height: 1.78125;
   overflow-wrap: anywhere;
 }
+
+.official-draft-preview .draft-body { white-space: normal; }
+.official-draft-preview .draft-body-paragraph { margin: 0; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.official-draft-preview .draft-body-item { display: grid; grid-template-columns: var(--item-marker-width) minmax(0, 1fr); margin-left: calc(var(--item-level) * 1em); }
+.official-draft-preview .draft-item-marker { white-space: nowrap; }
 
 .official-draft-preview .draft-distribution-block {
   display: grid;
@@ -12288,6 +12295,9 @@ body[data-session-state="revalidating"] .workspace::after {
 }
 #composeAiSuggestion { min-width: 0; overflow-wrap: anywhere; padding: 12px; background: #fff7ec; border-radius: 12px; }
 #composeAiSuggestion pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: 220px; overflow-y: auto; }
+.compose-ai-review { padding: 12px 16px; border-left: 3px solid #b45309; background: #fff7ec; border-radius: 8px; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.compose-ai-review[hidden] { display: none; }
+.compose-ai-review ul { margin: 6px 0 0; padding-left: 1.4em; }
 #composeAttachmentUploadStatus { overflow-wrap: anywhere; font-size: 14px; }
 .editor-a4-dialog { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); box-sizing: border-box; padding: 24px; border: 1px solid #efc8a0; border-radius: 20px; background: #fffaf3; color: #302a25; overflow: auto; }
 .editor-a4-dialog::backdrop { background: rgb(30 20 10 / 55%); }
