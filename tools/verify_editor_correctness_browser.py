@@ -63,6 +63,21 @@ def main() -> int:
                 browser.until("window.__fixtureTiming?.appInteractiveMs&&document.querySelector('#uploadedSealApprovalCategorySelect')?.options.length>1")
                 browser.run("snapshot", "-i")
                 row["checks"]["existingCasesCollapsed"] = browser.evaluate("!document.querySelector('#electronicSealWorkQueue').open")
+                row["queueLayouts"] = []
+                widths = [1440] if device == "desktop" else [375, 390, 430, 760, 820]
+                for width in widths:
+                    browser.run("set", "viewport", str(width), str(dimensions[1]))
+                    layout = browser.evaluate("(()=>{const q=document.querySelector('#electronicSealWorkQueue'),s=q.querySelector('summary'),r=q.getBoundingClientRect();return {width:innerWidth,height:r.height,summaryHeight:s.getBoundingClientRect().height,closed:!q.open,overflow:document.documentElement.scrollWidth>innerWidth+1}})()")
+                    row["queueLayouts"].append(layout)
+                row["checks"]["closedQueueIsCompactAtAllWidths"] = all(
+                    layout["closed"] and 44 <= layout["summaryHeight"] <= 100
+                    and layout["height"] <= 110 and not layout["overflow"]
+                    for layout in row["queueLayouts"]
+                )
+                browser.run("set", "viewport", *map(str, dimensions))
+                if device == "mobile":
+                    browser.until("!document.body.classList.contains('mobile-navigation-open')&&document.querySelector('#primarySidebar').getBoundingClientRect().right<=1")
+                browser.run("screenshot", str(output / f"{device}-queue-collapsed.png"))
                 category = browser.evaluate("[...document.querySelector('#uploadedSealApprovalCategorySelect').options].find(e=>e.textContent.includes('合作意向書')).value")
                 browser.run("select", "#uploadedSealApprovalCategorySelect", category)
                 browser.run("fill", "#uploadedSealTitle", f"合成測試 {device} PDF 編輯")

@@ -147,6 +147,20 @@ class ElectronicSealPageContractTest(unittest.TestCase):
                     f"#{removed_field} 只能作為隱藏技術欄位，不可出現在申請資訊畫面。",
                 )
 
+    def test_closed_case_queue_uses_a_compact_row_not_mobile_column_flex(self) -> None:
+        queue = javascript_function(self.js, "ensureElectronicSealWorkQueue")
+        self.assertIn('document.createElement("details")', queue)
+        self.assertNotIn('queue.open = true', queue)
+        self.assertIn('id="electronicSealWorkQueueSearch"', queue)
+        rule = re.search(r"#electronicSealWorkQueue > summary\s*\{([^}]+)", self.css)
+        self.assertIsNotNone(rule)
+        self.assertIn("display: grid;", rule.group(1))
+        self.assertIn("grid-template-columns: minmax(0, 1fr) auto auto;", rule.group(1))
+        self.assertIn("min-height: 58px;", rule.group(1))
+        title_rules = re.findall(r"#electronicSealWorkQueue > summary strong\s*\{([^}]+)", self.css)
+        self.assertTrue(title_rules)
+        self.assertTrue(all("flex:" not in rule and "flex-basis:" not in rule for rule in title_rules))
+
     def test_pdf_source_control_lives_in_editor_and_opens_native_picker(self) -> None:
         application = html_element(self.page, "uploadedSealApplicationPanel")
         editor = html_element(self.page, "uploadedPdfEditor")
