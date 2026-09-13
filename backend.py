@@ -42646,6 +42646,48 @@ def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]
             "entityCodes": entity_codes,
         })
 
+    # A Finance applicant may belong to a division/company node rather than a
+    # selectable department (for example, the CEO). Keep the general directory
+    # restricted to departments, but expose that actor's own authoritative node
+    # separately so applicant forms never silently choose the first department.
+    # This is display metadata only: all draft/write endpoints still call
+    # authoritative_finance_unit and require_official_creation_company.
+    current_applicant_department = None
+    external = parse_json_any(user.get("external_account_payload_json"), {}) or {}
+    profile = external.get("financeProfile") if isinstance(external, dict) else {}
+    profile = profile if isinstance(profile, dict) else {}
+    applicant_code = roster_text(profile.get("departmentCode")).upper()
+    current_entity_id = roster_text((current_company or {}).get("finance_entity_id"))
+    current_company_is_bound = bool(
+        current_company_id
+        and current_entity_id
+        and roster_text((current_company or {}).get("id")) == current_company_id
+        and roster_text((current_company or {}).get("finance_tenant_id")) == tenant_id
+        and roster_text((current_company or {}).get("source_system")).lower() == "finance"
+        and roster_text((current_company or {}).get("status")).lower() in {"active", "啟用"}
+    )
+    applicant_units = [
+        unit for unit in unit_rows
+        if applicant_code
+        and roster_text(unit.get("code")).upper() == applicant_code
+        and roster_text(unit.get("finance_tenant_id")) == tenant_id
+        and roster_text(unit.get("status")).lower() in {"active", "啟用"}
+        and roster_text(unit.get("name"))
+    ]
+    if current_company_is_bound and len(applicant_units) == 1:
+        applicant_unit = applicant_units[0]
+        applicant_entity_codes = effective_entity_codes(applicant_unit)
+        if current_entity_id in applicant_entity_codes:
+            current_applicant_department = {
+                "id": applicant_code,
+                "code": applicant_code,
+                "name": roster_text(applicant_unit.get("name")),
+                "financeUnitId": roster_text(applicant_unit.get("finance_unit_id")),
+                "companyId": current_company_id,
+                "unitType": roster_text(applicant_unit.get("unit_type")),
+                "entityCodes": [current_entity_id],
+            }
+
     etag = roster_text((state or {}).get("etag"))
     version_no = int((state or {}).get("version_no") or 0)
     return {
@@ -42654,6 +42696,7 @@ def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]
         "directoryVersion": f"{tenant_id}:{version_no}:{etag[:12]}" if state else f"{tenant_id}:pending",
         "syncedAt": roster_text((state or {}).get("last_synced_from_finance_at")),
         "currentCompanyId": current_company_id,
+        "currentApplicantDepartment": current_applicant_department,
         "companies": companies,
         "departments": departments,
         "organization": {
@@ -42712,12 +42755,28 @@ def local_finance_directory(conn: sqlite3.Connection, session: Dict[str, Any] | 
         if roster_text(row["status"]).lower() in {"active", "啟用"}
         and row["company_name"] in company_ids_by_name
     ]
+    current_applicant_department = None
+    current_company_id = roster_text(user.get("company_id"))
+    current_company = next((item for item in companies if item["id"] == current_company_id), None)
+    if current_company:
+        try:
+            applicant_unit = authoritative_applicant_department(user)
+        except PermissionError:
+            applicant_unit = None
+        if applicant_unit:
+            current_applicant_department = {
+                **applicant_unit,
+                "code": applicant_unit["id"],
+                "companyId": current_company_id,
+                "entityCodes": [current_company["financeEntityId"]],
+            }
     return {
         "source": "local-development",
         "schemaVersion": 2,
         "directoryVersion": "local-development",
         "syncedAt": now(),
         "currentCompanyId": roster_text(user.get("company_id")),
+        "currentApplicantDepartment": current_applicant_department,
         "companies": companies,
         "departments": departments,
         "organization": {"tenantId": "local-development", "versionNo": 0, "etag": ""},

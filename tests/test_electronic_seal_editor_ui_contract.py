@@ -88,19 +88,36 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         cls.css = (ROOT / "styles.css").read_text(encoding="utf-8")
         cls.page = html_element(cls.html, "electronicSeal")
 
-    def test_page_is_two_vertical_sections_with_application_first(self) -> None:
+    def test_page_keeps_application_first_and_uses_responsive_35_65_split(self) -> None:
         application = html_element(self.page, "uploadedSealApplicationPanel")
         editor = html_element(self.page, "uploadedPdfEditor")
 
         self.assertRegex(application, r'^<section\b[^>]*class="[^"]*electronic-seal-application-panel')
         self.assertLess(self.page.index(application), self.page.index(editor))
         self.assertNotIn("<aside", application)
+        self.assertIn('class="electronic-seal-layout electronic-seal-layout-split"', self.page)
 
         normalized_css = re.sub(r"\s+", " ", self.css)
         self.assertRegex(
             normalized_css,
-            r"\.electronic-seal-layout\.electronic-seal-layout-stacked\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)",
+            r"\.electronic-seal-layout\.electronic-seal-layout-split\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)",
         )
+        self.assertRegex(
+            normalized_css,
+            r"@media \(min-width: 1180px\) \{ \.electronic-seal-layout\.electronic-seal-layout-split \{ grid-template-columns: minmax\(0, 35fr\) minmax\(0, 65fr\);",
+        )
+
+    def test_editor_canvas_uses_full_pane_width_including_empty_and_selected_states(self) -> None:
+        normalized_css = re.sub(r"\s+", " ", self.css)
+        self.assertIn(
+            "#uploadedPdfEditor .pdf-editor-shell { grid-template-columns: minmax(0, 1fr); min-height: 0; }",
+            normalized_css,
+        )
+        self.assertNotIn(
+            '#uploadedPdfEditor:not([data-has-selection="true"]) .pdf-editor-shell { grid-template-columns: minmax(110px, 150px) minmax(0, 1fr); }',
+            normalized_css,
+        )
+        self.assertIn("#uploadedPdfEditor .pdf-editor-thumbnail-list { display: flex;", normalized_css)
 
     def test_application_section_has_exactly_the_six_requested_fields(self) -> None:
         application = html_element(self.page, "uploadedSealApplicationPanel")
