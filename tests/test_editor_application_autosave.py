@@ -70,7 +70,7 @@ let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(option
         self.run_javascript('''
 draft.title='Edited';await syncUploadedSealApplicationDraft();
 assert.equal(calls.length,1);assert.equal(calls[0].path,'/official-documents/OD-TEST');
-assert.deepEqual(Object.keys(calls[0].body),['title','subject','description','request_reason','handler_name','dispatch_unit']);
+assert.deepEqual(Object.keys(calls[0].body),['title','subject','description','request_reason','handler_name','dispatch_unit','applicant_department_id','applicant_department_name']);
 assert.equal(calls[0].body.title,'Edited');assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
 assert.equal(savePdfCalls,0);
 ''')

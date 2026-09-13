@@ -230,6 +230,28 @@ EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
     "editor_upload_cancelled",
     "editor_upload_network_failed",
     "editor_upload_expired",
+    # Keep the browser's bounded machine codes instead of collapsing useful
+    # transport failures to editor_upload_failed. Never accept provider text.
+    "editor_tus_create_rejected",
+    "editor_tus_invalid_object_key",
+    "editor_tus_asset_exists",
+    "editor_tus_request_failed",
+    "editor_tus_offset_conflict",
+    "editor_tus_file_too_large",
+    "editor_tus_mime_rejected",
+    "editor_tus_rate_limited",
+    "editor_tus_service_unavailable",
+    "editor_tus_network_error",
+    "editor_tus_offset_invalid",
+    "editor_tus_location_missing",
+    "editor_tus_location_invalid",
+    "editor_tus_metadata_missing",
+    "editor_tus_signature_missing",
+    "editor_tus_public_key_invalid",
+    "editor_tus_endpoint_invalid",
+    "editor_upload_conflict",
+    "editor_upload_authorization_failed",
+    "editor_upload_client_failed",
 })
 # PostgREST ``PT409`` messages are upstream-controlled text.  Only these
 # immutable, non-sensitive business codes may cross the transport boundary as
@@ -17411,8 +17433,12 @@ def list_company_seals(
     conn: sqlite3.Connection,
     company_id: str,
     session: Dict[str, Any] | None = None,
+    *, editor: bool = False,
 ) -> List[Dict[str, Any]]:
-    assert_sqlite_seal_company_access(conn, company_id, session)
+    if editor:
+        assert_editor_seal_catalog_company(official_session_user(session), company_id, session, conn)
+    else:
+        assert_sqlite_seal_company_access(conn, company_id, session)
     rows = conn.execute(
         """
         SELECT s.*, c.name AS company_name, c.tax_id AS company_tax_id
@@ -17423,7 +17449,42 @@ def list_company_seals(
         """,
         (company_id,),
     ).fetchall()
-    return [company_seal_row(conn, row["id"]) for row in rows]
+    result = [company_seal_row(conn, row["id"]) for row in rows]
+    return [editor_seal_catalog_metadata(row) for row in result if row.get("is_active")] if editor else result
+
+
+def assert_editor_seal_catalog_company(
+    user: Dict[str, Any], company_id: str, session: Dict[str, Any] | None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
+        raise PermissionError("official_document_create_forbidden")
+    official_editor_company(user, company_id, conn)
+
+
+def editor_seal_catalog_metadata(seal: Dict[str, Any]) -> Dict[str, Any]:
+    """Applicant picker metadata, never Vault locations, uploads or admin data."""
+    fields = {"id", "company_id", "seal_name", "seal_category", "seal_size_type", "is_active",
+              "render_size_mm", "render_width_mm", "render_height_mm", "render_width_pt",
+              "render_height_pt", "dimension_policy_version", "size_locked"}
+    file_fields = {"id", "seal_id", "file_hash", "version", "is_current", "render_width_mm",
+                   "render_height_mm", "render_width_pt", "render_height_pt",
+                   "dimension_policy_version", "dimension_validated", "usable"}
+    result = {key: seal[key] for key in fields if key in seal}
+    current = seal.get("current_file")
+    result["current_file"] = {key: current[key] for key in file_fields if key in current} if current else None
+    return result
+
+
+def assert_editor_seal_preview_company(
+    user: Dict[str, Any], seal: Dict[str, Any], conn: sqlite3.Connection | None = None,
+) -> None:
+    try:
+        official_editor_company(user, str(seal.get("company_id") or ""), conn)
+    except (PermissionError, ValueError) as exc:
+        raise PermissionError("editor_seal_preview_company_forbidden") from exc
+    if not seal.get("is_active"):
+        raise PermissionError("inactive_seal_cannot_be_requested")
 
 
 def create_company_seal(conn: sqlite3.Connection, company_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -20647,7 +20708,7 @@ def official_dispatch_route_notification_payload(
             "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
             "type": "發文寄發待辦",
             "title": f"{document['title']} 待總務寄發",
-            **exact_notification_target_payload(target, document.get("company_id") or ""),
+            **official_document_notification_target(target, document, conn),
             "channel": "Email + 系統通知",
             "source": document["id"],
             "priority": "高",
@@ -20659,7 +20720,7 @@ def official_dispatch_route_notification_payload(
             "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
             "type": "發文寄發待辦",
             "title": f"{document['title']} 已回到申請人寄發",
-            **exact_notification_target_payload(target, document.get("company_id") or ""),
+            **official_document_notification_target(target, document, conn),
             "channel": "Email + 系統通知",
             "source": document["id"],
             "priority": "高",
@@ -20670,7 +20731,7 @@ def official_dispatch_route_notification_payload(
         "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
         "type": "發文申請人確認",
         "title": f"{document['title']} 已完成，請確認結案",
-        **exact_notification_target_payload(target, document.get("company_id") or ""),
+        **official_document_notification_target(target, document, conn),
         "channel": "Email + 系統通知",
         "source": document["id"],
         "priority": "高",
@@ -20973,7 +21034,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
             "id": f"NTF-DISPATCH-COMPLETE-{record['id']}",
             "type": "發文申請人確認",
             "title": f"{document['title']} 已完成寄發，請確認結案",
-            **exact_notification_target_payload(applicant, document.get("company_id") or ""),
+            **official_document_notification_target(applicant, document, conn),
             "channel": "Email + 系統通知",
             "source": document_id,
             "priority": "高",
@@ -21063,7 +21124,7 @@ def upload_official_document_attachment(conn: sqlite3.Connection, document_id: s
     document = official_document_row(conn, document_id)
     if document.get("applicant_id") != user.get("id"):
         raise PermissionError("official_document_attachment_upload_forbidden")
-    require_official_creation_company(user, document.get("company_id"))
+    require_official_document_application_company(user, document, conn)
     if document.get("current_status") not in {"draft", "rejected"}:
         raise ValueError("official_document_attachments_locked_after_submit")
     content = payload.get("content_base64") or payload.get("file_content_base64") or ""
@@ -21902,6 +21963,121 @@ def require_official_creation_company(user: Dict[str, Any], requested_company_id
     return company_id
 
 
+def official_editor_company(
+    user: Dict[str, Any], requested_company_id: Any, conn: sqlite3.Connection | None = None,
+) -> Dict[str, Any]:
+    """Creation-only company choice for the applicant's own V2 seal case.
+
+    A selected company never changes the actor's Finance identity, role or
+    approval relationships, and does not grant access to other people's cases.
+    Production companies must belong to the actor's verified Finance tenant.
+    """
+    company_id = roster_text(requested_company_id or user.get("company_id"))
+    if not company_id:
+        raise PermissionError("finance_company_required")
+    company = official_company_row(conn, company_id) if conn is not None else supabase_official_company_row(company_id)
+    tenant_id = roster_text(user.get("finance_tenant_id"))
+    if is_production() or tenant_id:
+        if (
+            not tenant_id
+            or roster_text(company.get("finance_tenant_id")) != tenant_id
+            or roster_text(company.get("source_system")).lower() != "finance"
+            or not roster_text(company.get("finance_entity_id"))
+            or roster_text(company.get("status")).lower() not in {"active", "啟用"}
+        ):
+            raise PermissionError("official_document_company_forbidden")
+    else:
+        # Legacy isolated fixtures have no tenant. They retain the old own-
+        # company boundary and can never exercise cross-company production use.
+        require_official_creation_company(user, company_id)
+    if not launch_company_in_scope(company_id):
+        raise PermissionError("company_not_in_launch_scope")
+    return company
+
+
+def finance_unit_effective_entities(
+    unit: Dict[str, Any], units: List[Dict[str, Any]], entity_ids: set[str], tenant_id: str,
+) -> List[str]:
+    active_units = [row for row in units if roster_text(row.get("finance_tenant_id")) == tenant_id
+                    and roster_text(row.get("status")).lower() in {"active", "啟用"}]
+    by_id: Dict[str, List[Dict[str, Any]]] = {}
+    for row in active_units:
+        by_id.setdefault(roster_text(row.get("finance_unit_id")), []).append(row)
+    current, visited = unit, set()
+    for _depth in range(32):
+        unit_id = roster_text(current.get("finance_unit_id"))
+        if not unit_id or unit_id in visited or len(by_id.get(unit_id, [])) != 1:
+            return []
+        visited.add(unit_id)
+        mode = roster_text(current.get("entity_scope_mode")).lower() or "inherit"
+        if mode not in {"all", "explicit", "inherit"}:
+            return []
+        if mode == "all":
+            return sorted(entity_ids)
+        if mode == "explicit":
+            return sorted(set(_finance_directory_json_list(current.get("entity_codes"))) & entity_ids)
+        parents = by_id.get(roster_text(current.get("parent_finance_unit_id")), [])
+        if len(parents) != 1:
+            return []
+        current = parents[0]
+    return []
+
+
+def authoritative_editor_applicant_department(
+    user: Dict[str, Any], payload: Dict[str, Any], company: Dict[str, Any], conn: sqlite3.Connection | None = None,
+) -> Dict[str, str]:
+    """Validate the chosen application unit without rewriting actor identity."""
+    external = parse_json_any(user.get("external_account_payload_json"), {}) or {}
+    profile = external.get("financeProfile", {}) if isinstance(external, dict) else {}
+    profile = profile if isinstance(profile, dict) else {}
+    requested_code = roster_text(payload.get("applicant_department_id") or payload.get("applicantDepartmentId"))
+    own_company = roster_text(company.get("id")) == roster_text(user.get("company_id"))
+    code = (requested_code or (roster_text(profile.get("departmentCode")) if own_company else "")).upper()
+    tenant_id = roster_text(user.get("finance_tenant_id"))
+    if (is_production() and USE_SUPABASE) or (conn is None and tenant_id):
+        if not tenant_id or not code:
+            raise PermissionError("finance_unit_projection_unavailable")
+        units = supabase_filter_rows("finance_organization_units", {"finance_tenant_id": tenant_id, "status": "active"}, order="sort_order.asc,code.asc", limit=500)
+        matches = [unit for unit in units if roster_text(unit.get("code")).upper() == code
+                   and roster_text(unit.get("finance_tenant_id")) == tenant_id
+                   and roster_text(unit.get("status")).lower() in {"active", "啟用"}]
+        if len(matches) != 1 or not roster_text(matches[0].get("name")):
+            raise PermissionError("finance_unit_projection_unavailable")
+        unit = matches[0]
+        if roster_text(unit.get("unit_type")).lower() not in {"division", "department", "section", "team"}:
+            raise PermissionError("finance_unit_projection_unavailable")
+        entity_id = roster_text(company.get("finance_entity_id"))
+        if entity_id not in finance_unit_effective_entities(unit, units, {entity_id}, tenant_id):
+            raise PermissionError("finance_unit_company_mismatch")
+        name = roster_text(unit.get("name"))
+        accepted_names = {name}
+        if code == roster_text(profile.get("departmentCode")).upper():
+            accepted_names.update({roster_text(user.get("unit")), roster_text(profile.get("departmentName"))})
+        for key in ("applicant_department_name", "applicantDepartmentName", "applicant_department", "dispatch_unit"):
+            if roster_text(payload.get(key)) and roster_text(payload.get(key)) not in accepted_names:
+                raise PermissionError("finance_unit_payload_mismatch")
+        return {"id": code, "name": name}
+    if conn is not None and requested_code:
+        rows = conn.execute("SELECT id, name FROM department_registry WHERE id = ? AND company_name = ? AND status IN ('active', '啟用')", (requested_code, company.get("name"))).fetchall()
+        if len(rows) == 1:
+            name = roster_text(rows[0]["name"])
+            for key in ("applicant_department_name", "applicantDepartmentName", "applicant_department", "dispatch_unit"):
+                if roster_text(payload.get(key)) and roster_text(payload.get(key)) != name:
+                    raise PermissionError("finance_unit_payload_mismatch")
+            return {"id": roster_text(rows[0]["id"]), "name": name}
+    if own_company or not user.get("company_id"):
+        return authoritative_applicant_department(user, payload)
+    raise PermissionError("finance_unit_projection_unavailable")
+
+
+def require_official_document_application_company(
+    user: Dict[str, Any], document: Dict[str, Any], conn: sqlite3.Connection | None = None,
+) -> str:
+    if document.get("source_type") == "uploaded_pdf" and parse_json_field(document.get("metadata_json")).get("pdf_editor_v2"):
+        return roster_text(official_editor_company(user, document.get("company_id"), conn).get("id"))
+    return require_official_creation_company(user, document.get("company_id"))
+
+
 def official_compose_electronic_output(document: Dict[str, Any]) -> bool:
     """Only a typed, server-persisted compose letter can be sent without a seal."""
     return bool(
@@ -22383,6 +22559,7 @@ def _official_correction_plan(
     source_pages: List[Dict[str, Any]] | None = None,
     seal_lookup: Any = None,
     seal_file_lookup: Any = None,
+    applicant_department: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
     """Validate a correction payload and return only server-owned mutations.
 
@@ -22401,6 +22578,10 @@ def _official_correction_plan(
         for key in OFFICIAL_CORRECTION_EDITABLE_FIELDS
         if key in payload
     }
+    if applicant_department is not None:
+        updates.update({"applicant_department_id": applicant_department["id"],
+                        "applicant_department_name": applicant_department["name"],
+                        "dispatch_unit": applicant_department["name"]})
     if "title" in updates and not updates["title"]:
         raise ValueError("official_document_title_required")
     output_fields = official_output_fields(payload, document)
@@ -22486,6 +22667,8 @@ def _official_correction_plan(
 
     client_metadata = _official_correction_client_metadata(payload)
     metadata = _official_correction_metadata(document, seal_context, seal_id, payload)
+    if applicant_department is not None:
+        metadata["future_rule_inputs"] = {**(metadata.get("future_rule_inputs") or {}), "department": applicant_department["name"]}
     updates.update({
         "workflow_template_key": seal_context["workflow_template_key"],
         "metadata_json": json.dumps(metadata, ensure_ascii=False),
@@ -22544,6 +22727,25 @@ def _sqlite_store_correction_source_file(
     return insert_official_document_file(conn, document["id"], file_type, file_row, actor)
 
 
+def _editor_correction_department(
+    user: Dict[str, Any], document: Dict[str, Any], payload: Dict[str, Any], conn: sqlite3.Connection | None = None,
+) -> Dict[str, str] | None:
+    if document.get("source_type") != "uploaded_pdf" or not parse_json_field(document.get("metadata_json")).get("pdf_editor_v2"):
+        return None
+    company = official_editor_company(user, document.get("company_id"), conn)
+    selection = {"applicant_department_id": document.get("applicant_department_id"),
+                 "applicant_department_name": document.get("applicant_department_name"), **payload}
+    return authoritative_editor_applicant_department(user, selection, company, conn)
+
+
+def _editor_metadata_only_correction(document: Dict[str, Any], payload: Dict[str, Any], stamp_request: Dict[str, Any] | None) -> bool:
+    return bool(document.get("source_type") == "uploaded_pdf"
+                and parse_json_field(document.get("metadata_json")).get("pdf_editor_v2")
+                and not OFFICIAL_CORRECTION_FILE_FIELDS.intersection(payload)
+                and not OFFICIAL_CORRECTION_STAMP_FIELDS.intersection(payload)
+                and not (stamp_request or {}).get("stamp_positions"))
+
+
 def update_official_document_correction(
     conn: sqlite3.Connection,
     document_id: str,
@@ -22557,9 +22759,11 @@ def update_official_document_correction(
     if document.get("current_status") not in {"draft", "rejected"}:
         raise ValueError("official_document_correction_locked")
     require_content_revision(document, payload)
+    require_official_document_application_company(user, document, conn)
+    applicant_department = _editor_correction_department(user, document, payload, conn)
     stamp_request = official_document_stamp_request(conn, document_id)
     source_pages: List[Dict[str, Any]] = []
-    if not OFFICIAL_CORRECTION_FILE_FIELDS.intersection(payload):
+    if not OFFICIAL_CORRECTION_FILE_FIELDS.intersection(payload) and not _editor_metadata_only_correction(document, payload, stamp_request):
         source_meta = official_latest_source_file(conn, document)
         if not source_meta.get("file_object_id"):
             raise ValueError("official_document_file_object_missing")
@@ -22573,6 +22777,7 @@ def update_official_document_correction(
         source_pages,
         lambda item_seal_id: company_seal_row(conn, item_seal_id),
         lambda file_id, item_seal_id: local_official_seal_file_by_id(conn, file_id, item_seal_id),
+        applicant_department,
     )
     for seal_id in sorted({str(item.get("seal_id") or plan["seal_id"]) for item in plan["positions"]}):
         if not seal_id:
@@ -22590,6 +22795,8 @@ def update_official_document_correction(
         if key in plan["updates"] and str(document.get(key) or "") != str(plan["updates"][key] or "")
     ]
     changed_fields.extend(plan["render_metadata_changes"])
+    if applicant_department and document.get("applicant_department_id") != applicant_department["id"]:
+        changed_fields.append("applicant_department_id")
     document_body_changed = bool(changed_fields)
     previous_context = official_seal_context_from_document(document) or {}
     if previous_context.get("document_category") != plan["seal_context"]["document_category"]:
@@ -22860,7 +23067,7 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
             workflow_steps,
         )
         session = {**(session or {}), "user": user}
-    require_official_creation_company(user, document.get("company_id"))
+    require_official_document_application_company(user, document, conn)
     # The live Finance snapshot and complete exact actor plan are resolved
     # before AV/editor/seal locks mutate the application.
     # Claim SQLite's write transaction with a no-op compare-and-swap before any
@@ -22931,7 +23138,7 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
         create_and_deliver_notification(conn, {
             "type": "發文簽核",
             "title": f"{document['title']} 待{first['step_name']}簽核",
-            **exact_notification_target_payload(approver, document.get("company_id") or ""),
+            **official_document_notification_target(approver, document, conn),
             "source": document_id,
             "priority": "高",
             "body": f"{document.get('applicant_name') or '申請人'} 已送出發文用印申請。",
@@ -23710,7 +23917,7 @@ def approve_official_document(conn: sqlite3.Connection, document_id: str, payloa
     create_and_deliver_notification(conn, {
         "type": "發文簽核",
         "title": f"{document['title']} 待{next_step['step_name']}簽核",
-        **exact_notification_target_payload(next_approver, document.get("company_id") or ""),
+        **official_document_notification_target(next_approver, document, conn),
         "source": document_id,
         "priority": "高",
         "body": f"{step['step_name']}已核准，請接續處理。",
@@ -23834,7 +24041,7 @@ def reject_official_document(conn: sqlite3.Connection, document_id: str, payload
     create_and_deliver_notification(conn, {
         "type": "發文退回",
         "title": f"{document['title']} 已駁回",
-        **exact_notification_target_payload(applicant, document.get("company_id") or ""),
+        **official_document_notification_target(applicant, document, conn),
         "source": document_id,
         "priority": "高",
         "body": comment,
@@ -24590,7 +24797,7 @@ def auto_stamp_official_document(conn: sqlite3.Connection, document_id: str, pay
                 create_and_deliver_notification(conn, {
                     "type": "發文用印失敗",
                     "title": f"{document['title']} 自動用印失敗",
-                    **exact_notification_target_payload(ga_user, document.get("company_id") or ""),
+                    **official_document_notification_target(ga_user, document, conn),
                     "source": document_id,
                     "priority": "高",
                     "body": detail,
@@ -25697,12 +25904,11 @@ def local_editor_seal_preview(
 ) -> bytes:
     user = official_session_user(session)
     seal = company_seal_row(conn, seal_id)
-    if str(user.get("company_id") or "") != str(seal.get("company_id") or ""):
-        # Seal custodians may maintain records across the launch allowlist, but
-        # the PDF editor must never disclose even a watermarked seal preview
-        # outside the editor user's own company.
-        raise PermissionError("editor_seal_preview_company_forbidden")
-    assert_sqlite_seal_access(conn, seal_id, session)
+    assert_editor_seal_preview_company(user, seal, conn)
+    if not (document_id and revision_id) and not session_has_any_permission(
+        session, ["official_documents.compose", "official_documents.all_todo"]
+    ):
+        raise PermissionError("official_document_create_forbidden")
     has_binding_value = any((file_id, file_sha256, document_id, revision_id))
     if binding_requested or has_binding_value:
         if not file_id or not file_sha256:
@@ -25815,8 +26021,7 @@ def _editor_assert_document_access(
     user = official_session_user(session)
     user_company_id = str(user.get("company_id") or "")
     if write:
-        if user_company_id and user_company_id != str(document.get("company_id") or "") and user.get("id") != "system":
-            raise PermissionError("official_editor_company_forbidden")
+        require_official_document_application_company(user, document, conn)
         metadata = parse_json_field(document.get("metadata_json"))
         if not metadata.get("pdf_editor_v2"):
             raise ValueError("editor_legacy_document_read_only")
@@ -25897,14 +26102,14 @@ def create_official_editor_draft(conn: sqlite3.Connection, payload: Dict[str, An
     user = official_session_user(session)
     if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
         raise PermissionError("official_document_create_forbidden")
-    company_id = require_official_creation_company(user, payload.get("company_id") or user.get("company_id"))
+    company = official_editor_company(user, payload.get("company_id"), conn)
+    company_id = company["id"]
     if not launch_company_in_scope(company_id):
         raise PermissionError("company_not_in_launch_scope")
     if not pdf_editor_v2_enabled_for_company(company_id):
         raise PermissionError("pdf_editor_v2_not_enabled_for_company")
-    company = official_company_row(conn, company_id)
     require_official_seal_classification(payload)
-    applicant_department = authoritative_applicant_department(user, payload)
+    applicant_department = authoritative_editor_applicant_department(user, payload, company, conn)
     bound_payload = {
         **payload,
         "applicant_department_id": applicant_department["id"],
@@ -25972,7 +26177,7 @@ def _editor_conflict_copy_existing(existing: Dict[str, Any] | None, source_id: s
     return True
 
 
-def _editor_conflict_copy_bundle(document: Dict[str, Any], payload: Dict[str, Any], user: Dict[str, Any], company: Dict[str, Any], state: Dict[str, Any], assets: List[Dict[str, Any]], objects: List[Dict[str, Any]], files: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _editor_conflict_copy_bundle(document: Dict[str, Any], payload: Dict[str, Any], user: Dict[str, Any], company: Dict[str, Any], state: Dict[str, Any], assets: List[Dict[str, Any]], objects: List[Dict[str, Any]], files: List[Dict[str, Any]], conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
     """Only server-read, validated rows enter this atomic persistence bundle."""
     new_id, request_hash = _editor_conflict_copy_identity(document["id"], payload, user)
     incoming = payload.get("application") or {}
@@ -25987,7 +26192,9 @@ def _editor_conflict_copy_bundle(document: Dict[str, Any], payload: Dict[str, An
         creation.setdefault(key, document.get(key) or "")
         if not isinstance(creation[key], str) or len(creation[key]) > 20000:
             raise ValueError("editor_conflict_copy_application_invalid")
-    department = authoritative_applicant_department(user, creation)
+    creation["applicant_department_id"] = incoming.get("applicant_department_id") or document.get("applicant_department_id")
+    creation["applicant_department_name"] = incoming.get("applicant_department_name") or document.get("applicant_department_name")
+    department = authoritative_editor_applicant_department(user, creation, company, conn)
     creation["applicant_department_name"] = department["name"]
     metadata, _, workflow = official_editor_draft_metadata(creation, user, company)
     metadata["conflict_recovery"] = {"source_document_id": document["id"], "request_hash": request_hash}
@@ -26074,7 +26281,7 @@ def copy_official_editor_conflict(conn: sqlite3.Connection, document_id: str, pa
     validate_editor_seal_placements(conn, document["company_id"], state, previous_state=previous)
     objects = [dict(conn.execute("SELECT * FROM file_objects WHERE id = ?", (asset["file_object_id"],)).fetchone()) for asset in assets]
     files = [dict(row) for row in conn.execute("SELECT * FROM official_document_files WHERE document_id = ?", (document_id,)).fetchall()]
-    bundle = _editor_conflict_copy_bundle(document, payload, user, official_company_row(conn, document["company_id"]), state, assets, objects, files)
+    bundle = _editor_conflict_copy_bundle(document, payload, user, official_company_row(conn, document["company_id"]), state, assets, objects, files, conn)
     created_paths = []
     conn.execute("SAVEPOINT editor_conflict_copy")
     try:
@@ -31261,6 +31468,23 @@ def exact_notification_target_payload(
     }
 
 
+def official_document_notification_target(
+    user: Dict[str, Any], document: Dict[str, Any], conn: sqlite3.Connection | None = None,
+) -> Dict[str, str]:
+    """Notify the exact Finance actor, not the selected application's company.
+
+    Callers resolve this user from the immutable workflow or applicant ID. The
+    V2 exception validates the selected company's tenant, while delivery keeps
+    the target actor's own company so their private inbox can actually see it.
+    """
+    if (roster_text(user.get("company_id")) != roster_text(document.get("company_id"))
+            and document.get("source_type") == "uploaded_pdf"
+            and parse_json_field(document.get("metadata_json")).get("pdf_editor_v2")):
+        official_editor_company(user, document.get("company_id"), conn)
+        return exact_notification_target_payload(user)
+    return exact_notification_target_payload(user, document.get("company_id") or "")
+
+
 def exact_sqlite_notification_target_from_metadata(
     conn: sqlite3.Connection,
     metadata_value: Any,
@@ -33768,10 +33992,15 @@ def supabase_complete_general_affairs_dispatch_launch_smoke(
 def supabase_list_company_seals(
     company_id: str,
     session: Dict[str, Any] | None = None,
+    *, editor: bool = False,
 ) -> List[Dict[str, Any]]:
-    assert_supabase_seal_company_access(company_id, session)
+    if editor:
+        assert_editor_seal_catalog_company(supabase_official_session_user(session), company_id, session)
+    else:
+        assert_supabase_seal_company_access(company_id, session)
     rows = supabase_filter_rows("company_seals", {"company_id": company_id}, order="is_active.desc,seal_category.asc,seal_size_type.asc,created_at.desc", limit=500)
-    return [supabase_company_seal_row(row["id"]) for row in rows]
+    result = [supabase_company_seal_row(row["id"]) for row in rows]
+    return [editor_seal_catalog_metadata(row) for row in result if row.get("is_active")] if editor else result
 
 
 def supabase_create_company_seal(company_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -35411,7 +35640,7 @@ def supabase_upload_official_document_attachment(document_id: str, payload: Dict
     document = supabase_official_document_row(document_id)
     if document.get("applicant_id") != user.get("id"):
         raise PermissionError("official_document_attachment_upload_forbidden")
-    require_official_creation_company(user, document.get("company_id"))
+    require_official_document_application_company(user, document)
     if document.get("current_status") not in {"draft", "rejected"}:
         raise ValueError("official_document_attachments_locked_after_submit")
     content = payload.get("content_base64") or payload.get("file_content_base64") or ""
@@ -36086,8 +36315,7 @@ def _supabase_editor_assert_document_access(document: Dict[str, Any], session: D
     user = supabase_official_session_user(session)
     user_company_id = str(user.get("company_id") or "")
     if write:
-        if user_company_id and user_company_id != str(document.get("company_id") or "") and user.get("id") != "system":
-            raise PermissionError("official_editor_company_forbidden")
+        require_official_document_application_company(user, document)
         metadata = parse_json_field(document.get("metadata_json"))
         if not metadata.get("pdf_editor_v2"):
             raise ValueError("editor_legacy_document_read_only")
@@ -36157,14 +36385,14 @@ def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict
     user = supabase_official_session_user(session)
     if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
         raise PermissionError("official_document_create_forbidden")
-    company_id = require_official_creation_company(user, payload.get("company_id") or user.get("company_id"))
+    company = official_editor_company(user, payload.get("company_id"))
+    company_id = company["id"]
     if not launch_company_in_scope(company_id):
         raise PermissionError("company_not_in_launch_scope")
     if not pdf_editor_v2_enabled_for_company(company_id):
         raise PermissionError("pdf_editor_v2_not_enabled_for_company")
-    company = supabase_official_company_row(company_id)
     require_official_seal_classification(payload)
-    applicant_department = authoritative_applicant_department(user, payload)
+    applicant_department = authoritative_editor_applicant_department(user, payload, company)
     bound_payload = {
         **payload,
         "applicant_department_id": applicant_department["id"],
@@ -36273,6 +36501,26 @@ def _supabase_create_signed_upload_token(storage_path: str, bucket: str) -> str:
     return token
 
 
+def _editor_storage_extension(mime_type: str) -> str:
+    extensions = {"application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg"}
+    extension = extensions.get(str(mime_type).lower())
+    if not extension:
+        raise ValueError("editor_upload_mime_not_allowed")
+    return extension
+
+
+def _supabase_editor_staging_storage_path(document_id: str, asset_id: str, mime_type: str) -> str:
+    """Keep display filenames out of Storage keys, including Chinese and PII.
+
+    Supabase may sign a key before TUS validates its character set. An opaque
+    ASCII key is therefore required for both staging and immutable promotion;
+    percent-encoding the original filename is not a safe substitute.
+    """
+    if any(not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", str(value)) for value in (document_id, asset_id)):
+        raise ValueError("editor_storage_identity_invalid")
+    return f"editor/{document_id}/{asset_id}.{_editor_storage_extension(mime_type)}"
+
+
 def supabase_create_official_editor_upload_intent(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None, *, internal_metadata: Dict[str, Any] | None = None, issue_upload_capability: bool = True) -> Dict[str, Any]:
     require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
@@ -36285,7 +36533,7 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
     if internal_metadata and int(internal_metadata.get("a4_source_revision_no") or 0) != int(latest["revision_no"]):
         raise ValueError("editor_revision_conflict")
     asset_id = f"ODASSET-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}"
-    storage_path = f"editor/{document_id}/{asset_id}-{meta['file_name']}"
+    storage_path = _supabase_editor_staging_storage_path(document_id, asset_id, meta["mime_type"])
     expires_at = (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")
     upload_url = _supabase_storage_direct_tus_url() if issue_upload_capability else ""
     storage_publishable_key = _supabase_storage_public_upload_key() if issue_upload_capability else ""
@@ -36307,7 +36555,7 @@ def supabase_create_official_editor_upload_intent(document_id: str, payload: Dic
         "scan_status": "pending",
         "preflight_status": "pending",
         "page_count": 0,
-        "metadata_json": json.dumps({**(internal_metadata or {}), "base_revision_no": int(latest["revision_no"]), "expires_at": expires_at}, ensure_ascii=False),
+        "metadata_json": json.dumps({**(internal_metadata or {}), "base_revision_no": int(latest["revision_no"]), "expires_at": expires_at, "storage_key_version": 2}, ensure_ascii=False),
         "created_by": user.get("id") or "",
         "created_at": now(),
         "finalized_at": None,
@@ -36434,6 +36682,14 @@ def _supabase_editor_immutable_storage_path(
     asset: Dict[str, Any],
     digest: str,
 ) -> str:
+    metadata = parse_json_any(asset.get("metadata_json"), {}) or {}
+    if metadata.get("storage_key_version") == 2:
+        _supabase_editor_staging_storage_path(document_id, str(asset["id"]), str(asset.get("mime_type") or ""))
+        if not re.fullmatch(r"[A-Fa-f0-9]{64}", digest):
+            raise ValueError("editor_upload_hash_invalid")
+        return f"editor-final/{document_id}/{asset['id']}/{digest.upper()}.{_editor_storage_extension(str(asset['mime_type']))}"
+    # Existing jobs are immutable commitments. Preserve their legacy path;
+    # new capabilities always use version 2 and never carry display names.
     safe_name = Path(str(asset.get("file_name") or "asset.bin")).name
     return (
         f"editor-final/{document_id}/{asset['id']}/"
@@ -37452,9 +37708,11 @@ def supabase_editor_seal_preview(
 ) -> bytes:
     user = supabase_official_session_user(session)
     seal = supabase_company_seal_row(seal_id)
-    if str(user.get("company_id") or "") != str(seal.get("company_id") or ""):
-        raise PermissionError("editor_seal_preview_company_forbidden")
-    assert_supabase_seal_access(seal_id, session)
+    assert_editor_seal_preview_company(user, seal)
+    if not (document_id and revision_id) and not session_has_any_permission(
+        session, ["official_documents.compose", "official_documents.all_todo"]
+    ):
+        raise PermissionError("official_document_create_forbidden")
     has_binding_value = any((file_id, file_sha256, document_id, revision_id))
     if binding_requested or has_binding_value:
         if not file_id or not file_sha256:
@@ -38120,10 +38378,11 @@ def supabase_update_official_document_correction(
     if document.get("current_status") not in {"draft", "rejected"}:
         raise ValueError("official_document_correction_locked")
     require_content_revision(document, payload)
-    require_official_creation_company(user, document.get("company_id"))
+    require_official_document_application_company(user, document)
+    applicant_department = _editor_correction_department(user, document, payload)
     stamp_request = supabase_official_document_stamp_request(document_id)
     source_pages: List[Dict[str, Any]] = []
-    if not OFFICIAL_CORRECTION_FILE_FIELDS.intersection(payload):
+    if not OFFICIAL_CORRECTION_FILE_FIELDS.intersection(payload) and not _editor_metadata_only_correction(document, payload, stamp_request):
         source_meta = supabase_official_latest_source_file(document)
         if not source_meta.get("file_object_id"):
             raise ValueError("official_document_file_object_missing")
@@ -38143,6 +38402,7 @@ def supabase_update_official_document_correction(
         source_pages,
         supabase_company_seal_row,
         supabase_official_seal_file_by_id,
+        applicant_department,
     )
     for seal_id in sorted({str(item.get("seal_id") or plan["seal_id"]) for item in plan["positions"]}):
         if not seal_id:
@@ -38159,6 +38419,8 @@ def supabase_update_official_document_correction(
         if key in plan["updates"] and str(document.get(key) or "") != str(plan["updates"][key] or "")
     ]
     changed_fields.extend(plan["render_metadata_changes"])
+    if applicant_department and document.get("applicant_department_id") != applicant_department["id"]:
+        changed_fields.append("applicant_department_id")
     document_body_changed = bool(changed_fields)
     previous_context = official_seal_context_from_document(document) or {}
     if previous_context.get("document_category") != plan["seal_context"]["document_category"]:
@@ -38429,7 +38691,7 @@ def supabase_resubmit_official_document(
     document = supabase_official_document_row(document_id)
     if document.get("applicant_id") != user.get("id"):
         raise PermissionError("only_applicant_can_resubmit")
-    require_official_creation_company(user, document.get("company_id"))
+    require_official_document_application_company(user, document)
     if document.get("current_status") != "rejected":
         if _supabase_committed_resubmit_operation_id(document_id, user["id"]):
             return supabase_official_document_detail(document_id, session)
@@ -38638,7 +38900,7 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
             workflow_steps,
         )
         session = {**(session or {}), "user": user}
-    require_official_creation_company(user, document.get("company_id"))
+    require_official_document_application_company(user, document)
     # Resolve and validate every external witness before entering the database
     # transaction.  From the first workflow row through the document status
     # transition, only the service-role RPC below is allowed to mutate state.
@@ -38860,10 +39122,7 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
             supabase_create_and_deliver_notification({
                 "type": "發文簽核",
                 "title": f"{document['title']} 待{first['step_name']}簽核",
-                **exact_notification_target_payload(
-                    approver,
-                    document.get("company_id") or "",
-                ),
+                **official_document_notification_target(approver, document),
                 "source": document_id,
                 "priority": "高",
                 "body": f"{document.get('applicant_name') or '申請人'} 已送出發文用印申請。",
@@ -39593,7 +39852,7 @@ def supabase_auto_stamp_official_document(document_id: str, payload: Dict[str, A
                 supabase_create_and_deliver_notification({
                     "type": "發文用印失敗",
                     "title": f"{document['title']} 自動用印失敗",
-                    **exact_notification_target_payload(ga_user, document.get("company_id") or ""),
+                    **official_document_notification_target(ga_user, document),
                     "source": document_id,
                     "priority": "高",
                     "body": detail,
@@ -42555,6 +42814,7 @@ def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]
     )
     current_company_id = roster_text(user.get("company_id"))
     companies: List[Dict[str, Any]] = []
+    editor_companies: List[Dict[str, Any]] = []
     for company in finance_companies:
         company_tenant_id = roster_text(company.get("finance_tenant_id"))
         if company_tenant_id and company_tenant_id != tenant_id:
@@ -42563,14 +42823,12 @@ def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]
             continue
         if roster_text(company.get("status")).lower() not in {"active", "啟用"}:
             continue
-        if not privileged_directory and roster_text(company.get("id")) != current_company_id:
-            continue
         entity_id = roster_text(company.get("finance_entity_id"))
         if not entity_id:
             continue
         company_id = roster_text(company.get("id"))
         editor_v2_enabled = pdf_editor_v2_enabled_for_company(company_id)
-        companies.append({
+        public_company = {
             "id": company_id,
             "financeEntityId": entity_id,
             "name": roster_text(company.get("name")),
@@ -42584,9 +42842,18 @@ def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]
             "pdf_editor_v2": editor_v2_enabled,
             "feature_flags": {"pdf_editor_v2": editor_v2_enabled},
             "featureFlags": {"pdf_editor_v2": editor_v2_enabled},
-        })
+        }
+        if privileged_directory or company_id == current_company_id:
+            companies.append(public_company)
+        # This is a creation-only choice list, not a company-record grant.
+        # Do not derive its tenant from a legacy company or single-tenant guess.
+        if (roster_text(user.get("finance_tenant_id")) == company_tenant_id == tenant_id
+                and company_tenant_id and editor_v2_enabled and launch_company_in_scope(company_id)
+                and session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"])):
+            editor_companies.append(public_company)
 
     company_entity_ids = {item["financeEntityId"] for item in companies}
+    editor_entity_ids = {item["financeEntityId"] for item in editor_companies}
     unit_rows = supabase_filter_rows(
         "finance_organization_units",
         {"finance_tenant_id": tenant_id, "status": "active"},
@@ -42621,11 +42888,24 @@ def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]
         return []
 
     departments: List[Dict[str, Any]] = []
+    editor_departments: List[Dict[str, Any]] = []
     for unit in unit_rows:
         if roster_text(unit.get("finance_tenant_id")) != tenant_id:
             continue
         if roster_text(unit.get("status")).lower() not in {"active", "啟用"}:
             continue
+        editor_codes = finance_unit_effective_entities(unit, unit_rows, editor_entity_ids, tenant_id)
+        code = roster_text(unit.get("code")).upper()
+        unique_code = code and sum(1 for item in unit_rows if roster_text(item.get("code")).upper() == code
+                                 and roster_text(item.get("finance_tenant_id")) == tenant_id
+                                 and roster_text(item.get("status")).lower() in {"active", "啟用"}) == 1
+        if (editor_codes and unique_code and roster_text(unit.get("name"))
+                and roster_text(unit.get("unit_type")).lower() in {"division", "department", "section", "team"}):
+            editor_departments.append({
+                "id": code, "code": code, "name": roster_text(unit.get("name")),
+                "financeUnitId": roster_text(unit.get("finance_unit_id")),
+                "unitType": roster_text(unit.get("unit_type")), "entityCodes": editor_codes,
+            })
         if roster_text(unit.get("unit_type")).lower() not in {"department", "section", "team"}:
             continue
         entity_codes = effective_entity_codes(unit)
@@ -42650,8 +42930,8 @@ def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]
     # selectable department (for example, the CEO). Keep the general directory
     # restricted to departments, but expose that actor's own authoritative node
     # separately so applicant forms never silently choose the first department.
-    # This is display metadata only: all draft/write endpoints still call
-    # authoritative_finance_unit and require_official_creation_company.
+    # This is the default only; editorApplicant* lists provide validated
+    # alternatives without changing the general directory's visibility.
     current_applicant_department = None
     external = parse_json_any(user.get("external_account_payload_json"), {}) or {}
     profile = external.get("financeProfile") if isinstance(external, dict) else {}
@@ -42697,6 +42977,8 @@ def supabase_finance_directory(session: Dict[str, Any] | None) -> Dict[str, Any]
         "syncedAt": roster_text((state or {}).get("last_synced_from_finance_at")),
         "currentCompanyId": current_company_id,
         "currentApplicantDepartment": current_applicant_department,
+        "editorApplicantCompanies": editor_companies,
+        "editorApplicantDepartments": editor_departments,
         "companies": companies,
         "departments": departments,
         "organization": {
@@ -42713,7 +42995,7 @@ def local_finance_directory(conn: sqlite3.Connection, session: Dict[str, Any] | 
     if not user:
         raise PermissionError("finance_directory_forbidden")
     company_rows = conn.execute(
-        "SELECT id, name, tax_id, address, finance_entity_id, status FROM companies ORDER BY name"
+        "SELECT id, name, tax_id, address, finance_entity_id, finance_tenant_id, source_system, status FROM companies ORDER BY name"
     ).fetchall()
     companies = [
         {
@@ -42734,6 +43016,13 @@ def local_finance_directory(conn: sqlite3.Connection, session: Dict[str, Any] | 
         for row in company_rows
         if roster_text(row["status"]).lower() in {"active", "啟用"}
     ]
+    editor_company_ids = {
+        row["id"] for row in company_rows
+        if ((roster_text(user.get("finance_tenant_id"))
+             and roster_text(row["finance_tenant_id"]) == roster_text(user.get("finance_tenant_id"))
+             and row["source_system"] == "finance") or row["id"] == user.get("company_id"))
+        and launch_company_in_scope(row["id"])
+    }
     department_rows = conn.execute(
         "SELECT id, company_name, name, status FROM department_registry ORDER BY company_name, name"
     ).fetchall()
@@ -42777,6 +43066,8 @@ def local_finance_directory(conn: sqlite3.Connection, session: Dict[str, Any] | 
         "syncedAt": now(),
         "currentCompanyId": roster_text(user.get("company_id")),
         "currentApplicantDepartment": current_applicant_department,
+        "editorApplicantCompanies": [item for item in companies if item["id"] in editor_company_ids],
+        "editorApplicantDepartments": departments + ([current_applicant_department] if current_applicant_department else []),
         "companies": companies,
         "departments": departments,
         "organization": {"tenantId": "local-development", "versionNo": 0, "etag": ""},
@@ -46847,7 +47138,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if method == "GET":
                         if not self.require_table_access(session, "company_seals"):
                             return
-                        self.send_json(supabase_list_company_seals(parts[1], session))
+                        self.send_json(supabase_list_company_seals(parts[1], session, editor=query.get("editor") == ["1"]))
                         return
                     if method == "POST":
                         require_seal_custodian_role(session)
@@ -47450,7 +47741,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if method == "GET":
                         if not self.require_table_access(session, "company_seals"):
                             return
-                        self.send_json(list_company_seals(conn, parts[1], session))
+                        self.send_json(list_company_seals(conn, parts[1], session, editor=query.get("editor") == ["1"]))
                         return
                     if method == "POST":
                         require_seal_custodian_role(session)

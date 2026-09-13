@@ -116,11 +116,12 @@ class EditorApplicantUnitBindingTests(unittest.TestCase):
         self.assertEqual(stored["current_status"], "draft")
         self.assertEqual(len(result["editor_state"]["elements"]), 0)
 
-    def test_old_first_department_fallback_reproduces_exact_403_code(self):
+    def test_explicit_same_company_department_selection_is_allowed(self):
         payload = self.payload(department=self.department)
-        with self.assertRaisesRegex(PermissionError, "^finance_unit_payload_mismatch$"):
-            backend.supabase_create_official_editor_draft(payload, self.session)
-        self.assertEqual(self.inserted, [])
+        backend.supabase_create_official_editor_draft(payload, self.session)
+        stored = next(row for table, row in self.inserted if table == "official_documents")
+        self.assertEqual(stored["applicant_department_id"], "D1000")
+        self.assertEqual(self.user["unit"], self.division["name"])
 
     def test_employee_and_supervisor_current_department_is_bound_identically(self):
         for role, key in (("員工", "staff"), ("主管", "section_chief"), ("行政部主任", "admin_director")):
@@ -186,12 +187,97 @@ class EditorApplicantUnitBindingTests(unittest.TestCase):
     def test_cross_company_and_missing_permissions_remain_denied(self):
         payload = self.payload()
         payload["company_id"] = self.other_company["id"]
-        with self.assertRaisesRegex(PermissionError, "official_document_company_forbidden"):
+        with self.assertRaisesRegex(PermissionError, "finance_unit_company_mismatch"):
             backend.supabase_create_official_editor_draft(payload, self.session)
         self.session["permissions"] = []
         with self.assertRaisesRegex(PermissionError, "official_document_create_forbidden"):
             backend.supabase_create_official_editor_draft(self.payload(), self.session)
         self.assertEqual(self.inserted, [])
+
+    def test_all_applicant_roles_choose_same_tenant_company_without_role_change(self):
+        other_unit = {**self.department, "id": "FINORG-SECOND", "finance_unit_id": "unit-second", "code": "D2000", "name": "隔離測試乙部", "entity_codes": ["E2"]}
+        self.units.append(other_unit)
+        for role, key in (("員工", "staff"), ("主管", "section_chief"), ("主任", "department_head"), ("執行長", "ceo"), ("行政部主任", "admin_director"), ("總務", "ga_chief")):
+            with self.subTest(role=role):
+                self.user.update({"role": role, "logging_role_key": key})
+                original = copy.deepcopy(self.user)
+                directory = self.directory()
+                self.assertEqual({row["id"] for row in directory["editorApplicantCompanies"]}, {"CO-001", "CO-OTHER"})
+                payload = {**self.payload(department=other_unit), "company_id": "CO-OTHER"}
+                backend.supabase_create_official_editor_draft(payload, self.session)
+                stored = [row for table, row in self.inserted if table == "official_documents"][-1]
+                self.assertEqual((stored["company_id"], stored["applicant_department_id"]), ("CO-OTHER", "D2000"))
+                self.assertEqual(self.user, original)
+                self.assertEqual(stored["applicant_id"], original["id"])
+                self.assertEqual(backend._supabase_editor_assert_document_access(stored, self.session, write=True)["role"], role)
+
+    def test_cross_tenant_inactive_unmirrored_or_missing_tenant_company_denied(self):
+        for mutation in ({"finance_tenant_id": self.other_tenant}, {"status": "inactive"}, {"source_system": "manual"}, {"finance_entity_id": ""}):
+            with self.subTest(mutation=mutation):
+                old = copy.deepcopy(self.other_company)
+                self.other_company.update(mutation)
+                with self.assertRaisesRegex(PermissionError, "official_document_company_forbidden"):
+                    backend.official_editor_company(self.user, "CO-OTHER")
+                self.other_company = old
+        self.user["finance_tenant_id"] = ""
+        with self.assertRaisesRegex(PermissionError, "official_document_company_forbidden"):
+            backend.official_editor_company(self.user, "CO-001")
+
+    def test_directory_creation_choice_does_not_expand_general_records_scope(self):
+        self.user.update({"role": "員工", "logging_role_key": "staff"})
+        result = self.directory()
+        self.assertEqual([row["id"] for row in result["companies"]], ["CO-001"])
+        self.assertEqual({row["id"] for row in result["editorApplicantCompanies"]}, {"CO-001", "CO-OTHER"})
+        self.assertEqual(result["currentCompanyId"], "CO-001")
+        self.assertEqual(result["currentApplicantDepartment"]["code"], "A1000")
+
+    def test_stale_disabled_duplicate_or_invalid_selected_department_fails_closed(self):
+        baseline = copy.deepcopy(self.department)
+        payload = self.payload(department=self.department)
+        for replacement in ({**baseline, "status": "inactive"}, {**baseline, "unit_type": "position"}, {**baseline, "entity_scope_mode": "bogus"}, {**baseline, "entity_codes": ["E2"]}):
+            self.units = [self.division, replacement]
+            with self.assertRaises(PermissionError):
+                backend.supabase_create_official_editor_draft(payload, self.session)
+            if replacement.get("entity_codes") != ["E2"]:
+                self.assertNotIn("D1000", [row["code"] for row in self.directory()["editorApplicantDepartments"]])
+        self.units = [self.division, baseline, {**baseline, "id": "DUPLICATE"}]
+        with self.assertRaises(PermissionError):
+            backend.supabase_create_official_editor_draft(payload, self.session)
+
+    def test_department_inheritance_is_company_scoped_and_cycles_rejected(self):
+        self.department.update({"entity_scope_mode": "inherit", "entity_codes": []})
+        self.assertEqual(backend.authoritative_editor_applicant_department(self.user, self.payload(department=self.department), self.company)["id"], "D1000")
+        self.division.update({"entity_scope_mode": "inherit", "parent_finance_unit_id": self.department["finance_unit_id"]})
+        with self.assertRaisesRegex(PermissionError, "finance_unit_company_mismatch"):
+            backend.authoritative_editor_applicant_department(self.user, self.payload(department=self.department), self.company)
+
+    def test_selected_department_patch_is_canonical_and_keeps_actor_hierarchy(self):
+        document = {"company_id": "CO-001", "source_type": "uploaded_pdf", "applicant_department_id": "A1000", "applicant_department_name": self.division["name"], "metadata_json": {"pdf_editor_v2": True}}
+        actor = copy.deepcopy(self.user)
+        selected = backend._editor_correction_department(self.user, document, self.payload(department=self.department))
+        self.assertEqual(selected, {"id": "D1000", "name": self.department["name"]})
+        self.assertEqual(self.user, actor)
+        with self.assertRaisesRegex(PermissionError, "finance_unit_payload_mismatch"):
+            backend._editor_correction_department(self.user, document, {**self.payload(department=self.department), "dispatch_unit": "偽造高階單位"})
+
+    def test_company_and_submitted_case_remain_immutable_and_other_applicant_denied(self):
+        backend.supabase_create_official_editor_draft(self.payload(), self.session)
+        document = next(row for table, row in self.inserted if table == "official_documents")
+        document["current_status"] = "pending_general_affairs_review"
+        with self.assertRaisesRegex(ValueError, "editor_locked_after_submit"):
+            backend._supabase_editor_assert_document_access(document, self.session, write=True)
+        document["current_status"] = "draft"
+        document["applicant_id"] = "ANOTHER-APPLICANT"
+        with self.assertRaisesRegex(PermissionError, "official_editor_write_forbidden"):
+            backend._supabase_editor_assert_document_access(document, self.session, write=True)
+        with self.assertRaisesRegex(PermissionError, "official_document_company_forbidden"):
+            backend._official_correction_plan(document, {"company_id": "CO-OTHER"}, None)
+
+    def test_metadata_only_empty_v2_draft_does_not_require_pdf(self):
+        document = {"source_type": "uploaded_pdf", "metadata_json": {"pdf_editor_v2": True}}
+        self.assertTrue(backend._editor_metadata_only_correction(document, {"title": "new"}, None))
+        self.assertFalse(backend._editor_metadata_only_correction(document, {"stamp_positions": []}, None))
+        self.assertFalse(backend._editor_metadata_only_correction({**document, "source_type": "blank_editor"}, {"title": "new"}, None))
 
 
 if __name__ == "__main__":

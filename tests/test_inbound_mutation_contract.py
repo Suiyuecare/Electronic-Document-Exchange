@@ -14,7 +14,7 @@ class InboundMutationContractTests(unittest.TestCase):
         backend.register_sqlite_functions(self.conn)
         self.conn.executescript(backend.SCHEMA)
         self.conn.execute(
-            "INSERT INTO companies (id, name, finance_tenant_id, source_system, status, created_at, updated_at) VALUES (?, ?, ?, 'finance', 'active', ?, ?)",
+            "INSERT INTO companies (id, name, finance_tenant_id, finance_entity_id, source_system, status, created_at, updated_at) VALUES (?, ?, ?, 'E1', 'finance', 'active', ?, ?)",
             ("CO-001", "去識別化測試公司", "TENANT-001", backend.now(), backend.now()),
         )
         self.employee = self.add_user(
