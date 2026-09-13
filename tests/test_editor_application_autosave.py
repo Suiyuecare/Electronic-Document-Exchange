@@ -54,6 +54,7 @@ const officialWorkflowItems=[{id:'OD-TEST'}];
 const editorDraftPayload=()=>({...draft});
 function renderUploadedSealApplicationSaveStatus(){statusRenders++;}
 function renderUploadedEditorSubmissionActions(){}
+function finishUploadedEditorTextEdit(){return true;} // Inline lifecycle has its own behavioral tests.
 function renderElectronicSealWorkQueue(){}
 async function saveUploadedEditorState(){savePdfCalls++;}
 const uploadedEditorV2FeatureEnabled=()=>true;

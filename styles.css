@@ -12585,6 +12585,35 @@ body[data-session-state="revalidating"] .workspace::after {
 }
 
 /* Task-first PDF editor: one canvas, contextual editing, one page navigator. */
+#uploadedPdfEditor .editor-inline-text {
+  position: absolute; z-index: 12; box-sizing: border-box;
+  padding: 4px; border: 2px solid #ef8900; border-radius: 8px;
+  background: #fff; box-shadow: 0 4px 16px #39251325;
+}
+#uploadedPdfEditor .editor-inline-text[hidden],
+#uploadedPdfEditor .editor-selection-actions[hidden] { display: none; }
+#uploadedPdfEditor .editor-inline-text > textarea {
+  width: 100%; min-width: 0; min-height: 44px; padding: 6px;
+  border: 0; border-radius: 4px; font-size: 16px; box-sizing: border-box;
+  line-height: 1.5; resize: vertical; max-height: 180px;
+}
+#uploadedPdfEditor .editor-text-content { font-family: "EDoc LXGW WenKai TC", serif; font-kerning: none; font-variant-ligatures: none; }
+#uploadedPdfEditor .editor-inline-actions {
+  display: flex; align-items: center; gap: 2px; border-top: 1px solid #f0e5d7;
+}
+#uploadedPdfEditor .editor-inline-actions > * {
+  min-width: 44px; min-height: 44px; height: 44px; margin: 0;
+  padding: 4px; border: 0; border-radius: 4px; font-size: 14px; box-sizing: border-box;
+}
+#uploadedPdfEditor .editor-inline-actions input[type="number"] { width: 58px; font-size: 16px; }
+#uploadedPdfEditor .editor-inline-actions input[type="color"] { width: 44px; background: #fff; }
+#uploadedPdfEditor .editor-inline-actions button { flex: 1; background: #fff7ec; color: #8a4208; font-weight: 700; }
+#uploadedPdfEditor #uploadedEditorInlineDone { background: #ef8900; color: #fff; }
+#uploadedPdfEditor .editor-selection-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; padding: 6px 0 0; }
+#uploadedPdfEditor .editor-selection-actions button { min-height: 44px; padding: 6px 12px; border: 1px solid #edcfaa; border-radius: 8px; background: #fff; font: inherit; font-size: 14px; }
+#uploadedPdfEditor .editor-selection-actions button[hidden] { display: none; }
+#uploadedPdfEditor #uploadedEditorDeleteBtn { color: #b91c1c; }
+#uploadedPdfEditor[data-active-tool="text"] #uploadedStampLayer { cursor: text; }
 #uploadedPdfEditor .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
@@ -12689,6 +12718,8 @@ body[data-session-state="revalidating"] .workspace::after {
 #uploadedPdfEditor[data-has-document="false"]:not([data-uploading="true"]) .pdf-editor-source-bar { display: none; }
 #uploadedPdfEditor .pdf-editor-a4-rule[data-state="idle"] em { display: none; }
 @media (min-width: 821px) {
+  #uploadedPdfEditor .pdf-editor-properties { display: none; }
+  #uploadedPdfEditor[data-properties-open="true"][data-has-selection="true"] .pdf-editor-properties { display: block; }
   #uploadedPdfEditor .pdf-editor-thumbnails { display: none; grid-template-columns: minmax(0, 1fr); grid-row: 1; }
   #uploadedPdfEditor[data-thumbnails-open="true"] .pdf-editor-thumbnails { display: grid; }
   #uploadedPdfEditor .pdf-editor-thumbnails > .pdf-editor-pane-heading { border: 0; padding: 4px 10px; }

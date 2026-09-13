@@ -30,11 +30,11 @@ class SimplifiedEditorControlsTest(unittest.TestCase):
         self.assertRegex(more, r"^<details\b")
         self.assertNotRegex(more.split(">", 1)[0], r"\bopen(?:\s|=|$)")
         self.assertRegex(more, r"<summary\b[^>]*>[^<]*更多")
-        for kind in ("replacement", "image", "shape", "checkmark", "highlight", "redaction"):
+        for kind in ("replacement", "shape", "checkmark", "highlight", "redaction"):
             button = re.search(rf'<button\b[^>]*data-editor-tool="{kind}"[^>]*>', more)
             self.assertIsNotNone(button, kind)
             self.assertNotIn("advanced-only", button.group(0), kind)
-        for kind in ("select", "text", "seal"):
+        for kind in ("select", "text", "image", "seal"):
             self.assertNotIn(f'data-editor-tool="{kind}"', more)
             self.assertEqual(self.editor.count(f'data-editor-tool="{kind}"'), 1)
         for kind in ("replacement", "image", "shape", "checkmark", "highlight", "redaction"):
@@ -153,7 +153,7 @@ function element(){return {
   focus(){document.activeElement=this;},
 };}
 const nodes=new Map();
-for(const id of ['uploadedPdfEditor','uploadedEditorSeamPanel','uploadedEditorSeamToggleBtn','uploadedSealTextInput','uploadedEditorImageInput','uploadedEditorSaveStatus'])nodes.set('#'+id,element());
+for(const id of ['uploadedPdfEditor','uploadedEditorSeamPanel','uploadedEditorSeamToggleBtn','uploadedSealTextInput','uploadedEditorImageInput','uploadedEditorSaveStatus','uploadedEditorSvgLayer'])nodes.set('#'+id,element());
 nodes.get('#uploadedEditorImageInput').click=()=>counts.imagePicker++;
 const tools=[...PDF_EDITOR_ALLOWED_KINDS,'select'].map(kind=>Object.assign(element(),{dataset:{editorTool:kind}}));
 function disclosure(){const summary=element();const child=element();return {open:true,summary,child,contains:(item)=>item===child||item===summary,querySelector:()=>summary};}
@@ -169,6 +169,8 @@ function currentUploadedEditorPage(){return uploadedSealEditorState.pages[curren
 function commitUploadedEditorMutation(fn){counts.commits++;fn(uploadedSealEditorState);}
 function normalizeEditorDegrees(value){return (value+360)%360;}
 function showToast(){}
+function finishUploadedEditorTextEdit(){return true;}
+function ensureUploadedEditorTextFont(){return true;}
 '''
         result = subprocess.run(
             [node, "-e", harness + functions + "\n" + case],
@@ -211,13 +213,13 @@ for(const changes of [{locked:true},{uploading:true},{reviewMode:'original'},{re
 assert.equal(counts.imagePicker,0);assert.equal(counts.renders,0);assert.equal(counts.commits,0);
 ''')
 
-    def test_text_tool_focuses_input_once_without_creating_an_empty_object(self) -> None:
+    def test_text_tool_focuses_canvas_without_creating_an_empty_object(self) -> None:
         self.run_javascript(r'''
 const before=JSON.stringify(uploadedSealEditorState);
 chooseUploadedEditorTool('text');
 assert.equal(uploadedSealEditorRuntime.mode,'general');
 assert.equal(uploadedSealEditorRuntime.tool,'text');
-assert.equal(document.activeElement,nodes.get('#uploadedSealTextInput'));
+assert.equal(document.activeElement,nodes.get('#uploadedEditorSvgLayer'));
 assert.equal(JSON.stringify(uploadedSealEditorState),before);
 assert.equal(counts.commits,0);
 ''')
@@ -420,7 +422,12 @@ assert.notEqual(document.activeElement,hiddenInput);
         implementation = javascript_function(self.js, "appendEditorElementVisual")
         harness = r'''
 const assert=require('node:assert/strict');
-const uploadedSealEditorRuntime={selectedIds:new Set(),zoom:0.5};
+const uploadedSealEditorRuntime={selectedIds:new Set(),zoom:0.5,currentViewport:{convertToViewportPoint:(x,y)=>[x*0.5,(842-y)*0.5]}};
+const currentUploadedEditorPage=()=>({cropBox:[0,0,595,842],rotation:0});
+const uploadedEditorPageRuntime=()=>({userUnit:1});
+const ensureUploadedEditorTextFont=()=>true;
+const uploadedEditorTextLines=text=>text.split('\n');
+const normalizeEditorDegrees=degrees=>(degrees%360+360)%360;
 function svgEditorNode(name,attributes={}){return {name,attributes:{...attributes},textContent:''};}
 '''
         cases = r'''
@@ -445,7 +452,9 @@ for(const [kind,properties,rect] of [
   const visual=group.children[1];
   if(kind==='text'){
     assert.equal(visual.name,'text');assert.equal(visual.textContent,properties.text);
-    assert.equal(visual.attributes.x,rect.left+3);
+    assert.equal(visual.attributes.x,element.x*0.5);
+    assert.equal(visual.attributes.y,(842-(element.y+element.height-properties.fontSize*.88))*0.5);
+    assert.equal(visual.attributes['font-size'],properties.fontSize*0.5);
   }else if(properties.shapeType==='line'){
     assert.equal(visual.name,'line');assert.equal(visual.attributes.x1,rect.left);
     assert.equal(visual.attributes.x2,rect.left+rect.width);

@@ -99,8 +99,9 @@ def main() -> int:
                 browser.click_visible("#uploadedSealApplicationToggleBtn")
                 row["checks"]["applicationCollapsedWithoutLosingValues"] = browser.evaluate("document.querySelector('#uploadedSealApplicationFields').hidden&&document.querySelector('#uploadedSealTitle').value.includes('合成測試')")
                 row["checks"]["approvalRouteStillVisible"] = browser.evaluate("document.querySelector('#uploadedSealApprovalRouteBadge').getClientRects().length>0")
-                browser.click_visible("#uploadedEditorMoreTools > summary")
-                browser.click_visible('#uploadedEditorMoreTools [data-editor-tool="image"]')
+                if browser.evaluate("Boolean(document.querySelector('#uploadedEditorMoreTools [data-editor-tool=\"image\"]'))"):
+                    browser.click_visible("#uploadedEditorMoreTools > summary")
+                browser.click_visible('#uploadedPdfEditor [data-editor-tool="image"]')
                 # A plain synthetic rectangle, never a real seal image.
                 image_path = Path(fixture.tmp.name) / "synthetic.png"
                 Image.new("RGB", (32, 32), (250, 180, 80)).save(image_path, format="PNG")
@@ -114,6 +115,9 @@ def main() -> int:
                 row["checks"]["serverReadbackContainsImage"] = sum(e.get("kind") == "image" for e in image_state["elements"]) == 1
                 # Deleting source page one must not shift retained source bindings.
                 browser.click_visible("#uploadedEditorThumbnailToggleBtn")
+                browser.until("document.querySelector('#uploadedPdfEditor').dataset.thumbnailsOpen==='true'")
+                browser.evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))")
+                browser.run("snapshot", "-i")
                 browser.click_visible('[data-editor-page-action="delete"]')
                 browser.run("dialog", "accept")
                 browser.until("uploadedSealEditorState.pages.length===2&&uploadedSealEditorRuntime.savedGeneration>=uploadedSealEditorRuntime.dirtyGeneration&&!uploadedSealEditorRuntime.saving")
@@ -128,16 +132,31 @@ def main() -> int:
                 row["sourcePages"] = browser.evaluate("(async()=>{const out=[];for(const page of uploadedSealEditorState.pages){const proxy=uploadedSealEditorRuntime.pageProxies.get(page.pageId).proxy;out.push({sourcePageIndex:page.sourcePageIndex,pageNumber:proxy.pageNumber,text:(await proxy.getTextContent()).items.map(e=>e.str).join('')})}return out})()")
                 row["checks"]["reopenUsesCorrectSourcePages"] = all(item["pageNumber"] == item["sourcePageIndex"] + 1 and item["text"] == f'SYNTHETIC PAGE {item["pageNumber"]}' for item in row["sourcePages"])
                 browser.click_visible('#uploadedPdfEditor [data-editor-tool="text"]')
-                browser.run("fill", "#uploadedSealTextInput", "合成頁緣貼上")
-                browser.click_visible("#addUploadedTextBtn")
-                if device == "mobile":
+                if browser.evaluate("Boolean(document.querySelector('#uploadedEditorTextEdit'))"):
+                    browser.run("press", "Enter")
+                    browser.until("!document.querySelector('#uploadedEditorTextEdit').hidden")
+                    browser.run("fill", "#uploadedEditorInlineText", "合成頁緣貼上")
+                    browser.until("!document.fonts||document.fonts.check('14px \"EDoc LXGW WenKai TC\"')")
+                    browser.run("press", "Enter")
+                    browser.until("uploadedSealEditorState.elements.some(e=>e.kind==='text')&&!uploadedSealEditorRuntime.textEdit")
+                else:
+                    browser.run("fill", "#uploadedSealTextInput", "合成頁緣貼上")
+                    browser.click_visible("#addUploadedTextBtn")
+                if browser.evaluate("document.querySelector('#uploadedPdfEditor').dataset.propertiesOpen!=='true'"):
                     browser.click_visible("#uploadedEditorPropertiesToggleBtn")
                 browser.click_visible("#uploadedEditorPropertyForm > .editor-precision-settings > summary")
                 edge = browser.evaluate("(()=>{const e=[...uploadedSealEditorRuntime.selectedIds].map(editorElementById)[0],p=currentUploadedEditorPage();return {x:p.widthPt-e.width,y:p.heightPt-e.height}})()")
                 browser.run("fill", "#uploadedEditorPropertyX", str(edge["x"]))
+                row["focusedPropertyDuringSave"] = browser.evaluate("(async()=>{const input=document.querySelector('#uploadedEditorPropertyX'),before={value:input.value,focused:document.activeElement===input};await saveUploadedEditorState({immediate:true});return {before,after:{value:input.value,focused:document.activeElement===input}}})()")
+                property_during_save = row["focusedPropertyDuringSave"]
+                row["checks"]["focusedPropertySurvivesCanonicalSave"] = property_during_save["before"] == property_during_save["after"]
+                browser.run("fill", "#uploadedEditorPropertyX", str(edge["x"]))
                 browser.run("fill", "#uploadedEditorPropertyY", str(edge["y"]))
                 browser.run("press", "Tab")
-                if device == "mobile":
+                applied_edge = browser.evaluate("(()=>{const e=[...uploadedSealEditorRuntime.selectedIds].map(editorElementById)[0];return {x:e.x,y:e.y}})()")
+                row["edgePlacement"] = {"requested": edge, "applied": applied_edge}
+                row["checks"]["precisionPositionApplied"] = all(abs(applied_edge[key] - edge[key]) < 0.01 for key in ("x", "y"))
+                if browser.evaluate("document.querySelector('#uploadedEditorPropertiesCloseBtn').getClientRects().length>0"):
                     browser.click_visible("#uploadedEditorPropertiesCloseBtn")
                 browser.evaluate("document.activeElement?.blur();true")
                 browser.run("press", "Control+c")

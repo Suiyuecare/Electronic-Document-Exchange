@@ -1648,13 +1648,13 @@
                 <div class="pdf-editor-tool-group" role="group" aria-label="物件工具">
                   <button class="active" type="button" data-editor-tool="select" title="選取與移動">選取</button>
                   <button type="button" data-editor-tool="text" title="新增文字">加文字</button>
+                  <button type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
                   <button type="button" data-editor-tool="seal" title="放置公司印章">印章</button>
                   <button id="uploadedEditorSeamToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorSeamPanel">騎縫章</button>
                   <details class="editor-disclosure" id="uploadedEditorMoreTools">
                     <summary>更多工具</summary>
                     <div class="editor-disclosure-content editor-extra-tools" role="group" aria-label="其他編輯工具">
                       <button type="button" data-editor-tool="replacement" title="安全移除原文後取代">取代文字</button>
-                      <button type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
                       <button type="button" data-editor-tool="shape" title="插入矩形或線條">形狀</button>
                       <button type="button" data-editor-tool="checkmark" title="加入勾選記號">勾選</button>
                       <button type="button" data-editor-tool="highlight" title="加入螢光標記">螢光</button>
@@ -1665,9 +1665,6 @@
                 <div class="pdf-editor-tool-group editor-history-actions" role="group" aria-label="編輯歷程">
                   <button id="uploadedEditorUndoBtn" type="button" disabled title="復原（⌘/Ctrl+Z）" aria-label="復原">↶</button>
                   <button id="uploadedEditorRedoBtn" type="button" disabled title="重做（⌘/Ctrl+Shift+Z）" aria-label="重做">↷</button>
-                </div>
-                <div class="pdf-editor-mobile-actions mobile-only" role="group" aria-label="行動版面板">
-                  <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorProperties" aria-haspopup="dialog">屬性</button>
                 </div>
               </div>
 
@@ -1750,7 +1747,16 @@
                     <div class="uploaded-pdf-stage" id="uploadedPdfStage">
                       <canvas id="uploadedPdfCanvas" aria-label="PDF 目前頁面"></canvas>
                       <div class="uploaded-stamp-layer" id="uploadedStampLayer">
-                        <svg id="uploadedEditorSvgLayer" role="application" aria-label="PDF 編輯物件層"></svg>
+                        <svg id="uploadedEditorSvgLayer" role="application" aria-label="PDF 編輯物件層" tabindex="0"></svg>
+                      </div>
+                      <div id="uploadedEditorTextEdit" class="editor-inline-text" role="group" aria-label="直接編輯文字" hidden>
+                        <textarea id="uploadedEditorInlineText" aria-label="文字內容" rows="2" maxlength="1000" placeholder="輸入文字" autocomplete="off"></textarea>
+                        <div class="editor-inline-actions">
+                          <input id="uploadedEditorInlineFontSize" type="number" aria-label="文字字級" min="6" max="144" value="14" />
+                          <input id="uploadedEditorInlineColor" type="color" aria-label="文字顏色" value="#111827" />
+                          <button id="uploadedEditorInlineDone" type="button" aria-label="完成文字編輯">完成</button>
+                          <button id="uploadedEditorInlineCancel" type="button" aria-label="取消文字編輯">取消</button>
+                        </div>
                       </div>
                       <div class="uploaded-pdf-empty" id="uploadedPdfEmpty">
                         <strong>先上傳 A4 PDF</strong>
@@ -1763,13 +1769,19 @@
                   <div class="uploaded-page-meta sr-only">
                     <span id="uploadedPdfPageLabel">尚未載入頁面</span>
                   </div>
+                  <div id="uploadedEditorSelectionActions" class="editor-selection-actions" role="group" aria-label="已選物件操作" hidden>
+                    <button id="uploadedEditorEditTextBtn" type="button">編輯文字</button>
+                    <button id="uploadedEditorDuplicateBtn" type="button">複製一份</button>
+                    <button id="uploadedEditorDeleteBtn" type="button">刪除</button>
+                    <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorProperties" aria-haspopup="dialog">其他設定</button>
+                  </div>
                 </div>
 
                 <aside class="pdf-editor-properties" id="uploadedEditorProperties" aria-label="物件屬性">
                   <div class="pdf-editor-pane-heading">
                     <strong>屬性</strong>
                     <span id="uploadedEditorSelectionCount">未選取</span>
-                    <button class="pdf-editor-pane-close mobile-only" id="uploadedEditorPropertiesCloseBtn" type="button" aria-label="關閉屬性面板">×</button>
+                    <button class="pdf-editor-pane-close" id="uploadedEditorPropertiesCloseBtn" type="button" aria-label="關閉屬性面板">×</button>
                   </div>
                   <div class="pdf-editor-property-empty" id="uploadedEditorPropertyEmpty">未選取物件</div>
                   <form class="pdf-editor-property-form" id="uploadedEditorPropertyForm" hidden>
