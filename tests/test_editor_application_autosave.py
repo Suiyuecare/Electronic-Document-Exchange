@@ -42,6 +42,7 @@ const assert = require('node:assert/strict');
 const timers = new Map();let nextTimer=0;let calls=[];let savePdfCalls=0;let statusRenders=0;
 let sessionScope='user-one:company-one';
 const frontendSessionScope=()=>sessionScope;
+const hasAuthenticatedBackendSession=()=>true;
 const window={clearTimeout:(id)=>timers.delete(id),setTimeout:(fn)=>{timers.set(++nextTimer,fn);return nextTimer;}};
 const navigator={onLine:true};
 const draft={title:'Original',description:'Reason',request_reason:'Reason',handler_name:'Test person',dispatch_unit:'Test unit'};

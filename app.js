@@ -1633,6 +1633,7 @@ let financeDirectoryState = {
   schemaVersion: 2,
   directoryVersion: "",
   currentCompanyId: "",
+  currentApplicantDepartment: undefined,
   syncedAt: "",
   lastAttemptAt: 0,
   lastSuccessAt: 0,
@@ -5621,6 +5622,9 @@ function applyFinanceDirectoryPayload(payload = {}) {
     schemaVersion: Number(payload.schemaVersion ?? payload.schema_version ?? 2),
     directoryVersion: String(payload.directoryVersion || payload.directory_version || ""),
     currentCompanyId: String(payload.currentCompanyId || payload.current_company_id || ""),
+    currentApplicantDepartment: Object.hasOwn(payload, "currentApplicantDepartment")
+      ? (payload.currentApplicantDepartment ? normalizeFinanceDirectoryDepartment(payload.currentApplicantDepartment) : null)
+      : undefined,
     syncedAt: String(payload.syncedAt || payload.synced_at || new Date().toISOString()),
     lastSuccessAt: Date.now(),
     status: "synced",
@@ -5702,6 +5706,7 @@ function clearFinanceDirectoryCache() {
     schemaVersion: 2,
     directoryVersion: "",
     currentCompanyId: "",
+    currentApplicantDepartment: undefined,
     syncedAt: "",
     lastAttemptAt: 0,
     lastSuccessAt: 0,
@@ -20318,6 +20323,9 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     formal_exchange_disabled: "目前為內部正式使用模式，政府電子交換與正式 jAgent 送交未啟用。",
     company_not_in_launch_scope: "這間公司目前不在內部上線範圍內，請先由 IT 調整 EDOC_LAUNCH_COMPANY_IDS 或由總務補齊印章後再開放。",
     finance_company_required: "登入帳號尚未連動 Finance 公司，請先由管理員補齊公司資料。",
+    finance_unit_required: "帳號尚未連動會計系統的所屬單位，請由管理員在會計系統補齊後重新整理；已填資料不會清除。",
+    finance_unit_projection_unavailable: "會計系統的所屬單位尚未同步完成或已停用，請重新整理；若持續發生，請管理員確認組織同步。",
+    finance_unit_payload_mismatch: "申請單的部門與帳號在會計系統的所屬單位不一致，請重新整理單位資料後再上傳；已填內容不會清除。",
     finance_personnel_master_read_only: "人員主檔請只在會計系統修改，eDoc 會自動同步。",
     finance_company_master_read_only: "公司主檔請只在會計系統修改，eDoc 會自動同步。",
     official_document_company_forbidden: "只能為登入帳號所屬的 Finance 公司建立公文或用印申請。",
@@ -24800,7 +24808,7 @@ function uploadedSealCompanies() {
   // The backend has already scoped this response to the authenticated actor.
   // Do not rebuild a broader list in the browser.
   const companies = financeDirectoryCompanies();
-  if (!financeIdentitySelectionLocked()) return companies;
+  if (!hasAuthenticatedBackendSession()) return companies;
   const accountCompany = financeDirectoryCurrentCompany();
   return accountCompany ? [accountCompany] : [];
 }
@@ -24833,7 +24841,7 @@ function renderUploadedSealCompanyOptions() {
     snapshot.dataset.historicalSnapshot = "true";
     select.append(snapshot);
   }
-  select.disabled = !companies.length || financeIdentitySelectionLocked() || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+  select.disabled = !companies.length || hasAuthenticatedBackendSession() || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
   if (preserveHistorical || companies.some((item) => item.id === previous)) select.value = previous;
   else if (accountCompany) select.value = accountCompany.id;
   else if (!financeIdentitySelectionLocked() && companies[0]) select.value = companies[0].id;
@@ -24873,12 +24881,14 @@ function renderUploadedSealDepartmentOptions({ preferAccount = false } = {}) {
   const companyId = document.querySelector("#uploadedSealCompany")?.value || financeDirectoryCurrentCompany()?.id || "";
   const departments = financeDepartmentsForCompany(companyId);
   const previous = String(select.value || "").trim();
-  const accountDepartment = preferredFinanceDepartment(departments);
-  const selectionLocked = financeIdentitySelectionLocked();
+  const accountDepartment = uploadedSealApplicantDepartment(departments, companyId);
+  // A management directory is broader than an applicant's authority. Every
+  // applicant, including executives, is bound to their own Finance unit.
+  const selectionLocked = hasAuthenticatedBackendSession();
   const availableDepartments = selectionLocked ? (accountDepartment ? [accountDepartment] : []) : departments;
   const preserveHistorical = Boolean(previous && !availableDepartments.some((department) => department.name === previous) && uploadedSealEditorRuntime.documentId);
   select.innerHTML = [
-    ...availableDepartments.map((department) => `<option value="${escapeDraftHtml(department.name)}" data-finance-unit-id="${escapeDraftHtml(department.financeUnitId || department.id)}">${escapeDraftHtml(department.name)}${department.code ? `（${escapeDraftHtml(department.code)}）` : ""}</option>`),
+    ...availableDepartments.map((department) => `<option value="${escapeDraftHtml(department.name)}" data-finance-unit-id="${escapeDraftHtml(department.financeUnitId || department.id)}" data-finance-unit-code="${escapeDraftHtml(department.code || "")}">${escapeDraftHtml(department.name)}${department.code ? `（${escapeDraftHtml(department.code)}）` : ""}</option>`),
     preserveHistorical ? `<option value="${escapeDraftHtml(previous)}" data-historical-snapshot="true">${escapeDraftHtml(previous)}（歷史快照）</option>` : ""
   ].join("") || `<option value="">此公司尚無可用部門</option>`;
   const preferredName = preferAccount ? accountDepartment?.name : previous;
@@ -24888,6 +24898,19 @@ function renderUploadedSealDepartmentOptions({ preferAccount = false } = {}) {
   select.dataset.financeDirectoryEmpty = String(!availableDepartments.length && !preserveHistorical);
   select.dataset.financeCompanyId = companyId;
   select.disabled = selectionLocked || (!availableDepartments.length && !preserveHistorical) || uploadedSealEditorRuntime.locked;
+}
+
+function uploadedSealApplicantDepartment(departments = [], companyId = "") {
+  const current = financeDirectoryState.currentApplicantDepartment;
+  if (hasAuthenticatedBackendSession() && current !== undefined) {
+    // The server includes the current applicant's unit even when it is a
+    // company/division rather than a department. Null means unavailable, not
+    // permission to choose the first unrelated department in the directory.
+    if (!current || !current.name || !current.code || current.status !== "active") return null;
+    if (current.companyId && current.companyId !== companyId) return null;
+    return current;
+  }
+  return preferredFinanceDepartment(departments);
 }
 
 function renderUploadedSealOptions() {
@@ -25625,6 +25648,7 @@ function editorDraftPayload() {
   const approvalSelection = approvalSelectionForSelect("#uploadedSealApprovalCategorySelect");
   const handlerName = document.querySelector("#uploadedSealApplicant")?.value.trim() || authState?.user?.name || "";
   const departmentName = document.querySelector("#uploadedSealDepartment")?.value.trim() || activeUnit() || "";
+  const departmentCode = document.querySelector("#uploadedSealDepartment")?.selectedOptions?.[0]?.dataset.financeUnitCode || "";
   const contactEmail = document.querySelector("#uploadedSealEmail")?.value.trim() || authState?.user?.email || "";
   const contactPhone = document.querySelector("#uploadedSealPhone")?.value.trim() || "02-66045432 #";
   return {
@@ -25637,6 +25661,7 @@ function editorDraftPayload() {
     recipient: contractMode ? document.querySelector("#uploadedSealCounterparty")?.value.trim() || "" : "",
     handler_name: handlerName,
     applicant_department_name: departmentName,
+    applicant_department_id: departmentCode,
     dispatch_unit: departmentName,
     dispatch_method: "no_dispatch_required",
     contact_email: contactEmail,
@@ -25667,6 +25692,9 @@ async function ensureUploadedEditorDraft() {
     throw new Error("請先選擇用印文件類型，再上傳 PDF。");
   }
   if (uploadedSealEditorRuntime.draftCreatePromise) return uploadedSealEditorRuntime.draftCreatePromise;
+  if (hasAuthenticatedBackendSession() && !document.querySelector("#uploadedSealDepartment")?.value.trim()) {
+    throw new Error(friendlyBackendErrorMessage("finance_unit_projection_unavailable", 403));
+  }
   const applicationPayload = editorDraftPayload();
   const creationScope = uploadedSealApplicationScopeSnapshot();
   const operation = backendRequest("/official-documents/editor-drafts", {
@@ -28302,7 +28330,7 @@ function renderUploadedSealWorkbench() {
     !departmentInput.options.length
     || departmentInput.dataset.financeCompanyId !== (companySelect?.value || "")
   )) renderUploadedSealDepartmentOptions({ preferAccount: true });
-  if (companySelect) companySelect.disabled = !companySelect.options.length || financeIdentitySelectionLocked() || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
+  if (companySelect) companySelect.disabled = !companySelect.options.length || hasAuthenticatedBackendSession() || Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
   const typeSelect = document.querySelector("#uploadedSealType");
   if (typeSelect) typeSelect.disabled = Boolean(uploadedSealEditorRuntime.documentId) || uploadedSealEditorRuntime.locked;
   const approvalCategorySelect = document.querySelector("#uploadedSealApprovalCategorySelect");
