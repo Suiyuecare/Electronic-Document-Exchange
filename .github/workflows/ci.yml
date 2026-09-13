@@ -126,6 +126,16 @@ jobs:
             --set ON_ERROR_STOP=1 \
             --file supabase/verification/audit_chain_concurrency_check.sql
 
+          # Test-only role membership in the disposable loopback cluster.
+          # CREATEROLE does not imply SET ROLE on Supabase's postgres account.
+          PGPASSWORD=postgres psql \
+            --host 127.0.0.1 \
+            --port 54322 \
+            --username postgres \
+            --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --file tests/support/local_supabase_pg_test_roles.sql
+
           PGPASSWORD=postgres \
           EDOC_TEST_PG_USER=postgres \
           EDOC_COMPOSE_TEST_PG_PORT=54322 \
