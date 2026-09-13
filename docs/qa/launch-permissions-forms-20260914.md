@@ -89,4 +89,19 @@ PDF 編輯驗收工具已改用目前可見的文件內文字編輯操作，未�
 - 修正版證據：`tests/.artifacts/entry-20260914/candidate-confirmed/report.json`。
 - 最後補丁再驗：`tests/.artifacts/entry-20260914/final-browser/report.json`，桌機/手機探測 14.01/9.23 ms、登入頁 19.54/23.88 ms，12 checks 通過。
 - 最終完整測試 1,063 項：982 通過、81 條件跳過、零失敗（77.399 秒）；獨立登入回歸 74 項通過，同步快取版本後另跑 30 項全部通過。憑證掃描、Node 語法與 diff 檢查通過。
-- 第二補丁本機回歸完成，仍需 CI 與正式部署後檢查；本節不提前宣稱其已發布。
+- 第二補丁 PR #16 與合併後 CI 均通過（`34775266636`、`34775486813`）。正式版本 `07d4b6a3cdc47ff3b515cb7b9b1e8b047137321c`，deployment `dpl_MtAWUPSsVTXdyvNovx2dYMXnnLtP` Ready；6 個前端檔案 hash 一致，健康與匿名授權檢查通過。
+- 正式桌機／手機 18/18 入口檢查、4/4 early-probe 順序檢查通過。探測開始 720/317 ms，早於主程式完成 1,622/742 ms，各只有一次 handoff。單次樣本，不作 p95 或固定加速倍數的宣稱。
+
+## 最後窄補丁：晚到的匿名 401 不清除新登入 Cookie
+
+後續獨立複查確認原端點的缺 cookie 401 也會附兩個 `Max-Age=0`。若另一頁籤剛設新 handoff，舊回應晚到時會刪除同 host/name/path 的新 HttpOnly token 與 marker；瀏覽器會先套用 Set-Cookie，僅在 JavaScript 檢查 marker 並不足以避免此問題。這是已存在的登入可靠性問題，不是越權。
+
+最小修正只有後端 5 行：完全缺少／空 token 的 401 使用原有 no-store 回應，不發 Set-Cookie。非空畸形 token、403、失效 session、成功後清除與 503 暫時失敗保留 cookie 的既有行為不變。
+
+新增 `tests/test_handoff_cookie_race.py` 以真實 Handler cookie parser/header builder 與標準 CookieJar 重放晚到回應。另以 `tools/verify_handoff_cookie_race_browser.py` 使用真實 Chromium、HTTP Set-Cookie、實際後端 session 驗證：先延遲缺 cookie 401，再經隔離 HTTP 裝入新 handoff，最後釋放舊回應並驗新 handoff。沒有用 JavaScript 注入 cookie/token、沒有替換登入驗證，也不連正式帳號。
+
+- 舊版本 `07d4b6a` 真實 Handler：桌機／手機皆重現新 cookie 被刪，最後 handoff 401。
+- 修正版真實 Chromium／HTTP：桌機／手機 14/14 checks 通過；晚到匿名回應仍 401，但不刪除新 cookie，最後由真實後端驗證新 session 回 200，成功後仍清除 handoff。
+- 最終完整套件 1,070 項：989 通過、81 條件跳過、零失敗（76.524 秒）；51 項重點測試通過。Python 編譯、憑證掃描與 diff 檢查通過。
+- 證據：`tests/.artifacts/cookie-race-20260914/baseline/report.json`、`tests/.artifacts/cookie-race-20260914/candidate/report.json`。
+- 本節為最後補丁驗收中快照；正式發布結果以最終發布報告與 deployment 核對為準。
