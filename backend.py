@@ -46049,6 +46049,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error": "handoff_exchange_forbidden"}, 403, clear_headers)
             return
         token = self.cookie_value(EDOC_HANDOFF_COOKIE_NAME)
+        if not token:
+            # An anonymous probe may finish after another tab receives a new
+            # handoff. Its missing-cookie response must not erase that token.
+            self.send_json({"error": "handoff_session_missing"}, 401, no_store_headers)
+            return
         if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
             self.send_json({"error": "handoff_session_missing"}, 401, clear_headers)
             return
