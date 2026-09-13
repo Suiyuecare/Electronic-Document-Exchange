@@ -88,8 +88,7 @@ def editor_case(browser, fixture, auth, role, device, output):
             return result
         browser.click_visible('#uploadedPdfEditor [data-editor-tool="text"]')
         browser.until("uploadedSealEditorRuntime.tool==='text'")
-        browser.run("fill", "#uploadedSealTextInput", "六角色隔離驗收文字")
-        browser.click_visible("#addUploadedTextBtn")
+        browser.add_pdf_text("六角色隔離驗收文字")
         browser.until("uploadedSealEditorState.elements.some(e=>e.kind==='text')&&uploadedSealEditorRuntime.savedGeneration>=uploadedSealEditorRuntime.dirtyGeneration&&!uploadedSealEditorRuntime.saving")
         document_id = browser.evaluate("uploadedSealEditorRuntime.documentId")
         saved = fixture._expect_json("GET", f"/api/official-documents/{document_id}/editor-state", 200, token=auth["token"])
@@ -139,6 +138,20 @@ class Browser:
         self.evaluate("document.querySelector(" + encoded + ").scrollIntoView({block:'center',behavior:'instant'});true")
         self.until("(()=>{const e=document.querySelector(" + encoded + "),r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return !e.disabled&&r.width>0&&r.height>0&&(hit===e||e.contains(hit))})()")
         self.run("click", selector)
+    def add_pdf_text(self, text):
+        """Use the shipping inline controls, not hidden legacy form fields."""
+        self.click_visible('#uploadedPdfEditor [data-editor-tool="text"]')
+        self.until("uploadedSealEditorRuntime.tool==='text'&&document.querySelector('#uploadedPdfCanvas').width>0")
+        self.evaluate("document.querySelector('#uploadedPdfCanvas').scrollIntoView({block:'center',behavior:'instant'});true")
+        point = self.evaluate("(()=>{const r=document.querySelector('#uploadedPdfCanvas').getBoundingClientRect();return {x:Math.round(r.x+r.width*.25),y:Math.round(r.y+r.height*.7)}})()")
+        self.run("mouse", "move", str(point["x"]), str(point["y"]))
+        self.run("mouse", "down")
+        self.run("mouse", "up")
+        self.until("!!uploadedSealEditorRuntime.textEdit&&!document.querySelector('#uploadedEditorTextEdit').hidden")
+        self.run("fill", "#uploadedEditorInlineText", text)
+        self.until("document.fonts.check('14px \"EDoc LXGW WenKai TC\"')")
+        self.click_visible("#uploadedEditorInlineDone")
+        self.until("!uploadedSealEditorRuntime.textEdit")
     def until(self, expression, timeout=25):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -187,7 +200,9 @@ def audit(args) -> dict:
         fixture.setUpClass()
         require_local_origin(fixture.origin)
         config = Path(fixture.tmp.name) / "agent-browser.json"
-        config.write_text(json.dumps({"allowedDomains": ["127.0.0.1", "fonts.googleapis.com", "fonts.gstatic.com"], "headed": False}))
+        # Domain interception blocks native file chooser uploads in recent
+        # Chromium. The fixture origin remains explicitly loopback-only.
+        config.write_text(json.dumps({"headed": False}))
         browser = Browser(config)
         try:
             for role in args.roles:
@@ -201,7 +216,7 @@ def audit(args) -> dict:
                         browser.run("open", fixture.origin + f"/?fixture_navigation={time.monotonic_ns()}#dashboard")
                         browser.until("window.__fixtureTiming?.appInteractiveMs")
                         report.setdefault("navigation", []).append({"role": role, "device": device, "kind": navigation, **browser.evaluate("window.__fixtureTiming")})
-                    for route in ROUTES:
+                    for route in (() if args.editor_only else ROUTES):
                         # Actual navigation handler, preserving permission checks.
                         if device == "mobile" and not browser.evaluate("document.body.classList.contains('mobile-navigation-open')"):
                             browser.run("click", "#mobileMenuButton")
@@ -246,6 +261,7 @@ def main() -> int:
     parser.add_argument("--roles", nargs="+", choices=BROWSER_ROLES, default=list(BROWSER_ROLES))
     parser.add_argument("--devices", nargs="+", choices=VIEWPORTS, default=list(VIEWPORTS))
     parser.add_argument("--slow-font-ms", type=int, default=0)
+    parser.add_argument("--editor-only", action="store_true", help="Run role-specific uploads and editing without repeating the six-page visual audit")
     args = parser.parse_args()
     # A named browser session must never be driven by two audit processes.
     with open("/tmp/edoc-six-role-browser.lock", "a") as lock:

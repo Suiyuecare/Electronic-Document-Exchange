@@ -1,4 +1,5 @@
 """Real browser/HTTP conflict-copy check using isolated synthetic accounts only."""
+import argparse
 import io
 import json
 import sys
@@ -17,8 +18,10 @@ from tests.test_five_account_http_acceptance import FiveAccountHttpAcceptanceTes
 
 
 def main():
-    output = Path('/tmp/edoc-conflict-copy-evidence-20260911')
-    output.mkdir(exist_ok=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, default=ROOT / 'tests/.artifacts/editor-conflict-copy')
+    output = parser.parse_args().output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
     original = QuietAcceptanceHandler.send_head
     def instrument(handler):
         if urlparse(handler.path).path in {'/', '/index.html'}:
@@ -34,7 +37,7 @@ def main():
     with mock.patch.object(QuietAcceptanceHandler, 'send_head', instrument):
         fixture.setUpClass()
         config = Path(fixture.tmp.name) / 'conflict-browser.json'
-        config.write_text(json.dumps({'allowedDomains': ['127.0.0.1', 'fonts.googleapis.com', 'fonts.gstatic.com'], 'headed': False}))
+        config.write_text(json.dumps({'headed': False}))
         browser = Browser(config, session='edoc-conflict-20260911', namespace='edoc-conflict-local')
         try:
             for device, size in [('desktop', (1440, 1000)), ('mobile', (390, 844))]:
@@ -61,9 +64,7 @@ def main():
                 server = fixture._expect_json('GET', f'/api/official-documents/{old_id}/editor-state', 200, token=auth['token'])
                 server['state']['elements'] = []
                 fixture._expect_json('PUT', f'/api/official-documents/{old_id}/editor-state', 200, token=auth['token'], json_body={'revisionNo': server['revisionNo'], 'baseManifestSha256': server['manifestSha256'], 'state': server['state']})
-                browser.click_visible('#uploadedPdfEditor [data-editor-tool="text"]')
-                browser.run('fill', '#uploadedSealTextInput', '這是我要保留的本機修改')
-                browser.click_visible('#addUploadedTextBtn')
+                browser.add_pdf_text('這是我要保留的本機修改')
                 browser.until('Boolean(uploadedSealEditorRuntime.conflict)')
                 browser.evaluate("document.querySelector('#uploadedEditorConflictCopyBtn').scrollIntoView({block:'center'});true")
                 browser.run('screenshot', str(output / (device + '-conflict-choice.png')))

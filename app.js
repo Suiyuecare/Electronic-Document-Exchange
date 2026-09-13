@@ -28042,6 +28042,7 @@ async function handleUploadedEditorImage(file) {
 async function saveUploadedEditorState({ immediate = false } = {}) {
   window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
   if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.conflict) return null;
+  const saveScope = uploadedSealApplicationScopeSnapshot();
   if (!navigator.onLine) {
     uploadedSealEditorRuntime.offlineDirty = true;
     setUploadedEditorSaveStatus("offline", "離線中，尚未同步");
@@ -28049,7 +28050,14 @@ async function saveUploadedEditorState({ immediate = false } = {}) {
   }
   if (uploadedSealEditorRuntime.saving) {
     uploadedSealEditorRuntime.saveQueued = true;
-    const activeResult = await uploadedSealEditorRuntime.savePromise;
+    let activeResult;
+    try {
+      activeResult = await uploadedSealEditorRuntime.savePromise;
+    } catch (error) {
+      if (!uploadedSealApplicationScopeIsCurrent(saveScope)) return null;
+      throw error;
+    }
+    if (!uploadedSealApplicationScopeIsCurrent(saveScope)) return null;
     if (immediate && uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration && !uploadedSealEditorRuntime.conflict) {
       return saveUploadedEditorState({ immediate: true });
     }
@@ -28071,12 +28079,14 @@ async function saveUploadedEditorState({ immediate = false } = {}) {
   const operation = (async () => {
     try {
       const manifestSha256 = await calculateUploadedEditorManifest(stateSnapshot);
+      if (!uploadedSealApplicationScopeIsCurrent(saveScope)) return null;
       stateSnapshot.manifestSha256 = manifestSha256;
-      const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/editor-state`, {
+      const result = await backendRequest(`/official-documents/${encodeURIComponent(saveScope.documentId)}/editor-state`, {
         method: "PUT",
         headers: { "If-Match": `\"${baseManifestSha256 || revisionNo}\"` },
         body: JSON.stringify({ revisionNo, baseManifestSha256, manifestSha256, state: stateSnapshot })
       });
+      if (!uploadedSealApplicationScopeIsCurrent(saveScope)) return null;
       applyEditorRevisionFromResponse(result);
       saveCompleted = true;
       uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || result.state?.manifestSha256 || manifestSha256;
@@ -28095,24 +28105,38 @@ async function saveUploadedEditorState({ immediate = false } = {}) {
       }
       return result;
     } catch (error) {
+      if (!uploadedSealApplicationScopeIsCurrent(saveScope)) return null;
       if (error.status === 409 || error.detail === "editor_revision_conflict" || error.rawMessage === "editor_revision_conflict") {
         handleUploadedEditorConflict(error);
         return null;
       }
       setUploadedEditorSaveStatus("error", "儲存失敗，將自動重試");
-      if (!immediate) uploadedSealEditorRuntime.saveTimer = window.setTimeout(() => void saveUploadedEditorState(), 5000);
+      if (!immediate) uploadedSealEditorRuntime.saveTimer = window.setTimeout(() => {
+        if (uploadedSealApplicationScopeIsCurrent(saveScope)) void saveUploadedEditorState().catch(() => {});
+      }, 5000);
       throw error;
     } finally {
-      uploadedSealEditorRuntime.saving = false;
-      uploadedSealEditorRuntime.savePromise = null;
-      if (saveCompleted && (uploadedSealEditorRuntime.saveQueued || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration) && !uploadedSealEditorRuntime.conflict) {
-        uploadedSealEditorRuntime.saveQueued = false;
-        uploadedSealEditorRuntime.saveTimer = window.setTimeout(() => void saveUploadedEditorState(), 0);
+      if (uploadedSealApplicationScopeIsCurrent(saveScope)) {
+        uploadedSealEditorRuntime.saving = false;
+        uploadedSealEditorRuntime.savePromise = null;
+        if (saveCompleted && (uploadedSealEditorRuntime.saveQueued || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration) && !uploadedSealEditorRuntime.conflict) {
+          uploadedSealEditorRuntime.saveQueued = false;
+          uploadedSealEditorRuntime.saveTimer = window.setTimeout(() => {
+            if (uploadedSealApplicationScopeIsCurrent(saveScope)) void saveUploadedEditorState().catch(() => {});
+          }, 0);
+        }
       }
     }
   })();
   uploadedSealEditorRuntime.savePromise = operation;
-  const result = await operation;
+  let result;
+  try {
+    result = await operation;
+  } catch (error) {
+    if (!uploadedSealApplicationScopeIsCurrent(saveScope)) return null;
+    throw error;
+  }
+  if (!uploadedSealApplicationScopeIsCurrent(saveScope)) return null;
   if (immediate && uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration && !uploadedSealEditorRuntime.conflict) {
     return saveUploadedEditorState({ immediate: true });
   }
