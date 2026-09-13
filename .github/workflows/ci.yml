@@ -101,6 +101,13 @@ jobs:
             --username postgres \
             --dbname postgres \
             --set ON_ERROR_STOP=1 \
+            --file supabase/verification/editor_storage_v2_paths.sql
+          PGPASSWORD=postgres psql \
+            --host 127.0.0.1 \
+            --port 54322 \
+            --username postgres \
+            --dbname postgres \
+            --set ON_ERROR_STOP=1 \
             --file supabase/verification/service_role_data_api_grant_smoke.sql
 
           pids=()
@@ -141,7 +148,8 @@ jobs:
           EDOC_COMPOSE_TEST_PG_PORT=54322 \
             python -m unittest -v \
               tests.test_editor_applicant_selection_postgres \
-              tests.test_editor_cross_company_workflow_postgres
+              tests.test_editor_cross_company_workflow_postgres \
+              tests.test_editor_storage_v2_paths_postgres
 
           eval "$(supabase status -o env)"
           test -n "${API_URL:-}"
@@ -151,6 +159,11 @@ jobs:
           EDOC_LOCAL_SUPABASE_ANON_KEY="$ANON_KEY" \
           EDOC_LOCAL_SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
             python tests/support/local_supabase_editor_filename_gate.py
+
+          EDOC_LOCAL_SUPABASE_URL="$API_URL" \
+          EDOC_LOCAL_SUPABASE_ANON_KEY="$ANON_KEY" \
+          EDOC_LOCAL_SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+            python tests/support/local_supabase_editor_upload_pipeline_gate.py
 
           EDOC_LOCAL_SUPABASE_URL="$API_URL" \
           EDOC_LOCAL_SUPABASE_ANON_KEY="$ANON_KEY" \
@@ -187,6 +200,15 @@ jobs:
         with:
           name: local-supabase-filename-protocol-${{ github.run_id }}
           path: tests/.artifacts/editor-filename-protocol/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Preserve real database and Storage upload pipeline evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: local-supabase-upload-pipeline-${{ github.run_id }}
+          path: tests/.artifacts/editor-upload-pipeline/
           if-no-files-found: warn
           retention-days: 14
 
