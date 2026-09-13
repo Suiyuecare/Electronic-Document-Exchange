@@ -60,6 +60,8 @@
     "20260908135730_immutable_official_document_numbering.sql",
     "20260908135911_compose_electronic_output_dispatch_date.sql",
     "20260911133144_compose_resilience_drafts_revision.sql",
-    "20260911133603_editor_conflict_copy_atomic.sql"
+    "20260911133603_editor_conflict_copy_atomic.sql",
+    "20260913055452_editor_applicant_selection_scope.sql",
+    "20260913060040_editor_cross_company_workflow_scope.sql"
   ]
 }

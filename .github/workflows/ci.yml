@@ -42,8 +42,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node for production TUS client acceptance
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
       - name: Install pinned application dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements.txt
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check -r scripts/backup-restore-requirements.txt
 
       - name: Reset fresh local database and exercise RPC contracts
         run: |
@@ -118,10 +126,32 @@ jobs:
             --set ON_ERROR_STOP=1 \
             --file supabase/verification/audit_chain_concurrency_check.sql
 
+          # Test-only role membership in the disposable loopback cluster.
+          # CREATEROLE does not imply SET ROLE on Supabase's postgres account.
+          PGPASSWORD=postgres psql \
+            --host 127.0.0.1 \
+            --port 54322 \
+            --username postgres \
+            --dbname postgres \
+            --set ON_ERROR_STOP=1 \
+            --file tests/support/local_supabase_pg_test_roles.sql
+
+          PGPASSWORD=postgres \
+          EDOC_TEST_PG_USER=postgres \
+          EDOC_COMPOSE_TEST_PG_PORT=54322 \
+            python -m unittest -v \
+              tests.test_editor_applicant_selection_postgres \
+              tests.test_editor_cross_company_workflow_postgres
+
           eval "$(supabase status -o env)"
           test -n "${API_URL:-}"
           test -n "${ANON_KEY:-}"
           test -n "${SERVICE_ROLE_KEY:-}"
+          EDOC_LOCAL_SUPABASE_URL="$API_URL" \
+          EDOC_LOCAL_SUPABASE_ANON_KEY="$ANON_KEY" \
+          EDOC_LOCAL_SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+            python tests/support/local_supabase_editor_filename_gate.py
+
           EDOC_LOCAL_SUPABASE_URL="$API_URL" \
           EDOC_LOCAL_SUPABASE_ANON_KEY="$ANON_KEY" \
           EDOC_LOCAL_SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
@@ -148,6 +178,15 @@ jobs:
         with:
           name: local-supabase-tus-five-account-${{ github.run_id }}
           path: tests/.artifacts/five-account-acceptance/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Preserve real Storage filename protocol evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: local-supabase-filename-protocol-${{ github.run_id }}
+          path: tests/.artifacts/editor-filename-protocol/
           if-no-files-found: warn
           retention-days: 14
 

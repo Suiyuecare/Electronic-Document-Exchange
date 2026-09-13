@@ -43,7 +43,7 @@ class FinanceMirror:
             code = "QA100" if entity == "E1" else "QA200"
             name = "隔離驗收部一" if entity == "E1" else "隔離驗收部二"
             self.states.append({"finance_tenant_id": tenant, "version_no": 1, "etag": "a" * 64, "last_synced_from_finance_at": "2026-09-13T00:00:00Z"})
-            for order, unit_code, unit_name, unit_type in ((1, code, name, "department"), (2, "A1000", "隔離執行長室", "division")):
+            for order, unit_code, unit_name, unit_type in ((1, code, name, "department"), (2, "A1000" if entity == "E1" else "A2000", "隔離執行長室", "division"), (3, code + "B", name + "協作組", "team")):
                 self.units.append({"id": f"MIRROR-{entity}-{unit_code}", "finance_unit_id": f"SYNTHETIC-{entity}-{unit_code}", "finance_tenant_id": tenant, "code": unit_code, "name": unit_name, "unit_type": unit_type, "parent_finance_unit_id": None, "sort_order": order, "is_posting_unit": unit_type == "department", "entity_scope_mode": "explicit", "entity_codes": [entity], "status": "active"})
 
     def rows(self, table, filters=None, **kwargs):
@@ -72,6 +72,7 @@ def run(args):
     original_head = QuietAcceptanceHandler.send_head
     original_json = QuietAcceptanceHandler.send_json
     requests = []
+    api_failures = []
 
     def instrument(handler):
         path = urlparse(handler.path).path
@@ -88,14 +89,22 @@ def run(args):
         return original_head(handler)
 
     def trace_json(handler, data, status=200, extra_headers=None):
+        if status >= 400:
+            api_failures.append({"path": urlparse(handler.path).path, "status": status, "errorCode": data.get("detail", "") if isinstance(data, dict) else ""})
         if urlparse(handler.path).path == "/api/official-documents/editor-drafts":
             requests.append({"operation": "editor-draft-create", "status": status, "errorCode": data.get("detail", "") if isinstance(data, dict) and status >= 400 else ""})
         return original_json(handler, data, status, extra_headers)
 
-    report = {"scope": "synthetic_production_finance_mirror_with_real_guards_local_pdf_transport", "realSsoVerified": False, "hostedTusVerified": False, "baseline": args.baseline, "journeys": [], "draftRequests": requests}
+    report = {"scope": "synthetic_production_finance_mirror_with_real_guards_local_pdf_transport", "realSsoVerified": False, "hostedTusVerified": False, "baseline": args.baseline, "journeys": [], "draftRequests": requests, "failedApiRequests": api_failures}
     fixture = FiveAccountHttpAcceptanceTest
     fixture.setUpClass()
     require_local_origin(fixture.origin)
+    # A second selectable company in the SAME synthetic Finance tenant. The
+    # original cross-tenant fixtures remain unchanged outside this isolated DB.
+    with backend.connect() as conn:
+        conn.execute("UPDATE companies SET finance_tenant_id='tenant-acceptance-one' WHERE id='CO-002'")
+        conn.execute("UPDATE companies SET name='隔離驗收公司一' WHERE id='CO-001'")
+        conn.execute("UPDATE companies SET name='隔離驗收公司二' WHERE id='CO-002'")
     # The reported failure is a division-level CEO missing from department-only
     # directory options. Names and accounts here are synthetic, not copied users.
     for snapshot in fixture.snapshots_by_email.values():
@@ -105,17 +114,19 @@ def run(args):
     directory = mirror.production_function(backend.supabase_finance_directory)
     authority = mirror.production_function(backend.authoritative_finance_unit)
     authority.__kwdefaults__ = backend.authoritative_finance_unit.__kwdefaults__
+    application_authority = mirror.production_function(backend.authoritative_editor_applicant_department)
     config = Path(fixture.tmp.name) / "browser.json"
     config.write_text(json.dumps({"allowedDomains": ["127.0.0.1", "fonts.googleapis.com", "fonts.gstatic.com"], "headed": False}))
     browser = Browser(config, session="editor-applicant-0913", namespace="editor-applicant-0913")
     try:
-        with mock.patch.object(QuietAcceptanceHandler, "send_head", instrument), mock.patch.object(QuietAcceptanceHandler, "send_json", trace_json), mock.patch.object(backend, "local_finance_directory", side_effect=lambda conn, session: directory(session)), mock.patch.object(backend, "authoritative_finance_unit", side_effect=authority):
+        with mock.patch.object(QuietAcceptanceHandler, "send_head", instrument), mock.patch.object(QuietAcceptanceHandler, "send_json", trace_json), mock.patch.object(backend, "local_finance_directory", side_effect=lambda conn, session: directory(session)), mock.patch.object(backend, "authoritative_finance_unit", side_effect=authority), mock.patch.object(backend, "authoritative_editor_applicant_department", side_effect=application_authority):
             roles = ("ceo",) if args.baseline else ("ceo", *[role for role in BROWSER_ROLES if role != "ceo"])
             for role in roles:
                 auth = isolated_browser_session(fixture, role, entity_id="E1")
                 devices = [("desktop", (1440, 1000))] if args.baseline or role != "ceo" else [("desktop", (1440, 1000)), ("mobile", (390, 844))]
                 expected_code = "A1000" if role == "ceo" else "QA100"
                 for device, dimensions in devices:
+                    failure_start = len(api_failures)
                     row = {"role": role, "device": device, "checks": {}}
                     report["journeys"].append(row)
                     browser.run("open", fixture.origin + "/assets/favicon-32.png")
@@ -128,10 +139,11 @@ def run(args):
                     row["checks"]["realFinanceDirectoryShape"] = row["identity"]["source"] == "finance"
                     row["checks"]["divisionNotInjectedIntoGeneralDirectory"] = not row["identity"]["generalDirectoryIncludesA1000"]
                     row["checks"]["exactOwnUnitSelected"] = row["identity"].get("departmentCode") == expected_code
-                    row["checks"]["companyAndUnitLocked"] = row["identity"]["companyLocked"] and row["identity"]["departmentLocked"]
+                    row["checks"]["companyAndUnitSelectable"] = not row["identity"]["companyLocked"] and not row["identity"]["departmentLocked"]
                     row["checks"]["payloadUsesCanonicalCode"] = row["identity"].get("payloadDepartmentCode") == expected_code
                     row["checks"]["ownCompanyUsed"] = row["identity"]["company"] == auth["user"]["company_id"] == row["identity"]["payloadCompany"]
-                    if role == "ceo":
+                    row["checks"]["sameTenantCompanyChoices"] = browser.evaluate("uploadedSealCompanies().map(c=>c.id).sort().join(',')==='CO-001,CO-002'")
+                    if role in {"ceo", "staff"}:
                         category = browser.evaluate("[...document.querySelector('#uploadedSealApprovalCategorySelect').options].find(e=>e.textContent.includes('合作意向書')).value")
                         browser.run("select", "#uploadedSealApprovalCategorySelect", category)
                         browser.run("fill", "#uploadedSealTitle", "隔離驗收：執行長 PDF 文字編輯")
@@ -158,12 +170,52 @@ def run(args):
                             state = saved.get("state") or saved.get("editor_state")
                             row["checks"]["savedTextReadbackMatches"] = any(e.get("properties", {}).get("text") == "隔離執行長編輯驗收" for e in state.get("elements", []))
                             row["checks"]["noSealOrSubmission"] = not any(e.get("kind") == "seal" for e in state.get("elements", []))
+                            # User-selected unit must survive directory refresh,
+                            # application autosave and a full draft reopen.
+                            browser.run("select", "#uploadedSealDepartment", "隔離驗收部一協作組")
+                            browser.until("!uploadedSealApplicationHasUnsavedChanges()&&!uploadedSealApplicationRuntime.promise")
+                            browser.evaluate("financeDirectoryState.lastAttemptAt=0;refreshFinanceDirectory({silent:true}).then(()=>true)")
+                            row["checks"]["selectedDepartmentSurvivesRefresh"] = browser.evaluate("editorDraftPayload().applicant_department_id==='QA100B'")
+                            saved_application = fixture._expect_json("GET", f"/api/official-documents/{document_id}", 200, token=auth["token"])
+                            row["checks"]["selectedDepartmentSaved"] = saved_application["applicant_department_id"] == "QA100B"
+                            browser.evaluate("openOfficialDocumentEditorReview(" + json.dumps(document_id) + ",'edited').then(()=>true)")
+                            browser.until("!uploadedSealEditorRuntime.locked&&uploadedSealEditorState.pages.length===1")
+                            row["checks"]["selectedDepartmentRestored"] = browser.evaluate("editorDraftPayload().applicant_department_id==='QA100B'")
+                            # Accept the specific company-change confirmation in
+                            # this fixture only; the production UI uses a dialog.
+                            browser.evaluate("window.__companyConfirm='';window.confirm=message=>{window.__companyConfirm=message;return true};true")
+                            browser.run("select", "#uploadedSealCompany", "CO-002")
+                            browser.until("document.querySelector('#uploadedSealCompany').value==='CO-002'&&!uploadedSealEditorRuntime.companyChanging&&!uploadedSealEditorRuntime.documentId")
+                            row["checks"]["companyChangeRequiresNewPdfWithNotice"] = browser.evaluate("window.__companyConfirm.includes('PDF 需要重新上傳')&&uploadedSealEditorState.pages.length===0&&document.querySelector('#uploadedSealDepartment').value===''")
+                            preserved = fixture._expect_json("GET", f"/api/official-documents/{document_id}/editor-state", 200, token=auth["token"])
+                            row["checks"]["oldCompanyDraftPreserved"] = len((preserved.get("state") or preserved.get("editor_state"))["pages"]) == 1
+                            browser.run("select", "#uploadedSealDepartment", "隔離驗收部二")
+                            browser.run("upload", "#uploadedSealPdfInput", str(pdf))
+                            browser.until("uploadedSealEditorState.pages.length===1&&!uploadedSealEditorRuntime.uploading||!document.querySelector('#uploadedEditorUploadError').hidden")
+                            if not browser.evaluate("uploadedSealEditorState.pages.length===1"):
+                                raise AssertionError("upload_selected_company_failed")
+                            new_document_id = browser.evaluate("uploadedSealEditorRuntime.documentId")
+                            browser.click_visible('#uploadedPdfEditor [data-editor-tool="text"]')
+                            browser.run("fill", "#uploadedSealTextInput", "選定公司文件測試")
+                            browser.click_visible("#addUploadedTextBtn")
+                            browser.until("uploadedSealEditorState.elements.some(e=>e.kind==='text')&&uploadedSealEditorRuntime.savedGeneration>=uploadedSealEditorRuntime.dirtyGeneration&&!uploadedSealEditorRuntime.saving")
+                            new_application = fixture._expect_json("GET", f"/api/official-documents/{new_document_id}", 200, token=auth["token"])
+                            row["checks"]["selectedCompanySavedWithoutChangingActor"] = new_application["company_id"] == "CO-002" and new_application["applicant_department_id"] == "QA200" and new_application["applicant_id"] == auth["user"]["id"]
+                            browser.evaluate("openOfficialDocumentEditorReview(" + json.dumps(new_document_id) + ",'edited').then(()=>true)")
+                            browser.until("!uploadedSealEditorRuntime.locked&&uploadedSealEditorState.pages.length===1")
+                            row["checks"]["selectedCompanyReopenPreservesPdfAndDepartment"] = browser.evaluate("document.querySelector('#uploadedSealCompany').value==='CO-002'&&editorDraftPayload().applicant_department_id==='QA200'&&uploadedSealEditorState.elements.some(e=>e.properties?.text==='選定公司文件測試')")
                         else:
                             row["reproduced403"] = any(e["status"] == 403 and e["errorCode"] == "finance_unit_payload_mismatch" for e in row["draftRequests"])
                     row["layout"] = browser.evaluate(AUDIT_JS)
                     row["checks"]["noDocumentOverflow"] = not row["layout"]["overflow"]
                     row["checks"]["noUnhandledErrors"] = not row["layout"]["errors"]
+                    if not args.baseline:
+                        row["checks"]["noUnexpectedApiFailures"] = len(api_failures) == failure_start
+                    browser.evaluate("document.querySelector('#uploadedSealApplicationPanel').scrollIntoView({block:'start'});true")
                     browser.run("screenshot", str(output / f"{role}-{device}.png"), "--full")
+                    if role in {"ceo", "staff"} and not args.baseline:
+                        browser.evaluate("document.querySelector('#uploadedPdfEditor').scrollIntoView({block:'start'});true")
+                        browser.run("screenshot", str(output / f"{role}-{device}-editor.png"), "--full")
                     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
                     print(json.dumps({"role": role, "device": device, "checks": row["checks"], "reproduced403": row.get("reproduced403")}), flush=True)
             return int(not all(row.get("reproduced403") for row in report["journeys"])) if args.baseline else int(any(not all(row["checks"].values()) for row in report["journeys"]))

@@ -228,6 +228,8 @@ class FinanceDirectoryBackendContractTest(unittest.TestCase):
                 "syncedAt",
                 "currentCompanyId",
                 "currentApplicantDepartment",
+                "editorApplicantCompanies",
+                "editorApplicantDepartments",
                 "companies",
                 "departments",
                 "organization",
