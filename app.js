@@ -6006,7 +6006,20 @@ async function resumePostedHandoffSession() {
     hasVisibleMarker ? "安全接收會計系統的登入狀態。" : "確認瀏覽器中既有的安全登入狀態。"
   );
   let shouldClearVisibleMarker = true;
+  let earlyHandoffResponse = window.__edocEarlyHandoffResponse;
+  window.__edocEarlyHandoffResponse = null;
   try {
+    if (earlyHandoffResponse) {
+      // The head probe started without a marker. A marker present now can
+      // represent a new HttpOnly handoff that arrived after its missing 401.
+      // Only that exact stale absence proof may be replaced by a fresh probe;
+      // never discard a successful one-time exchange or another error.
+      const response = await earlyHandoffResponse;
+      if (response.status === 401) {
+        const data = await response.clone().json().catch(() => null);
+        if (data?.error === "handoff_session_missing" && readCookieValue(edocHandoffMarkerCookieKey) === "1") earlyHandoffResponse = null;
+      }
+    }
     const session = await backendAuthRequestWithTransientRetry(
       "/auth/handoff-session",
       {
@@ -6015,6 +6028,7 @@ async function resumePostedHandoffSession() {
         body: "{}"
       },
       {
+        firstResponse: earlyHandoffResponse,
         onRetry(nextAttempt) {
           setModuleEntryProgress(
             42,
@@ -20274,14 +20288,14 @@ async function syncDashboardFromBackend(silent = false) {
   }
 }
 
-async function backendRequest(path, options = {}) {
+async function backendRequest(path, options = {}, prefetchedResponse = null) {
   const { headers: optionHeaders = {}, ...fetchOptions } = options;
   const headers = { "Content-Type": "application/json", ...optionHeaders };
   if (isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
-  const response = await fetch(`${backendApiBase}${path}`, {
+  const response = await (prefetchedResponse || fetch(`${backendApiBase}${path}`, {
     ...fetchOptions,
     headers
-  });
+  }));
   const raw = await response.text();
   let data = {};
   try {
@@ -20318,7 +20332,7 @@ async function backendAuthRequestWithTransientRetry(path, options = {}, retryOpt
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await backendRequest(path, options);
+      return await backendRequest(path, options, attempt === 1 ? retryOptions.firstResponse : null);
     } catch (error) {
       lastError = error;
       if (!isRetryableAuthError(error) || attempt >= attempts) throw error;

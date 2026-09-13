@@ -86,7 +86,8 @@ class PortalHandoffDiagnosticsTestCase(unittest.TestCase):
         app = (ROOT / "app.js").read_text(encoding="utf-8")
 
         self.assertIn("window.__edocProbeHttpOnlyHandoff = true", bootstrap)
-        self.assertNotIn('loginUrl.searchParams.set("module", "edoc")', bootstrap)
+        self.assertIn('response.status !== 401', bootstrap)
+        self.assertIn('data?.error !== "handoff_session_missing"', bootstrap)
         self.assertIn("hasVisibleMarker || window.__edocProbeHttpOnlyHandoff === true", app)
         self.assertIn(
             'if (error?.status === 401 && error?.code === "handoff_session_missing")',

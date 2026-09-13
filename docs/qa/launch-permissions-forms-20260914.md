@@ -58,4 +58,35 @@ PDF 編輯驗收工具已改用目前可見的文件內文字編輯操作，未�
 - 不連接正式電子公文交換，不實作或啟用正式 provider；Mock/停用邊界維持。
 - 本機 production-branch fixture 使用 SQLite/本機儲存，健康檢核回 503 NO_GO 是預期環境限制；不列為產品錯誤，也不能當作正式環境可上線的證據。
 - PDF 遲到回應測試在真實 localhost HTTP 完成後延遲傳回，未替換產品 editor 函式；同一頁的再次登入使用合成 fixture auth，不代表 Google/Portal OAuth 驗收。
-- **本機修正與驗收已完成；CI、正式部署及部署後 smoke test 仍待主線核對補錄。** 不以本文件宣稱已推至前台或正式可上線。
+- 本節為第一批修正提交前的本機驗收快照；正式發布結果見下方補錄。
+
+## 第一批正式發布補錄
+
+- PR #15 已合併，主線版本 `83f9f594ab23c649487cf3398e653277103f9a7e`。
+- PR CI `34773840881` 與合併 CI `34774079297` 通過；包含 backend/frontend 與 fresh Supabase/TUS 工作。
+- 正式 deployment `dpl_AUS8arVM8MJrN3goXbNRCZRXdJoL` 為 Ready。正式 alias 的 HTML、app、CSS、A4 與騎縫章腳本 SHA-256 與發布檔案一致。
+- `/api/healthz`、`/api/readyz` 回 200；5 個受保護 API 的匿名請求回 401，未取得案件或印章資料。
+- CI 的獨立 Supabase private Storage/TUS 五帳號流程 5/5 通過。應用資料庫、Finance 與掃毒仍為隔離測試 fixture；不把它當成真實 Finance／正式掃毒服務／實體印章的驗收。
+- 正式匿名入口桌機/手機 18 項功能檢查通過，但效能檢查發現主程式下載造成登入探測延後。此結果促成下一節第二補丁，不宣稱全程 0.5 秒達標。
+- 證據：`tests/.artifacts/launch-20260914/production-confirmed/production-release.json`、`tests/.artifacts/launch-20260914/production-browser/report.json`、`tests/.artifacts/launch-20260914/ci-tus/latest.json`。
+
+## 第二補丁：匿名入口不再等待大主程式
+
+正式入口追蹤顯示，匿名瀏覽器需要先載入約 1.6 MB `app.js` 才執行 handoff 探測；本輪網路下，桌機/手機該資源分別耗時約 15.845/14.954 秒。這不是 PDF 字型或帳號權限遭拒造成。
+
+修正只將「沒有已知 session／handoff marker／舊 bridge」的同源 HttpOnly 探測前移至 head：
+
+- 只有後端明確回 `401 + handoff_session_missing` 才能提早到相同的安全 Portal 登入目標，不能憑可讀 cookie 不存在就導頁。
+- 成功 Response 由主程式取用一次，保留原 JSON 錯誤處理、登入驗證與 503 重試；不在 head 解鎖模組。
+- 暫時網路錯誤、403、異常 JSON 不會被改為成功或跳過授權。
+- 另一個頁籤在探測期間新增登入 session／bridge 時，不使用遲到的 missing 回應直接導走。
+- 新 handoff marker 在探測或接管期間到達時，只有舊回應為明確 missing 401 才重新請後端驗證；成功或其他拒絕不丟棄、不重複取用。head 與 app 同步更新快取版本。
+
+隔離真實瀏覽器驗收刻意把 `app.js` 延遲 8 秒，只把 production hostname guard 與 Portal 目標改到 localhost，其餘使用真實 HTML、head、app 與後端匿名缺 cookie 端點。舊版桌機/手機約 8.087/8.077 秒才發起探測；修正版約 9.21/9.22 ms 發起探測，18.11/24.79 ms 到本機登入頁，兩者皆僅 1 次探測且沒有橫向溢位。**這是依賴關係的 red→green 證據，不是正式網路或 Google SSO 的速度保證。**
+
+- 工具：`tools/verify_entry_early_handoff_browser.py`。
+- 舊版證據：`tests/.artifacts/entry-20260914/baseline-confirmed/report.json`。
+- 修正版證據：`tests/.artifacts/entry-20260914/candidate-confirmed/report.json`。
+- 最後補丁再驗：`tests/.artifacts/entry-20260914/final-browser/report.json`，桌機/手機探測 14.01/9.23 ms、登入頁 19.54/23.88 ms，12 checks 通過。
+- 最終完整測試 1,063 項：982 通過、81 條件跳過、零失敗（77.399 秒）；獨立登入回歸 74 項通過，同步快取版本後另跑 30 項全部通過。憑證掃描、Node 語法與 diff 檢查通過。
+- 第二補丁本機回歸完成，仍需 CI 與正式部署後檢查；本節不提前宣稱其已發布。
