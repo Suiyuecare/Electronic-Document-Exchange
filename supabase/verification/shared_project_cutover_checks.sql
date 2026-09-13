@@ -156,11 +156,12 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 62
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 63
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133144_compose_resilience_drafts_revision.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133603_editor_conflict_copy_atomic.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913055452_editor_applicant_selection_scope.sql')
-      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913060040_editor_cross_company_workflow_scope.sql'),
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913060040_editor_cross_company_workflow_scope.sql')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913130517_editor_storage_v2_opaque_paths.sql'),
       (select count(*)::text from edoc_private.shared_project_migration_ledger)
     ),
     (
