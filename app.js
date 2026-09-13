@@ -1335,6 +1335,7 @@ function emptyUploadedSealEditorState() {
 }
 
 function clearUploadedEditorSensitivePreviews() {
+  finishUploadedEditorTextEdit({ cancel: true });
   window.clearTimeout(uploadedSealEditorRuntime?.saveTimer || 0);
   resetUploadedSealApplicationSaving();
   [uploadedSealEditorRuntime?.assetUrls, uploadedSealEditorRuntime?.imageUrls].forEach((map) => {
@@ -1434,6 +1435,7 @@ const uploadedSealEditorRuntime = {
   thumbnailObserver: null,
   thumbnailTasks: new Map(),
   pointerAction: null,
+  textEdit: null,
   touchPointers: new Map(),
   pinchStartDistance: 0,
   pinchStartZoom: 1,
@@ -25500,7 +25502,8 @@ function setUploadedEditorSaveStatus(kind, message) {
   const status = document.querySelector("#uploadedEditorSaveStatus");
   if (!status) return;
   status.className = `pdf-editor-save-status ${kind}`;
-  status.textContent = message;
+  status.textContent = kind === "saved" && /^已(?:保存 · revision|載入 revision) \d+$/.test(message) ? "已保存" : message;
+  status.title = message;
 }
 
 function clearUploadedEditorUploadError() {
@@ -26527,6 +26530,189 @@ function addUploadedEditorElement(kind, point = null, properties = {}, pageIds =
   renderUploadedSealWorkbench();
 }
 
+function uploadedEditorTextEditIsCurrent(edit) {
+  const page = currentUploadedEditorPage();
+  return Boolean(edit && uploadedSealApplicationScopeIsCurrent(edit.scope)
+    && page?.pageId === edit.pageId && page.sourceAssetId === edit.sourceAssetId
+    && page.sourcePageIndex === edit.sourcePageIndex
+    && (!edit.elementId || canonicalEditorJson(editorElementById(edit.elementId)) === edit.originalElement));
+}
+
+function ensureUploadedEditorTextFont() {
+  if (!document.fonts) return true;
+  const face = '14px "EDoc LXGW WenKai TC"';
+  if (document.fonts.check(face)) return true;
+  if (!uploadedSealEditorRuntime.textFontPromise) {
+    uploadedSealEditorRuntime.textFontPromise = document.fonts.load(face).then(() => {
+      renderUploadedEditorSvgLayer();
+    }).catch(() => showToast("文字字體載入失敗，請重新整理後再試。"))
+      .finally(() => { uploadedSealEditorRuntime.textFontPromise = null; });
+  }
+  return false;
+}
+
+function uploadedEditorTextLines(text, width, fontSize) {
+  const canvas = uploadedSealEditorRuntime.textMeasureCanvas ||= document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  context.font = `${fontSize}px "EDoc LXGW WenKai TC"`;
+  context.fontKerning = "none";
+  const lines = [];
+  for (const paragraph of String(text).replace(/\r\n?/g, "\n").split("\n")) {
+    let line = "";
+    for (const character of paragraph) {
+      if (line && context.measureText(line + character).width > width) { lines.push(line); line = character; }
+      else line += character;
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
+function fitUploadedEditorTextHeight(element, page) {
+  const lines = uploadedEditorTextLines(element.properties.text, element.width, element.properties.fontSize);
+  const height = Math.max(element.height, lines.length * element.properties.fontSize * 1.2);
+  if (height > page.heightPt) return false;
+  const top = element.y + element.height;
+  element.height = roundEditorPoint(height);
+  const y = [0, 270].includes(normalizeEditorDegrees(page.rotation)) ? top - element.height : element.y;
+  element.y = roundEditorPoint(Math.max(0, Math.min(page.heightPt - element.height, y)));
+  return true;
+}
+
+function startUploadedEditorTextEdit(point = null, elementId = "") {
+  if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading
+    || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.conflict
+    || uploadedSealEditorRuntime.reviewMode !== "edited") return false;
+  if (!finishUploadedEditorTextEdit()) return false;
+  const page = currentUploadedEditorPage();
+  const input = document.querySelector("#uploadedEditorInlineText");
+  if (!page || !uploadedSealEditorRuntime.currentViewport || !input) return false;
+  const existing = elementId ? editorElementById(elementId) : null;
+  if (elementId && (!existing || existing.pageId !== page.pageId || existing.kind !== "text")) return false;
+  if (!existing && uploadedSealEditorState.elements.length >= PDF_EDITOR_MAX_ELEMENTS) {
+    showToast(`每份草稿最多 ${PDF_EDITOR_MAX_ELEMENTS} 個物件。`);
+    return false;
+  }
+  const element = existing ? cloneUploadedEditorValue(existing) : editorDefaultElement("text", page, point, { text: "" });
+  ensureUploadedEditorTextFont();
+  if (!existing && point) {
+    // The clicked point is the start of the text, not the centre of a hidden box.
+    const rotation = normalizeEditorDegrees(page.rotation);
+    const x = point.x - ([180, 270].includes(rotation) ? element.width : 0);
+    const y = point.y - ([0, 270].includes(rotation) ? element.height : 0);
+    element.x = roundEditorPoint(Math.max(0, Math.min(page.widthPt - element.width, x)));
+    element.y = roundEditorPoint(Math.max(0, Math.min(page.heightPt - element.height, y)));
+  }
+  uploadedSealEditorRuntime.textEdit = {
+    scope: uploadedSealApplicationScopeSnapshot(), pageId: page.pageId,
+    sourceAssetId: page.sourceAssetId, sourcePageIndex: page.sourcePageIndex,
+    elementId, originalElement: existing ? canonicalEditorJson(existing) : "",
+    element, composing: false
+  };
+  uploadedSealEditorRuntime.pointerAction = null;
+  uploadedSealEditorRuntime.selectedIds = new Set(existing ? [existing.id] : []);
+  input.value = existing?.properties?.text || "";
+  document.querySelector("#uploadedEditorInlineFontSize").value = String(element.properties.fontSize || 14);
+  document.querySelector("#uploadedEditorInlineColor").value = element.properties.color || "#111827";
+  renderUploadedEditorTextEdit();
+  renderUploadedEditorSvgLayer();
+  renderUploadedEditorProperties();
+  input.focus({ preventScroll: true });
+  input.select();
+  document.querySelector("#uploadedEditorTextEdit")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  return true;
+}
+
+function renderUploadedEditorTextEdit() {
+  const panel = document.querySelector("#uploadedEditorTextEdit");
+  const edit = uploadedSealEditorRuntime.textEdit;
+  if (!panel) return;
+  if (!edit) { panel.hidden = true; return; }
+  if (!uploadedEditorTextEditIsCurrent(edit) || uploadedSealEditorRuntime.locked
+    || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.companyChanging
+    || uploadedSealEditorRuntime.reviewMode !== "edited") {
+    finishUploadedEditorTextEdit({ cancel: true });
+    return;
+  }
+  const viewport = uploadedSealEditorRuntime.currentViewport;
+  if (!viewport) { panel.hidden = true; return; }
+  const rect = uploadedEditorViewportRect(edit.element);
+  const width = Math.min(viewport.width, Math.max(220, Math.min(360, rect.width + 20)));
+  panel.style.width = `${width}px`;
+  panel.style.left = `${Math.max(0, Math.min(viewport.width - width, rect.left))}px`;
+  panel.style.top = `${Math.max(0, Math.min(viewport.height - 128, rect.top))}px`;
+  panel.hidden = false;
+}
+
+function finishUploadedEditorTextEdit({ cancel = false } = {}) {
+  const edit = uploadedSealEditorRuntime.textEdit;
+  if (!edit) return true;
+  const invalid = !uploadedEditorTextEditIsCurrent(edit) || uploadedSealEditorRuntime.locked
+    || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.companyChanging
+    || uploadedSealEditorRuntime.reviewMode !== "edited";
+  if (!cancel && !invalid && edit.composing) return false;
+  const text = String(document.querySelector("#uploadedEditorInlineText")?.value || "").replace(/\r\n?/g, "\n").trim();
+  const fontSize = Number(document.querySelector("#uploadedEditorInlineFontSize")?.value);
+  const color = document.querySelector("#uploadedEditorInlineColor")?.value || "#111827";
+  if (!cancel && !invalid && text && (!Number.isFinite(fontSize) || fontSize < 6 || fontSize > 144 || text.length > 1000)) {
+    showToast("字級請填 6–144，文字最多 1,000 字。");
+    return false;
+  }
+  if (!cancel && !invalid && edit.elementId && !text) {
+    showToast("請輸入文字；要移除整段文字可使用「刪除」。");
+    return false;
+  }
+  const updatedElement = cloneUploadedEditorValue(edit.element);
+  updatedElement.properties = { ...updatedElement.properties, text, fontSize, color };
+  const textChanged = text !== edit.element.properties.text || fontSize !== Number(edit.element.properties.fontSize);
+  if (!cancel && !invalid && text && textChanged) {
+    if (!ensureUploadedEditorTextFont()) { showToast("字體載入中，請稍候再按完成。"); return false; }
+    if (!fitUploadedEditorTextHeight(updatedElement, currentUploadedEditorPage())) {
+      showToast("文字超過一頁，請分段加入或縮小字級。");
+      return false;
+    }
+  }
+  uploadedSealEditorRuntime.textEdit = null;
+  const panel = document.querySelector("#uploadedEditorTextEdit");
+  if (panel) panel.hidden = true;
+  const input = document.querySelector("#uploadedEditorInlineText");
+  if (input) input.value = "";
+  if (cancel || invalid || !text) return true;
+  const committed = commitUploadedEditorMutation((state) => {
+    const element = edit.elementId ? state.elements.find((item) => item.id === edit.elementId) : updatedElement;
+    if (!element) return;
+    Object.assign(element, updatedElement);
+    if (!edit.elementId) state.elements.push(element);
+  }, { render: false });
+  if (committed || edit.elementId) uploadedSealEditorRuntime.selectedIds = new Set([edit.element.id]);
+  uploadedSealEditorRuntime.tool = "select";
+  uploadedSealPlacementMode = "select";
+  renderUploadedSealWorkbench();
+  return true;
+}
+
+function handleUploadedEditorTextKeydown(event) {
+  if (event.isComposing || event.keyCode === 229 || uploadedSealEditorRuntime.textEdit?.composing) return;
+  if (!["Escape", "Enter"].includes(event.key)) return;
+  if (event.key === "Enter" && event.shiftKey) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (finishUploadedEditorTextEdit({ cancel: event.key === "Escape" })) {
+    renderUploadedEditorProperties();
+    document.querySelector("#uploadedEditorSvgLayer")?.focus({ preventScroll: true });
+  }
+}
+
+function renderUploadedEditorSelectionActions() {
+  const selected = [...uploadedSealEditorRuntime.selectedIds].map(editorElementById).filter(Boolean);
+  const panel = document.querySelector("#uploadedEditorSelectionActions");
+  if (!panel) return;
+  panel.hidden = !selected.length || Boolean(uploadedSealEditorRuntime.textEdit)
+    || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited";
+  document.querySelector("#uploadedEditorEditTextBtn").hidden = selected.length !== 1 || selected[0]?.kind !== "text";
+  document.querySelector("#uploadedEditorDuplicateBtn").disabled = selected.some((element) => element.properties?.seamGroupId);
+}
+
 function addUploadedSeamGroups() {
   const seal = selectedUploadedSeal();
   if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇可用的印章版本。");
@@ -26566,10 +26752,11 @@ function renderUploadedSeamGroups() {
   if (!target || !globalThis.EDOCSeam) return;
   const groups = [...globalThis.EDOCSeam.groups(uploadedSealEditorState)];
   const locked = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited";
-  document.querySelector("#uploadedEditorSeamAddBtn")?.toggleAttribute("disabled", locked || uploadedSealEditorState.pages.length < 2);
+  const hasUsableSeal = uploadedSealOptions.some(officialSealHasCurrentFile);
+  document.querySelector("#uploadedEditorSeamAddBtn")?.toggleAttribute("disabled", locked || !hasUsableSeal || uploadedSealEditorState.pages.length < 2);
   document.querySelector("#uploadedEditorSeamPages")?.toggleAttribute("disabled", locked);
   const status = document.querySelector("#uploadedEditorSeamStatus");
-  if (status) status.textContent = groups.length ? `共 ${groups.length} 組。可輸入距頁首高度，或在 PDF 拖曳半章；同組另一半會同步。` : "尚未建立騎縫章；至少需要兩頁 PDF。";
+  if (status) status.textContent = !hasUsableSeal ? "尚無可用印章，請先啟用印章。" : uploadedSealEditorState.pages.length < 2 ? "騎縫章需要至少兩頁 PDF。" : groups.length ? `已加入 ${groups.length} 組，可各別調整高度。` : "選好印章後，按「加入騎縫章」。";
   target.innerHTML = groups.map(([id, members], index) => {
     const first = members[0];
     const page = uploadedSealEditorState.pages.find((item) => item.pageId === first.pageId);
@@ -26745,6 +26932,16 @@ function svgEditorNode(name, attributes = {}) {
 function appendEditorElementVisual(group, element, rect) {
   const selected = uploadedSealEditorRuntime.selectedIds.has(element.id);
   const properties = element.properties || {};
+  // A <g> has no painted area of its own. Keep an explicit hit target behind
+  // the visual so text/lines can be selected directly, including on touch.
+  const hitWidth = Math.max(44, rect.width);
+  const hitHeight = Math.max(44, rect.height);
+  group.append(svgEditorNode("rect", {
+    x: rect.left - (hitWidth - rect.width) / 2,
+    y: rect.top - (hitHeight - rect.height) / 2,
+    width: hitWidth, height: hitHeight, fill: "transparent",
+    class: "editor-object-hit", "aria-hidden": "true"
+  }));
   if (element.kind === "seal") {
     const previewBinding = uploadedEditorSealPreviewBinding(properties);
     const preview = activeUploadedEditorSealPreviewUrl(previewBinding);
@@ -26759,10 +26956,27 @@ function appendEditorElementVisual(group, element, rect) {
     }
   } else if (["text", "replacement"].includes(element.kind)) {
     if (element.kind === "replacement") group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, fill: properties.fill || "#ffffff", class: "editor-replacement-base" }));
-    const fontSize = Math.max(8, Number(properties.fontSize || 14) * uploadedSealEditorRuntime.zoom);
-    const text = svgEditorNode("text", { x: rect.left + 3, y: rect.top + Math.min(rect.height - 2, fontSize), fill: properties.color || "#111827", "font-size": fontSize, class: "editor-text-content" });
-    text.textContent = properties.text || "文字";
-    group.append(text);
+    ensureUploadedEditorTextFont();
+    const fontSize = Number(properties.fontSize || 14);
+    const page = currentUploadedEditorPage();
+    const runtime = uploadedEditorPageRuntime(element.pageId);
+    const viewport = uploadedSealEditorRuntime.currentViewport;
+    const unit = runtime?.userUnit || 1;
+    const lines = uploadedEditorTextLines(properties.text || "文字", element.width, fontSize);
+    lines.forEach((line, index) => {
+      // Use the same pinned font, paragraph wrapping and 1.2 leading as the
+      // prepared-PDF renderer; place baselines through PDF.js page geometry.
+      const pdfY = element.y + element.height - fontSize * .88 - index * fontSize * 1.2;
+      if (pdfY < element.y - fontSize) return;
+      const align = properties.align || "left";
+      const pdfX = element.x + (align === "center" ? element.width / 2 : align === "right" ? element.width : 0);
+      const [x, y] = viewport.convertToViewportPoint((page.cropBox[0] + pdfX) / unit, (page.cropBox[1] + pdfY) / unit);
+      const text = svgEditorNode("text", { x, y, fill: properties.color || "#111827", "font-size": fontSize * uploadedSealEditorRuntime.zoom,
+        "text-anchor": align === "center" ? "middle" : align === "right" ? "end" : "start",
+        transform: `rotate(${normalizeEditorDegrees(page.rotation)} ${x} ${y})`, class: "editor-text-content" });
+      text.textContent = line;
+      group.append(text);
+    });
   } else if (element.kind === "image") {
     const url = uploadedSealEditorRuntime.imageUrls.get(properties.assetId) || "";
     if (url) group.append(svgEditorNode("image", { href: url, x: rect.left, y: rect.top, width: rect.width, height: rect.height, preserveAspectRatio: "none" }));
@@ -26792,10 +27006,11 @@ function appendEditorElementVisual(group, element, rect) {
 }
 
 function renderUploadedEditorSvgLayer() {
+  renderUploadedEditorTextEdit();
   const svg = document.querySelector("#uploadedEditorSvgLayer");
   const viewport = uploadedSealEditorRuntime.currentViewport;
   const page = currentUploadedEditorPage();
-  if (!svg || !viewport || !page) {
+  if (!svg || !viewport || !page || uploadedSealEditorRuntime.reviewMode !== "edited") {
     if (svg) svg.replaceChildren();
     return;
   }
@@ -26848,7 +27063,7 @@ function calculateUploadedEditorFitScale(pageRuntime, rotation) {
   const scroll = document.querySelector("#uploadedEditorScroll");
   if (!scroll || !pageRuntime) return 1;
   const baseViewport = pageRuntime.proxy.getViewport({ scale: 1, rotation });
-  const availableWidth = Math.max(280, scroll.clientWidth - 34);
+  const availableWidth = Math.max(1, scroll.clientWidth - 34);
   const availableHeight = Math.max(360, Math.min(window.innerHeight * 0.72, 920));
   return Math.max(0.25, Math.min(2, availableWidth / baseViewport.width, availableHeight / baseViewport.height));
 }
@@ -27162,6 +27377,7 @@ function renderUploadedEditorChangeSummary() {
 
 async function showUploadedEditorReview(mode) {
   if (!["original", "edited", "prepared", "changes"].includes(mode)) return;
+  if (!finishUploadedEditorTextEdit()) return;
   if (mode !== "prepared") invalidateUploadedEditorSubmissionPreview();
   const reviewGeneration = ++uploadedSealEditorRuntime.reviewGeneration;
   uploadedSealEditorRuntime.reviewMode = mode;
@@ -27186,7 +27402,8 @@ async function showUploadedEditorReview(mode) {
 async function renderUploadedEditorThumbnail(pageId, canvas) {
   const runtime = uploadedEditorPageRuntime(pageId);
   const page = uploadedSealEditorState.pages.find((item) => item.pageId === pageId);
-  if (!runtime || !page || canvas.dataset.rendered === `${page.rotation}`) return;
+  if (!runtime || !page || canvas.dataset.rendered === `${page.rotation}` || canvas.dataset.rendering === `${page.rotation}`) return;
+  canvas.dataset.rendering = String(page.rotation);
   const base = runtime.proxy.getViewport({ scale: 1, rotation: page.rotation });
   const viewport = runtime.proxy.getViewport({ scale: Math.min(0.24, 116 / Math.max(1, base.width)), rotation: page.rotation });
   const ratio = Math.min(1.5, window.devicePixelRatio || 1);
@@ -27199,14 +27416,36 @@ async function renderUploadedEditorThumbnail(pageId, canvas) {
     canvas.dataset.rendered = String(page.rotation);
   } catch (error) {
     canvas.dataset.rendered = "error";
+  } finally {
+    delete canvas.dataset.rendering;
   }
 }
 
 function renderUploadedEditorThumbnails() {
   const list = document.querySelector("#uploadedPdfThumbnailList");
   if (!list) return;
+  // Editing text or autosaving must not destroy every rendered thumbnail.
+  const signature = JSON.stringify(uploadedSealEditorState.pages.map((page) => [page.pageId, page.rotation, page.sourceAssetId]));
+  if (list.dataset.pageSignature === signature) {
+    list.querySelectorAll("[data-page-id]").forEach((button) => {
+      const active = button.dataset.pageId === uploadedSealEditorRuntime.currentPageId;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-current", active ? "page" : "false");
+    });
+    // A reopened draft renders once before its PDF assets finish hydrating.
+    // Retry only missing thumbnails after those assets become available.
+    list.querySelectorAll("canvas").forEach((canvas) => {
+      const pageId = canvas.closest("[data-page-id]")?.dataset.pageId;
+      const page = uploadedSealEditorState.pages.find((item) => item.pageId === pageId);
+      if (!page || !uploadedEditorPageRuntime(pageId) || canvas.dataset.rendering || canvas.dataset.rendered === String(page.rotation)) return;
+      uploadedSealEditorRuntime.thumbnailObserver?.unobserve(canvas);
+      uploadedSealEditorRuntime.thumbnailObserver?.observe(canvas);
+    });
+    return;
+  }
+  list.dataset.pageSignature = signature;
   list.innerHTML = uploadedSealEditorState.pages.length
-    ? uploadedSealEditorState.pages.map((page, index) => `<button class="pdf-editor-thumbnail ${page.pageId === uploadedSealEditorRuntime.currentPageId ? "active" : ""}" type="button" draggable="true" data-page-id="${escapeDraftHtml(page.pageId)}"><canvas aria-hidden="true"></canvas><span>${index + 1}</span><small>${Math.round(page.widthPt)} × ${Math.round(page.heightPt)} pt${page.rotation ? ` · ${page.rotation}°` : ""}</small></button>`).join("")
+    ? uploadedSealEditorState.pages.map((page, index) => `<button class="pdf-editor-thumbnail ${page.pageId === uploadedSealEditorRuntime.currentPageId ? "active" : ""}" type="button" draggable="true" data-page-id="${escapeDraftHtml(page.pageId)}" aria-label="第 ${index + 1} 頁" aria-current="${page.pageId === uploadedSealEditorRuntime.currentPageId ? "page" : "false"}"><canvas aria-hidden="true"></canvas><span>第 ${index + 1} 頁</span></button>`).join("")
     : `<p class="empty-text">尚未載入頁面</p>`;
   list.querySelectorAll("[data-page-id]").forEach((button) => {
     button.addEventListener("click", () => setUploadedSealPage(button.dataset.pageId));
@@ -27222,14 +27461,17 @@ function renderUploadedEditorThumbnails() {
   uploadedSealEditorRuntime.thumbnailObserver = new IntersectionObserver((entries) => {
     entries.filter((entry) => entry.isIntersecting).forEach((entry) => {
       const button = entry.target.closest("[data-page-id]");
-      if (button) void renderUploadedEditorThumbnail(button.dataset.pageId, entry.target);
-      uploadedSealEditorRuntime.thumbnailObserver?.unobserve(entry.target);
+      if (button) void renderUploadedEditorThumbnail(button.dataset.pageId, entry.target).then(() => {
+        const page = uploadedSealEditorState.pages.find((item) => item.pageId === button.dataset.pageId);
+        if (page && entry.target.dataset.rendered === String(page.rotation)) uploadedSealEditorRuntime.thumbnailObserver?.unobserve(entry.target);
+      });
     });
   }, { root: list, rootMargin: "180px" });
   list.querySelectorAll("canvas").forEach((canvas) => uploadedSealEditorRuntime.thumbnailObserver.observe(canvas));
 }
 
 function setUploadedSealPage(page) {
+  if (!finishUploadedEditorTextEdit()) return;
   if (!uploadedSealEditorState.pages.length) return;
   let pageId = "";
   if (typeof page === "string" && uploadedSealEditorState.pages.some((item) => item.pageId === page)) pageId = page;
@@ -27265,9 +27507,38 @@ function setUploadedEditorTool(tool) {
   if (uploadedSealEditorRuntime.mode === "general" && !["select", "seal", "text"].includes(tool)) return;
   uploadedSealEditorRuntime.tool = tool;
   uploadedSealPlacementMode = tool;
+  closeUploadedEditorSeamPanel();
   document.querySelectorAll("[data-editor-tool]").forEach((button) => button.classList.toggle("active", button.dataset.editorTool === tool));
   if (tool === "image") document.querySelector("#uploadedEditorImageInput")?.click();
   renderUploadedSealWorkbench();
+}
+
+function chooseUploadedEditorTool(tool) {
+  if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
+  if (!["select", ...PDF_EDITOR_ALLOWED_KINDS].includes(tool)) return;
+  if (!finishUploadedEditorTextEdit()) return;
+  if (!["select", "seal", "text"].includes(tool)) setUploadedEditorMode("advanced");
+  setUploadedEditorTool(tool);
+  closeUploadedEditorDisclosures(null, true);
+  if (tool === "replacement") document.querySelector("#uploadedSealTextInput")?.focus({ preventScroll: true });
+  if (tool === "text") document.querySelector("#uploadedEditorSvgLayer")?.focus({ preventScroll: true });
+  if (tool === "text") ensureUploadedEditorTextFont();
+}
+
+function closeUploadedEditorSeamPanel() {
+  const panel = document.querySelector("#uploadedEditorSeamPanel");
+  if (panel) panel.hidden = true;
+  document.querySelector("#uploadedEditorSeamToggleBtn")?.setAttribute("aria-expanded", "false");
+  document.querySelector("#uploadedPdfEditor")?.setAttribute("data-seam-open", "false");
+}
+
+function closeUploadedEditorDisclosures(except = null, restoreFocus = false) {
+  document.querySelectorAll("#uploadedPdfEditor .editor-disclosure[open]").forEach((details) => {
+    if (details === except) return;
+    const focused = details.contains(document.activeElement);
+    details.open = false;
+    if (restoreFocus && focused) details.querySelector("summary")?.focus();
+  });
 }
 
 function setUploadedEditorZoom(value, { fit = false } = {}) {
@@ -27324,6 +27595,10 @@ function beginUploadedEditorPointer(event) {
     event.preventDefault();
     if (!uploadedSealEditorRuntime.selectedIds.has(elementId) || event.shiftKey || event.metaKey || event.ctrlKey) selectUploadedEditorElement(elementId, event.shiftKey || event.metaKey || event.ctrlKey);
     const element = editorElementById(elementId);
+    if (!handle && element?.kind === "text" && uploadedSealEditorRuntime.tool === "text") {
+      startUploadedEditorTextEdit(null, elementId);
+      return;
+    }
     const startPoint = uploadedEditorClientPoint(event.clientX, event.clientY);
     if (!element || !startPoint) return;
     const requestedAction = handle?.dataset.editorHandle || "move";
@@ -27352,6 +27627,11 @@ function beginUploadedEditorPointer(event) {
   }
   if (uploadedSealEditorRuntime.tool === "image") return document.querySelector("#uploadedEditorImageInput")?.click();
   const point = uploadedEditorClientPoint(event.clientX, event.clientY);
+  if (point && uploadedSealEditorRuntime.tool === "text") {
+    event.preventDefault();
+    startUploadedEditorTextEdit(point);
+    return;
+  }
   if (point) addUploadedEditorElement(uploadedSealEditorRuntime.tool, point);
 }
 
@@ -27416,7 +27696,19 @@ function endUploadedEditorPointer(event) {
     return;
   }
   if (canonicalEditorJson(action.previousState) === canonicalEditorJson(uploadedSealEditorState)) {
-    return renderUploadedEditorSvgLayer();
+    // SVG children are rebuilt after selection. Detect repeated taps on the
+    // stable pointer layer rather than relying on a replaced DOM dblclick target.
+    const now = performance.now();
+    const previousTap = uploadedSealEditorRuntime.lastTextTap;
+    const element = editorElementById(action.elementId);
+    const doubleTap = action.type === "move" && element?.kind === "text"
+      && previousTap?.id === element.id && now - previousTap.at < 500
+      && Math.hypot(event.clientX - previousTap.x, event.clientY - previousTap.y) < 24;
+    uploadedSealEditorRuntime.lastTextTap = action.type === "move" && element?.kind === "text"
+      ? { id: element.id, at: now, x: event.clientX, y: event.clientY } : null;
+    renderUploadedEditorSvgLayer();
+    if (doubleTap) { uploadedSealEditorRuntime.lastTextTap = null; startUploadedEditorTextEdit(null, element.id); }
+    return;
   }
   pushUploadedEditorHistory(action.previousState);
   syncLegacyUploadedEditorCollections();
@@ -27424,7 +27716,16 @@ function endUploadedEditorPointer(event) {
   renderUploadedSealWorkbench();
 }
 
+function setUploadedEditorPropertyValue(input, value, selectionKey) {
+  if (!input) return;
+  const preserveTyping = document.activeElement === input && !input.disabled && !input.readOnly
+    && input.dataset.editorSelectionKey === selectionKey;
+  input.dataset.editorSelectionKey = selectionKey;
+  if (!preserveTyping) input.value = String(value ?? "");
+}
+
 function renderUploadedEditorProperties() {
+  renderUploadedEditorSelectionActions();
   const selected = [...uploadedSealEditorRuntime.selectedIds].map(editorElementById).filter(Boolean);
   const editor = document.querySelector("#uploadedPdfEditor");
   if (editor) editor.dataset.hasSelection = String(selected.length > 0);
@@ -27441,9 +27742,10 @@ function renderUploadedEditorProperties() {
   if (empty) empty.hidden = Boolean(selected.length);
   if (!selected.length) return;
   const element = selected[0];
+  const selectionKey = JSON.stringify([uploadedSealApplicationScopeSnapshot(), selected.map((item) => [item.id, item.pageId])]);
   const setValue = (selector, value) => {
     const input = document.querySelector(selector);
-    if (input) input.value = selected.length === 1 ? String(value ?? "") : "";
+    setUploadedEditorPropertyValue(input, selected.length === 1 ? value : "", selectionKey);
   };
   setValue("#uploadedEditorPropertyText", element.properties?.text || "");
   setValue("#uploadedEditorPropertyX", element.x);
@@ -27602,10 +27904,12 @@ function reorderUploadedEditorPage(sourceId, targetId) {
 }
 
 function runUploadedEditorPageAction(action) {
+  if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
   const index = currentUploadedEditorPageIndex();
   const page = currentUploadedEditorPage();
   if (!page || index < 0) return;
   if (action === "delete" && uploadedSealEditorState.pages.length === 1) return showToast("文件至少需要保留一頁。");
+  if (action === "delete" && !window.confirm(`刪除第 ${index + 1} 頁及該頁編輯？可按「復原」還原，原始 PDF 仍會保留。`)) return;
   commitUploadedEditorMutation((state) => {
     const currentIndex = state.pages.findIndex((item) => item.pageId === page.pageId);
     if (action === "move-up" && currentIndex > 0) [state.pages[currentIndex - 1], state.pages[currentIndex]] = [state.pages[currentIndex], state.pages[currentIndex - 1]];
@@ -27816,6 +28120,7 @@ async function saveUploadedEditorState({ immediate = false } = {}) {
 }
 
 function handleUploadedEditorConflict(error) {
+  finishUploadedEditorTextEdit();
   uploadedSealEditorRuntime.conflict = { at: Date.now(), revisionNo: uploadedSealEditorState.revisionNo, detail: error?.detail || "editor_revision_conflict", localState: cloneUploadedEditorValue(uploadedSealEditorState), requestId: crypto.randomUUID(), application: editorDraftPayload() };
   window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
   setUploadedEditorSaveStatus("conflict", "另一裝置已更新。你的內容仍保留在畫面，請選擇如何繼續。");
@@ -28134,6 +28439,7 @@ async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
 }
 
 async function preflightUploadedEditor() {
+  if (!finishUploadedEditorTextEdit()) throw new Error("請先完成文字編輯。");
   if (!uploadedSealEditorRuntime.documentId) throw new Error("尚未建立 PDF 編輯草稿。");
   ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
   await saveUploadedEditorState({ immediate: true });
@@ -28365,8 +28671,8 @@ function renderUploadedSealAvailabilityNotice(hasUsableSeal) {
   if (hasUsableSeal) return;
   const canManage = isCompanySealCustodian() && isRouteAllowed("seals");
   notice.innerHTML = canManage
-    ? `可先上傳 PDF、加文字並保存草稿；目前尚無可用印章，啟用後即可放章與送簽。<button class="text-button" type="button" data-open-seal-settings>前往系統設定處理印章</button>`
-    : "可先上傳 PDF、加文字並保存草稿；目前尚無可用印章，請由執行長或行政部門主任在「系統設定 → 印章檔案」啟用後再放章與送簽。";
+    ? `尚無可用印章；可編輯並存草稿，暫不能用印送簽。<button class="text-button" type="button" data-open-seal-settings>設定印章</button>`
+    : "尚無可用印章；可編輯並存草稿。請聯絡執行長或行政主任啟用後再用印送簽。";
   notice.querySelector("[data-open-seal-settings]")?.addEventListener("click", () => {
     setView("seals");
     openIntegratedPageSection("seals");
@@ -28428,6 +28734,7 @@ function renderUploadedSealWorkbench() {
     editor.dataset.uploading = String(uploadedSealEditorRuntime.uploading);
     editor.dataset.reviewMode = uploadedSealEditorRuntime.reviewMode;
     editor.dataset.hasDocument = String(uploadedSealEditorState.pages.length > 0);
+    editor.dataset.activeTool = uploadedSealEditorRuntime.tool;
   }
   const sourceInput = document.querySelector("#uploadedSealPdfInput");
   if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
@@ -28467,8 +28774,12 @@ function renderUploadedSealWorkbench() {
     reviewSelect.value = uploadedSealEditorRuntime.reviewMode;
     reviewSelect.disabled = !uploadedSealEditorState.pages.length || uploadedSealEditorRuntime.uploading;
   }
+  const viewSummary = document.querySelector("#uploadedEditorViewSummary");
+  if (viewSummary) viewSummary.textContent = ({ edited: "檢視", original: "原稿・唯讀", prepared: "確認版・唯讀", changes: "變更清單" })[uploadedSealEditorRuntime.reviewMode] || "檢視";
+  if (reviewReadOnly || uploadedSealEditorRuntime.locked) closeUploadedEditorSeamPanel();
   document.querySelectorAll("[data-editor-tool]").forEach((button) => {
     button.classList.toggle("active", button.dataset.editorTool === uploadedSealEditorRuntime.tool);
+    button.setAttribute("aria-pressed", String(button.dataset.editorTool === uploadedSealEditorRuntime.tool));
     button.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
   });
   const hasUsableSeal = uploadedSealOptions.some(officialSealHasCurrentFile);
@@ -28477,6 +28788,15 @@ function renderUploadedSealWorkbench() {
   if (sealTool) {
     sealTool.disabled = sealTool.disabled || !hasUsableSeal;
     sealTool.title = hasUsableSeal ? "" : "目前公司沒有可用的 current 印章版本，請由執行長或行政部門主任到系統設定處理。";
+  }
+  const seamToggle = document.querySelector("#uploadedEditorSeamToggleBtn");
+  if (seamToggle) seamToggle.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
+  const moreSummary = document.querySelector("#uploadedEditorMoreTools > summary");
+  if (moreSummary) moreSummary.textContent = ({ replacement: "取代文字", shape: "形狀", checkmark: "勾選", highlight: "螢光", redaction: "安全遮蔽" })[uploadedSealEditorRuntime.tool] || "更多工具";
+  const toolNotice = document.querySelector("#uploadedEditorToolNotice");
+  if (toolNotice) {
+    toolNotice.hidden = uploadedSealEditorRuntime.tool !== "redaction" || reviewReadOnly;
+    toolNotice.textContent = "遮蔽會永久移除編輯版的區域內容；原稿保留。";
   }
   document.querySelectorAll("[data-editor-page-action], [data-editor-layer], [data-editor-copy-selected], [data-editor-delete-selected]").forEach((control) => {
     control.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
@@ -28490,13 +28810,14 @@ function renderUploadedSealWorkbench() {
   renderUploadedEditorSubmissionActions();
   document.querySelectorAll("[data-uploaded-placement-mode]").forEach((button) => button.classList.toggle("active", button.dataset.uploadedPlacementMode === uploadedSealPlacementMode));
   const generalOptions = document.querySelector("#uploadedEditorGeneralOptions");
-  if (generalOptions) generalOptions.hidden = !["seal", "text", "replacement"].includes(uploadedSealEditorRuntime.tool);
-  document.querySelector("#uploadedSealTextTools")?.toggleAttribute("hidden", !["text", "replacement"].includes(uploadedSealEditorRuntime.tool));
+  const seamOpen = document.querySelector("#uploadedEditorSeamPanel")?.hidden === false;
+  if (generalOptions) generalOptions.hidden = !seamOpen && !["seal", "replacement"].includes(uploadedSealEditorRuntime.tool);
+  document.querySelector("#uploadedSealTextTools")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "replacement");
   const textInputLabel = document.querySelector("#uploadedEditorTextInputLabel");
   const textInput = document.querySelector("#uploadedSealTextInput");
   if (textInputLabel) textInputLabel.textContent = uploadedSealEditorRuntime.tool === "replacement" ? "取代後文字（舊內容會安全移除）" : "文字";
   if (textInput) textInput.placeholder = uploadedSealEditorRuntime.tool === "replacement" ? "輸入安全取代後的新文字，再點選文件位置" : "輸入要加入的文字";
-  document.querySelector("#uploadedSealSealSelect")?.closest("label")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
+  document.querySelector("#uploadedSealSealSelect")?.closest("label")?.toggleAttribute("hidden", !seamOpen && uploadedSealEditorRuntime.tool !== "seal");
   document.querySelector("#uploadedSealStampType")?.closest("label")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
   document.querySelector("#addSelectedStampBtn")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
   const status = document.querySelector("#uploadedSealPdfStatus");
@@ -28507,17 +28828,23 @@ function renderUploadedSealWorkbench() {
   if (pageCount) pageCount.textContent = `${uploadedSealEditorState.pages.length} 頁`;
   const currentIndex = currentUploadedEditorPageIndex();
   const page = currentUploadedEditorPage();
+  const fileMeta = document.querySelector("#uploadedEditorFileMeta");
+  if (fileMeta) fileMeta.textContent = uploadedSealEditorState.pages.length
+    ? `${uploadedSealEditorState.pages.length} 頁${document.querySelector("#uploadedPdfA4Rule")?.dataset.state === "ok" ? " · A4" : ""} · 原稿保留`
+    : "PDF · 上限 50 MB／300 頁";
   const pageLabel = document.querySelector("#uploadedPdfPageLabel");
   if (pageLabel) pageLabel.textContent = page ? `第 ${currentIndex + 1} / ${uploadedSealEditorState.pages.length} 頁` : "尚未載入頁面";
   const geometry = document.querySelector("#uploadedPdfGeometryLabel");
   if (geometry) geometry.textContent = page ? `${Math.round(page.widthPt)} × ${Math.round(page.heightPt)} pt · CropBox · ${page.rotation}°` : "等待 PDF 幾何資訊";
-  const strip = document.querySelector("#uploadedPdfPageStrip");
-  if (strip) {
-    strip.innerHTML = uploadedSealEditorState.pages.length
-      ? uploadedSealEditorState.pages.map((item, index) => `<button class="uploaded-page-chip ${item.pageId === uploadedSealEditorRuntime.currentPageId ? "active" : ""}" type="button" data-uploaded-page="${escapeDraftHtml(item.pageId)}" aria-label="前往第 ${index + 1} 頁">${index + 1}</button>`).join("")
-      : `<span>頁面將顯示於此</span>`;
-    strip.querySelectorAll("[data-uploaded-page]").forEach((button) => button.addEventListener("click", () => setUploadedSealPage(button.dataset.uploadedPage)));
-    strip.querySelector(".active")?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  const pageSelect = document.querySelector("#uploadedEditorPageSelect");
+  if (pageSelect) {
+    const signature = uploadedSealEditorState.pages.map((item) => item.pageId).join(",");
+    if (pageSelect.dataset.pageSignature !== signature) {
+      pageSelect.innerHTML = uploadedSealEditorState.pages.map((item, index) => `<option value="${escapeDraftHtml(item.pageId)}">${index + 1} / ${uploadedSealEditorState.pages.length} 頁</option>`).join("");
+      pageSelect.dataset.pageSignature = signature;
+    }
+    pageSelect.value = uploadedSealEditorRuntime.currentPageId || "";
+    pageSelect.disabled = !page || uploadedSealEditorRuntime.uploading;
   }
   const prev = document.querySelector("#uploadedPdfPrevBtn");
   const next = document.querySelector("#uploadedPdfNextBtn");
@@ -28809,6 +29136,7 @@ async function syncUploadedSealApplicationDraft() {
 }
 
 async function flushUploadedSealDraftBeforeSwitch() {
+  if (!finishUploadedEditorTextEdit()) throw new Error("請先完成文字編輯。");
   const scope = uploadedSealApplicationScopeSnapshot();
   if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.draftCreatePromise) {
     throw new Error("PDF 正在上傳或建立草稿，請完成後再切換案件。");
@@ -28886,6 +29214,7 @@ async function handleUploadedSealCompanyChange(event) {
   select.value = previous;
   if (requested === previous || uploadedSealApplicantSelectionBusy()) return;
   if (!uploadedSealCompanies().some((company) => company.id === requested)) return;
+  if (!finishUploadedEditorTextEdit()) return;
   const documentId = uploadedSealEditorRuntime.documentId;
   const hasContent = uploadedSealEditorState.sourceFiles.length || uploadedSealEditorState.pages.length
     || uploadedSealEditorState.elements.length || document.querySelector("#uploadedSealTitle")?.value.trim()
@@ -30662,7 +30991,19 @@ function closeUploadedEditorMobileDrawer({ restoreFocus = true } = {}) {
 }
 
 function setUploadedEditorMobileDrawer(kind, open, trigger = null) {
-  if (!uploadedEditorMobileDrawerIsCompact()) return closeUploadedEditorMobileDrawer({ restoreFocus: false });
+  if (!uploadedEditorMobileDrawerIsCompact()) {
+    const editor = document.querySelector("#uploadedPdfEditor");
+    if (!open) return closeUploadedEditorMobileDrawer();
+    const thumbnails = kind === "thumbnails";
+    editor?.setAttribute("data-thumbnails-open", String(thumbnails));
+    editor?.setAttribute("data-properties-open", String(!thumbnails));
+    document.querySelector("#uploadedEditorThumbnailToggleBtn")?.setAttribute("aria-expanded", String(thumbnails));
+    document.querySelector("#uploadedEditorPropertiesToggleBtn")?.setAttribute("aria-expanded", String(!thumbnails));
+    document.querySelector(thumbnails ? "#uploadedEditorThumbnailPane" : "#uploadedEditorProperties")?.removeAttribute("aria-hidden");
+    uploadedEditorMobileDrawerReturnFocus = trigger || document.activeElement;
+    document.querySelector(thumbnails ? "#uploadedEditorThumbnailCloseBtn" : "#uploadedEditorPropertiesCloseBtn")?.focus({ preventScroll: true });
+    return;
+  }
   if (!open) return closeUploadedEditorMobileDrawer();
   const editor = document.querySelector("#uploadedPdfEditor");
   const backdrop = document.querySelector("#uploadedEditorMobileBackdrop");
@@ -30690,6 +31031,11 @@ function setUploadedEditorMobileDrawer(kind, open, trigger = null) {
 }
 
 function syncUploadedEditorMobileDrawer() {
+  ["#uploadedEditorThumbnailToggleBtn", "#uploadedEditorPropertiesToggleBtn"].forEach((selector) => {
+    const button = document.querySelector(selector);
+    if (uploadedEditorMobileDrawerIsCompact()) button?.setAttribute("aria-haspopup", "dialog");
+    else button?.removeAttribute("aria-haspopup");
+  });
   if (!uploadedEditorMobileDrawerIsCompact()) closeUploadedEditorMobileDrawer({ restoreFocus: false });
 }
 
@@ -30710,9 +31056,20 @@ document.querySelector("#uploadedSealForm")?.addEventListener("invalid", () => {
 
 document.querySelector("#uploadedEditorSeamToggleBtn")?.addEventListener("click", (event) => {
   const panel = document.querySelector("#uploadedEditorSeamPanel");
-  panel.hidden = !panel.hidden;
-  event.currentTarget.setAttribute("aria-expanded", String(!panel.hidden));
-  if (!panel.hidden) { setUploadedEditorTool("seal"); renderUploadedSeamGroups(); panel.scrollIntoView({ block: "nearest" }); }
+  if (!panel || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
+  if (!panel.hidden) { chooseUploadedEditorTool("select"); return; }
+  // Seam stamping uses its group action. Canvas taps only select/move members,
+  // never accidentally add a regular full seal while this panel is open.
+  setUploadedEditorTool("select");
+  closeUploadedEditorDisclosures();
+  panel.hidden = false;
+  event.currentTarget.setAttribute("aria-expanded", "true");
+  document.querySelector("#uploadedPdfEditor")?.setAttribute("data-seam-open", "true");
+  renderUploadedSealWorkbench();
+});
+document.querySelector("#uploadedEditorSeamCloseBtn")?.addEventListener("click", () => {
+  chooseUploadedEditorTool("select");
+  document.querySelector("#uploadedEditorSeamToggleBtn")?.focus({ preventScroll: true });
 });
 document.querySelector("#uploadedEditorSeamAddBtn")?.addEventListener("click", addUploadedSeamGroups);
 document.querySelector("#addSelectedStampBtn")?.addEventListener("click", () => addUploadedStamp(document.querySelector("#uploadedSealStampType")?.value || "current_page"));
@@ -30731,7 +31088,7 @@ window.addEventListener("online", () => {
   if (uploadedSealApplicationHasUnsavedChanges()) scheduleUploadedSealApplicationSave();
 });
 window.addEventListener("beforeunload", (event) => {
-  if (uploadedSealApplicationHasUnsavedChanges() || uploadedSealApplicationRuntime.promise
+  if (uploadedSealEditorRuntime.textEdit || uploadedSealApplicationHasUnsavedChanges() || uploadedSealApplicationRuntime.promise
     || (uploadedSealEditorRuntime.documentId && !uploadedSealEditorRuntime.locked
       && (uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration))) {
     event.preventDefault();
@@ -30749,7 +31106,68 @@ document.querySelector("#uploadedSealApprovalCategorySelect")?.addEventListener(
   void refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true });
 });
 document.querySelectorAll("button[data-editor-mode]").forEach((button) => button.addEventListener("click", () => setUploadedEditorMode(button.dataset.editorMode)));
-document.querySelectorAll("[data-editor-tool]").forEach((button) => button.addEventListener("click", () => setUploadedEditorTool(button.dataset.editorTool)));
+document.querySelectorAll("[data-editor-tool]").forEach((button) => button.addEventListener("click", () => chooseUploadedEditorTool(button.dataset.editorTool)));
+document.querySelector("#uploadedEditorInlineText")?.addEventListener("keydown", handleUploadedEditorTextKeydown);
+document.querySelector("#uploadedEditorInlineText")?.addEventListener("compositionstart", () => {
+  if (uploadedSealEditorRuntime.textEdit) uploadedSealEditorRuntime.textEdit.composing = true;
+});
+document.querySelector("#uploadedEditorInlineText")?.addEventListener("compositionend", () => {
+  if (uploadedSealEditorRuntime.textEdit) uploadedSealEditorRuntime.textEdit.composing = false;
+});
+document.querySelector("#uploadedEditorInlineDone")?.addEventListener("click", () => {
+  if (finishUploadedEditorTextEdit()) document.querySelector("#uploadedEditorSvgLayer")?.focus({ preventScroll: true });
+});
+document.querySelector("#uploadedEditorInlineCancel")?.addEventListener("click", () => {
+  finishUploadedEditorTextEdit({ cancel: true });
+  renderUploadedEditorProperties();
+  document.querySelector("#uploadedEditorSvgLayer")?.focus({ preventScroll: true });
+});
+document.querySelector("#uploadedEditorTextEdit")?.addEventListener("keydown", (event) => {
+  if (event.target.id !== "uploadedEditorInlineText" && event.key === "Escape") handleUploadedEditorTextKeydown(event);
+});
+document.querySelector("#uploadedEditorTextEdit")?.addEventListener("focusout", (event) => {
+  if (event.currentTarget.contains(event.relatedTarget)) return;
+  const edit = uploadedSealEditorRuntime.textEdit;
+  window.setTimeout(() => {
+    const panel = document.querySelector("#uploadedEditorTextEdit");
+    if (edit && uploadedSealEditorRuntime.textEdit === edit && !panel?.contains(document.activeElement)) finishUploadedEditorTextEdit();
+  }, 0);
+});
+document.querySelector("#uploadedEditorEditTextBtn")?.addEventListener("click", () => startUploadedEditorTextEdit(null, [...uploadedSealEditorRuntime.selectedIds][0]));
+document.querySelector("#uploadedEditorDuplicateBtn")?.addEventListener("click", () => {
+  if ([...uploadedSealEditorRuntime.selectedIds].some((id) => editorElementById(id)?.properties?.seamGroupId)) return;
+  copyUploadedEditorSelection();
+  pasteUploadedEditorSelection();
+});
+document.querySelector("#uploadedEditorDeleteBtn")?.addEventListener("click", deleteUploadedEditorSelection);
+document.addEventListener("pointerdown", (event) => {
+  if (!uploadedSealEditorRuntime.textEdit || event.target.closest?.("#uploadedEditorTextEdit")) return;
+  if (!finishUploadedEditorTextEdit()) { event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);
+document.querySelector("#uploadedEditorPageSelect")?.addEventListener("change", (event) => setUploadedSealPage(event.target.value));
+document.querySelector("#uploadedSealTextInput")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing) return;
+  event.preventDefault();
+  if (!document.querySelector("#addUploadedTextBtn")?.disabled) addUploadedTextAtPoint();
+});
+document.querySelectorAll("#uploadedPdfEditor .editor-disclosure").forEach((details) => {
+  details.addEventListener("toggle", () => {
+    if (details.open) closeUploadedEditorDisclosures(details);
+  });
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!event.target.closest?.("#uploadedPdfEditor .editor-disclosure")) closeUploadedEditorDisclosures();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const details = document.querySelector("#uploadedPdfEditor .editor-disclosure[open]");
+  if (details) { event.preventDefault(); closeUploadedEditorDisclosures(null, true); }
+  else if (!uploadedEditorMobileDrawerIsCompact() && (document.querySelector("#uploadedPdfEditor")?.dataset.thumbnailsOpen === "true" || document.querySelector("#uploadedPdfEditor")?.dataset.propertiesOpen === "true")) closeUploadedEditorMobileDrawer();
+  else if (document.querySelector("#uploadedEditorSeamPanel")?.hidden === false) {
+    chooseUploadedEditorTool("select");
+    document.querySelector("#uploadedEditorSeamToggleBtn")?.focus({ preventScroll: true });
+  }
+});
 document.querySelector("#uploadedPdfPrevBtn")?.addEventListener("click", () => setUploadedSealPage(uploadedSealCurrentPage - 1));
 document.querySelector("#uploadedPdfNextBtn")?.addEventListener("click", () => setUploadedSealPage(uploadedSealCurrentPage + 1));
 document.querySelector("#uploadedEditorUndoBtn")?.addEventListener("click", undoUploadedEditor);
@@ -30791,8 +31209,12 @@ document.addEventListener("keydown", (event) => {
     editor?.dataset.thumbnailsOpen === "true" ? "#uploadedEditorThumbnailPane" : "#uploadedEditorProperties"
   );
   const focusable = [...(openPane?.querySelectorAll(
-    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
-  ) || [])].filter((element) => element instanceof HTMLElement && element.offsetParent !== null);
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])'
+  ) || [])].filter((element) => {
+    if (!(element instanceof HTMLElement) || element.offsetParent === null) return false;
+    const closed = element.closest("details:not([open])");
+    return !closed || closed.querySelector(":scope > summary")?.contains(element);
+  });
   if (!focusable.length) return;
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
@@ -30819,7 +31241,10 @@ document.querySelector("#uploadedEditorImageInput")?.addEventListener("change", 
 document.querySelector("#uploadedPdfEmptyUploadBtn")?.addEventListener("click", openUploadedPdfPicker);
 document.querySelector("#uploadedPdfReplaceBtn")?.addEventListener("click", openUploadedPdfPicker);
 document.querySelectorAll("[data-editor-page-action]").forEach((button) => button.addEventListener("click", () => runUploadedEditorPageAction(button.dataset.editorPageAction)));
-document.querySelector("#uploadedEditorReviewSelect")?.addEventListener("change", (event) => void showUploadedEditorReview(event.target.value));
+document.querySelector("#uploadedEditorReviewSelect")?.addEventListener("change", (event) => {
+  closeUploadedEditorDisclosures(null, true);
+  void showUploadedEditorReview(event.target.value);
+});
 document.querySelector("#clearUploadedStampsBtn")?.addEventListener("click", () => {
   if (!uploadedSealEditorState.elements.length || uploadedSealEditorRuntime.locked) return;
   if (!window.confirm("確定清除目前草稿的全部編輯物件？原始 PDF 不會被刪除。")) return;
@@ -30844,6 +31269,17 @@ document.querySelector("#uploadedSealType")?.addEventListener("change", (event) 
 });
 const uploadedStampLayer = document.querySelector("#uploadedStampLayer");
 uploadedStampLayer?.addEventListener("pointerdown", beginUploadedEditorPointer);
+uploadedStampLayer?.addEventListener("dblclick", (event) => {
+  // Native dblclick may target the stable layer after the SVG child was
+  // replaced. The immediately selected single text object is still authoritative.
+  const selected = [...uploadedSealEditorRuntime.selectedIds];
+  const elementId = event.target.closest("[data-editor-element-id]")?.dataset.editorElementId
+    || (selected.length === 1 ? selected[0] : "");
+  if (elementId && editorElementById(elementId)?.kind === "text") {
+    event.preventDefault();
+    startUploadedEditorTextEdit(null, elementId);
+  }
+});
 uploadedStampLayer?.addEventListener("pointermove", moveUploadedEditorPointer);
 uploadedStampLayer?.addEventListener("pointerup", endUploadedEditorPointer);
 uploadedStampLayer?.addEventListener("pointercancel", endUploadedEditorPointer);
@@ -30891,6 +31327,11 @@ document.addEventListener("keydown", (event) => {
     || event.target.closest("input, textarea, select")
   ) return;
   const command = event.metaKey || event.ctrlKey;
+  if (event.key === "Enter" && uploadedSealEditorRuntime.tool === "text" && event.target.id === "uploadedEditorSvgLayer") {
+    event.preventDefault();
+    startUploadedEditorTextEdit();
+    return;
+  }
   if (command && event.key.toLowerCase() === "z") {
     event.preventDefault();
     if (event.shiftKey) redoUploadedEditor(); else undoUploadedEditor();

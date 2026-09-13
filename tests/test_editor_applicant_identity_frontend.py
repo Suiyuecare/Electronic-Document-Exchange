@@ -57,6 +57,7 @@ const frontendSessionScope=()=> 'one';
 const flushUploadedSealDraftBeforeSwitch=async()=>{calls.push({operation:'flush',company:company.value});if(flushFailure)throw flushFailure;};
 const clearUploadedEditorSensitivePreviews=()=>{clears++;uploadedSealEditorRuntime.documentId='';uploadedSealEditorState.pages=[];uploadedSealEditorState.elements=[];};
 const renderUploadedSealWorkbench=()=>{};
+const finishUploadedEditorTextEdit=()=>true; // No transient text edit in this identity fixture.
 const renderUploadedSealOptions=()=>{};
 const invalidateUploadedEditorSubmissionPreview=()=>{};
 const refreshWorkflowReadinessForContext=async()=>{};

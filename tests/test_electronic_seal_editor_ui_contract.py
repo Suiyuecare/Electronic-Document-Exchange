@@ -287,7 +287,7 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         )
         self.assertRegex(
             self.js,
-            r'document\.querySelector\("#uploadedEditorReviewSelect"\)\?\.addEventListener\("change",\s*\(event\)\s*=>\s*void showUploadedEditorReview\(event\.target\.value\)\)',
+            r'document\.querySelector\("#uploadedEditorReviewSelect"\)\?\.addEventListener\("change",\s*\(event\)\s*=>\s*\{[^}]*void showUploadedEditorReview\(event\.target\.value\);[^}]*\}\)',
         )
         show_review = javascript_function(self.js, "showUploadedEditorReview")
         self.assertIn('document.querySelector("#uploadedEditorReviewSelect")', show_review)
@@ -413,8 +413,14 @@ class ElectronicSealPageContractTest(unittest.TestCase):
             self.assertIn(f'id="{element_id}"', editor)
         self.assertRegex(
             editor,
-            r'id="uploadedEditorThumbnailToggleBtn"[^>]*aria-controls="uploadedEditorThumbnailPane"[^>]*aria-haspopup="dialog"',
+            r'id="uploadedEditorThumbnailToggleBtn"[^>]*aria-controls="uploadedEditorThumbnailPane"',
         )
+        # The same action opens an inline panel on desktop and a modal drawer
+        # on mobile; only the latter should announce a dialog.
+        sync_drawer = javascript_function(self.js, "syncUploadedEditorMobileDrawer")
+        self.assertIn("uploadedEditorMobileDrawerIsCompact()", sync_drawer)
+        self.assertIn('setAttribute("aria-haspopup", "dialog")', sync_drawer)
+        self.assertIn('removeAttribute("aria-haspopup")', sync_drawer)
         self.assertRegex(
             editor,
             r'id="uploadedEditorPropertiesToggleBtn"[^>]*aria-controls="uploadedEditorProperties"[^>]*aria-haspopup="dialog"',

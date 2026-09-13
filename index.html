@@ -1610,13 +1610,9 @@
               <div class="electronic-seal-toolbar pdf-editor-commandbar">
                 <div>
                   <h3 id="uploadedSealWorkspaceTitle">電子用印編輯</h3>
-                  <p id="uploadedSealWorkspaceDescription">上傳後可直接加文字、選擇印章並拖曳到正確位置；原稿不會被覆寫。</p>
+                  <p id="uploadedSealWorkspaceDescription" class="sr-only">編輯另存新版本，原稿保留。</p>
                 </div>
                 <div class="pdf-editor-command-status">
-                  <div class="pdf-editor-mode-switch" role="group" aria-label="PDF 編輯模式">
-                    <button class="active" id="uploadedEditorModeGeneral" type="button" data-editor-mode="general" aria-pressed="true">一般</button>
-                    <button id="uploadedEditorModeAdvanced" type="button" data-editor-mode="advanced" aria-pressed="false">進階</button>
-                  </div>
                   <span class="pdf-editor-save-status idle" id="uploadedEditorSaveStatus" role="status" aria-live="polite">尚未建立草稿</span>
                   <button class="primary-button pdf-editor-conflict-action" id="uploadedEditorConflictCopyBtn" type="button" hidden>保留我的內容為新草稿</button>
                   <button class="secondary-button pdf-editor-conflict-action" id="uploadedEditorResolveConflictBtn" type="button" hidden>使用最新版</button>
@@ -1626,15 +1622,15 @@
 
               <div class="pdf-editor-source-bar" id="uploadedPdfSourceBar">
                 <div class="pdf-editor-source-copy">
-                  <strong>PDF 文件</strong>
                   <span id="uploadedPdfFileName">尚未選擇檔案</span>
+                  <small id="uploadedEditorFileMeta">PDF · 上限 50 MB／300 頁</small>
                 </div>
-                <button class="primary-button" id="uploadedPdfReplaceBtn" type="button" aria-controls="uploadedSealPdfInput">選擇 PDF 並開始編輯</button>
+                <button class="secondary-button" id="uploadedPdfReplaceBtn" type="button" aria-controls="uploadedSealPdfInput">選擇 PDF</button>
                 <input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="uploadedPdfA4Rule" hidden />
               </div>
               <div class="pdf-a4-rule pdf-editor-a4-rule" id="uploadedPdfA4Rule" data-state="idle">
-                <strong>編輯與送簽使用 A4 PDF（直式或橫式）</strong>
-                <span>非 A4 可先等比例轉換並確認預覽；原稿保留。上限 50 MB／300 頁。</span>
+                <strong>A4 直式、橫式皆可</strong>
+                <span>非 A4 可等比例轉換；原稿保留。</span>
                 <em id="uploadedPdfA4Status" role="status" aria-live="polite">尚未檢查 PDF 頁面尺寸。</em>
               </div>
               <div class="pdf-editor-upload-error" id="uploadedEditorUploadError" role="alert" aria-live="assertive" hidden>
@@ -1651,42 +1647,28 @@
               <div class="pdf-editor-toolbar" id="uploadedEditorToolTray" role="toolbar" aria-label="PDF 編輯工具">
                 <div class="pdf-editor-tool-group" role="group" aria-label="物件工具">
                   <button class="active" type="button" data-editor-tool="select" title="選取與移動">選取</button>
+                  <button type="button" data-editor-tool="text" title="新增文字">加文字</button>
+                  <button type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
                   <button type="button" data-editor-tool="seal" title="放置公司印章">印章</button>
                   <button id="uploadedEditorSeamToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorSeamPanel">騎縫章</button>
-                  <button type="button" data-editor-tool="text" title="新增文字">文字</button>
-                  <button class="advanced-only" type="button" data-editor-tool="replacement" title="安全移除原文後取代">取代文字</button>
-                  <button class="advanced-only" type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
-                  <button class="advanced-only" type="button" data-editor-tool="shape" title="插入矩形或線條">形狀</button>
-                  <button class="advanced-only" type="button" data-editor-tool="checkmark" title="加入勾選記號">勾選</button>
-                  <button class="advanced-only" type="button" data-editor-tool="highlight" title="加入螢光標記">螢光</button>
-                  <button class="advanced-only danger" type="button" data-editor-tool="redaction" title="安全移除選取內容">安全遮蔽</button>
+                  <details class="editor-disclosure" id="uploadedEditorMoreTools">
+                    <summary>更多工具</summary>
+                    <div class="editor-disclosure-content editor-extra-tools" role="group" aria-label="其他編輯工具">
+                      <button type="button" data-editor-tool="replacement" title="安全移除原文後取代">取代文字</button>
+                      <button type="button" data-editor-tool="shape" title="插入矩形或線條">形狀</button>
+                      <button type="button" data-editor-tool="checkmark" title="加入勾選記號">勾選</button>
+                      <button type="button" data-editor-tool="highlight" title="加入螢光標記">螢光</button>
+                      <button class="danger" type="button" data-editor-tool="redaction" title="永久移除衍生 PDF 的區域內容，原稿保留">安全遮蔽</button>
+                    </div>
+                  </details>
                 </div>
                 <div class="pdf-editor-tool-group editor-history-actions" role="group" aria-label="編輯歷程">
-                  <button id="uploadedEditorUndoBtn" type="button" disabled title="復原（⌘/Ctrl+Z）">復原</button>
-                  <button id="uploadedEditorRedoBtn" type="button" disabled title="重做（⌘/Ctrl+Shift+Z）">重做</button>
-                </div>
-                <div class="pdf-editor-tool-group editor-zoom-actions" role="group" aria-label="縮放">
-                  <button id="uploadedEditorZoomOutBtn" type="button" aria-label="縮小">−</button>
-                  <label class="pdf-editor-zoom-label"><span class="sr-only">縮放比例</span><input id="uploadedEditorZoom" type="range" min="25" max="300" step="5" value="100" /><output id="uploadedEditorZoomValue">100%</output></label>
-                  <button id="uploadedEditorZoomInBtn" type="button" aria-label="放大">＋</button>
-                  <button id="uploadedEditorFitBtn" type="button">符合頁面</button>
-                </div>
-                <div class="pdf-editor-mobile-actions mobile-only" role="group" aria-label="行動版面板">
-                  <button id="uploadedEditorThumbnailToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorThumbnailPane" aria-haspopup="dialog">頁面</button>
-                  <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorProperties" aria-haspopup="dialog">屬性</button>
+                  <button id="uploadedEditorUndoBtn" type="button" disabled title="復原（⌘/Ctrl+Z）" aria-label="復原">↶</button>
+                  <button id="uploadedEditorRedoBtn" type="button" disabled title="重做（⌘/Ctrl+Shift+Z）" aria-label="重做">↷</button>
                 </div>
               </div>
 
-              <section class="pdf-editor-seam-panel" id="uploadedEditorSeamPanel" hidden aria-label="批次騎縫章">
-                <h4>批次騎縫章</h4>
-                <p>每組將同一枚章分成左右半章，放在兩頁接縫；各組可獨立調整高度，尺寸不變。請先在下方選擇印章。</p>
-                <div class="pdf-editor-seam-actions">
-                  <label>頁面範圍<input id="uploadedEditorSeamPages" inputmode="numeric" placeholder="例如 1-5，留白為全部頁" /></label>
-                  <button class="primary-button" id="uploadedEditorSeamAddBtn" type="button">為相鄰頁建立騎縫章</button>
-                </div>
-                <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">至少需要兩頁 PDF。</p>
-                <div id="uploadedEditorSeamGroups"></div>
-              </section>
+              <p id="uploadedEditorToolNotice" role="status" hidden></p>
               <div class="electronic-seal-tools pdf-editor-general-options" id="uploadedEditorGeneralOptions">
                 <label>印章<select id="uploadedSealSealSelect"></select></label>
                 <label>套用頁面<select id="uploadedSealStampType">
@@ -1700,16 +1682,33 @@
                   <button class="secondary-button" id="addUploadedTextBtn" type="button">加入文字</button>
                 </div>
               </div>
+              <section class="pdf-editor-seam-panel" id="uploadedEditorSeamPanel" hidden aria-label="批次騎縫章">
+                <div class="editor-context-heading"><h4>騎縫章</h4><button id="uploadedEditorSeamCloseBtn" type="button" class="text-button" aria-label="關閉騎縫章設定">×</button></div>
+                <p>相鄰兩頁一組，自動錯開位置；可拖曳調整，尺寸固定。</p>
+                <div class="pdf-editor-seam-actions">
+                  <label>套用頁面<input id="uploadedEditorSeamPages" inputmode="numeric" placeholder="全部頁（或輸入 1-5）" /></label>
+                  <button class="primary-button" id="uploadedEditorSeamAddBtn" type="button">加入騎縫章</button>
+                </div>
+                <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">至少需要兩頁 PDF。</p>
+                <div id="uploadedEditorSeamGroups"></div>
+              </section>
 
               <div class="pdf-editor-shell">
                 <aside class="pdf-editor-thumbnails" id="uploadedEditorThumbnailPane" aria-label="縮圖與頁面管理">
                   <div class="pdf-editor-pane-heading">
                     <strong>頁面</strong>
                     <span id="uploadedEditorPageCount">0 頁</span>
-                    <button class="pdf-editor-pane-close mobile-only" id="uploadedEditorThumbnailCloseBtn" type="button" aria-label="關閉頁面面板">×</button>
+                    <button class="pdf-editor-pane-close" id="uploadedEditorThumbnailCloseBtn" type="button" aria-label="關閉頁面面板">×</button>
                   </div>
                   <div class="pdf-editor-thumbnail-list" id="uploadedPdfThumbnailList"></div>
-                  <div class="pdf-editor-page-import advanced-only">
+                  <div class="pdf-editor-page-actions" id="uploadedEditorPageActions" role="toolbar" aria-label="整理目前頁">
+                    <button type="button" data-editor-page-action="move-up">往前移</button>
+                    <button type="button" data-editor-page-action="move-down">往後移</button>
+                    <button type="button" data-editor-page-action="rotate-left">左轉</button>
+                    <button type="button" data-editor-page-action="rotate-right">右轉</button>
+                    <button class="danger" type="button" data-editor-page-action="delete">刪除頁面</button>
+                  </div>
+                  <div class="pdf-editor-page-import">
                     <input id="uploadedEditorImportPdfInput" type="file" accept="application/pdf,.pdf" multiple hidden />
                     <button class="secondary-button" id="uploadedEditorImportPdfBtn" type="button">匯入／合併 PDF</button>
                   </div>
@@ -1718,30 +1717,46 @@
                 <div class="uploaded-pdf-workspace pdf-editor-canvas-column">
                   <div class="uploaded-pdf-navigation" aria-label="PDF 頁面切換">
                     <button class="page-arrow" id="uploadedPdfPrevBtn" type="button" aria-label="上一頁">‹</button>
-                    <div class="uploaded-page-strip" id="uploadedPdfPageStrip"></div>
+                    <div class="uploaded-page-strip" id="uploadedPdfPageStrip"><select id="uploadedEditorPageSelect" aria-label="目前頁面"><option>尚無頁面</option></select></div>
                     <button class="page-arrow" id="uploadedPdfNextBtn" type="button" aria-label="下一頁">›</button>
+                    <button id="uploadedEditorThumbnailToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorThumbnailPane">頁面</button>
+                    <div class="editor-zoom-actions" role="group" aria-label="縮放">
+                      <button id="uploadedEditorZoomOutBtn" type="button" aria-label="縮小">−</button>
+                      <output id="uploadedEditorZoomValue" aria-label="縮放比例">100%</output>
+                      <button id="uploadedEditorZoomInBtn" type="button" aria-label="放大">＋</button>
+                      <button id="uploadedEditorFitBtn" type="button">適合頁面</button>
+                    </div>
+                    <details class="editor-disclosure" id="uploadedEditorViewOptions">
+                      <summary id="uploadedEditorViewSummary">檢視</summary>
+                      <div class="editor-disclosure-content">
+                        <label class="pdf-editor-review-picker" id="uploadedEditorReviewSwitch">
+                          <span>預覽版本</span>
+                          <select id="uploadedEditorReviewSelect" aria-label="預覽版本">
+                            <option value="edited">編輯版</option>
+                            <option value="original">原稿</option>
+                            <option value="prepared">送簽確認版</option>
+                            <option value="changes">按頁變更清單</option>
+                          </select>
+                        </label>
+                        <label class="pdf-editor-zoom-label">縮放<input id="uploadedEditorZoom" aria-label="縮放比例" type="range" min="25" max="300" step="5" value="100" /></label>
+                        <small id="uploadedPdfGeometryLabel">等待 PDF 幾何資訊</small>
+                      </div>
+                    </details>
                   </div>
-                  <div class="pdf-editor-page-actions advanced-only" id="uploadedEditorPageActions" role="toolbar" aria-label="頁面整理">
-                    <button type="button" data-editor-page-action="move-up">往前</button>
-                    <button type="button" data-editor-page-action="move-down">往後</button>
-                    <button type="button" data-editor-page-action="rotate-left">左轉</button>
-                    <button type="button" data-editor-page-action="rotate-right">右轉</button>
-                    <button class="danger" type="button" data-editor-page-action="delete">刪除頁面</button>
-                  </div>
-                  <label class="pdf-editor-review-picker" id="uploadedEditorReviewSwitch">
-                    <span>預覽版本</span>
-                    <select id="uploadedEditorReviewSelect" aria-label="預覽版本">
-                      <option value="edited">編輯版</option>
-                      <option value="original">原稿</option>
-                      <option value="prepared">送簽確認版</option>
-                      <option value="changes">按頁變更清單</option>
-                    </select>
-                  </label>
                   <div class="pdf-editor-scroll" id="uploadedEditorScroll">
                     <div class="uploaded-pdf-stage" id="uploadedPdfStage">
                       <canvas id="uploadedPdfCanvas" aria-label="PDF 目前頁面"></canvas>
                       <div class="uploaded-stamp-layer" id="uploadedStampLayer">
-                        <svg id="uploadedEditorSvgLayer" role="application" aria-label="PDF 編輯物件層"></svg>
+                        <svg id="uploadedEditorSvgLayer" role="application" aria-label="PDF 編輯物件層" tabindex="0"></svg>
+                      </div>
+                      <div id="uploadedEditorTextEdit" class="editor-inline-text" role="group" aria-label="直接編輯文字" hidden>
+                        <textarea id="uploadedEditorInlineText" aria-label="文字內容" rows="2" maxlength="1000" placeholder="輸入文字" autocomplete="off"></textarea>
+                        <div class="editor-inline-actions">
+                          <input id="uploadedEditorInlineFontSize" type="number" aria-label="文字字級" min="6" max="144" value="14" />
+                          <input id="uploadedEditorInlineColor" type="color" aria-label="文字顏色" value="#111827" />
+                          <button id="uploadedEditorInlineDone" type="button" aria-label="完成文字編輯">完成</button>
+                          <button id="uploadedEditorInlineCancel" type="button" aria-label="取消文字編輯">取消</button>
+                        </div>
                       </div>
                       <div class="uploaded-pdf-empty" id="uploadedPdfEmpty">
                         <strong>先上傳 A4 PDF</strong>
@@ -1751,9 +1766,14 @@
                     </div>
                     <div class="pdf-editor-change-summary" id="uploadedEditorChangeSummaryPanel" hidden></div>
                   </div>
-                  <div class="uploaded-page-meta">
+                  <div class="uploaded-page-meta sr-only">
                     <span id="uploadedPdfPageLabel">尚未載入頁面</span>
-                    <span id="uploadedPdfGeometryLabel">等待 PDF 幾何資訊</span>
+                  </div>
+                  <div id="uploadedEditorSelectionActions" class="editor-selection-actions" role="group" aria-label="已選物件操作" hidden>
+                    <button id="uploadedEditorEditTextBtn" type="button">編輯文字</button>
+                    <button id="uploadedEditorDuplicateBtn" type="button">複製一份</button>
+                    <button id="uploadedEditorDeleteBtn" type="button">刪除</button>
+                    <button id="uploadedEditorPropertiesToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorProperties" aria-haspopup="dialog">其他設定</button>
                   </div>
                 </div>
 
@@ -1761,7 +1781,7 @@
                   <div class="pdf-editor-pane-heading">
                     <strong>屬性</strong>
                     <span id="uploadedEditorSelectionCount">未選取</span>
-                    <button class="pdf-editor-pane-close mobile-only" id="uploadedEditorPropertiesCloseBtn" type="button" aria-label="關閉屬性面板">×</button>
+                    <button class="pdf-editor-pane-close" id="uploadedEditorPropertiesCloseBtn" type="button" aria-label="關閉屬性面板">×</button>
                   </div>
                   <div class="pdf-editor-property-empty" id="uploadedEditorPropertyEmpty">未選取物件</div>
                   <form class="pdf-editor-property-form" id="uploadedEditorPropertyForm" hidden>
@@ -1789,8 +1809,10 @@
                       <button type="button" data-editor-copy-selected>複製</button>
                       <button class="danger" type="button" data-editor-delete-selected>刪除</button>
                     </div>
-                    <label class="advanced-only">複製到頁面／區間<input id="uploadedEditorCopyPages" placeholder="例如 2-4, 7" /></label>
-                    <button class="secondary-button advanced-only" id="uploadedEditorCopyPagesBtn" type="button">複製到指定頁</button>
+                    <details class="editor-precision-settings"><summary>複製到其他頁</summary>
+                      <label>頁面／區間<input id="uploadedEditorCopyPages" placeholder="例如 2-4, 7" /></label>
+                      <button class="secondary-button" id="uploadedEditorCopyPagesBtn" type="button">複製到指定頁</button>
+                    </details>
                   </form>
                   <div class="pdf-editor-limits">
                     <span>50 MB／300 頁</span>
