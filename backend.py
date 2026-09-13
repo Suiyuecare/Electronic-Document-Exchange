@@ -21575,6 +21575,54 @@ def canDownloadOfficialDocument(
     return user_id in official_document_participant_ids(document, steps, actor_snapshots)
 
 
+def official_document_active_read_delegation(
+    document: Dict[str, Any],
+    steps: Iterable[Dict[str, Any]],
+    user: Dict[str, Any] | None,
+    *,
+    conn: sqlite3.Connection | None = None,
+    supabase_mode: bool = False,
+) -> Dict[str, Any] | None:
+    """Permit review only while this person's delegated step is current.
+
+    A delegate needs the original, prepared version and attachments before a
+    decision can be recorded. This temporary read path is not participation:
+    expired/revoked coverage or a superseded workflow generation grants no
+    archive access. After acting, decision_actor_user_id supplies that durable
+    access through the normal participant check instead.
+    """
+    if not user or not str(user.get("id") or ""):
+        return None
+    all_steps = list(steps)
+    generation = max((int(step.get("workflow_generation") or 1) for step in all_steps), default=0)
+    current = next((
+        step for step in all_steps
+        if int(step.get("workflow_generation") or 1) == generation
+        and step.get("step_key") == document.get("current_step")
+        and step.get("step_key") != "applicant_confirm"
+        and step.get("status") == "pending"
+        and OFFICIAL_DOCUMENT_STEP_STATUS.get(str(step.get("step_key") or "")) == document.get("current_status")
+    ), None)
+    if not current or current.get("approver_user_id") == user.get("id"):
+        return None
+    try:
+        return (
+            supabase_active_official_workflow_delegation(document, current, user)
+            if supabase_mode
+            else active_official_workflow_delegation(conn, document, current, user) if conn else None
+        )
+    except (PermissionError, ValueError) as error:
+        # A stale coverage record must deny that record, not break every other
+        # task in the list. Decision endpoints still call the strict lookup.
+        if str(error) in {
+            "official_workflow_delegation_actor_inactive",
+            "official_workflow_delegation_company_forbidden",
+            "official_workflow_delegation_ambiguous",
+        }:
+            return None
+        raise
+
+
 def official_application_package(
     document: Dict[str, Any],
     files: List[Dict[str, Any]],
@@ -21651,9 +21699,7 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         step for step in steps
         if step.get("step_key") == document.get("current_step") and step.get("status") == "pending"
     ), None)
-    active_delegation = None
-    if user and current_step and current_step.get("status") == "pending" and current_step.get("approver_user_id") != user.get("id"):
-        active_delegation = active_official_workflow_delegation(conn, document, current_step, user)
+    active_delegation = official_document_active_read_delegation(document, all_steps, user, conn=conn)
     if user and not is_participant and not active_delegation:
         if not official_document_user_same_company(user, document) or not str(user.get("company_id") or "").strip():
             raise PermissionError("official_document_company_forbidden")
@@ -21692,7 +21738,7 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         "correction": correction,
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
-        "can_download": is_participant,
+        "can_download": bool(is_participant or active_delegation),
         "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
         "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
@@ -21717,7 +21763,7 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
               OR EXISTS (
                 SELECT 1 FROM official_document_approval_steps participant_step
                 WHERE participant_step.document_id = d.id
-                  AND participant_step.approver_user_id = ?
+                  AND (participant_step.approver_user_id = ? OR participant_step.decision_actor_user_id = ?)
               )
               OR EXISTS (
                 SELECT 1 FROM approval_step_actor_snapshots participant_snapshot
@@ -21728,7 +21774,7 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
             )
             """
         )
-        params.extend([user_company_id, user["id"], user["id"], user["id"]])
+        params.extend([user_company_id, user["id"], user["id"], user["id"], user["id"]])
     if query.get("status"):
         where.append("d.current_status = ?")
         params.append(query["status"][0])
@@ -21815,7 +21861,7 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
               d.applicant_id = ?
               OR EXISTS (
                 SELECT 1 FROM official_document_approval_steps s
-                WHERE s.document_id = d.id AND s.approver_user_id = ?
+                WHERE s.document_id = d.id AND (s.approver_user_id = ? OR s.decision_actor_user_id = ?)
               )
               OR EXISTS (
                 SELECT 1 FROM approval_step_actor_snapshots a
@@ -21841,7 +21887,7 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
             """
         )
         timestamp = now()
-        params.extend([user["id"], user["id"], user["id"], user["id"], timestamp, timestamp])
+        params.extend([user["id"], user["id"], user["id"], user["id"], user["id"], timestamp, timestamp])
     sql = "SELECT d.* FROM official_documents d"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -21869,14 +21915,7 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
             ),
             None,
         )
-        active_delegation = None
-        if current_pending and current_pending.get("approver_user_id") != user.get("id"):
-            active_delegation = active_official_workflow_delegation(
-                conn,
-                item,
-                current_pending,
-                user,
-            )
+        active_delegation = official_document_active_read_delegation(item, all_steps, user, conn=conn)
         seal_context = official_seal_context_from_document(item)
         item["official_seal"] = seal_context
         item["document_category"] = (seal_context or {}).get("document_category") or ""
@@ -21895,7 +21934,7 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
             ),
             "",
         )
-        item["can_download"] = canDownloadOfficialDocument(
+        item["can_download"] = bool(active_delegation) or canDownloadOfficialDocument(
             user,
             item,
             all_steps,
@@ -21933,6 +21972,20 @@ def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]
         item["delegation_id"] = (
             active_delegation.get("id") if active_delegation else ""
         )
+        # SQL only narrows the candidate set. Historical pending rows can
+        # satisfy its delegation EXISTS even after a workflow is superseded;
+        # the current-generation authority above must decide final visibility.
+        if scope == "todo" and not (
+            item["can_act"]
+            or item["can_retry_stamp"]
+            or (dispatch_record and dispatch_record.get("dispatch_status") == "pending" and dispatch_record.get("dispatch_owner_user_id") == user.get("id"))
+        ):
+            continue
+        if scope not in {"mine", "todo"} and not item["can_download"] and (
+            not user_company_id
+            or not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"])
+        ):
+            continue
         rows.append(item)
     return rows
 
@@ -23167,6 +23220,26 @@ def _active_delegation_at(row: Dict[str, Any], timestamp: datetime | None = None
     return bool(row.get("status") == "active" and starts and ends and starts <= current < ends)
 
 
+def official_delegation_actor_qualification_current(
+    document: Dict[str, Any],
+    principal: Dict[str, Any],
+    delegate: Dict[str, Any],
+) -> bool:
+    """Finance role/company changes must invalidate old delegation coverage."""
+    try:
+        principal_profile = _finance_delegation_actor_profile(principal)
+        delegate_profile = _finance_delegation_actor_profile(delegate)
+    except PermissionError:
+        return False
+    company_id = str(document.get("company_id") or "").strip()
+    return bool(
+        company_id
+        and str(principal.get("company_id") or "").strip() == company_id
+        and str(delegate.get("company_id") or "").strip() == company_id
+        and all(principal_profile[key] == delegate_profile[key] for key in ("logging_role_key", "role", "job_level"))
+    )
+
+
 def active_official_workflow_delegation(
     conn: sqlite3.Connection,
     document: Dict[str, Any],
@@ -23195,6 +23268,8 @@ def active_official_workflow_delegation(
         raise PermissionError("official_workflow_delegation_actor_inactive")
     if str(active_delegate.get("company_id") or "") not in {"", str(document.get("company_id") or "")}:
         raise PermissionError("official_workflow_delegation_company_forbidden")
+    if not official_delegation_actor_qualification_current(document, principal, active_delegate):
+        return None
     return rows[0]
 
 
@@ -23228,6 +23303,8 @@ def supabase_active_official_workflow_delegation(
         raise PermissionError("official_workflow_delegation_actor_inactive")
     if str(active_delegate.get("company_id") or "") not in {"", str(document.get("company_id") or "")}:
         raise PermissionError("official_workflow_delegation_company_forbidden")
+    if not official_delegation_actor_qualification_current(document, principal, active_delegate):
+        return None
     return rows[0]
 
 
@@ -24840,7 +24917,7 @@ def official_document_download_file(conn: sqlite3.Connection, document_id: str, 
     document = official_document_row(conn, document_id)
     steps = official_document_steps(conn, document_id)
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, conn=conn):
         raise PermissionError("official_document_download_forbidden")
     # A clean stamped derivative must not become a bypass for an unscanned or
     # later-quarantined original/attachment that remains part of the package.
@@ -26035,7 +26112,8 @@ def _editor_assert_document_access(
         steps = official_document_steps(conn, document["id"])
         actor_snapshots = official_document_actor_snapshots(conn, document["id"])
         is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots)
-        if not is_participant:
+        active_delegation = None if is_participant else official_document_active_read_delegation(document, steps, user, conn=conn)
+        if not is_participant and not active_delegation:
             if (
                 not user_company_id
                 or user_company_id != str(document.get("company_id") or "")
@@ -36165,9 +36243,7 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         step for step in steps
         if step.get("step_key") == document.get("current_step") and step.get("status") == "pending"
     ), None)
-    active_delegation = None
-    if user and current_step and current_step.get("status") == "pending" and current_step.get("approver_user_id") != user.get("id"):
-        active_delegation = supabase_active_official_workflow_delegation(document, current_step, user)
+    active_delegation = official_document_active_read_delegation(document, all_steps, user, supabase_mode=True)
     if user and not is_participant and not active_delegation:
         if not official_document_user_same_company(user, document) or not str(user.get("company_id") or "").strip():
             raise PermissionError("official_document_company_forbidden")
@@ -36207,7 +36283,7 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         "correction": correction,
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
-        "can_download": is_participant,
+        "can_download": bool(is_participant or active_delegation),
         "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
         "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
@@ -36258,9 +36334,7 @@ def supabase_list_official_documents(query: Dict[str, List[str]] | None, session
             continue
         dispatch_record = supabase_official_dispatch_record(item["id"])
         current_pending = next((step for step in steps if step.get("status") == "pending" and step.get("step_key") == item.get("current_step")), None)
-        active_delegation = None
-        if current_pending and current_pending.get("approver_user_id") != user.get("id"):
-            active_delegation = supabase_active_official_workflow_delegation(item, current_pending, user)
+        active_delegation = official_document_active_read_delegation(item, all_steps, user, supabase_mode=True)
         is_current_todo = bool(current_pending and (current_pending.get("approver_user_id") == user.get("id") or active_delegation))
         is_dispatch_todo = bool(
             dispatch_record
@@ -36273,7 +36347,9 @@ def supabase_list_official_documents(query: Dict[str, List[str]] | None, session
             continue
         if scope == "todo" and not (is_current_todo or is_dispatch_todo or is_stamp_retry_todo):
             continue
-        if not scope and not is_applicant and not is_participant and (not user_company_id or not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"])):
+        # Unknown scope values must never bypass the normal record boundary.
+        # Only the explicit mine/todo views have their own narrower checks.
+        if scope not in {"mine", "todo"} and not is_applicant and not is_participant and not active_delegation and (not user_company_id or not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"])):
             continue
         seal_context = official_seal_context_from_document(item)
         item["official_seal"] = seal_context
@@ -36284,7 +36360,7 @@ def supabase_list_official_documents(query: Dict[str, List[str]] | None, session
         item["stamp_request"] = official_application_package(item, [], [], [], stamp_request).get("stamp_request")
         item["dispatch_record"] = dispatch_record
         item["current_step_name"] = next((step["step_name"] for step in steps if step.get("step_key") == item.get("current_step")), "")
-        item["can_download"] = is_participant
+        item["can_download"] = bool(is_participant or active_delegation)
         item["can_manage_dispatch"] = official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(
             user,
             item,
@@ -36329,7 +36405,8 @@ def _supabase_editor_assert_document_access(document: Dict[str, Any], session: D
         steps = supabase_official_document_steps(document["id"])
         actor_snapshots = supabase_official_document_actor_snapshots(document["id"])
         is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots)
-        if not is_participant:
+        active_delegation = None if is_participant else official_document_active_read_delegation(document, steps, user, supabase_mode=True)
+        if not is_participant and not active_delegation:
             if (
                 not user_company_id
                 or user_company_id != str(document.get("company_id") or "")
@@ -39895,7 +39972,7 @@ def supabase_official_document_download_file(document_id: str, file_id: str, ses
     document = supabase_official_document_row(document_id)
     steps = supabase_official_document_steps(document_id)
     actor_snapshots = supabase_official_document_actor_snapshots(document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, supabase_mode=True):
         raise PermissionError("official_document_download_forbidden")
     supabase_assert_official_document_uploads_av_clean(document)
     rows = supabase_filter_rows("official_document_files", {"id": file_id, "document_id": document_id}, limit=1)

@@ -78,6 +78,7 @@ def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *
             return detail
 
         def verify_saved_draft(auth, device):
+            saved_contacts = browser.evaluate("Object.fromEntries(['contactAddress','contactOwner','contactPhone','contactFax','contactEmail'].map(id=>[id,document.querySelector('#'+id).value]))")
             browser.run("select", "#composeOutputMode", "electronic")
             set_date("2026-09-15")
             browser.until("document.querySelectorAll('#draftPreview .draft-seal-placeholder').length===0")
@@ -99,6 +100,7 @@ def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *
             browser.evaluate("(async()=>{await beginOfficialCorrection(officialWorkflowItems.find(e=>e.id===" + json.dumps(first["id"]) + "));return true})()")
             browser.until("document.querySelector('#dispatchDate').value==='2026-09-16'&&document.querySelector('#composeOutputMode').value==='electronic'")
             require(browser.evaluate("document.querySelector('#dispatchNo').value") == number, "reopened_number_mismatch")
+            require(browser.evaluate("Object.fromEntries(['contactAddress','contactOwner','contactPhone','contactFax','contactEmail'].map(id=>[id,document.querySelector('#'+id).value]))") == saved_contacts, "reopened_contacts_mismatch")
             require(browser.evaluate("document.querySelector('#dispatchNo').readOnly&&document.querySelector('#composeSealFields').hidden"), "reopened_number_or_output_controls_mismatch")
             capture("#dispatchDate", f"{phase}-{device}-saved-draft-reopened.png")
             browser.click_visible("#composeNextBtn")
@@ -114,6 +116,7 @@ def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *
                 "firstDate": first["dispatch_date"], "secondDate": second["dispatch_date"],
                 "sameDocumentAndNumber": True, "savedOutputMode": second["output_mode"],
                 "reopenedFieldsMatched": True, "confirmationOpened": True,
+                "reopenedContactsMatched": True,
                 "finalStatus": final["current_status"], "noSubmission": True,
             }
 
@@ -172,9 +175,12 @@ def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *
                     "subject": "有關測試資料更新一案，請查照。",
                     "bodyText": "一、本函僅供隔離驗收，不送簽、不寄發。\n二、請協助更新測試資料。",
                 }
+                if browser.evaluate("document.querySelector('#composeContactToggleBtn').getAttribute('aria-expanded')!=='true'"):
+                    browser.click_visible("#composeContactToggleBtn")
                 for identity, value in values.items():
                     browser.run("fill", "#" + identity, value)
                 browser.until("document.querySelector('#draftPreview')?.textContent.includes('有關測試資料更新一案')")
+                require(browser.evaluate("document.querySelector('#contactAddress').value") == values["contactAddress"], "manual_contact_address_overwritten_before_save")
                 row = {"device": device, "fixtureContent": "same_synthetic_compose_document"}
                 capture("#composeForm", f"{phase}-{device}-compose-full.png", full=True)
                 capture("#composeCompanySelect", f"{phase}-{device}-form-top.png")

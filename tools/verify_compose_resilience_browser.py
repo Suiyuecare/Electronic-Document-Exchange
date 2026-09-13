@@ -12,18 +12,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import backend
 from tools.six_role_browser_acceptance import Browser, TELEMETRY, AUDIT_JS, require_local_origin
-from tests.support.five_account_browser_fixture import isolated_browser_session
+from tests.support.five_account_browser_fixture import BROWSER_ROLES, isolated_browser_session
 from tests.test_five_account_http_acceptance import FiveAccountHttpAcceptanceTest, QuietAcceptanceHandler
 
 
-def run(output):
+def run(output, roles=("staff", "ceo")):
+    output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     fixture = FiveAccountHttpAcceptanceTest
     original = QuietAcceptanceHandler.send_head
     def instrumented(handler):
         if urlparse(handler.path).path in {"/", "/index.html"}:
             data = (ROOT / "index.html").read_text().replace("<head>", "<head>" + TELEMETRY, 1).encode()
-            handler.send_response(200); handler.send_header("Content-Type", "text/html; charset=utf-8"); handler.send_header("Content-Length", str(len(data))); handler.end_headers()
+            handler.send_response(200); handler.send_header("Content-Type", "text/html; charset=utf-8"); handler.send_header("Content-Security-Policy", "connect-src 'self'"); handler.send_header("Content-Length", str(len(data))); handler.end_headers()
             return io.BytesIO(data)
         return original(handler)
     report = {"scope": "isolated_synthetic_local_no_submission", "rows": []}
@@ -31,10 +32,13 @@ def run(output):
         fixture.setUpClass()
         require_local_origin(fixture.origin)
         config = Path(fixture.tmp.name) / "browser.json"
-        config.write_text(json.dumps({"allowedDomains": ["127.0.0.1", "fonts.googleapis.com", "fonts.gstatic.com"], "headed": False}))
-        browser = Browser(config, session="compose-resilience", namespace="compose-sep11")
+        # Native file chooser automation can stall behind agent-browser's
+        # domain interceptor. The fixture document instead enforces same-origin
+        # API traffic with CSP, while every backend is a temporary local fixture.
+        config.write_text(json.dumps({"headed": False}))
+        browser = Browser(config, session=f"c-{time.monotonic_ns():x}"[-18:], namespace="compose-launch")
         try:
-            for role in ("staff", "ceo"):
+            for role in roles:
                 auth = isolated_browser_session(fixture, role)
                 for device, size in (("desktop", (1440, 1000)), ("mobile", (390, 844))):
                     browser.run("set", "viewport", *map(str, size))
@@ -48,6 +52,10 @@ def run(output):
                         raise AssertionError("initial_browser_verification_failed")
                     row = {"role": role, "device": device, "checks": {}}
                     checks = row["checks"]
+                    checks["dateDefaultsToTaipeiToday"] = browser.evaluate("document.querySelector('#dispatchDate').value===new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())")
+                    checks["faxDefaultsToNA"] = browser.evaluate("document.querySelector('#contactFax').value==='N/A'")
+                    browser.click_visible("#composeNextBtn")
+                    checks["missingFieldsStayEditableWithSummary"] = browser.evaluate("activeComposeStep==='fill'&&!document.querySelector('#composeValidationSummary').hidden&&!!document.querySelector('#composeForm [aria-invalid=true]')")
                     browser.run("fill", "#documentPurpose", "去識別化測試，申請更新公文資料。")
                     browser.until("composeSaveState.title==='私人雲端草稿已保存'&&!composeCloudOperation")
                     cloud_id = browser.evaluate("composeCloudDraftId")
@@ -69,13 +77,25 @@ def run(output):
                     category = browser.evaluate("[...document.querySelector('#composeApprovalCategorySelect').options].find(e=>e.textContent.includes('合作意向書')).value")
                     browser.run("select", "#composeApprovalCategorySelect", category)
                     browser.run("select", "#composeOutputMode", "electronic")
+                    browser.until("document.querySelector('#composeSealFields').hidden&&document.querySelectorAll('#draftPreview .draft-seal-placeholder').length===0")
+                    checks["electronicHidesSeals"] = browser.evaluate("document.querySelector('#composeSealFields').hidden&&document.querySelectorAll('#draftPreview .draft-seal-placeholder').length===0")
+                    browser.run("select", "#composeOutputMode", "physical")
+                    checks["physicalExposesSealSelection"] = browser.evaluate("!document.querySelector('#composeSealFields').hidden")
+                    browser.run("select", "#composeOutputMode", "electronic")
+                    if browser.evaluate("document.querySelector('#composeContactToggleBtn').getAttribute('aria-expanded')!=='true'"):
+                        browser.click_visible("#composeContactToggleBtn")
                     for name, value in {"recipient": "隔離受文機關", "contactOwner": "隔離承辦人", "contactAddress": "測試路一號", "contactEmail": "test@example.test", "bodyText": "一、本文件僅供本地隔離測試。"}.items():
                         browser.run("fill", "#"+name, value)
+                    checks["manualContactValuesRetained"] = browser.evaluate("document.querySelector('#contactOwner').value==='隔離承辦人'&&document.querySelector('#contactAddress').value==='測試路一號'&&document.querySelector('#contactEmail').value==='test@example.test'")
                     # Select real synthetic PDF attachments and fail only the second request.
                     first = output / f"fixture-{role}-{device}-a.pdf"
                     second = output / f"fixture-{role}-{device}-b.pdf"
                     first.write_bytes(fixture._make_attachment_pdf(1)); second.write_bytes(fixture._make_attachment_pdf(2))
                     browser.run("upload", "#attachments", str(first), str(second))
+                    checks["attachmentNamesPopulateEditableDescription"] = browser.evaluate("document.querySelector('#attachmentDetails').value.includes(" + json.dumps(first.name) + ")&&document.querySelector('#attachmentDetails').value.includes(" + json.dumps(second.name) + ")&&!document.querySelector('#attachmentDetails').readOnly")
+                    browser.run("fill", "#attachmentDetails", "附件一：合成申請資料；附件二：補充清冊")
+                    browser.until("document.querySelector('#draftPreview').textContent.includes('附件一：合成申請資料')")
+                    checks["previewUsesEditedDescriptionNotFileNames"] = browser.evaluate("document.querySelector('#draftPreview').textContent.includes('附件一：合成申請資料')&&!document.querySelector('#draftPreview').textContent.includes(" + json.dumps(first.name) + ")")
                     browser.evaluate("window.__uploadNames=[];window.__failSecond=true;window.fetch=async(url,opts)=>{if(/\\/official-documents\\/[^/]+\\/files$/.test(String(url))&&opts?.method==='POST'){const b=JSON.parse(opts.body);window.__uploadNames.push(b.file_name);if(b.file_name.endsWith('-b.pdf')&&window.__failSecond)return new Response(JSON.stringify({detail:'fixture_attachment_offline'}),{status:503,headers:{'Content-Type':'application/json'}})}return window.__fixtureFetch(url,opts)};true")
                     browser.click_visible("#saveDispatchDraftBtn")
                     browser.until("!composeSaveInFlight&&composeSaveState.tone==='error'")
@@ -139,5 +159,6 @@ def run(output):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(); parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--roles", nargs="+", choices=BROWSER_ROLES, default=["staff", "ceo"])
     args = parser.parse_args()
-    raise SystemExit(0 if run(args.output)["passed"] else 1)
+    raise SystemExit(0 if run(args.output, args.roles)["passed"] else 1)
