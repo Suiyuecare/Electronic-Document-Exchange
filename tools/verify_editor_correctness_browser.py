@@ -39,6 +39,9 @@ def main() -> int:
             handler.send_response(200)
             handler.send_header("Content-Type", "text/html; charset=utf-8")
             handler.send_header("Content-Length", str(len(data)))
+            # Keep fixture requests on localhost without intercepting binary
+            # File PUT bodies in agent-browser's allowedDomains proxy.
+            handler.send_header("Content-Security-Policy", "connect-src 'self'")
             handler.end_headers()
             return io.BytesIO(data)
         return original_head(handler)
@@ -49,8 +52,10 @@ def main() -> int:
         fixture.setUpClass()
         require_local_origin(fixture.origin)
         config = Path(fixture.tmp.name) / "browser.json"
-        config.write_text(json.dumps({"allowedDomains": ["127.0.0.1", "fonts.googleapis.com", "fonts.gstatic.com"], "headed": False}))
-        browser = Browser(config, session="editor-fix-0912", namespace="editor-fix-0912")
+        config.write_text(json.dumps({"headed": False}))
+        # Keep the isolated socket path below the macOS UNIX socket limit.
+        browser_session = f"ec-{time.monotonic_ns() % 100000000}"
+        browser = Browser(config, session=browser_session, namespace=browser_session)
         try:
             auth = isolated_browser_session(fixture, "staff")
             for device, dimensions in [("desktop", (1440, 1000)), ("mobile", (390, 844))]:
@@ -94,7 +99,8 @@ def main() -> int:
                 browser.click_visible("#uploadedSealApplicationToggleBtn")
                 row["checks"]["applicationCollapsedWithoutLosingValues"] = browser.evaluate("document.querySelector('#uploadedSealApplicationFields').hidden&&document.querySelector('#uploadedSealTitle').value.includes('合成測試')")
                 row["checks"]["approvalRouteStillVisible"] = browser.evaluate("document.querySelector('#uploadedSealApprovalRouteBadge').getClientRects().length>0")
-                browser.click_visible("#uploadedEditorModeAdvanced")
+                browser.click_visible("#uploadedEditorMoreTools > summary")
+                browser.click_visible('#uploadedEditorMoreTools [data-editor-tool="image"]')
                 # A plain synthetic rectangle, never a real seal image.
                 image_path = Path(fixture.tmp.name) / "synthetic.png"
                 Image.new("RGB", (32, 32), (250, 180, 80)).save(image_path, format="PNG")
@@ -107,7 +113,9 @@ def main() -> int:
                 image_state = image_readback.get("state") or image_readback.get("editor_state")
                 row["checks"]["serverReadbackContainsImage"] = sum(e.get("kind") == "image" for e in image_state["elements"]) == 1
                 # Deleting source page one must not shift retained source bindings.
+                browser.click_visible("#uploadedEditorThumbnailToggleBtn")
                 browser.click_visible('[data-editor-page-action="delete"]')
+                browser.run("dialog", "accept")
                 browser.until("uploadedSealEditorState.pages.length===2&&uploadedSealEditorRuntime.savedGeneration>=uploadedSealEditorRuntime.dirtyGeneration&&!uploadedSealEditorRuntime.saving")
                 document_id = browser.evaluate("uploadedSealEditorRuntime.documentId")
                 browser.run("open", fixture.origin + f"/?editor_reopen={time.monotonic_ns()}#electronicSeal")
@@ -124,7 +132,7 @@ def main() -> int:
                 browser.click_visible("#addUploadedTextBtn")
                 if device == "mobile":
                     browser.click_visible("#uploadedEditorPropertiesToggleBtn")
-                browser.click_visible(".editor-precision-settings > summary")
+                browser.click_visible("#uploadedEditorPropertyForm > .editor-precision-settings > summary")
                 edge = browser.evaluate("(()=>{const e=[...uploadedSealEditorRuntime.selectedIds].map(editorElementById)[0],p=currentUploadedEditorPage();return {x:p.widthPt-e.width,y:p.heightPt-e.height}})()")
                 browser.run("fill", "#uploadedEditorPropertyX", str(edge["x"]))
                 browser.run("fill", "#uploadedEditorPropertyY", str(edge["y"]))

@@ -25500,7 +25500,8 @@ function setUploadedEditorSaveStatus(kind, message) {
   const status = document.querySelector("#uploadedEditorSaveStatus");
   if (!status) return;
   status.className = `pdf-editor-save-status ${kind}`;
-  status.textContent = message;
+  status.textContent = kind === "saved" && /^已(?:保存 · revision|載入 revision) \d+$/.test(message) ? "已保存" : message;
+  status.title = message;
 }
 
 function clearUploadedEditorUploadError() {
@@ -26566,10 +26567,11 @@ function renderUploadedSeamGroups() {
   if (!target || !globalThis.EDOCSeam) return;
   const groups = [...globalThis.EDOCSeam.groups(uploadedSealEditorState)];
   const locked = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited";
-  document.querySelector("#uploadedEditorSeamAddBtn")?.toggleAttribute("disabled", locked || uploadedSealEditorState.pages.length < 2);
+  const hasUsableSeal = uploadedSealOptions.some(officialSealHasCurrentFile);
+  document.querySelector("#uploadedEditorSeamAddBtn")?.toggleAttribute("disabled", locked || !hasUsableSeal || uploadedSealEditorState.pages.length < 2);
   document.querySelector("#uploadedEditorSeamPages")?.toggleAttribute("disabled", locked);
   const status = document.querySelector("#uploadedEditorSeamStatus");
-  if (status) status.textContent = groups.length ? `共 ${groups.length} 組。可輸入距頁首高度，或在 PDF 拖曳半章；同組另一半會同步。` : "尚未建立騎縫章；至少需要兩頁 PDF。";
+  if (status) status.textContent = !hasUsableSeal ? "尚無可用印章，請先啟用印章。" : uploadedSealEditorState.pages.length < 2 ? "騎縫章需要至少兩頁 PDF。" : groups.length ? `已加入 ${groups.length} 組，可各別調整高度。` : "選好印章後，按「加入騎縫章」。";
   target.innerHTML = groups.map(([id, members], index) => {
     const first = members[0];
     const page = uploadedSealEditorState.pages.find((item) => item.pageId === first.pageId);
@@ -26745,6 +26747,16 @@ function svgEditorNode(name, attributes = {}) {
 function appendEditorElementVisual(group, element, rect) {
   const selected = uploadedSealEditorRuntime.selectedIds.has(element.id);
   const properties = element.properties || {};
+  // A <g> has no painted area of its own. Keep an explicit hit target behind
+  // the visual so text/lines can be selected directly, including on touch.
+  const hitWidth = Math.max(44, rect.width);
+  const hitHeight = Math.max(44, rect.height);
+  group.append(svgEditorNode("rect", {
+    x: rect.left - (hitWidth - rect.width) / 2,
+    y: rect.top - (hitHeight - rect.height) / 2,
+    width: hitWidth, height: hitHeight, fill: "transparent",
+    class: "editor-object-hit", "aria-hidden": "true"
+  }));
   if (element.kind === "seal") {
     const previewBinding = uploadedEditorSealPreviewBinding(properties);
     const preview = activeUploadedEditorSealPreviewUrl(previewBinding);
@@ -26848,7 +26860,7 @@ function calculateUploadedEditorFitScale(pageRuntime, rotation) {
   const scroll = document.querySelector("#uploadedEditorScroll");
   if (!scroll || !pageRuntime) return 1;
   const baseViewport = pageRuntime.proxy.getViewport({ scale: 1, rotation });
-  const availableWidth = Math.max(280, scroll.clientWidth - 34);
+  const availableWidth = Math.max(1, scroll.clientWidth - 34);
   const availableHeight = Math.max(360, Math.min(window.innerHeight * 0.72, 920));
   return Math.max(0.25, Math.min(2, availableWidth / baseViewport.width, availableHeight / baseViewport.height));
 }
@@ -27186,7 +27198,8 @@ async function showUploadedEditorReview(mode) {
 async function renderUploadedEditorThumbnail(pageId, canvas) {
   const runtime = uploadedEditorPageRuntime(pageId);
   const page = uploadedSealEditorState.pages.find((item) => item.pageId === pageId);
-  if (!runtime || !page || canvas.dataset.rendered === `${page.rotation}`) return;
+  if (!runtime || !page || canvas.dataset.rendered === `${page.rotation}` || canvas.dataset.rendering === `${page.rotation}`) return;
+  canvas.dataset.rendering = String(page.rotation);
   const base = runtime.proxy.getViewport({ scale: 1, rotation: page.rotation });
   const viewport = runtime.proxy.getViewport({ scale: Math.min(0.24, 116 / Math.max(1, base.width)), rotation: page.rotation });
   const ratio = Math.min(1.5, window.devicePixelRatio || 1);
@@ -27199,14 +27212,36 @@ async function renderUploadedEditorThumbnail(pageId, canvas) {
     canvas.dataset.rendered = String(page.rotation);
   } catch (error) {
     canvas.dataset.rendered = "error";
+  } finally {
+    delete canvas.dataset.rendering;
   }
 }
 
 function renderUploadedEditorThumbnails() {
   const list = document.querySelector("#uploadedPdfThumbnailList");
   if (!list) return;
+  // Editing text or autosaving must not destroy every rendered thumbnail.
+  const signature = JSON.stringify(uploadedSealEditorState.pages.map((page) => [page.pageId, page.rotation, page.sourceAssetId]));
+  if (list.dataset.pageSignature === signature) {
+    list.querySelectorAll("[data-page-id]").forEach((button) => {
+      const active = button.dataset.pageId === uploadedSealEditorRuntime.currentPageId;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-current", active ? "page" : "false");
+    });
+    // A reopened draft renders once before its PDF assets finish hydrating.
+    // Retry only missing thumbnails after those assets become available.
+    list.querySelectorAll("canvas").forEach((canvas) => {
+      const pageId = canvas.closest("[data-page-id]")?.dataset.pageId;
+      const page = uploadedSealEditorState.pages.find((item) => item.pageId === pageId);
+      if (!page || !uploadedEditorPageRuntime(pageId) || canvas.dataset.rendering || canvas.dataset.rendered === String(page.rotation)) return;
+      uploadedSealEditorRuntime.thumbnailObserver?.unobserve(canvas);
+      uploadedSealEditorRuntime.thumbnailObserver?.observe(canvas);
+    });
+    return;
+  }
+  list.dataset.pageSignature = signature;
   list.innerHTML = uploadedSealEditorState.pages.length
-    ? uploadedSealEditorState.pages.map((page, index) => `<button class="pdf-editor-thumbnail ${page.pageId === uploadedSealEditorRuntime.currentPageId ? "active" : ""}" type="button" draggable="true" data-page-id="${escapeDraftHtml(page.pageId)}"><canvas aria-hidden="true"></canvas><span>${index + 1}</span><small>${Math.round(page.widthPt)} × ${Math.round(page.heightPt)} pt${page.rotation ? ` · ${page.rotation}°` : ""}</small></button>`).join("")
+    ? uploadedSealEditorState.pages.map((page, index) => `<button class="pdf-editor-thumbnail ${page.pageId === uploadedSealEditorRuntime.currentPageId ? "active" : ""}" type="button" draggable="true" data-page-id="${escapeDraftHtml(page.pageId)}" aria-label="第 ${index + 1} 頁" aria-current="${page.pageId === uploadedSealEditorRuntime.currentPageId ? "page" : "false"}"><canvas aria-hidden="true"></canvas><span>第 ${index + 1} 頁</span></button>`).join("")
     : `<p class="empty-text">尚未載入頁面</p>`;
   list.querySelectorAll("[data-page-id]").forEach((button) => {
     button.addEventListener("click", () => setUploadedSealPage(button.dataset.pageId));
@@ -27222,8 +27257,10 @@ function renderUploadedEditorThumbnails() {
   uploadedSealEditorRuntime.thumbnailObserver = new IntersectionObserver((entries) => {
     entries.filter((entry) => entry.isIntersecting).forEach((entry) => {
       const button = entry.target.closest("[data-page-id]");
-      if (button) void renderUploadedEditorThumbnail(button.dataset.pageId, entry.target);
-      uploadedSealEditorRuntime.thumbnailObserver?.unobserve(entry.target);
+      if (button) void renderUploadedEditorThumbnail(button.dataset.pageId, entry.target).then(() => {
+        const page = uploadedSealEditorState.pages.find((item) => item.pageId === button.dataset.pageId);
+        if (page && entry.target.dataset.rendered === String(page.rotation)) uploadedSealEditorRuntime.thumbnailObserver?.unobserve(entry.target);
+      });
     });
   }, { root: list, rootMargin: "180px" });
   list.querySelectorAll("canvas").forEach((canvas) => uploadedSealEditorRuntime.thumbnailObserver.observe(canvas));
@@ -27265,9 +27302,35 @@ function setUploadedEditorTool(tool) {
   if (uploadedSealEditorRuntime.mode === "general" && !["select", "seal", "text"].includes(tool)) return;
   uploadedSealEditorRuntime.tool = tool;
   uploadedSealPlacementMode = tool;
+  closeUploadedEditorSeamPanel();
   document.querySelectorAll("[data-editor-tool]").forEach((button) => button.classList.toggle("active", button.dataset.editorTool === tool));
   if (tool === "image") document.querySelector("#uploadedEditorImageInput")?.click();
   renderUploadedSealWorkbench();
+}
+
+function chooseUploadedEditorTool(tool) {
+  if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
+  if (!["select", ...PDF_EDITOR_ALLOWED_KINDS].includes(tool)) return;
+  if (!["select", "seal", "text"].includes(tool)) setUploadedEditorMode("advanced");
+  setUploadedEditorTool(tool);
+  closeUploadedEditorDisclosures(null, true);
+  if (["text", "replacement"].includes(tool)) document.querySelector("#uploadedSealTextInput")?.focus({ preventScroll: true });
+}
+
+function closeUploadedEditorSeamPanel() {
+  const panel = document.querySelector("#uploadedEditorSeamPanel");
+  if (panel) panel.hidden = true;
+  document.querySelector("#uploadedEditorSeamToggleBtn")?.setAttribute("aria-expanded", "false");
+  document.querySelector("#uploadedPdfEditor")?.setAttribute("data-seam-open", "false");
+}
+
+function closeUploadedEditorDisclosures(except = null, restoreFocus = false) {
+  document.querySelectorAll("#uploadedPdfEditor .editor-disclosure[open]").forEach((details) => {
+    if (details === except) return;
+    const focused = details.contains(document.activeElement);
+    details.open = false;
+    if (restoreFocus && focused) details.querySelector("summary")?.focus();
+  });
 }
 
 function setUploadedEditorZoom(value, { fit = false } = {}) {
@@ -27602,10 +27665,12 @@ function reorderUploadedEditorPage(sourceId, targetId) {
 }
 
 function runUploadedEditorPageAction(action) {
+  if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
   const index = currentUploadedEditorPageIndex();
   const page = currentUploadedEditorPage();
   if (!page || index < 0) return;
   if (action === "delete" && uploadedSealEditorState.pages.length === 1) return showToast("文件至少需要保留一頁。");
+  if (action === "delete" && !window.confirm(`刪除第 ${index + 1} 頁及該頁編輯？可按「復原」還原，原始 PDF 仍會保留。`)) return;
   commitUploadedEditorMutation((state) => {
     const currentIndex = state.pages.findIndex((item) => item.pageId === page.pageId);
     if (action === "move-up" && currentIndex > 0) [state.pages[currentIndex - 1], state.pages[currentIndex]] = [state.pages[currentIndex], state.pages[currentIndex - 1]];
@@ -28365,8 +28430,8 @@ function renderUploadedSealAvailabilityNotice(hasUsableSeal) {
   if (hasUsableSeal) return;
   const canManage = isCompanySealCustodian() && isRouteAllowed("seals");
   notice.innerHTML = canManage
-    ? `可先上傳 PDF、加文字並保存草稿；目前尚無可用印章，啟用後即可放章與送簽。<button class="text-button" type="button" data-open-seal-settings>前往系統設定處理印章</button>`
-    : "可先上傳 PDF、加文字並保存草稿；目前尚無可用印章，請由執行長或行政部門主任在「系統設定 → 印章檔案」啟用後再放章與送簽。";
+    ? `尚無可用印章；可編輯並存草稿，暫不能用印送簽。<button class="text-button" type="button" data-open-seal-settings>設定印章</button>`
+    : "尚無可用印章；可編輯並存草稿。請聯絡執行長或行政主任啟用後再用印送簽。";
   notice.querySelector("[data-open-seal-settings]")?.addEventListener("click", () => {
     setView("seals");
     openIntegratedPageSection("seals");
@@ -28428,6 +28493,7 @@ function renderUploadedSealWorkbench() {
     editor.dataset.uploading = String(uploadedSealEditorRuntime.uploading);
     editor.dataset.reviewMode = uploadedSealEditorRuntime.reviewMode;
     editor.dataset.hasDocument = String(uploadedSealEditorState.pages.length > 0);
+    editor.dataset.activeTool = uploadedSealEditorRuntime.tool;
   }
   const sourceInput = document.querySelector("#uploadedSealPdfInput");
   if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
@@ -28467,8 +28533,12 @@ function renderUploadedSealWorkbench() {
     reviewSelect.value = uploadedSealEditorRuntime.reviewMode;
     reviewSelect.disabled = !uploadedSealEditorState.pages.length || uploadedSealEditorRuntime.uploading;
   }
+  const viewSummary = document.querySelector("#uploadedEditorViewSummary");
+  if (viewSummary) viewSummary.textContent = ({ edited: "檢視", original: "原稿・唯讀", prepared: "確認版・唯讀", changes: "變更清單" })[uploadedSealEditorRuntime.reviewMode] || "檢視";
+  if (reviewReadOnly || uploadedSealEditorRuntime.locked) closeUploadedEditorSeamPanel();
   document.querySelectorAll("[data-editor-tool]").forEach((button) => {
     button.classList.toggle("active", button.dataset.editorTool === uploadedSealEditorRuntime.tool);
+    button.setAttribute("aria-pressed", String(button.dataset.editorTool === uploadedSealEditorRuntime.tool));
     button.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
   });
   const hasUsableSeal = uploadedSealOptions.some(officialSealHasCurrentFile);
@@ -28477,6 +28547,15 @@ function renderUploadedSealWorkbench() {
   if (sealTool) {
     sealTool.disabled = sealTool.disabled || !hasUsableSeal;
     sealTool.title = hasUsableSeal ? "" : "目前公司沒有可用的 current 印章版本，請由執行長或行政部門主任到系統設定處理。";
+  }
+  const seamToggle = document.querySelector("#uploadedEditorSeamToggleBtn");
+  if (seamToggle) seamToggle.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
+  const moreSummary = document.querySelector("#uploadedEditorMoreTools > summary");
+  if (moreSummary) moreSummary.textContent = ({ replacement: "取代文字", image: "圖片", shape: "形狀", checkmark: "勾選", highlight: "螢光", redaction: "安全遮蔽" })[uploadedSealEditorRuntime.tool] || "更多工具";
+  const toolNotice = document.querySelector("#uploadedEditorToolNotice");
+  if (toolNotice) {
+    toolNotice.hidden = uploadedSealEditorRuntime.tool !== "redaction" || reviewReadOnly;
+    toolNotice.textContent = "遮蔽會永久移除編輯版的區域內容；原稿保留。";
   }
   document.querySelectorAll("[data-editor-page-action], [data-editor-layer], [data-editor-copy-selected], [data-editor-delete-selected]").forEach((control) => {
     control.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
@@ -28490,13 +28569,14 @@ function renderUploadedSealWorkbench() {
   renderUploadedEditorSubmissionActions();
   document.querySelectorAll("[data-uploaded-placement-mode]").forEach((button) => button.classList.toggle("active", button.dataset.uploadedPlacementMode === uploadedSealPlacementMode));
   const generalOptions = document.querySelector("#uploadedEditorGeneralOptions");
-  if (generalOptions) generalOptions.hidden = !["seal", "text", "replacement"].includes(uploadedSealEditorRuntime.tool);
+  const seamOpen = document.querySelector("#uploadedEditorSeamPanel")?.hidden === false;
+  if (generalOptions) generalOptions.hidden = !seamOpen && !["seal", "text", "replacement"].includes(uploadedSealEditorRuntime.tool);
   document.querySelector("#uploadedSealTextTools")?.toggleAttribute("hidden", !["text", "replacement"].includes(uploadedSealEditorRuntime.tool));
   const textInputLabel = document.querySelector("#uploadedEditorTextInputLabel");
   const textInput = document.querySelector("#uploadedSealTextInput");
   if (textInputLabel) textInputLabel.textContent = uploadedSealEditorRuntime.tool === "replacement" ? "取代後文字（舊內容會安全移除）" : "文字";
   if (textInput) textInput.placeholder = uploadedSealEditorRuntime.tool === "replacement" ? "輸入安全取代後的新文字，再點選文件位置" : "輸入要加入的文字";
-  document.querySelector("#uploadedSealSealSelect")?.closest("label")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
+  document.querySelector("#uploadedSealSealSelect")?.closest("label")?.toggleAttribute("hidden", !seamOpen && uploadedSealEditorRuntime.tool !== "seal");
   document.querySelector("#uploadedSealStampType")?.closest("label")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
   document.querySelector("#addSelectedStampBtn")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
   const status = document.querySelector("#uploadedSealPdfStatus");
@@ -28507,17 +28587,23 @@ function renderUploadedSealWorkbench() {
   if (pageCount) pageCount.textContent = `${uploadedSealEditorState.pages.length} 頁`;
   const currentIndex = currentUploadedEditorPageIndex();
   const page = currentUploadedEditorPage();
+  const fileMeta = document.querySelector("#uploadedEditorFileMeta");
+  if (fileMeta) fileMeta.textContent = uploadedSealEditorState.pages.length
+    ? `${uploadedSealEditorState.pages.length} 頁${document.querySelector("#uploadedPdfA4Rule")?.dataset.state === "ok" ? " · A4" : ""} · 原稿保留`
+    : "PDF · 上限 50 MB／300 頁";
   const pageLabel = document.querySelector("#uploadedPdfPageLabel");
   if (pageLabel) pageLabel.textContent = page ? `第 ${currentIndex + 1} / ${uploadedSealEditorState.pages.length} 頁` : "尚未載入頁面";
   const geometry = document.querySelector("#uploadedPdfGeometryLabel");
   if (geometry) geometry.textContent = page ? `${Math.round(page.widthPt)} × ${Math.round(page.heightPt)} pt · CropBox · ${page.rotation}°` : "等待 PDF 幾何資訊";
-  const strip = document.querySelector("#uploadedPdfPageStrip");
-  if (strip) {
-    strip.innerHTML = uploadedSealEditorState.pages.length
-      ? uploadedSealEditorState.pages.map((item, index) => `<button class="uploaded-page-chip ${item.pageId === uploadedSealEditorRuntime.currentPageId ? "active" : ""}" type="button" data-uploaded-page="${escapeDraftHtml(item.pageId)}" aria-label="前往第 ${index + 1} 頁">${index + 1}</button>`).join("")
-      : `<span>頁面將顯示於此</span>`;
-    strip.querySelectorAll("[data-uploaded-page]").forEach((button) => button.addEventListener("click", () => setUploadedSealPage(button.dataset.uploadedPage)));
-    strip.querySelector(".active")?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  const pageSelect = document.querySelector("#uploadedEditorPageSelect");
+  if (pageSelect) {
+    const signature = uploadedSealEditorState.pages.map((item) => item.pageId).join(",");
+    if (pageSelect.dataset.pageSignature !== signature) {
+      pageSelect.innerHTML = uploadedSealEditorState.pages.map((item, index) => `<option value="${escapeDraftHtml(item.pageId)}">${index + 1} / ${uploadedSealEditorState.pages.length} 頁</option>`).join("");
+      pageSelect.dataset.pageSignature = signature;
+    }
+    pageSelect.value = uploadedSealEditorRuntime.currentPageId || "";
+    pageSelect.disabled = !page || uploadedSealEditorRuntime.uploading;
   }
   const prev = document.querySelector("#uploadedPdfPrevBtn");
   const next = document.querySelector("#uploadedPdfNextBtn");
@@ -30662,7 +30748,16 @@ function closeUploadedEditorMobileDrawer({ restoreFocus = true } = {}) {
 }
 
 function setUploadedEditorMobileDrawer(kind, open, trigger = null) {
-  if (!uploadedEditorMobileDrawerIsCompact()) return closeUploadedEditorMobileDrawer({ restoreFocus: false });
+  if (!uploadedEditorMobileDrawerIsCompact()) {
+    const editor = document.querySelector("#uploadedPdfEditor");
+    if (kind !== "thumbnails" || !open) return closeUploadedEditorMobileDrawer();
+    editor?.setAttribute("data-thumbnails-open", "true");
+    document.querySelector("#uploadedEditorThumbnailToggleBtn")?.setAttribute("aria-expanded", "true");
+    document.querySelector("#uploadedEditorThumbnailPane")?.removeAttribute("aria-hidden");
+    uploadedEditorMobileDrawerReturnFocus = trigger || document.activeElement;
+    document.querySelector("#uploadedEditorThumbnailCloseBtn")?.focus({ preventScroll: true });
+    return;
+  }
   if (!open) return closeUploadedEditorMobileDrawer();
   const editor = document.querySelector("#uploadedPdfEditor");
   const backdrop = document.querySelector("#uploadedEditorMobileBackdrop");
@@ -30690,6 +30785,9 @@ function setUploadedEditorMobileDrawer(kind, open, trigger = null) {
 }
 
 function syncUploadedEditorMobileDrawer() {
+  const pageButton = document.querySelector("#uploadedEditorThumbnailToggleBtn");
+  if (uploadedEditorMobileDrawerIsCompact()) pageButton?.setAttribute("aria-haspopup", "dialog");
+  else pageButton?.removeAttribute("aria-haspopup");
   if (!uploadedEditorMobileDrawerIsCompact()) closeUploadedEditorMobileDrawer({ restoreFocus: false });
 }
 
@@ -30710,9 +30808,20 @@ document.querySelector("#uploadedSealForm")?.addEventListener("invalid", () => {
 
 document.querySelector("#uploadedEditorSeamToggleBtn")?.addEventListener("click", (event) => {
   const panel = document.querySelector("#uploadedEditorSeamPanel");
-  panel.hidden = !panel.hidden;
-  event.currentTarget.setAttribute("aria-expanded", String(!panel.hidden));
-  if (!panel.hidden) { setUploadedEditorTool("seal"); renderUploadedSeamGroups(); panel.scrollIntoView({ block: "nearest" }); }
+  if (!panel || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
+  if (!panel.hidden) { chooseUploadedEditorTool("select"); return; }
+  // Seam stamping uses its group action. Canvas taps only select/move members,
+  // never accidentally add a regular full seal while this panel is open.
+  setUploadedEditorTool("select");
+  closeUploadedEditorDisclosures();
+  panel.hidden = false;
+  event.currentTarget.setAttribute("aria-expanded", "true");
+  document.querySelector("#uploadedPdfEditor")?.setAttribute("data-seam-open", "true");
+  renderUploadedSealWorkbench();
+});
+document.querySelector("#uploadedEditorSeamCloseBtn")?.addEventListener("click", () => {
+  chooseUploadedEditorTool("select");
+  document.querySelector("#uploadedEditorSeamToggleBtn")?.focus({ preventScroll: true });
 });
 document.querySelector("#uploadedEditorSeamAddBtn")?.addEventListener("click", addUploadedSeamGroups);
 document.querySelector("#addSelectedStampBtn")?.addEventListener("click", () => addUploadedStamp(document.querySelector("#uploadedSealStampType")?.value || "current_page"));
@@ -30749,7 +30858,31 @@ document.querySelector("#uploadedSealApprovalCategorySelect")?.addEventListener(
   void refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true });
 });
 document.querySelectorAll("button[data-editor-mode]").forEach((button) => button.addEventListener("click", () => setUploadedEditorMode(button.dataset.editorMode)));
-document.querySelectorAll("[data-editor-tool]").forEach((button) => button.addEventListener("click", () => setUploadedEditorTool(button.dataset.editorTool)));
+document.querySelectorAll("[data-editor-tool]").forEach((button) => button.addEventListener("click", () => chooseUploadedEditorTool(button.dataset.editorTool)));
+document.querySelector("#uploadedEditorPageSelect")?.addEventListener("change", (event) => setUploadedSealPage(event.target.value));
+document.querySelector("#uploadedSealTextInput")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing) return;
+  event.preventDefault();
+  if (!document.querySelector("#addUploadedTextBtn")?.disabled) addUploadedTextAtPoint();
+});
+document.querySelectorAll("#uploadedPdfEditor .editor-disclosure").forEach((details) => {
+  details.addEventListener("toggle", () => {
+    if (details.open) closeUploadedEditorDisclosures(details);
+  });
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!event.target.closest?.("#uploadedPdfEditor .editor-disclosure")) closeUploadedEditorDisclosures();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const details = document.querySelector("#uploadedPdfEditor .editor-disclosure[open]");
+  if (details) { event.preventDefault(); closeUploadedEditorDisclosures(null, true); }
+  else if (!uploadedEditorMobileDrawerIsCompact() && document.querySelector("#uploadedPdfEditor")?.dataset.thumbnailsOpen === "true") closeUploadedEditorMobileDrawer();
+  else if (document.querySelector("#uploadedEditorSeamPanel")?.hidden === false) {
+    chooseUploadedEditorTool("select");
+    document.querySelector("#uploadedEditorSeamToggleBtn")?.focus({ preventScroll: true });
+  }
+});
 document.querySelector("#uploadedPdfPrevBtn")?.addEventListener("click", () => setUploadedSealPage(uploadedSealCurrentPage - 1));
 document.querySelector("#uploadedPdfNextBtn")?.addEventListener("click", () => setUploadedSealPage(uploadedSealCurrentPage + 1));
 document.querySelector("#uploadedEditorUndoBtn")?.addEventListener("click", undoUploadedEditor);
@@ -30791,8 +30924,12 @@ document.addEventListener("keydown", (event) => {
     editor?.dataset.thumbnailsOpen === "true" ? "#uploadedEditorThumbnailPane" : "#uploadedEditorProperties"
   );
   const focusable = [...(openPane?.querySelectorAll(
-    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
-  ) || [])].filter((element) => element instanceof HTMLElement && element.offsetParent !== null);
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])'
+  ) || [])].filter((element) => {
+    if (!(element instanceof HTMLElement) || element.offsetParent === null) return false;
+    const closed = element.closest("details:not([open])");
+    return !closed || closed.querySelector(":scope > summary")?.contains(element);
+  });
   if (!focusable.length) return;
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
@@ -30819,7 +30956,10 @@ document.querySelector("#uploadedEditorImageInput")?.addEventListener("change", 
 document.querySelector("#uploadedPdfEmptyUploadBtn")?.addEventListener("click", openUploadedPdfPicker);
 document.querySelector("#uploadedPdfReplaceBtn")?.addEventListener("click", openUploadedPdfPicker);
 document.querySelectorAll("[data-editor-page-action]").forEach((button) => button.addEventListener("click", () => runUploadedEditorPageAction(button.dataset.editorPageAction)));
-document.querySelector("#uploadedEditorReviewSelect")?.addEventListener("change", (event) => void showUploadedEditorReview(event.target.value));
+document.querySelector("#uploadedEditorReviewSelect")?.addEventListener("change", (event) => {
+  closeUploadedEditorDisclosures(null, true);
+  void showUploadedEditorReview(event.target.value);
+});
 document.querySelector("#clearUploadedStampsBtn")?.addEventListener("click", () => {
   if (!uploadedSealEditorState.elements.length || uploadedSealEditorRuntime.locked) return;
   if (!window.confirm("確定清除目前草稿的全部編輯物件？原始 PDF 不會被刪除。")) return;
