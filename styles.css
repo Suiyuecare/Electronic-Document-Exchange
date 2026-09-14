@@ -10781,6 +10781,13 @@ textarea {
   z-index: 0;
 }
 
+.official-draft-preview .draft-seal-layer,
+.draft-preview-panel.live .official-draft-preview .draft-seal-layer,
+.official-draft-preview .draft-seal-layer .draft-seal-placeholder,
+.draft-preview-panel.live .official-draft-preview .draft-seal-layer .draft-seal-placeholder {
+  z-index: 2;
+}
+
 .official-draft-preview .draft-file-meta,
 .draft-preview-panel.live .official-draft-preview .draft-file-meta {
   display: grid;
