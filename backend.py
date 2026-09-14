@@ -213,7 +213,9 @@ EDOC_A4_WIDTH_PT = 210 / 25.4 * 72
 EDOC_A4_HEIGHT_PT = 297 / 25.4 * 72
 EDOC_A4_PAGE_TOLERANCE_PT = 1.0
 EDOC_EDITOR_SCHEMA_VERSION = 2
-EDOC_EDITOR_RENDERER_VERSION = "pymupdf-1.26.5-editor-v3-kai-text-front"
+EDOC_EDITOR_LEGACY_TEXT_FRONT_RENDERER_VERSION = "pymupdf-1.26.5-editor-v3-kai-text-front"
+EDOC_EDITOR_RENDERER_VERSION = "pymupdf-1.26.5-editor-v4-seal-front"
+SEAL_FRONT_LAYER_POLICY = "company_seal_above_all_content"
 EDOC_EDITOR_PREVIEW_TTL_SECONDS = 300
 EDOC_EDITOR_TUS_CHUNK_SIZE = 6 * 1024 * 1024
 EDOC_STAMP_CLAIM_LEASE_SECONDS = max(60, min(1800, int(os.getenv("EDOC_STAMP_CLAIM_LEASE_SECONDS", "300"))))
@@ -11653,7 +11655,7 @@ def roc_date_string(value: Any = None) -> str:
     return f"中華民國{parsed.year - 1911}年{parsed.month}月{parsed.day}日"
 
 
-OFFICIAL_PDF_RENDERER_VERSION = "reportlab-4.4.9-formal-tw-v5-manual-edukai-5.1"
+OFFICIAL_PDF_RENDERER_VERSION = "reportlab-4.4.9-formal-tw-v6-manual-edukai-5.1-seal-front"
 # The supplied official-writing manual reserves 25 mm on all four sides of
 # the A4 body, including 15 mm binding space plus 10 mm on the left.
 OFFICIAL_PDF_CONTENT_LEFT = 25 / 25.4 * 72
@@ -12311,12 +12313,7 @@ def draw_official_page_stamps(
     page_number: int,
     font_name: str,
 ) -> None:
-    """Draw company seals below all official-letter text.
-
-    ReportLab writes in paint order. Keeping this in a dedicated first pass
-    makes the business rule explicit: company large/small seals are the
-    annotation background, while the official document text remains legible.
-    """
+    """Paint new official-letter seal placeholders after all document content."""
     for stamp in stamps:
         if stamp.get("page") not in {page_number, "all"}:
             continue
@@ -12354,7 +12351,6 @@ def draw_official_page(
 
     page_number = int(page["number"])
     font_name = layout["font_profile"]["name"]
-    draw_official_page_stamps(pdf_canvas, stamps, page_number, font_name)
     pdf_canvas.setFillColorRGB(0, 0, 0)
     draw_official_binding_line(pdf_canvas, font_name)
     if page_number == 1:
@@ -12435,6 +12431,7 @@ def draw_official_page(
         A4_HEIGHT_PT - 806.22 - pdfmetrics.getAscent(font_name, 10.0),
         footer,
     )
+    draw_official_page_stamps(pdf_canvas, stamps, page_number, font_name)
 
 def write_official_pdf_document(
     info: Dict[str, Any],
@@ -18109,6 +18106,7 @@ def create_seal_usage_request(conn: sqlite3.Connection, document_id: str, payloa
     )
     metadata = parse_json_any(payload.get("metadata"), {}) if isinstance(payload.get("metadata"), str) else dict(payload.get("metadata") or {})
     metadata["seal_dimension_lock"] = company_seal_usage_lock_metadata(seal, seal_file)
+    metadata["seal_layer_policy"] = SEAL_FRONT_LAYER_POLICY
     row = {
         "id": request_id,
         "document_id": document["id"],
@@ -18201,6 +18199,7 @@ def stamp_seal_usage_request(conn: sqlite3.Connection, request_id: str, payload:
             "data": seal_bytes,
             "mime_type": file_meta.get("file_mime_type") or file_object.get("mime_type") or "image/png",
         },
+        "_trusted_seal_layer_policy": parse_json_field(request.get("metadata_json")).get("seal_layer_policy") or "legacy",
     })
     conn.execute(
         "UPDATE seal_usage_requests SET status = 'stamped', stamped_at = ?, stamped_pdf_version_id = ?, updated_at = ? WHERE id = ?",
@@ -22277,6 +22276,7 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
     workflow_template_key = (seal_context or {}).get("workflow_template_key") or payload.get("workflow_template_key") or "internal_official_dispatch_v1"
     metadata = {
         "attachments": extra_metadata["attachment_details"],
+        "seal_layer_policy": SEAL_FRONT_LAYER_POLICY,
         "workflow_template": workflow_template_key,
         "future_rule_inputs": {
             "company_id": company_id,
@@ -22509,6 +22509,8 @@ def _official_correction_metadata(
     """Merge server-derived classification without replacing audit/editor metadata."""
     metadata = parse_json_field(document.get("metadata_json"))
     metadata = json.loads(json.dumps(metadata, ensure_ascii=False))
+    if document.get("current_status") in {"draft", "rejected"}:
+        metadata["seal_layer_policy"] = SEAL_FRONT_LAYER_POLICY
     client_metadata = _official_correction_client_metadata(payload)
     extra = metadata.get("extra")
     if not isinstance(extra, dict):
@@ -24357,12 +24359,12 @@ def stamp_prepared_pdf_with_locked_seals(locked: Dict[str, Any]) -> Tuple[bytes,
             )
             seal_rects_by_page.setdefault(page_index, []).append(placed_rect)
 
-        # New V3 revisions guarantee entered / replacement text is the highest
+        # Locked V3 revisions guarantee entered / replacement text is the highest
         # annotation tier. Repaint only text whose visual bounds intersect a
         # company seal, avoiding changes to unrelated text while preserving the
         # locked prepared PDF as the sole base. Redaction is never replayed.
         front_text_repaint_count = 0
-        if str(locked.get("renderer_version") or "") == EDOC_EDITOR_RENDERER_VERSION:
+        if str(locked.get("renderer_version") or "") == EDOC_EDITOR_LEGACY_TEXT_FRONT_RENDERER_VERSION:
             text_elements = sorted(
                 [
                     item
@@ -24400,8 +24402,10 @@ def stamp_prepared_pdf_with_locked_seals(locked: Dict[str, Any]) -> Tuple[bytes,
             "distinct_seal_versions": len(locked.get("seal_assets") or {}),
             "front_text_repaint_count": front_text_repaint_count,
             "layer_policy": (
-                "company_seal_below_intersecting_editor_text"
+                SEAL_FRONT_LAYER_POLICY
                 if str(locked.get("renderer_version") or "") == EDOC_EDITOR_RENDERER_VERSION
+                else "company_seal_below_intersecting_editor_text"
+                if str(locked.get("renderer_version") or "") == EDOC_EDITOR_LEGACY_TEXT_FRONT_RENDERER_VERSION
                 else "legacy_seal_overlay"
             ),
         }
@@ -24811,6 +24815,7 @@ def auto_stamp_official_document(conn: sqlite3.Connection, document_id: str, pay
                     text_overlays,
                     prevalidated_legacy_assets,
                     source_text_on_top=document.get("source_type") == "blank_editor",
+                    seal_on_top=official_document_seal_on_top(document),
                 )
             # Renew immediately before the durable output write.  A worker
             # whose lease was reclaimed while rendering cannot publish.
@@ -25754,10 +25759,10 @@ def _editor_insert_kai_text(
 
 
 def _editor_element_layer_rank(element: Dict[str, Any]) -> int:
-    """Company seals are lowest; entered/replacement text is always highest."""
+    """Current editable revisions reserve the highest tier for company seals."""
     kind = str(element.get("kind") or "")
     if kind == "seal":
-        return 0
+        return 3
     if kind in {"text", "replacement"}:
         return 2
     return 1
@@ -27093,7 +27098,7 @@ def preflight_official_editor(conn: sqlite3.Connection, document_id: str, payloa
         state,
         previous_state=state,
     )
-    if canonical_json_hash(state) != state_before_binding:
+    if canonical_json_hash(state) != state_before_binding or latest.get("renderer_version") != EDOC_EDITOR_RENDERER_VERSION:
         latest = _insert_editor_revision(conn, document_id, state, user, latest["id"])
         state = parse_json_any(latest["editor_state_json"], {}) or {}
         revision_id = latest["id"]
@@ -27214,6 +27219,17 @@ def _editor_source_bundle_sha256(conn: sqlite3.Connection, document_id: str, sta
     return sha256_bytes(json.dumps(sorted(rows, key=lambda item: item["assetId"]), sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
+def require_current_editor_preflight(revision: Dict[str, Any], prepared_asset: Dict[str, Any]) -> None:
+    """A new submission must confirm bytes prepared under its exact renderer.
+
+    Historical locked requests are not processed here. An editable old draft
+    gets a new revision during preflight; old revisions and PDF bytes remain.
+    """
+    prepared_renderer = parse_json_field(prepared_asset.get("metadata_json")).get("renderer_version")
+    if revision.get("renderer_version") != EDOC_EDITOR_RENDERER_VERSION or prepared_renderer != EDOC_EDITOR_RENDERER_VERSION:
+        raise ValueError("editor_preflight_not_completed")
+
+
 def lock_official_editor_submission(conn: sqlite3.Connection, document: Dict[str, Any], payload: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
     metadata = parse_json_field(document.get("metadata_json"))
     if not metadata.get("pdf_editor_v2"):
@@ -27247,6 +27263,7 @@ def lock_official_editor_submission(conn: sqlite3.Connection, document: Dict[str
     ).fetchone()
     if not asset_row:
         raise ValueError("editor_preflight_not_completed")
+    require_current_editor_preflight(latest, row_to_dict(asset_row))
     state = parse_json_any(latest["editor_state_json"], {}) or {}
     validate_editor_seal_placements(
         conn,
@@ -28799,12 +28816,23 @@ def stamp_seal_application_positions(
     positions: List[Dict[str, Any]],
     stamp_no: str,
     company_seal_assets: Dict[str, Dict[str, Any]],
+    seal_on_top: bool = False,
 ) -> Tuple[bytes, str, Dict[str, Any]]:
     """Render each locked company seal image; retain legacy placeholders for old assets."""
     legacy_positions = [position for position in positions if not position.get("locked_seal_file_id")]
     current = original
     modes: List[str] = []
     metadata: Dict[str, Any] = {}
+    if seal_on_top:
+        # New snapshots paint in saved placement order, including interleaved
+        # versions of the same seal. Never regroup them across another seal.
+        for position in positions:
+            asset = company_seal_assets.get(str(position.get("locked_seal_file_id") or ""))
+            current, mode, metadata = stamp_uploaded_pdf_bytes(current, [position], stamp_no, seal_asset=asset, seal_on_top=True)
+            modes.append(mode)
+        if not modes:
+            raise ValueError("stamp_positions_required")
+        return current, "+".join(modes), metadata
     if legacy_positions:
         current, mode, metadata = stamp_uploaded_pdf_bytes(current, legacy_positions, stamp_no)
         modes.append(mode)
@@ -29069,6 +29097,11 @@ def write_stamp_overlay_pdf(
     return pdf.encode("latin-1", "replace")
 
 
+def official_document_seal_on_top(document: Dict[str, Any]) -> bool:
+    """Only explicitly versioned requests adopt the new paint order."""
+    return parse_json_field(document.get("metadata_json")).get("seal_layer_policy") == SEAL_FRONT_LAYER_POLICY
+
+
 def stamp_legacy_pdf_with_locked_seals(
     original: bytes,
     positions: List[Dict[str, Any]],
@@ -29076,6 +29109,7 @@ def stamp_legacy_pdf_with_locked_seals(
     text_overlays: List[Dict[str, Any]],
     assets: List[Tuple[Dict[str, Any], bytes]],
     source_text_on_top: bool = False,
+    seal_on_top: bool = False,
 ) -> Tuple[bytes, str, Dict[str, Any]]:
     """Render each legacy placement with its own validated Seal Vault asset."""
     if not positions or len(positions) != len(assets):
@@ -29083,7 +29117,7 @@ def stamp_legacy_pdf_with_locked_seals(
     layers = list(zip(positions, assets))
     # An underlay is inserted below prior layers. Reverse traversal preserves
     # saved order while keeping the original letter text above both seals.
-    if source_text_on_top:
+    if source_text_on_top and not seal_on_top:
         layers.reverse()
     output = original
     engine = ""
@@ -29093,9 +29127,10 @@ def stamp_legacy_pdf_with_locked_seals(
             output,
             [{**position, "stamp_no": stamp_no}],
             stamp_no,
-            text_overlays if index == len(layers) - 1 else [],
+            text_overlays if index == (0 if seal_on_top else len(layers) - 1) else [],
             {"data": seal_bytes, "mime_type": seal_file.get("file_mime_type") or ""},
             source_text_on_top=source_text_on_top,
+            seal_on_top=seal_on_top,
         )
     layout["seal_placement_count"] = len(positions)
     layout["seal_version_count"] = len({str(item[0].get("id") or item[0].get("file_hash") or "") for item in assets})
@@ -29109,13 +29144,14 @@ def stamp_uploaded_pdf_bytes(
     text_overlays: List[Dict[str, Any]] | None = None,
     seal_asset: Dict[str, Any] | None = None,
     source_text_on_top: bool = False,
+    seal_on_top: bool = False,
 ) -> Tuple[bytes, str, Dict[str, Any]]:
     page_sizes = pdf_page_sizes(original)
     try:
         from pypdf import PdfReader, PdfWriter  # type: ignore
 
         source = PdfReader(io.BytesIO(original))
-        if source_text_on_top:
+        if source_text_on_top or seal_on_top:
             seal_overlay = PdfReader(io.BytesIO(write_stamp_overlay_pdf(page_sizes, stamps, stamp_no, [], seal_asset)))
             text_overlay = PdfReader(io.BytesIO(write_kai_text_overlay_pdf(page_sizes, text_overlays or []))) if text_overlays else None
         else:
@@ -29123,7 +29159,11 @@ def stamp_uploaded_pdf_bytes(
         writer = PdfWriter()
         for index, page in enumerate(source.pages):
             writer.add_page(page)
-            if source_text_on_top:
+            if seal_on_top:
+                if text_overlay:
+                    writer.pages[-1].merge_page(text_overlay.pages[index], over=True)
+                writer.pages[-1].merge_page(seal_overlay.pages[index], over=True)
+            elif source_text_on_top:
                 writer.pages[-1].merge_page(seal_overlay.pages[index], over=False)
                 if text_overlay:
                     writer.pages[-1].merge_page(text_overlay.pages[index], over=True)
@@ -29131,12 +29171,12 @@ def stamp_uploaded_pdf_bytes(
                 writer.pages[-1].merge_page(overlay.pages[index], over=True)
         out = io.BytesIO()
         writer.write(out)
-        return out.getvalue(), "pypdf-seal-underlay" if source_text_on_top else "pypdf-overlay", {
+        return out.getvalue(), "pypdf-seal-front" if seal_on_top else "pypdf-seal-underlay" if source_text_on_top else "pypdf-overlay", {
             "page_count": len(source.pages),
             "page_size": page_sizes[0] if page_sizes else (A4_WIDTH_PT, A4_HEIGHT_PT),
             "text_overlay_count": len(text_overlays or []),
             "seal_image_applied": bool(seal_asset),
-            "layer_policy": "source_and_added_text_over_company_seal" if source_text_on_top else "added_text_over_company_seal",
+            "layer_policy": SEAL_FRONT_LAYER_POLICY if seal_on_top else "source_and_added_text_over_company_seal" if source_text_on_top else "added_text_over_company_seal",
         }
     except Exception as exc:
         if seal_asset:
@@ -29417,6 +29457,7 @@ def seal_application_submit(conn: sqlite3.Connection, payload: Dict[str, Any], s
         "approval_route_code": route_code,
         "approval_route_name": route_name,
         "approval_snapshot_json": json.dumps({
+            "seal_layer_policy": SEAL_FRONT_LAYER_POLICY,
             "steps": [
                 {
                     **step,
@@ -29611,6 +29652,7 @@ def seal_application_approve(conn: sqlite3.Connection, application_id: str, payl
         [{**position, "stamp_no": stamp_no} for position in positions],
         stamp_no,
         company_seal_assets,
+        seal_on_top=(application.get("approval_snapshot") or {}).get("seal_layer_policy") == SEAL_FRONT_LAYER_POLICY,
     )
     after_version = create_pdf_version(conn, document, "after_seal", payload.get("template") or "上傳 PDF 自動用印", stamped_bytes, {
         "source": "uploaded_pdf",
@@ -30505,6 +30547,7 @@ def pdf_stamp(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, An
         stamp_no,
         seal_asset=trusted_seal_asset,
         source_text_on_top=True,
+        seal_on_top=payload.get("_trusted_seal_layer_policy", SEAL_FRONT_LAYER_POLICY) == SEAL_FRONT_LAYER_POLICY,
     )
     package = {**dry_package, "data": stamped_data}
     version = create_pdf_version(
@@ -34458,6 +34501,7 @@ def supabase_create_seal_usage_request(document_id: str, payload: Dict[str, Any]
     )
     metadata = parse_json_any(payload.get("metadata"), {}) if isinstance(payload.get("metadata"), str) else dict(payload.get("metadata") or {})
     metadata["seal_dimension_lock"] = company_seal_usage_lock_metadata(seal, seal_file)
+    metadata["seal_layer_policy"] = SEAL_FRONT_LAYER_POLICY
     supabase_insert("seal_usage_requests", {
         "id": request_id,
         "document_id": document["id"],
@@ -34551,6 +34595,7 @@ def supabase_stamp_seal_usage_request(request_id: str, payload: Dict[str, Any], 
             "mime_type": file_meta.get("file_mime_type") or file_object.get("mime_type") or "image/png",
         },
         source_text_on_top=True,
+        seal_on_top=official_document_seal_on_top(request),
     )
     package = {**dry_package, "data": stamped_data}
     actor = seal_actor(session, payload)
@@ -37698,7 +37743,7 @@ def supabase_preflight_official_editor(document_id: str, payload: Dict[str, Any]
         state,
         previous_state=state,
     )
-    if canonical_json_hash(state) != state_before_binding:
+    if canonical_json_hash(state) != state_before_binding or latest.get("renderer_version") != EDOC_EDITOR_RENDERER_VERSION:
         latest = _supabase_insert_editor_revision(document_id, state, user, latest["id"])
         state = parse_json_any(latest["editor_state_json"], {}) or {}
         revision_id = latest["id"]
@@ -37914,6 +37959,7 @@ def supabase_lock_official_editor_submission(
     preflight_assets = supabase_filter_rows("official_document_editor_assets", {"document_id": document["id"], "editor_revision_id": revision_id, "asset_kind": "prepared_pdf", "official_file_id": prepared_file_id, "sha256": prepared_sha256, "preflight_status": "passed"}, limit=1)
     if not preflight_assets:
         raise ValueError("editor_preflight_not_completed")
+    require_current_editor_preflight(latest, preflight_assets[0])
     state = parse_json_any(latest["editor_state_json"], {}) or {}
     validate_supabase_editor_seal_placements(
         str(document.get("company_id") or ""),
@@ -38199,6 +38245,7 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
     workflow_template_key = (seal_context or {}).get("workflow_template_key") or payload.get("workflow_template_key") or "internal_official_dispatch_v1"
     metadata = {
         "attachments": extra_metadata["attachment_details"],
+        "seal_layer_policy": SEAL_FRONT_LAYER_POLICY,
         "workflow_template": workflow_template_key,
         "future_rule_inputs": {
             "company_id": company_id,
@@ -39875,6 +39922,7 @@ def supabase_auto_stamp_official_document(document_id: str, payload: Dict[str, A
                     text_overlays,
                     prevalidated_legacy_assets,
                     source_text_on_top=document.get("source_type") == "blank_editor",
+                    seal_on_top=official_document_seal_on_top(document),
                 )
             renewed = supabase_claim_official_document_stamp(
                 document_id,

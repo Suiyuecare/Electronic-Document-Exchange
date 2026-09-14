@@ -1276,7 +1276,7 @@ let uploadedSealPlacementMode = "seal";
 let uploadedSealOptions = [];
 let uploadedSealOptionsRequestNo = 0;
 const PDF_EDITOR_SCHEMA_VERSION = 2;
-const PDF_EDITOR_RENDERER_VERSION = "pymupdf-1.26.5-editor-v3-kai-text-front";
+const PDF_EDITOR_RENDERER_VERSION = "pymupdf-1.26.5-editor-v4-seal-front";
 const PDF_EDITOR_MAX_FILE_BYTES = 50 * 1024 * 1024;
 const PDF_EDITOR_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 // JSON/Base64 requests expand the file by roughly one third and still pass
@@ -1301,7 +1301,14 @@ let officialPdfA4Validation = { fileKey: "", state: "idle", report: null };
 
 function editorElementLayerTier(element) {
   const kind = String(element?.kind || "");
-  if (kind === "seal") return 0;
+  if (kind === "seal") {
+    // Preserve the visual order of immutable historical revisions. Editable
+    // drafts adopt the current renderer when their next revision is saved.
+    const legacyLocked = typeof uploadedSealEditorRuntime === "object"
+      && uploadedSealEditorRuntime.locked
+      && uploadedSealEditorRuntime.rendererVersion !== PDF_EDITOR_RENDERER_VERSION;
+    return legacyLocked ? 0 : 3;
+  }
   if (["text", "replacement"].includes(kind)) return 2;
   return 1;
 }
@@ -1359,6 +1366,7 @@ function clearUploadedEditorSensitivePreviews() {
     uploadedSealEditorRuntime.changeSummary = null;
     uploadedSealEditorRuntime.documentId = "";
     uploadedSealEditorRuntime.revisionId = "";
+    uploadedSealEditorRuntime.rendererVersion = "";
     uploadedSealEditorRuntime.baseManifestSha256 = "";
     uploadedSealEditorRuntime.preparedFileId = "";
     uploadedSealEditorRuntime.preparedSha256 = "";
@@ -1395,6 +1403,7 @@ let uploadedSealEditorState = emptyUploadedSealEditorState();
 const uploadedSealEditorRuntime = {
   documentId: "",
   revisionId: "",
+  rendererVersion: "",
   baseManifestSha256: "",
   preparedFileId: "",
   preparedSha256: "",
@@ -8086,7 +8095,7 @@ function normalizeSealPlacementPages(pageCount) {
 function renderDraftSealLayer(data, pageNumber) {
   if (data.outputMode === "electronic") return "";
   return `
-    <footer class="draft-footer">
+    <footer class="draft-footer draft-seal-layer">
       ${composeSealPlacements.large.page === pageNumber ? renderDraftSealPlaceholder("large", "公司大章", data.largeSealType, "large") : ""}
       ${composeSealPlacements.small.page === pageNumber ? renderDraftSealPlaceholder("small", "公司小章", data.smallSealType, "small") : ""}
     </footer>
@@ -20398,7 +20407,7 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     editor_manifest_hash_mismatch: "PDF 編輯清單雜湊不一致，系統已停止簽核並保留紀錄。",
     editor_source_hash_mismatch: "PDF 原始來源雜湊不一致，系統已停止簽核並保留紀錄。",
     official_document_prepared_sha256_mismatch: "PDF 編輯版雜湊不一致，系統已停止簽核並保留紀錄。",
-    editor_preflight_not_completed: "PDF 編輯版尚未完成後端檢查，不能進行簽核。",
+    editor_preflight_not_completed: "PDF 編輯版尚未完成目前版本的檢查，請重新預覽並確認後再送簽。",
     applicant_cannot_self_approve: "申請人不能核准或駁回自己的簽核關卡，請通知系統管理員修正會計系統的簽核關係。",
     official_workflow_existing_steps_invalid: "既有簽核關卡與目前會計系統規則不一致，已停止送簽；請通知系統管理員檢查案件歷程。",
     official_workflow_delegation_company_required: "登入帳號尚未連動公司，無法設定簽核代理。",
@@ -26308,6 +26317,8 @@ function applyEditorRevisionFromResponse(result) {
   const revisionId = revision.id || revision.revision_id || result?.revision_id;
   if (Number.isFinite(revisionNo)) uploadedSealEditorState.revisionNo = revisionNo;
   if (revisionId) uploadedSealEditorRuntime.revisionId = revisionId;
+  const rendererVersion = result?.rendererVersion || result?.renderer_version || revision.rendererVersion || revision.renderer_version;
+  if (rendererVersion) uploadedSealEditorRuntime.rendererVersion = rendererVersion;
   const serverManifest = result?.manifestSha256 || result?.manifest_sha256 || result?.state?.manifestSha256 || revision.manifest_sha256 || revision.manifestSha256;
   if (serverManifest) uploadedSealEditorRuntime.baseManifestSha256 = serverManifest;
   rememberUploadedEditorSavedSealBindings(result?.state || result?.editor_state || revision?.state || revision?.editor_state || null);
@@ -28283,6 +28294,7 @@ async function installUploadedEditorRecovery(result, documentId, scope) {
   uploadedSealEditorState = { ...emptyUploadedSealEditorState(), ...cloneUploadedEditorValue(state), revisionNo: Number(result.revisionNo ?? state.revisionNo ?? 0), manifestSha256: result.manifestSha256 || state.manifestSha256 || "" };
   const sealGeometryNormalized = normalizeUploadedEditorSealGeometry(uploadedSealEditorState);
   uploadedSealEditorRuntime.revisionId = result.revision_id || result.revisionId || "";
+  applyEditorRevisionFromResponse(result);
   uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || state.manifestSha256 || "";
   uploadedSealEditorRuntime.preparedFileId = result.preparedFileId || "";
   uploadedSealEditorRuntime.preparedSha256 = result.preparedSha256 || "";
@@ -28402,6 +28414,7 @@ async function loadUploadedEditorState(documentId) {
   const loadedScope = uploadedSealApplicationScopeSnapshot();
   uploadedSealEditorState = { ...emptyUploadedSealEditorState(), ...cloneUploadedEditorValue(state), revisionNo: Number(result.revisionNo ?? state.revisionNo ?? 0), manifestSha256: result.manifestSha256 || state.manifestSha256 || "" };
   uploadedSealEditorRuntime.revisionId = result.revision_id || result.revisionId || "";
+  applyEditorRevisionFromResponse(result);
   uploadedSealEditorRuntime.baseManifestSha256 = result.manifestSha256 || state.manifestSha256 || "";
   uploadedSealEditorRuntime.preparedFileId = result.preparedFileId || "";
   uploadedSealEditorRuntime.preparedSha256 = result.preparedSha256 || "";
@@ -28482,12 +28495,17 @@ async function preflightUploadedEditor() {
   ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
   await saveUploadedEditorState({ immediate: true });
   if (uploadedSealEditorRuntime.conflict) throw new Error("版本衝突尚未處理，不能送簽。");
+  const preflightScope = uploadedSealApplicationScopeSnapshot();
+  const preflightGeneration = uploadedSealEditorRuntime.dirtyGeneration;
   const status = document.querySelector("#uploadedEditorPreflightStatus");
   if (status) status.textContent = "後端正在產生精準確認版…";
   const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/editor-preflight`, {
     method: "POST",
     body: JSON.stringify({ editorRevisionId: uploadedSealEditorRuntime.revisionId, manifestSha256: uploadedSealEditorState.manifestSha256 })
   });
+  if (!uploadedSealApplicationScopeIsCurrent(preflightScope) || uploadedSealEditorRuntime.dirtyGeneration !== preflightGeneration) {
+    throw new Error("草稿或內容已變更，請重新預覽後再送簽。");
+  }
   if (result.status !== "prepared") throw new Error("確認版尚未完成，請稍後再試。");
   void uploadedSealEditorRuntime.preparedPdfDocument?.destroy?.();
   uploadedSealEditorRuntime.preparedPdfDocument = null;
@@ -28495,6 +28513,8 @@ async function preflightUploadedEditor() {
   uploadedSealEditorRuntime.preparedSha256 = result.preparedSha256 || result.prepared_sha256 || "";
   uploadedSealEditorRuntime.preparedUrl = editorPreparedAuthorizedUrl(result) || result.authorizedUrl || result.authorized_url || "";
   applyEditorRevisionFromResponse(result);
+  applyUploadedEditorCanonicalSaveResponse(result, preflightGeneration);
+  uploadedSealEditorState.manifestSha256 = uploadedSealEditorRuntime.baseManifestSha256;
   if (!uploadedSealEditorRuntime.preparedFileId || !uploadedSealEditorRuntime.preparedSha256) throw new Error("後端未回傳完整確認版雜湊。");
   if (status) status.textContent = `確認版已完成 · ${uploadedSealEditorRuntime.preparedSha256.slice(0, 12)}…`;
   return result;
