@@ -136,7 +136,7 @@ class ElectronicSealPageContractTest(unittest.TestCase):
             "uploadedSealApplicant": "申請人",
             "uploadedSealApprovalCategorySelect": "用印文件類型",
             "uploadedSealDepartment": "部門",
-            "uploadedSealCompany": "公司",
+            "uploadedSealCompany": "用印公司",
             "uploadedSealTitle": "申請主旨",
             "uploadedSealReason": "用印原因",
         }

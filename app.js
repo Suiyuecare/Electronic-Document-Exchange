@@ -1342,6 +1342,7 @@ function emptyUploadedSealEditorState() {
 }
 
 function clearUploadedEditorSensitivePreviews() {
+  uploadedSealOptionsRequestNo += 1;
   finishUploadedEditorTextEdit({ cancel: true });
   window.clearTimeout(uploadedSealEditorRuntime?.saveTimer || 0);
   resetUploadedSealApplicationSaving();
@@ -1374,6 +1375,7 @@ function clearUploadedEditorSensitivePreviews() {
     uploadedSealEditorRuntime.uploading = false;
     uploadedSealEditorRuntime.companyChanging = false;
     uploadedSealEditorRuntime.directoryLoading = false;
+    uploadedSealEditorRuntime.sealOptionsLoading = false;
     uploadedSealEditorRuntime.reviewMode = "edited";
     uploadedSealEditorRuntime.currentPageId = "";
     uploadedSealEditorRuntime.currentViewport = null;
@@ -1420,6 +1422,7 @@ const uploadedSealEditorRuntime = {
   uploading: false,
   companyChanging: false,
   directoryLoading: false,
+  sealOptionsLoading: false,
   saving: false,
   savePromise: null,
   saveQueued: false,
@@ -24993,22 +24996,105 @@ function uploadedSealApplicantDepartment(departments = [], companyId = "") {
   return preferredFinanceDepartment(departments);
 }
 
+function uploadedSealPickerReadOnly() {
+  return uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading
+    || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading
+    || uploadedSealEditorRuntime.sealOptionsLoading || Boolean(uploadedSealEditorRuntime.draftCreatePromise)
+    || uploadedSealEditorRuntime.reviewMode !== "edited"
+    || uploadedSealApplicationRuntime.editable === false || uploadedSealApplicationRuntime.submissionBusy;
+}
+
+function uploadedSealCompanyRecords() {
+  const companyId = document.querySelector("#uploadedSealCompany")?.value || "";
+  return uploadedSealOptions.filter((seal) => companyId && seal.company_id === companyId
+    && seal.is_active !== 0 && seal.is_active !== false);
+}
+
+function uploadedSealPickerCategoryOptions(records = uploadedSealCompanyRecords()) {
+  const options = companySealRefOptions("category").map((item) => ({ ...item }));
+  // Keep server-defined categories visible instead of coercing them to "other".
+  records.forEach((seal) => {
+    if (seal.seal_category && !options.some((item) => item.code === seal.seal_category)) {
+      options.push({ code: seal.seal_category, name: companySealRefName("category", seal.seal_category) });
+    }
+  });
+  const labels = { general_seal: "一般章", establishment_seal: "公司設立章", bank_seal: "銀行章", official_seal: "圖記章", other: "其他章" };
+  return options.map((item) => ({ ...item, name: labels[item.code] || item.name }));
+}
+
 function renderUploadedSealOptions() {
   const select = document.querySelector("#uploadedSealSealSelect");
-  if (!select) return;
-  const previous = select.value;
-  const ready = uploadedSealOptions.filter(officialSealHasCurrentFile);
+  const categorySelect = document.querySelector("#uploadedSealCategorySelect");
+  const sizeSelect = document.querySelector("#uploadedSealSizeSelect");
+  if (!select || !categorySelect || !sizeSelect) return;
+  const company = document.querySelector("#uploadedSealCompany");
+  const companyId = company?.value || "";
+  const records = uploadedSealCompanyRecords();
+  const ready = records.filter(officialSealHasCurrentFile);
+  const categories = uploadedSealPickerCategoryOptions(records);
+  const sameCompany = categorySelect.dataset.companyId === companyId;
+  const previousId = sameCompany ? select.value : "";
+  const initialized = sameCompany && categorySelect.dataset.initialized === "true";
+  const previousCategory = initialized ? categorySelect.value : "";
+  const previousSize = initialized ? sizeSelect.value : "";
+  const first = ready.find((seal) => seal.seal_category === "general_seal") || ready[0];
+  const category = previousCategory || first?.seal_category || "general_seal";
+  const size = previousSize || first?.seal_size_type || "large_seal";
+  if (!categories.some((item) => item.code === category)) categories.push({ code: category, name: category });
+  categorySelect.innerHTML = categories.map((item) => `<option value="${escapeDraftHtml(item.code)}">${escapeDraftHtml(item.name)}</option>`).join("");
+  categorySelect.value = category;
+  categorySelect.dataset.companyId = companyId;
+  categorySelect.dataset.initialized = String(initialized || records.length > 0);
+  sizeSelect.innerHTML = `<option value="large_seal">大章</option><option value="small_seal">小章</option>`;
+  sizeSelect.value = size;
+  const matching = records.filter((seal) => seal.seal_category === category && seal.seal_size_type === size);
+  const usable = matching.filter(officialSealHasCurrentFile);
   select.innerHTML = [
-    ready.length ? "" : `<option value="">尚無可用的 current 印章版本</option>`,
-    ...uploadedSealOptions.map((seal) => {
-      const usable = officialSealHasCurrentFile(seal);
-      const size = seal.seal_size_type === "large_seal" ? "大章" : seal.seal_size_type === "small_seal" ? "小章" : "";
-      return `<option value="${escapeDraftHtml(seal.id)}"${usable ? "" : " disabled"}>${escapeDraftHtml(seal.seal_name || seal.id)}${size ? ` · ${size}` : ""}${usable ? "" : "（未上傳版本）"}</option>`;
-    })
+    usable.length ? "" : `<option value="">此款式尚無可用${size === "small_seal" ? "小章" : "大章"}</option>`,
+    ...matching.map((seal) => `<option value="${escapeDraftHtml(seal.id)}"${officialSealHasCurrentFile(seal) ? "" : " disabled"}>${escapeDraftHtml(seal.seal_name || seal.id)}${officialSealHasCurrentFile(seal) ? "" : "（尚未啟用）"}</option>`)
   ].join("");
-  select.disabled = !ready.length;
-  if (ready.some((seal) => seal.id === previous)) select.value = previous;
-  else select.value = ready[0]?.id || "";
+  // Only choose within the exact category/size. Never replace a missing choice
+  // with another purpose's seal, even if that is the company's only ready seal.
+  select.value = usable.some((seal) => seal.id === previousId) ? previousId : usable[0]?.id || "";
+  const readOnly = uploadedSealPickerReadOnly();
+  categorySelect.disabled = readOnly || !companyId;
+  sizeSelect.disabled = readOnly || !companyId;
+  select.disabled = readOnly || !usable.length;
+  const recordLabel = document.querySelector("#uploadedSealRecordLabel");
+  if (recordLabel) recordLabel.hidden = matching.length <= 1;
+  const companyLabel = document.querySelector("#uploadedSealPickerCompany");
+  if (companyLabel) companyLabel.textContent = company?.selectedOptions?.[0]?.textContent || "尚未選擇";
+  const companyButton = document.querySelector("#uploadedSealCompanyFocusBtn");
+  if (companyButton) companyButton.disabled = readOnly;
+  const status = document.querySelector("#uploadedSealPickerStatus");
+  if (status) {
+    const seal = usable.find((item) => item.id === select.value);
+    const geometry = seal ? companySealFixedGeometry(seal) : null;
+    const categoryLabel = categories.find((item) => item.code === category)?.name || category;
+    status.dataset.state = seal ? "ready" : "empty";
+    status.textContent = uploadedSealEditorRuntime.sealOptionsLoading ? "正在載入印章…"
+      : !companyId ? "請先選擇用印公司。"
+        : seal ? `${categoryLabel} · ${size === "small_seal" ? "小章" : "大章"} · ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（尺寸固定）`
+          : `此公司尚無可用的${categoryLabel}${size === "small_seal" ? "小章" : "大章"}，請另選款式或聯絡印章管理人。`;
+  }
+}
+
+function changeUploadedSealPickerSelection() {
+  if (uploadedSealPickerReadOnly()) return;
+  const category = document.querySelector("#uploadedSealCategorySelect");
+  if (category) category.dataset.initialized = "true";
+  renderUploadedSealOptions();
+  renderUploadedSealWorkbench();
+}
+
+function focusUploadedSealCompany() {
+  if (uploadedSealPickerReadOnly()) return;
+  const fields = document.querySelector("#uploadedSealApplicationFields");
+  if (fields) fields.hidden = false;
+  renderUploadedSealApplicationDisclosure();
+  const select = document.querySelector("#uploadedSealCompany");
+  select?.scrollIntoView({ behavior: "smooth", block: "center" });
+  select?.focus({ preventScroll: true });
 }
 
 async function loadUploadedSealOptions(companyId = document.querySelector("#uploadedSealCompany")?.value || "") {
@@ -25017,10 +25103,14 @@ async function loadUploadedSealOptions(companyId = document.querySelector("#uplo
   const isCurrent = () => requestNo === uploadedSealOptionsRequestNo && actorScope === frontendSessionScope()
     && companyId === (document.querySelector("#uploadedSealCompany")?.value || "");
   if (!companyId || !hasAuthenticatedBackendSession()) {
+    uploadedSealEditorRuntime.sealOptionsLoading = false;
     uploadedSealOptions = [];
     renderUploadedSealOptions();
+    renderUploadedSealWorkbench();
     return;
   }
+  uploadedSealEditorRuntime.sealOptionsLoading = true;
+  renderUploadedSealOptions();
   try {
     const result = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals?editor=1`);
     if (!isCurrent()) return;
@@ -25032,17 +25122,25 @@ async function loadUploadedSealOptions(companyId = document.querySelector("#uplo
     uploadedSealOptions = [];
     showToast(`印章清單載入失敗：${error.message}`);
   }
+  uploadedSealEditorRuntime.sealOptionsLoading = false;
   renderUploadedSealOptions();
   if (normalizeUploadedEditorSealGeometry(uploadedSealEditorState)) {
     syncLegacyUploadedEditorCollections();
     if (uploadedSealEditorRuntime.documentId && !uploadedSealEditorRuntime.locked) markUploadedEditorDirty();
-    renderUploadedSealWorkbench();
   }
+  // Refresh toolbar and seam actions too, including the unchanged-geometry
+  // path, so a render during loading cannot leave valid actions disabled.
+  renderUploadedSealWorkbench();
 }
 
 function selectedUploadedSeal() {
+  if (uploadedSealPickerReadOnly()) return null;
   const sealId = document.querySelector("#uploadedSealSealSelect")?.value || "";
-  return uploadedSealOptions.find((seal) => seal.id === sealId) || null;
+  const category = document.querySelector("#uploadedSealCategorySelect")?.value || "";
+  const size = document.querySelector("#uploadedSealSizeSelect")?.value || "";
+  return uploadedSealCompanyRecords().find((seal) => seal.id === sealId
+    && seal.seal_category === category && seal.seal_size_type === size
+    && officialSealHasCurrentFile(seal)) || null;
 }
 
 function configureUploadedSealMode(target = activeRouteTarget) {
@@ -26535,7 +26633,7 @@ function addUploadedEditorElement(kind, point = null, properties = {}, pageIds =
   if (uploadedSealEditorState.elements.length >= PDF_EDITOR_MAX_ELEMENTS) return showToast(`每份草稿最多 ${PDF_EDITOR_MAX_ELEMENTS} 個物件。`);
   if (kind === "seal") {
     const seal = selectedUploadedSeal();
-    if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇已有 current 版本的印章。");
+    if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇可用的款式與大小章。");
     const versionSnapshot = companySealCurrentVersionSnapshot(seal);
     if (!versionSnapshot.sealFileId || !versionSnapshot.sealFileSha256) {
       return showToast("目前印章版本缺少不可變檔案 ID 或 SHA-256，請重新整理 Seal Vault 後再放置。");
@@ -26739,6 +26837,7 @@ function renderUploadedEditorSelectionActions() {
 }
 
 function addUploadedSeamGroups() {
+  if (uploadedSealPickerReadOnly()) return;
   const seal = selectedUploadedSeal();
   if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇可用的印章版本。");
   const binding = companySealCurrentVersionSnapshot(seal);
@@ -26776,12 +26875,12 @@ function renderUploadedSeamGroups() {
   const target = document.querySelector("#uploadedEditorSeamGroups");
   if (!target || !globalThis.EDOCSeam) return;
   const groups = [...globalThis.EDOCSeam.groups(uploadedSealEditorState)];
-  const locked = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited";
-  const hasUsableSeal = uploadedSealOptions.some(officialSealHasCurrentFile);
+  const locked = uploadedSealPickerReadOnly();
+  const hasUsableSeal = Boolean(selectedUploadedSeal());
   document.querySelector("#uploadedEditorSeamAddBtn")?.toggleAttribute("disabled", locked || !hasUsableSeal || uploadedSealEditorState.pages.length < 2);
   document.querySelector("#uploadedEditorSeamPages")?.toggleAttribute("disabled", locked);
   const status = document.querySelector("#uploadedEditorSeamStatus");
-  if (status) status.textContent = !hasUsableSeal ? "尚無可用印章，請先啟用印章。" : uploadedSealEditorState.pages.length < 2 ? "騎縫章需要至少兩頁 PDF。" : groups.length ? `已加入 ${groups.length} 組，可各別調整高度。` : "選好印章後，按「加入騎縫章」。";
+  if (status) status.textContent = uploadedSealEditorState.pages.length < 2 ? "騎縫章需要至少兩頁 PDF。" : groups.length ? `已加入 ${groups.length} 組，可各別調整高度。` : !hasUsableSeal ? "請在上方選擇可用的款式與大小章。" : "選好印章後，按「加入騎縫章」。";
   target.innerHTML = groups.map(([id, members], index) => {
     const first = members[0];
     const page = uploadedSealEditorState.pages.find((item) => item.pageId === first.pageId);
@@ -26805,6 +26904,7 @@ function renderUploadedSeamGroups() {
 }
 
 function addUploadedStamp(scope = "current_page", placement = null) {
+  if (uploadedSealPickerReadOnly()) return;
   const page = currentUploadedEditorPage();
   if (!page) return showToast("請先上傳 PDF。");
   const point = placement ? { x: placement.x, y: placement.y } : null;
@@ -28840,15 +28940,19 @@ function renderUploadedSealWorkbench() {
     button.setAttribute("aria-pressed", String(button.dataset.editorTool === uploadedSealEditorRuntime.tool));
     button.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
   });
-  const hasUsableSeal = uploadedSealOptions.some(officialSealHasCurrentFile);
+  const hasUsableSeal = uploadedSealCompanyRecords().some(officialSealHasCurrentFile);
   renderUploadedSealAvailabilityNotice(hasUsableSeal);
+  renderUploadedSealOptions();
+  const sealPickerReadOnly = uploadedSealPickerReadOnly();
+  const hasSelectedSeal = Boolean(selectedUploadedSeal());
   const sealTool = document.querySelector('[data-editor-tool="seal"]');
   if (sealTool) {
-    sealTool.disabled = sealTool.disabled || !hasUsableSeal;
-    sealTool.title = hasUsableSeal ? "" : "目前公司沒有可用的 current 印章版本，請由執行長或行政部門主任到系統設定處理。";
+    // The picker stays reachable even if a category has no available seal.
+    sealTool.disabled = sealPickerReadOnly;
+    sealTool.title = "選擇款式與大小章，再點選文件上的用印位置";
   }
   const seamToggle = document.querySelector("#uploadedEditorSeamToggleBtn");
-  if (seamToggle) seamToggle.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
+  if (seamToggle) seamToggle.disabled = sealPickerReadOnly;
   const moreSummary = document.querySelector("#uploadedEditorMoreTools > summary");
   if (moreSummary) moreSummary.textContent = ({ replacement: "取代文字", shape: "形狀", checkmark: "勾選", highlight: "螢光", redaction: "安全遮蔽" })[uploadedSealEditorRuntime.tool] || "更多工具";
   const toolNotice = document.querySelector("#uploadedEditorToolNotice");
@@ -28864,7 +28968,9 @@ function renderUploadedSealWorkbench() {
     if (control) control.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
   });
   const addStampButton = document.querySelector("#addSelectedStampBtn");
-  if (addStampButton) addStampButton.disabled = addStampButton.disabled || !hasUsableSeal;
+  if (addStampButton) addStampButton.disabled = sealPickerReadOnly || !hasSelectedSeal || !uploadedSealEditorState.pages.length;
+  const placementSelect = document.querySelector("#uploadedSealStampType");
+  if (placementSelect) placementSelect.disabled = sealPickerReadOnly;
   renderUploadedEditorSubmissionActions();
   document.querySelectorAll("[data-uploaded-placement-mode]").forEach((button) => button.classList.toggle("active", button.dataset.uploadedPlacementMode === uploadedSealPlacementMode));
   const generalOptions = document.querySelector("#uploadedEditorGeneralOptions");
@@ -28875,7 +28981,10 @@ function renderUploadedSealWorkbench() {
   const textInput = document.querySelector("#uploadedSealTextInput");
   if (textInputLabel) textInputLabel.textContent = uploadedSealEditorRuntime.tool === "replacement" ? "取代後文字（舊內容會安全移除）" : "文字";
   if (textInput) textInput.placeholder = uploadedSealEditorRuntime.tool === "replacement" ? "輸入安全取代後的新文字，再點選文件位置" : "輸入要加入的文字";
-  document.querySelector("#uploadedSealSealSelect")?.closest("label")?.toggleAttribute("hidden", !seamOpen && uploadedSealEditorRuntime.tool !== "seal");
+  const sealPicker = document.querySelector("#uploadedSealPicker");
+  if (sealPicker) sealPicker.hidden = !seamOpen && uploadedSealEditorRuntime.tool !== "seal";
+  const placementHint = document.querySelector("#uploadedSealPlacementHint");
+  if (placementHint) placementHint.hidden = seamOpen || uploadedSealEditorRuntime.tool !== "seal" || !hasSelectedSeal;
   document.querySelector("#uploadedSealStampType")?.closest("label")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
   document.querySelector("#addSelectedStampBtn")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
   const status = document.querySelector("#uploadedSealPdfStatus");
@@ -31114,7 +31223,7 @@ document.querySelector("#uploadedSealForm")?.addEventListener("invalid", () => {
 
 document.querySelector("#uploadedEditorSeamToggleBtn")?.addEventListener("click", (event) => {
   const panel = document.querySelector("#uploadedEditorSeamPanel");
-  if (!panel || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
+  if (!panel || uploadedSealPickerReadOnly()) return;
   if (!panel.hidden) { chooseUploadedEditorTool("select"); return; }
   // Seam stamping uses its group action. Canvas taps only select/move members,
   // never accidentally add a regular full seal while this panel is open.
@@ -31130,6 +31239,10 @@ document.querySelector("#uploadedEditorSeamCloseBtn")?.addEventListener("click",
   document.querySelector("#uploadedEditorSeamToggleBtn")?.focus({ preventScroll: true });
 });
 document.querySelector("#uploadedEditorSeamAddBtn")?.addEventListener("click", addUploadedSeamGroups);
+document.querySelectorAll("#uploadedSealCategorySelect, #uploadedSealSizeSelect, #uploadedSealSealSelect").forEach((select) => {
+  select.addEventListener("change", changeUploadedSealPickerSelection);
+});
+document.querySelector("#uploadedSealCompanyFocusBtn")?.addEventListener("click", focusUploadedSealCompany);
 document.querySelector("#addSelectedStampBtn")?.addEventListener("click", () => addUploadedStamp(document.querySelector("#uploadedSealStampType")?.value || "current_page"));
 document.querySelector("#addUploadedTextBtn")?.addEventListener("click", () => addUploadedTextAtPoint());
 document.querySelector("#uploadedSealCompany")?.addEventListener("change", handleUploadedSealCompanyChange);

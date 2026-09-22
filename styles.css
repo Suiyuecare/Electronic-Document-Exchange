@@ -12715,6 +12715,20 @@ body[data-session-state="revalidating"] .workspace::after {
 #uploadedPdfEditor[data-seam-open="true"] label:has(#uploadedSealStampType) { display: none; }
 #uploadedPdfEditor[data-seam-open="true"] #uploadedEditorSeamToggleBtn { background: #fff4e4; box-shadow: inset 0 0 0 1px #ea880c; color: #9a3412; }
 #uploadedPdfEditor .pdf-editor-general-options { gap: 8px; }
+#uploadedPdfEditor .uploaded-seal-picker { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(100px, 1fr); flex: 1 1 100%; min-width: 0; gap: 8px 12px; }
+#uploadedPdfEditor .uploaded-seal-picker[hidden],
+#uploadedPdfEditor .uploaded-seal-picker label[hidden],
+#uploadedPdfEditor .uploaded-seal-placement-hint[hidden] { display: none; }
+#uploadedPdfEditor .uploaded-seal-picker-company { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; font-size: 13px; }
+#uploadedPdfEditor .uploaded-seal-picker-company > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+#uploadedPdfEditor .uploaded-seal-picker-company button { flex: 0 0 auto; width: auto; min-height: 44px; }
+#uploadedPdfEditor .uploaded-seal-picker label { min-width: 0; margin: 0; }
+#uploadedPdfEditor .uploaded-seal-picker select { width: 100%; min-width: 0; min-height: 44px; font-size: 16px; }
+#uploadedPdfEditor #uploadedSealRecordLabel,
+#uploadedPdfEditor #uploadedSealPickerStatus { grid-column: 1 / -1; }
+#uploadedPdfEditor #uploadedSealPickerStatus,
+#uploadedPdfEditor .uploaded-seal-placement-hint { flex: 1 1 100%; margin: 0; font-size: 13px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+#uploadedPdfEditor #uploadedSealPickerStatus[data-state="empty"] { color: #9a3412; }
 #uploadedPdfEditor .pdf-editor-page-actions { flex-wrap: wrap; overflow: visible; margin: 0; padding: 8px; gap: 5px; }
 #uploadedPdfEditor .pdf-editor-page-actions button { min-height: 44px; font-size: 13px; }
 #uploadedPdfEditor .pdf-editor-limits { display: none; }

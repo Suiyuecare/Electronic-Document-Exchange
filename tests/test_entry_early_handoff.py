@@ -243,7 +243,7 @@ assert.equal(requests.length,0);assert.equal(redirects.length,0);
     def test_head_script_is_cache_busted_and_precedes_main_bundle(self):
         html = (ROOT / "index.html").read_text(encoding="utf-8")
         self.assertIn("entry-bootstrap.js?v=20260914-early-handoff-r1", html)
-        self.assertIn("app.js?v=20260914-seal-front-r1", html)
+        self.assertIn("app.js?v=20260922-seal-picker-r1", html)
         self.assertLess(html.index('src="entry-bootstrap.js'), html.index('src="app.js'))
 
 
