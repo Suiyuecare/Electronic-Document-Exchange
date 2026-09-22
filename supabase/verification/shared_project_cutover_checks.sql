@@ -67,6 +67,46 @@ begin
 end;
 $compose_editor_resilience_gate$;
 
+do $configurable_workflow_gate$
+declare
+  v_schema text := 'edoc';
+  v_backend text := 'edoc_backend';
+  v_denied text[] := array['anon','authenticated','service_role','authenticator'];
+  v_proc record;
+  v_rpc text;
+  v_role text;
+begin
+  foreach v_rpc in array array['edoc_save_official_workflow_config(jsonb)','edoc_mutate_official_workflow(jsonb)'] loop
+    select * into v_proc from pg_catalog.pg_proc
+      where oid=pg_catalog.to_regprocedure(v_schema || '.' || v_rpc);
+    if not found then raise exception 'configurable_workflow_rpc_missing'; end if;
+    if not v_proc.prosecdef or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+       or not coalesce(v_proc.proconfig @> array['search_path=""','lock_timeout=5s'],false)
+       or not pg_catalog.has_function_privilege(v_backend,v_proc.oid,'EXECUTE') then
+      raise exception 'configurable_workflow_rpc_security_mismatch';
+    end if;
+    foreach v_role in array v_denied loop
+      if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+        raise exception 'configurable_workflow_browser_rpc_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,pg_catalog.acldefault('f',v_proc.proowner))) a where a.grantee=0 and a.privilege_type='EXECUTE') then
+      raise exception 'configurable_workflow_public_rpc_grant';
+    end if;
+  end loop;
+  if not exists (
+    select 1 from pg_catalog.pg_trigger where tgrelid=pg_catalog.to_regclass(v_schema || '.official_document_approval_steps')
+      and tgname='preserve_official_decision_evidence' and tgenabled='O' and not tgisinternal
+  ) then raise exception 'configurable_workflow_evidence_trigger_missing'; end if;
+  if not exists (
+    select 1 from pg_catalog.pg_constraint where conrelid=pg_catalog.to_regclass(v_schema || '.official_documents')
+      and conname='official_documents_status_check' and convalidated
+      and pg_catalog.pg_get_constraintdef(oid) like '%pending_approval%'
+  ) then raise exception 'configurable_workflow_custom_status_missing'; end if;
+end;
+$configurable_workflow_gate$;
+
+
 with expected_storage_policies(policy_name, table_name) as (
   values
     ('edoc backend reads private buckets', 'buckets'),
@@ -156,12 +196,13 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 63
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 64
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133144_compose_resilience_drafts_revision.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133603_editor_conflict_copy_atomic.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913055452_editor_applicant_selection_scope.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913060040_editor_cross_company_workflow_scope.sql')
-      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913130517_editor_storage_v2_opaque_paths.sql'),
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913130517_editor_storage_v2_opaque_paths.sql')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260922074613_configurable_official_workflows.sql'),
       (select count(*)::text from edoc_private.shared_project_migration_ledger)
     ),
     (

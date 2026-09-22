@@ -47,7 +47,10 @@ class SealFrontFrontendTest(unittest.TestCase):
                     self.PREFLIGHT_SETUP + f'const backendRequest=async()=>{{{change}return response;}};',
                     'let error="";try{await preflightUploadedEditor()}catch(e){error=e.message}console.log(JSON.stringify({error,revision:uploadedSealEditorRuntime.revisionId,manifest:uploadedSealEditorState.manifestSha256,prepared:uploadedSealEditorRuntime.preparedFileId||""}));',
                 )
-                self.assertIn("重新預覽", result["error"])
+                if change == 'scope="OTHER";':
+                    self.assertEqual(result["error"], "", "Old-case completion must be ignored, not shown as an error in the new draft")
+                else:
+                    self.assertIn("重新預覽", result["error"])
                 self.assertEqual(result["revision"], "R3")
                 self.assertEqual(result["manifest"], "old-manifest")
                 self.assertEqual(result["prepared"], "")

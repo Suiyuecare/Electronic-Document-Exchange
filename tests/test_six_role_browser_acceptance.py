@@ -20,8 +20,8 @@ class SixRoleBrowserFixtureContractTests(unittest.TestCase):
         self.assertIn('interfaceFontStylesheet.addEventListener("load", applyInterfaceFont, { once: true });', js)
         self.assertNotRegex(html, r'id="interfaceFontStylesheet"[^>]*onload=')
         self.assertIn("entry-bootstrap.js?v=20260914-early-handoff-r1", html)
-        self.assertIn("styles.css?v=20260922-seal-picker-r1", html)
-        self.assertIn("app.js?v=20260922-seal-picker-r1", html)
+        self.assertIn("styles.css?v=20260922-workflow-audit-r1", html)
+        self.assertIn("app.js?v=20260922-workflow-audit-r1", html)
         self.assertIn("edukai", js.lower())
 
     def test_mobile_header_touch_targets_are_at_least_44px(self):

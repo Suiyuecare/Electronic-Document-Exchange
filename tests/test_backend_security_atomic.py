@@ -475,7 +475,11 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
                 ), mock.patch.object(
                     backend,
                     "official_seal_context_from_document",
-                    return_value={"approval_route_code": "A"},
+                    return_value={"approval_route_code": "A", "document_category": "合作意向書"},
+                ), mock.patch.object(
+                    backend,
+                    "supabase_official_workflow_config",
+                    return_value=backend.normalize_official_workflow_config(),
                 ), mock.patch.object(
                     backend,
                     "official_seal_workflow_steps",

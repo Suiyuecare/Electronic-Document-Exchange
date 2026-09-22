@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
-    <link rel="stylesheet" href="styles.css?v=20260922-seal-picker-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260922-workflow-audit-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
@@ -1320,15 +1320,26 @@
           <section class="panel" id="officialWorkflowConfigPanel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">固定簽核規則</p>
-                <h3>發文簽核流程設定</h3>
+                <p class="eyebrow">文件類型與簽核</p>
+                <h3>簽核流程設定</h3>
               </div>
               <div class="detail-actions">
                 <span class="status-pill" id="officialWorkflowConfigStatus">讀取中</span>
+                <button class="secondary-button" id="officialWorkflowConfigReloadBtn" type="button">重新載入</button>
                 <button class="primary-button" id="officialWorkflowConfigSaveBtn" type="button" hidden>儲存流程</button>
               </div>
             </div>
-            <p class="field-hint">此流程由會計系統的即時職級與組織關係決定：一般申請人依序經申請人主管、部門主任；課長略過申請人主管；主任略過前兩關。C／D 會再加入執行長，之後一律經行政部門主任、總務專員並回到申請人收件。已在簽核中的案件不會被改動。</p>
+            <p class="field-hint">依文件類型設定審核順序；組織關係與人員由會計系統提供。變更僅套用之後送簽的案件，進行中的案件不受影響。</p>
+            <div id="officialWorkflowEditableConfig" hidden>
+              <div class="workflow-config-selectors">
+                <label>文件類型<select id="officialWorkflowCategorySelect"></select></label>
+                <label>人員查詢範圍<select id="officialWorkflowCandidateCompany"></select></label>
+              </div>
+              <div id="officialWorkflowNodeRows" class="workflow-config-node-list"></div>
+              <button class="secondary-button" id="officialWorkflowNodeAddBtn" type="button">新增簽核關卡</button>
+              <p id="officialWorkflowFixedTail" class="field-hint">審核通過 → 總務執行 → 申請人收件（固定）</p>
+              <p id="officialWorkflowConfigMessage" class="field-hint" role="status" aria-live="polite"></p>
+            </div>
             <div class="workflow-config-sequence" id="officialWorkflowConfigSteps">
               <label><input type="checkbox" data-official-workflow-step="applicant_manager" checked disabled />申請人主管</label>
               <label><input type="checkbox" data-official-workflow-step="department_head" checked disabled />部門主任</label>
@@ -4185,7 +4196,12 @@
             <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required />我已查看原稿／送簽 PDF，內容與申請目的相符。</label>
             <label class="decision-check"><input id="officialReviewAttachments" type="checkbox" required />我已查看全部附件，或確認本案沒有附件。</label>
             <label class="decision-check"><input id="officialReviewEdited" type="checkbox" required />我已查看 PDF 編輯版與用印位置，或確認本案沒有編輯內容。</label>
-            <label>核准意見<textarea id="officialApprovalComment" rows="3" minlength="2" maxlength="1000" required placeholder="請填寫核准判斷或注意事項（至少 2 個字）"></textarea></label>
+            <label><span id="officialApprovalCommentLabel">核准意見</span><textarea id="officialApprovalComment" rows="3" minlength="2" maxlength="1000" required placeholder="請填寫核准判斷或注意事項（至少 2 個字）"></textarea></label>
+          </section>
+          <section id="officialWorkflowActionFields" class="official-decision-section" hidden>
+            <p id="officialWorkflowActionExplanation"></p>
+            <label id="officialAddSignPersonLabel" hidden>加簽人員<select id="officialAddSignPerson" required></select></label>
+            <label id="officialWithdrawCommentLabel" hidden>抽單原因<textarea id="officialWithdrawComment" rows="3" minlength="6" maxlength="1000" placeholder="請說明抽單原因（至少 6 個字）"></textarea></label>
           </section>
           <section id="officialRejectionFields" class="official-decision-section" hidden>
             <h4>退回補正內容</h4>
@@ -4222,6 +4238,6 @@
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
     <script src="editor-seam.js?v=20260911-r1"></script>
     <script src="editor-a4.js?v=20260911-r1"></script>
-    <script src="app.js?v=20260922-seal-picker-r1"></script>
+    <script src="app.js?v=20260922-workflow-audit-r1"></script>
   </body>
 </html>

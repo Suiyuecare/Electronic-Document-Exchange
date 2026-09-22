@@ -44,7 +44,9 @@ class FrontendAuthoritativeWorkflowsContractTest(unittest.TestCase):
 
     def test_workflow_readiness_blocks_submit_and_uses_finance_source(self) -> None:
         readiness = javascript_function(self.js, "loadOfficialWorkflowReadiness")
-        self.assertIn("/official-documents/workflow-readiness?route_code=", readiness)
+        self.assertIn("/official-documents/workflow-readiness?${query.toString()}", readiness)
+        self.assertIn("route_code: normalizedRoute", readiness)
+        self.assertIn("workflowReadinessContextQuery(context)", readiness)
         self.assertIn('sourceOfTruth: "finance"', readiness)
         compose_submit = self.js[self.js.index('document.querySelector("#composeForm").addEventListener'):]
         self.assertIn("await loadOfficialWorkflowReadiness", compose_submit)

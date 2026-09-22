@@ -58,6 +58,19 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertEqual(result["errorCode"], "database_query_unavailable")
 
+    def test_configurable_workflow_rpcs_are_required_before_runtime_reports_ready(self):
+        required = ("edoc_mutate_official_workflow", "edoc_save_official_workflow_config")
+        for name in required:
+            self.assertIn(name, backend.EDOC_READINESS_REQUIRED_RPC_NAMES)
+        for missing in required:
+            paths = {f"/rpc/{name}": {"post": {}} for name in backend.EDOC_READINESS_REQUIRED_RPC_NAMES if name != missing}
+            paths.update({f"/{name}": {"get": {}} for name in backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES})
+            with self.subTest(missing=missing), self.production_runtime_config(), mock.patch.object(backend, "_readiness_http_json", return_value={"paths": paths}):
+                result = backend._probe_main_supabase_rpcs(0.25)
+            self.assertFalse(result["ready"])
+            self.assertEqual(result["missingRpcNames"], [missing])
+            self.assertEqual(result["errorCode"], "database_required_rpc_missing")
+
     def test_main_supabase_probes_never_follow_redirects(self):
         rpc_paths = {
             f"/rpc/{name}": {"post": {}}

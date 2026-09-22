@@ -289,6 +289,8 @@ with required_rpcs(signature) as (
     ('public.edoc_commit_official_document_submission(jsonb)'),
     ('public.edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)'),
     ('public.edoc_copy_editor_conflict(jsonb)'),
+    ('public.edoc_save_official_workflow_config(jsonb)'),
+    ('public.edoc_mutate_official_workflow(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
 ), resolved as (
   select signature, pg_catalog.to_regprocedure(signature) as oid
@@ -334,6 +336,8 @@ with required_rpcs(signature) as (
     ('public.edoc_commit_official_document_submission(jsonb)'),
     ('public.edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)'),
     ('public.edoc_copy_editor_conflict(jsonb)'),
+    ('public.edoc_save_official_workflow_config(jsonb)'),
+    ('public.edoc_mutate_official_workflow(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
 ), resolved as (
   select signature, pg_catalog.to_regprocedure(signature) as oid
@@ -367,6 +371,8 @@ with allowed(signature) as (
     ('public.edoc_commit_official_document_submission(jsonb)'),
     ('public.edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)'),
     ('public.edoc_copy_editor_conflict(jsonb)'),
+    ('public.edoc_save_official_workflow_config(jsonb)'),
+    ('public.edoc_mutate_official_workflow(jsonb)'),
     ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_complete_official_document_stamp(text,text,text,text)'),
     ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)'),

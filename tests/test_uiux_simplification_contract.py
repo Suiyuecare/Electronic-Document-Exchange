@@ -101,7 +101,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn('id="logoutBtn"', self.html)
 
     def test_core_page_guidance_uses_plain_chinese(self) -> None:
-        for label in ("今日待辦", "簽核案件", "固定簽核規則", "印章版本控管"):
+        for label in ("今日待辦", "簽核案件", "簽核流程設定", "印章版本控管"):
             self.assertIn(label, self.html)
         for teaching_copy in ("兩步完成", "四步完成", "第一次使用", "三步開始今天的工作"):
             self.assertNotIn(teaching_copy, self.html + self.js)
@@ -431,8 +431,8 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         body = self.js[start:end]
         self.assertIn('officialWorkflowStatusFilter = "";', body)
         self.assertIn('officialWorkflowSearchTerm = "";', body)
-        self.assertIn('await loadOfficialWorkflow("mine");', body)
-        self.assertIn("await loadOfficialDocumentDetail(documentId);", body)
+        self.assertIn('await loadOfficialWorkflow("mine", { isCurrent: current });', body)
+        self.assertIn("if (current() && documentId) await loadOfficialDocumentDetail(documentId, { isCurrent: current });", body)
         self.assertGreaterEqual(self.js.count("await showSubmittedOfficialDocument("), 3)
 
 

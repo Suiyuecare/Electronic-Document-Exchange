@@ -158,12 +158,14 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_finalize_editor_asset_v2",
     "edoc_finalize_official_document_resubmit",
     "edoc_mutate_inbound_document_v1",
+    "edoc_mutate_official_workflow",
     "edoc_register_official_archive_export",
     "edoc_resolve_finance_session_v1",
     "edoc_resolve_portal_finance_user",
     "edoc_revalidate_finance_session_v2",
     "edoc_revoke_official_workflow_delegation",
     "edoc_save_compose_draft",
+    "edoc_save_official_workflow_config",
     "edoc_set_current_company_seal_file",
 )
 # These server-only tables are the minimum immutable PDF Editor V2 contract.
@@ -259,6 +261,13 @@ EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
 # immutable, non-sensitive business codes may cross the transport boundary as
 # application errors.  Everything else remains an opaque machine-code marker.
 POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
+    "official_workflow_config_conflict",
+    "official_workflow_config_version_conflict",
+    "official_workflow_action_conflict",
+    "official_workflow_operation_conflict",
+    "official_workflow_step_conflict",
+    "official_workflow_generation_conflict",
+    "official_workflow_irreversible",
     "editor_conflict_copy_request_conflict",
     "editor_locked_after_submit",
     "compose_draft_revision_conflict",
@@ -633,9 +642,10 @@ def api_value_error_status(detail: str) -> int:
         "editor_antivirus_not_ready",
         "editor_antivirus_scan_failed",
         "editor_runtime_maintenance",
+        "official_workflow_history_unavailable",
     )):
         return 503
-    return 409 if detail in API_CONFLICT_ERROR_CODES else 422
+    return 409 if detail in API_CONFLICT_ERROR_CODES or detail in {"official_workflow_config_version_conflict", "official_workflow_action_conflict", "official_workflow_operation_conflict", "official_workflow_step_conflict"} else 422
 
 
 def normalize_edoc_job_level(job_level: Any) -> str:
@@ -3756,7 +3766,8 @@ BEFORE DELETE ON official_document_approval_logs
 BEGIN
   SELECT RAISE(ABORT, 'immutable_record_log');
 END;
-CREATE TRIGGER IF NOT EXISTS trg_official_step_decision_evidence_no_rewrite
+DROP TRIGGER IF EXISTS trg_official_step_decision_evidence_no_rewrite;
+CREATE TRIGGER trg_official_step_decision_evidence_no_rewrite
 BEFORE UPDATE OF decision_actor_user_id, decision_evidence_json ON official_document_approval_steps
 WHEN (
   COALESCE(OLD.decision_actor_user_id, '') <> ''
@@ -3765,6 +3776,12 @@ WHEN (
 AND (
   NEW.decision_actor_user_id IS NOT OLD.decision_actor_user_id
   OR NEW.decision_evidence_json IS NOT OLD.decision_evidence_json
+)
+AND NOT (
+  OLD.status = 'pending' AND COALESCE(OLD.decision_actor_user_id, '') = ''
+  AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(OLD.decision_evidence_json, '{}')) WHERE key NOT IN ('copied_from_step_id', 'added_by_operation_id'))
+  AND json_extract(NEW.decision_evidence_json, '$.copied_from_step_id') IS json_extract(OLD.decision_evidence_json, '$.copied_from_step_id')
+  AND json_extract(NEW.decision_evidence_json, '$.added_by_operation_id') IS json_extract(OLD.decision_evidence_json, '$.added_by_operation_id')
 )
 BEGIN
   SELECT RAISE(ABORT, 'official_document_decision_evidence_immutable');
@@ -18312,6 +18329,14 @@ OFFICIAL_WORKFLOW_AVAILABLE_STEPS = [dict(step) for step in OFFICIAL_UNIFIED_APP
 OFFICIAL_DOCUMENT_STEP_STATUS = {step["key"]: step["status"] for step in OFFICIAL_WORKFLOW_AVAILABLE_STEPS}
 OFFICIAL_DOCUMENT_STEP_STATUS["accounting_review"] = "pending_department_head"
 OFFICIAL_WORKFLOW_SETTING_KEY = "official_workflow_config"
+OFFICIAL_CONFIGURABLE_ROLE_KEYS = ("applicant_manager", "department_head", "ceo", "admin_director")
+OFFICIAL_WORKFLOW_MAX_NODES = 12
+
+
+def official_step_status(key: str) -> str:
+    if re.fullmatch(r"approval_[a-zA-Z0-9_-]{1,80}", str(key or "")):
+        return "pending_approval"
+    return OFFICIAL_DOCUMENT_STEP_STATUS.get(str(key or ""), "")
 
 OFFICIAL_SEAL_ROUTE_NAMES = {
     "A": "A 行政部門用印（統一簽核）",
@@ -18384,44 +18409,180 @@ def official_seal_workflow_steps(route_code: str) -> List[Dict[str, Any]]:
 
 def normalize_official_workflow_config(payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = payload or {}
-    # The approval chain is an organization policy, not a per-screen option.
-    # Persist the canonical no-CEO chain for settings/readiness displays; C/D
-    # routes are expanded by official_seal_workflow_steps on the server.
-    steps = unified_official_workflow_steps("A")
+    raw_categories = payload.get("categories")
+    if raw_categories is not None and not isinstance(raw_categories, dict):
+        raise ValueError("official_workflow_config_categories_invalid")
+    known_categories = set(OFFICIAL_SEAL_DOCUMENT_CATEGORIES)
+    if raw_categories and set(raw_categories) - known_categories:
+        raise ValueError("official_workflow_config_category_invalid")
+    categories = {}
+    for category, item in OFFICIAL_SEAL_DOCUMENT_CATEGORIES.items():
+        defaults = [
+            {"id": step["key"], "name": step["name"], "assignee": {"type": "role", "role_key": step["key"]}}
+            for step in unified_official_workflow_steps(item["route"])
+            if step["key"] not in {"general_affairs_review", "applicant_confirm"}
+        ]
+        entry = (raw_categories or {}).get(category, {"nodes": defaults})
+        nodes = entry.get("nodes") if isinstance(entry, dict) else None
+        if not isinstance(nodes, list) or len(nodes) > OFFICIAL_WORKFLOW_MAX_NODES:
+            raise ValueError("official_workflow_config_nodes_invalid")
+        normalized_nodes = []
+        seen = set()
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise ValueError("official_workflow_config_node_invalid")
+            node_id = str(node.get("id") or "")
+            if not re.fullmatch(r"[a-zA-Z0-9_-]{1,60}", node_id) or node_id in seen:
+                raise ValueError("official_workflow_config_node_id_invalid")
+            seen.add(node_id)
+            name = str(node.get("name") or "").strip()
+            if not name or len(name) > 80:
+                raise ValueError("official_workflow_config_node_name_invalid")
+            assignee = node.get("assignee") or {}
+            if not isinstance(assignee, dict):
+                raise ValueError("official_workflow_config_assignee_invalid")
+            if assignee.get("type") == "role" and assignee.get("role_key") in OFFICIAL_CONFIGURABLE_ROLE_KEYS:
+                normalized_assignee = {"type": "role", "role_key": assignee["role_key"]}
+            elif assignee.get("type") == "user" and isinstance(assignee.get("user_id"), str) and 0 < len(assignee["user_id"]) <= 200:
+                normalized_assignee = {"type": "user", "user_id": assignee["user_id"]}
+            else:
+                raise ValueError("official_workflow_config_assignee_invalid")
+            normalized_nodes.append({"id": node_id, "name": name, "assignee": normalized_assignee})
+        categories[category] = {"nodes": normalized_nodes}
+    steps = unified_official_workflow_steps("A")  # legacy read-only clients
     return {
-        "key": "internal_official_dispatch_v2",
+        "schema_version": 3,
+        "key": "internal_official_dispatch_v3",
         "name": str(payload.get("name") or "發文與用印簽核流程"),
+        "version": int(payload.get("version") or 0),
+        "categories": categories,
+        "available_roles": [{"key": key, "name": next((step["name"] for step in OFFICIAL_UNIFIED_APPROVAL_STEPS if step["key"] == key), "會計")} for key in OFFICIAL_CONFIGURABLE_ROLE_KEYS],
+        "fixed_tail": [dict(step) for step in OFFICIAL_UNIFIED_APPROVAL_STEPS if step["key"] in {"general_affairs_review", "applicant_confirm"}],
         "enabled_steps": [step["key"] for step in steps],
         "steps": steps,
-        "locked": True,
+        "locked": False,
         "updated_at": str(payload.get("updated_at") or now()),
     }
 
 
 def local_official_workflow_config(conn: sqlite3.Connection) -> Dict[str, Any]:
-    row = conn.execute("SELECT value_json FROM settings WHERE key = ?", (OFFICIAL_WORKFLOW_SETTING_KEY,)).fetchone()
+    row = conn.execute("SELECT value_json, version FROM settings WHERE key = ?", (OFFICIAL_WORKFLOW_SETTING_KEY,)).fetchone()
     if not row:
         return normalize_official_workflow_config()
-    return normalize_official_workflow_config(parse_json_field(row["value_json"]))
+    return normalize_official_workflow_config({**parse_json_field(row["value_json"]), "version": row["version"]})
 
 
-def save_local_official_workflow_config(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+def save_local_official_workflow_config(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    if session is not None and not can_write_table(session, "settings"):
+        raise PermissionError("workflow_config_manage_forbidden")
+    expected = payload.get("expected_version")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+        raise ValueError("official_workflow_config_expected_version_required")
     config = normalize_official_workflow_config(payload)
-    conn.execute(
-        """
-        INSERT INTO settings (key, value_json, version, updated_at) VALUES (?, ?, 1, ?)
-        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, version = settings.version + 1, updated_at = excluded.updated_at
-        """,
-        (OFFICIAL_WORKFLOW_SETTING_KEY, json.dumps(config, ensure_ascii=False), now()),
-    )
+    validate_official_config_designated_users(config, lambda user_id: active_user_by_id(conn, user_id), (session or {}).get("user"))
+    config["version"], config["updated_at"] = expected + 1, now()
+    encoded = json.dumps(config, ensure_ascii=False)
+    if expected == 0:
+        changed = conn.execute("INSERT OR IGNORE INTO settings (key,value_json,version,updated_at) VALUES (?,?,1,?)", (OFFICIAL_WORKFLOW_SETTING_KEY, encoded, config["updated_at"]))
+    else:
+        changed = conn.execute("UPDATE settings SET value_json=?,version=version+1,updated_at=? WHERE key=? AND version=?", (encoded, config["updated_at"], OFFICIAL_WORKFLOW_SETTING_KEY, expected))
+    if changed.rowcount != 1:
+        raise ValueError("official_workflow_config_version_conflict")
+    actor = (session or {}).get("user") or {"id": "system"}
+    log_audit(conn, str(actor["id"]), "official_workflow_config_save", "settings", OFFICIAL_WORKFLOW_SETTING_KEY, f"version={config['version']};sha256={sha256_bytes(encoded.encode())}", actor_user_id=str(actor["id"]), metadata={"version": config["version"], "config_sha256": sha256_bytes(encoded.encode())})
     return config
 
 
 def official_workflow_steps_for_document(conn: sqlite3.Connection, document: Dict[str, Any]) -> List[Dict[str, Any]]:
     seal_context = official_seal_context_from_document(document)
     if seal_context:
-        return official_seal_workflow_steps(seal_context["approval_route_code"])
+        return configured_official_workflow_steps(local_official_workflow_config(conn), seal_context["document_category"])
     return unified_official_workflow_steps("A")
+
+
+def validate_official_config_designated_users(config: Dict[str, Any], lookup: Any, administrator: Dict[str, Any] | None = None) -> None:
+    for category in config["categories"].values():
+        for node in category["nodes"]:
+            if node["assignee"]["type"] != "user":
+                continue
+            actor = lookup(node["assignee"]["user_id"])
+            if not actor or actor.get("status") != "啟用" or not finance_workflow_actor(actor):
+                raise ValueError("official_workflow_designated_actor_invalid")
+            if administrator:
+                tenant = roster_text(administrator.get("finance_tenant_id"))
+                if (tenant and roster_text(actor.get("finance_tenant_id")) != tenant) or (not tenant and (is_production() or actor.get("company_id") != administrator.get("company_id"))):
+                    raise PermissionError("official_workflow_designated_actor_forbidden")
+
+
+def official_designated_document_scope_allowed(actor: Dict[str, Any] | None, document: Dict[str, Any] | None) -> bool:
+    """Match the existing decision RPC scope; config itself is tenant-wide."""
+    if document is None:
+        return True
+    if not actor:
+        return False
+    if actor.get("company_id") and actor.get("company_id") == document.get("company_id"):
+        return True
+    return bool(document.get("source_type") == "uploaded_pdf" and parse_json_field(document.get("metadata_json")).get("pdf_editor_v2") is True)
+
+
+def official_designated_actor_allowed(actor: Dict[str, Any] | None, applicant: Dict[str, Any], company: Dict[str, Any], document: Dict[str, Any] | None = None) -> bool:
+    if not actor or actor.get("status") != "啟用" or not finance_workflow_actor(actor) or actor.get("id") == applicant.get("id"):
+        return False
+    if not official_designated_document_scope_allowed(actor, document):
+        return False
+    if document is not None and actor.get("company_id") != document.get("company_id"):
+        if company.get("source_system") != "finance" or company.get("status") not in {"active", "啟用"} or not roster_text(company.get("finance_entity_id")) or applicant.get("status") != "啟用" or not roster_text(applicant.get("finance_tenant_id")):
+            return False
+    tenant = roster_text(applicant.get("finance_tenant_id") or company.get("finance_tenant_id"))
+    if tenant:
+        return bool(roster_text(actor.get("finance_tenant_id")) == tenant and roster_text(company.get("finance_tenant_id")) == tenant)
+    return bool(not is_production() and actor.get("company_id") and actor.get("company_id") == company.get("id"))
+
+
+def require_official_designated_document_scope(steps: Iterable[Dict[str, Any]], document: Dict[str, Any], lookup: Any) -> None:
+    for step in steps:
+        assignee = step.get("assignee") or {}
+        if assignee.get("type") == "user":
+            actor = lookup(assignee.get("user_id") or "")
+            if actor and not official_designated_document_scope_allowed(actor, document):
+                raise ValueError("official_workflow_designated_company_forbidden")
+
+
+def official_workflow_readiness_document(company_id: str, source_type: str) -> Dict[str, Any]:
+    if source_type not in {"blank_editor", "uploaded_pdf"}:
+        raise ValueError("official_workflow_source_type_invalid")
+    return {"company_id": company_id, "source_type": source_type, "metadata_json": {"pdf_editor_v2": source_type == "uploaded_pdf"}}
+
+
+def configured_official_workflow_steps(config: Dict[str, Any], category: str, finance_role: Any = "") -> List[Dict[str, Any]]:
+    entry = config.get("categories", {}).get(category)
+    if entry is None:
+        raise ValueError("official_workflow_config_category_invalid")
+    skipped = OFFICIAL_FINANCE_APPLICANT_SKIPPED_STEPS.get(canonical_logging_role(finance_role), set()) if finance_role else set()
+    steps = []
+    for node in entry["nodes"]:
+        assignee = node["assignee"]
+        role_key = assignee.get("role_key") if assignee["type"] == "role" else ""
+        if role_key in skipped:
+            continue
+        base = next((step for step in OFFICIAL_UNIFIED_APPROVAL_STEPS if step["key"] == role_key), {})
+        # Keep default role identities compatible; repeated/custom nodes use
+        # an explicit identity and a generic approval status, never a role guess.
+        key = role_key if role_key and node["id"] == role_key else f"approval_{node['id']}"
+        if any(step["key"] == key for step in steps):
+            raise ValueError("official_workflow_config_node_id_invalid")
+        steps.append({"key": key, "name": node["name"], "role": base.get("role") or ("會計" if role_key == "accounting_review" else "指定簽核人"), "status": official_step_status(key), "required": True, "assignee": dict(assignee), "node_id": node["id"]})
+    steps.extend(dict(step) for step in OFFICIAL_UNIFIED_APPROVAL_STEPS if step["key"] in {"general_affairs_review", "applicant_confirm"})
+    return [{**step, "order": i + 1} for i, step in enumerate(steps)]
+
+
+def locked_official_config_metadata(document: Dict[str, Any], config: Dict[str, Any], category: str, steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    metadata = parse_json_field(document.get("metadata_json"))
+    seal = dict(metadata.get("official_seal") or {})
+    snapshot = {"schema_version": 3, "version": config["version"], "document_category": category, "nodes": config["categories"][category]["nodes"]}
+    seal.update({"workflow_config_snapshot": snapshot, "workflow_config_sha256": hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "approval_steps": steps, "approval_step_keys": [step["key"] for step in steps], "workflow_locked_at": now()})
+    metadata["official_seal"] = seal
+    return metadata
 
 
 def official_workflow_step_sequence_matches(
@@ -18908,8 +19069,14 @@ def official_department_head_role(conn: sqlite3.Connection, company: Dict[str, A
     return row["manager_role"] if row else "主任"
 
 
-def resolve_official_step_approver(conn: sqlite3.Connection, step: Dict[str, Any], applicant: Dict[str, Any], company: Dict[str, Any]) -> Dict[str, Any] | None:
-    key = step["key"]
+def resolve_official_step_approver(conn: sqlite3.Connection, step: Dict[str, Any], applicant: Dict[str, Any], company: Dict[str, Any], document: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+    assignee = step.get("assignee") or {}
+    if assignee.get("type") == "user":
+        actor = active_user_by_id(conn, assignee.get("user_id") or "")
+        if actor and not official_designated_document_scope_allowed(actor, document):
+            raise ValueError("official_workflow_designated_company_forbidden")
+        return actor if official_designated_actor_allowed(actor, applicant, company, document) else None
+    key = assignee.get("role_key") or step["key"]
     if key == "applicant_confirm":
         return applicant
     if key == "applicant_manager":
@@ -18998,7 +19165,7 @@ def finance_workflow_step_failure_reason(
     applicant: Dict[str, Any],
     approver: Dict[str, Any] | None,
 ) -> str:
-    key = str(step.get("key") or "")
+    key = str((step.get("assignee") or {}).get("role_key") or step.get("key") or "")
     if (
         key != "applicant_confirm"
         and approver
@@ -19059,7 +19226,7 @@ def workflow_readiness_summary(
     unit_ready = bool(roster_text(user.get("unit")))
     step_results: List[Dict[str, Any]] = []
     for step, actor in steps_and_actors:
-        reason = (
+        reason = step.get("scope_failure") or (
             finance_workflow_step_failure_reason(step, user, actor)
             if finance_workflow_actor(user)
             else "" if actor else "actor_not_found"
@@ -19068,6 +19235,8 @@ def workflow_readiness_summary(
             "stepKey": step.get("key") or "",
             "stepName": step.get("name") or "",
             "requiredRole": step.get("role") or "",
+            "approverUserId": (actor or {}).get("id") or "",
+            "approverName": (actor or {}).get("name") or "",
             "ready": not reason,
             "reason": reason,
         })
@@ -19101,17 +19270,24 @@ def official_applicant_workflow_readiness(
     conn: sqlite3.Connection,
     session: Dict[str, Any] | None,
     route_code: str = "A",
+    document_category: str = "",
+    company_id: str = "",
+    unit: str = "",
+    source_type: str = "blank_editor",
 ) -> Dict[str, Any]:
     user = official_session_user(session)
     route = roster_text(route_code or "A").upper()
-    company_id = roster_text(user.get("company_id"))
+    if document_category:
+        route = official_seal_approval_context({"document_category": document_category})["approval_route_code"]
+    company_id = roster_text(company_id or user.get("company_id"))
     company: Dict[str, Any] | None = None
     if company_id:
         try:
-            company = official_company_row(conn, company_id)
+            company = official_editor_company(user, company_id, conn)
         except ValueError:
             company = None
-    steps = (
+    config = local_official_workflow_config(conn)
+    steps = configured_official_workflow_steps(config, document_category, user.get("logging_role_key") or user.get("role") if finance_workflow_actor(user) else "") if document_category else (
         official_workflow_steps_for_finance_applicant(
             route,
             user.get("logging_role_key") or user.get("role"),
@@ -19119,16 +19295,21 @@ def official_applicant_workflow_readiness(
         if finance_workflow_actor(user)
         else unified_official_workflow_steps(route)
     )
-    resolved = [
-        (step, resolve_official_step_approver(conn, step, user, company or {}))
-        for step in steps
-    ]
-    return workflow_readiness_summary(
+    document = official_workflow_readiness_document(company_id, source_type)
+    resolved = []
+    for step in steps:
+        try:
+            resolved.append((step, resolve_official_step_approver(conn, step, user, company or {}, document)))
+        except ValueError as error:
+            if str(error) != "official_workflow_designated_company_forbidden":
+                raise
+            resolved.append(({**step, "scope_failure": "designated_company_forbidden"}, None))
+    return {**workflow_readiness_summary(
         user,
         route,
         resolved,
         company_ready=bool(company),
-    )
+    ), "configurationVersion": config["version"]}
 
 
 INTERNAL_LAUNCH_WORKFLOW_FAILURE_LABELS = {
@@ -19139,6 +19320,7 @@ INTERNAL_LAUNCH_WORKFLOW_FAILURE_LABELS = {
     "actor_resolution_error": "Finance actor 解析失敗",
     "non_finance_actor": "解析結果不是 Finance actor",
     "self_assignment": "簽核人不可為申請人本人",
+    "designated_company_forbidden": "指定簽核人不屬於公文公司，請調整流程設定",
 }
 
 
@@ -20329,6 +20511,88 @@ def current_official_document_steps(conn: sqlite3.Connection, document_id: str) 
     return [row for row in rows if int(row.get("workflow_generation") or 1) == generation]
 
 
+def official_step_decision_display(steps: List[Dict[str, Any]], logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Read-only audit projection; never treat an assignment as a decision."""
+    by_id = {(row.get("document_id"), str(row.get("id") or "")): row for row in steps}
+    evidence_by_id = {key: parse_json_any(row.get("decision_evidence_json"), {}) or {} for key, row in by_id.items()}
+    step_logs, receipt_logs = {}, {}
+    for log in logs:
+        if not log.get("actor_id") or log.get("action") not in {"approve", "add_sign", "reject", "confirm"}:
+            continue
+        key = (log.get("document_id"), str(log.get("step_id") or ""))
+        step_logs.setdefault(key, []).append(log)
+        if log.get("action") == "confirm" and not log.get("step_id"):
+            receipt_logs.setdefault((log.get("document_id"), log.get("created_at"), log.get("actor_id")), []).append(log)
+    for group in (*step_logs.values(), *receipt_logs.values()):
+        group.sort(key=lambda log: (str(log.get("created_at") or ""), str(log.get("id") or "")))
+    conflict = object()
+    empty = (None, None)
+    summaries, own_summaries = {}, {}
+
+    def merge(nearest, ancestors):
+        witness, actor = nearest
+        prior_witness, prior_actor = ancestors
+        if actor is None:
+            actor = prior_actor
+        elif prior_actor is not None and actor != prior_actor:
+            actor = conflict
+        return (witness if witness is not None else prior_witness, actor)
+
+    def summarize(candidates, actions, actor_id):
+        summary = empty
+        for log in candidates:
+            if log.get("action") in actions and (not actor_id or str(log["actor_id"]) == actor_id):
+                summary = merge(summary, (log, str(log["actor_id"])))
+        return summary
+
+    def lineage_summary(document_id, step_id, actions, actor_id):
+        # Memoize a constant-size witness/conflict summary, not entire ancestry.
+        # Iterative traversal also handles histories deeper than Python's stack.
+        mode = (document_id, actions, actor_id)
+        path, seen, cursor = [], set(), step_id
+        while cursor and (*mode, cursor) not in summaries and cursor not in seen:
+            seen.add(cursor)
+            path.append(cursor)
+            cursor = str(evidence_by_id.get((document_id, cursor), {}).get("copied_from_step_id") or "")
+        cyclic = cursor in seen
+        summary = empty if cyclic else summaries.get((*mode, cursor), empty)
+        for node_id in reversed(path):
+            key = (*mode, node_id)
+            if key not in own_summaries:
+                own_summaries[key] = summarize(step_logs.get((document_id, node_id), []), actions, actor_id)
+            summary = merge(own_summaries[key], summary)
+            # A corrupt cycle has source-relative nearest-log order. Do not
+            # reuse intermediate summaries that would omit part of the cycle.
+            if not cyclic:
+                summaries[key] = summary
+        return summary
+
+    result = []
+    for source in steps:
+        row = {**source, "decision_actor_id": "", "decision_actor_name": "", "decision_log_id": "", "decision_actor_evidence_source": "unrecorded"}
+        if source.get("status") not in {"approved", "rejected"}:
+            result.append(row)
+            continue
+        evidence = evidence_by_id.get((source.get("document_id"), str(source.get("id") or "")), {})
+        actor_id = str(source.get("decision_actor_user_id") or evidence.get("decision_actor_user_id") or "")
+        actions = {"reject"} if source.get("status") == "rejected" else {"approve", "add_sign"}
+        if source.get("step_key") == "applicant_confirm":
+            actions.add("confirm")
+        summary = lineage_summary(source.get("document_id"), str(source.get("id") or ""), frozenset(actions), actor_id)
+        if source.get("step_key") == "applicant_confirm" and source.get("approved_at"):
+            receipts = receipt_logs.get((source.get("document_id"), source.get("approved_at"), source.get("approver_user_id")), [])
+            summary = merge(summary, summarize(receipts, actions, actor_id))
+        witness, witnessed_actor = summary
+        # Legacy rows with no actual-actor field need an unambiguous audit
+        # witness. Conflicting actors must remain visibly unknown.
+        if witness is not None and witnessed_actor is not conflict:
+            row.update(decision_actor_id=str(witness["actor_id"]), decision_actor_name=str(witness.get("actor_name") or ""), decision_log_id=str(witness.get("id") or ""), decision_actor_evidence_source="approval_log")
+        elif actor_id:
+            row.update(decision_actor_id=actor_id, decision_actor_evidence_source="decision_actor_id")
+        result.append(row)
+    return result
+
+
 OFFICIAL_DOCUMENT_ACTOR_SNAPSHOT_SOURCE_TYPES = frozenset({
     "official_document",
     "official_documents",
@@ -21438,7 +21702,11 @@ def create_official_workflow_steps(
     )
     target_generation = current_generation or 1
     generation_base = 0
-    if existing and all(step.get("status") == "skipped" for step in existing):
+    withdrawn_generation = any(
+        int((parse_json_any(row["decision_evidence_json"], {}) or {}).get("action_result", {}).get("workflow_generation") or 0) == current_generation
+        for row in conn.execute("SELECT decision_evidence_json FROM official_document_approval_logs WHERE document_id=? AND action='withdraw'", (document["id"],))
+    )
+    if existing and (all(step.get("status") == "skipped" for step in existing) or (document.get("current_status") == "draft" and withdrawn_generation and all(step.get("status") != "pending" for step in existing))):
         snapshot_official_document_approval_steps(conn, document["id"], existing)
         # A rejected generation remains part of the permanent decision record.
         # Allocate the replacement generation after it instead of deleting the
@@ -21495,7 +21763,7 @@ def create_official_workflow_steps(
     company = official_company_row(conn, document["company_id"])
     resolved_steps: List[Tuple[Dict[str, Any], Dict[str, Any] | None]] = []
     for step in selected_workflow_steps:
-        approver = actor_plan.get(step["key"]) if actor_plan is not None else resolve_official_step_approver(conn, step, applicant, company)
+        approver = actor_plan.get(step["key"]) if actor_plan is not None else resolve_official_step_approver(conn, step, applicant, company, document)
         require_valid_finance_workflow_step_actor(
             step,
             applicant,
@@ -21600,7 +21868,7 @@ def official_document_active_read_delegation(
         and step.get("step_key") == document.get("current_step")
         and step.get("step_key") != "applicant_confirm"
         and step.get("status") == "pending"
-        and OFFICIAL_DOCUMENT_STEP_STATUS.get(str(step.get("step_key") or "")) == document.get("current_status")
+        and official_step_status(str(step.get("step_key") or "")) == document.get("current_status")
     ), None)
     if not current or current.get("approver_user_id") == user.get("id"):
         return None
@@ -21620,6 +21888,45 @@ def official_document_active_read_delegation(
         }:
             return None
         raise
+
+
+def official_workflow_action_capabilities(document: Dict[str, Any], steps: List[Dict[str, Any]], user: Dict[str, Any] | None, delegation: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    current = next((row for row in steps if row.get("status") == "pending" and row.get("step_key") == document.get("current_step")), None)
+    active = bool(current and current.get("step_key") != "applicant_confirm" and document.get("current_status") == official_step_status(current["step_key"]))
+    can_decide = bool(active and user and user.get("id") != document.get("applicant_id") and (current.get("approver_user_id") == user.get("id") or delegation))
+    previous = next((row for row in reversed(steps) if current and row.get("status") == "approved" and int(row.get("step_order") or 0) < int(current.get("step_order") or 0)), None)
+    actions = ["approve", "reject", "add-sign"] if can_decide else []
+    if can_decide and previous:
+        actions.append("return-previous")
+    if active and user and user.get("id") == document.get("applicant_id"):
+        actions.append("withdraw")
+    return {"available_actions": actions, "workflow_action_context": {"expected_step_id": (current or {}).get("id") or "", "expected_content_revision": int(document.get("content_revision") or 0), "previous_step": {"id": previous["id"], "name": previous.get("step_name") or "", "approver_name": previous.get("approver_name") or ""} if previous else None}}
+
+
+def official_workflow_candidates(session: Dict[str, Any] | None, *, company_id: str = "", document_id: str = "", conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    actor = official_session_user(session) if conn is not None else supabase_official_session_user(session)
+    excluded = set()
+    document = None
+    if document_id:
+        document = official_document_row(conn, document_id) if conn is not None else supabase_official_document_row(document_id)
+        step = current_official_pending_step(conn, document) if conn is not None else supabase_current_official_pending_step(document)
+        assert_official_step_actor(actor, step, document, conn=conn, supabase_mode=conn is None)
+        if not official_workflow_action_capabilities(document, [step], actor, {"valid": True})["available_actions"]:
+            raise PermissionError("official_workflow_candidates_forbidden")
+        applicant = (active_user_by_id(conn, document["applicant_id"]) if conn is not None else supabase_user_by_id(document["applicant_id"])) or {}
+        company_id = document["company_id"]
+        excluded.update({actor["id"], step.get("approver_user_id"), document["applicant_id"]})
+        all_steps = official_document_steps(conn, document_id) if conn is not None else supabase_official_document_steps(document_id)
+        generation = max((int(row.get("workflow_generation") or 1) for row in all_steps), default=0)
+        excluded.update(row.get("approver_user_id") for row in all_steps if int(row.get("workflow_generation") or 1) == generation and row.get("status") == "pending")
+        company = official_company_row(conn, company_id) if conn is not None else supabase_official_company_row(company_id)
+    else:
+        if not can_write_table(session, "settings"):
+            raise PermissionError("workflow_config_manage_forbidden")
+        company = official_editor_company(actor, company_id or actor.get("company_id"), conn)
+        applicant = {**actor, "id": ""}
+    rows = [row_to_dict(row) for row in conn.execute("SELECT * FROM users WHERE status='啟用' AND account_source='finance' ORDER BY name,id").fetchall()] if conn is not None else supabase_filter_rows("users", {"status": "啟用", "account_source": "finance"}, order="name.asc,id.asc", limit=2000)
+    return {"candidates": [{key: row.get(key) or "" for key in ("id", "name", "role", "company_id", "unit")} for row in rows if row["id"] not in excluded and official_designated_actor_allowed(row, applicant, company, document)]}
 
 
 def official_application_package(
@@ -21706,6 +22013,9 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
             raise PermissionError("official_document_access_denied")
     files = official_document_files(conn, document_id)
     logs = official_document_logs(conn, document_id)
+    current_ids = {step["id"] for step in steps}
+    all_steps = official_step_decision_display(all_steps, logs)
+    steps = [step for step in all_steps if step["id"] in current_ids]
     stamp_request = official_document_stamp_request(conn, document_id)
     dispatch_record = official_dispatch_record(conn, document_id)
     package = official_application_package(document, files, steps, logs, stamp_request, dispatch_record)
@@ -21735,6 +22045,7 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         "stamp_request": package.get("stamp_request"),
         "dispatch_record": dispatch_record,
         "correction": correction,
+        **official_workflow_action_capabilities(document, steps, user, active_delegation),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
         "can_download": bool(is_participant or active_delegation),
@@ -23092,9 +23403,10 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
     seal_context = official_seal_context_from_document(document)
     if not seal_context:
         raise ValueError("official_seal_document_category_required")
-    workflow_steps = official_workflow_steps_for_document(conn, document)
+    workflow_config = local_official_workflow_config(conn)
+    workflow_steps = configured_official_workflow_steps(workflow_config, seal_context["document_category"], user.get("logging_role_key") or user.get("role") if finance_workflow_actor(user) else "")
     actor_plan: Dict[str, Dict[str, Any]] | None = None
-    workflow_lock_metadata: Dict[str, Any] | None = None
+    workflow_lock_metadata = locked_official_config_metadata(document, workflow_config, seal_context["document_category"], workflow_steps)
     if is_production():
         snapshot = current_finance_bridge_snapshot(
             user.get("email") or "",
@@ -23103,26 +23415,27 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
         finance_role = strict_finance_role_profile(
             (snapshot.get("identity") or {}).get("role")
         )["logging_role_key"]
-        workflow_steps = official_workflow_steps_for_finance_applicant(
-            seal_context["approval_route_code"],
-            finance_role,
-        )
-        user, actor_plan = sync_sqlite_finance_snapshot(
+        workflow_steps = configured_official_workflow_steps(workflow_config, seal_context["document_category"], finance_role)
+        user, finance_actor_plan = sync_sqlite_finance_snapshot(
             conn,
             snapshot,
             auth_user_id=user.get("auth_user_id") or "",
             expected_user_id=user["id"],
             require_workflow=True,
-            required_step_keys=(step["key"] for step in workflow_steps),
+            required_step_keys=((step.get("assignee") or {}).get("role_key") or step["key"] for step in workflow_steps if (step.get("assignee") or {}).get("type") != "user"),
         )
+        company = official_company_row(conn, document["company_id"])
+        actor_plan = {step["key"]: (resolve_official_step_approver(conn, step, user, company, document) if (step.get("assignee") or {}).get("type") == "user" else finance_actor_plan.get((step.get("assignee") or {}).get("role_key") or step["key"])) for step in workflow_steps}
         workflow_lock_metadata = locked_official_finance_workflow_metadata(
             document,
             snapshot,
             finance_role,
             workflow_steps,
         )
+        workflow_lock_metadata = locked_official_config_metadata({**document, "metadata_json": workflow_lock_metadata}, workflow_config, seal_context["document_category"], workflow_steps)
         session = {**(session or {}), "user": user}
     require_official_document_application_company(user, document, conn)
+    require_official_designated_document_scope(workflow_steps, document, lambda user_id: active_user_by_id(conn, user_id))
     # The live Finance snapshot and complete exact actor plan are resolved
     # before AV/editor/seal locks mutate the application.
     # Claim SQLite's write transaction with a no-op compare-and-swap before any
@@ -23166,10 +23479,10 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
             "lock_finance_workflow",
             user,
             (
-                f"policy={workflow_lock['conditional_policy_version']};"
-                f"role={workflow_lock['applicant_finance_role']};"
+                f"policy={workflow_lock.get('conditional_policy_version', 1)};"
+                f"role={workflow_lock.get('applicant_finance_role', '')};"
                 f"steps={','.join(workflow_lock['approval_step_keys'])};"
-                f"snapshot={workflow_lock['finance_snapshot_sha256']}"
+                f"snapshot={workflow_lock.get('finance_snapshot_sha256', '')};config={workflow_lock.get('workflow_config_sha256', '')}"
             ),
         )
     applicant = active_user_by_id(conn, document["applicant_id"]) or user
@@ -23182,7 +23495,7 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
     )
     first = steps[0]
     review_started_at = now()
-    conn.execute("UPDATE official_documents SET current_status = ?, current_step = ?, updated_at = ? WHERE id = ?", (OFFICIAL_DOCUMENT_STEP_STATUS[first["step_key"]], first["step_key"], review_started_at, document_id))
+    conn.execute("UPDATE official_documents SET current_status = ?, current_step = ?, updated_at = ? WHERE id = ?", (official_step_status(first["step_key"]), first["step_key"], review_started_at, document_id))
     conn.execute(
         "UPDATE official_document_approval_steps SET review_started_at = ?, updated_at = ? WHERE id = ? AND review_started_at IS NULL",
         (review_started_at, review_started_at, first["id"]),
@@ -23362,7 +23675,7 @@ def claim_official_document_approval(
     owned by the same approver.  The savepoint rolls back the step mutation if
     the document compare-and-set unexpectedly loses its race.
     """
-    expected_status = OFFICIAL_DOCUMENT_STEP_STATUS.get(str(step.get("step_key") or ""))
+    expected_status = official_step_status(str(step.get("step_key") or ""))
     if (
         not expected_status
         or document.get("current_status") != expected_status
@@ -23395,7 +23708,8 @@ def claim_official_document_approval(
     if not next_step:
         raise ValueError("official_document_next_step_missing")
     if next_step.get("step_key") == "applicant_confirm":
-        if step.get("step_key") not in {"general_affairs_review", "ceo"}:
+        approved_general_affairs = conn.execute("SELECT 1 FROM official_document_approval_steps WHERE document_id=? AND workflow_generation=? AND step_key='general_affairs_review' AND status='approved'", (document["id"], int(step.get("workflow_generation") or 1))).fetchone()
+        if step.get("step_key") not in {"general_affairs_review", "ceo"} and not (str(step.get("step_key") or "").startswith("approval_") and approved_general_affairs):
             raise ValueError("official_document_invalid_final_approval_step")
         electronic_output = official_compose_electronic_output(document)
         if not bool(document.get("requires_stamp", 1)) and not electronic_output:
@@ -23406,7 +23720,7 @@ def claim_official_document_approval(
     else:
         transition = "next_step"
         next_key = str(next_step.get("step_key") or "")
-        next_status = OFFICIAL_DOCUMENT_STEP_STATUS.get(next_key) or ""
+        next_status = official_step_status(next_key)
         if not next_status:
             raise ValueError("official_document_next_step_invalid")
 
@@ -23513,7 +23827,7 @@ def claim_official_document_rejection(
     mutable generation steps atomic, so whichever action wins cannot be
     overwritten by a stale competing request.
     """
-    expected_status = OFFICIAL_DOCUMENT_STEP_STATUS.get(str(step.get("step_key") or ""))
+    expected_status = official_step_status(str(step.get("step_key") or ""))
     if (
         not expected_status
         or document.get("current_status") != expected_status
@@ -23881,7 +24195,9 @@ def official_approval_decision_evidence(
     comment = str(payload.get("comment") or "").strip()
     if step.get("step_key") in {"ceo", "admin_director", "general_affairs_review"} and not comment:
         raise ValueError("official_document_approval_comment_required")
+    provenance = parse_json_any(step.get("decision_evidence_json"), {}) or {}
     return {
+        **{key: provenance[key] for key in ("copied_from_step_id", "added_by_operation_id") if key in provenance},
         "schema_version": 2,
         "decision_type": decision_type,
         "expected_step_id": step.get("id") or "",
@@ -23990,7 +24306,9 @@ def approve_official_document(conn: sqlite3.Connection, document_id: str, payloa
         complete_official_electronic_output(conn, document_id, user)
         return official_document_detail(conn, document_id, session)
     if claim["transition"] == "auto_stamp":
-        result = auto_stamp_official_document(conn, document_id, payload, user)
+        # The workflow engine, not the added reviewer, executes the already
+        # approved fixed general-affairs stamp authority. Retry ACLs stay fixed.
+        result = auto_stamp_official_document(conn, document_id, payload, None if str(step["step_key"]).startswith("approval_") else user)
         return {**official_document_detail(conn, document_id, session), "auto_stamp": result}
     next_approver = active_user_by_id(conn, next_step.get("approver_user_id") or "") or {}
     create_and_deliver_notification(conn, {
@@ -24133,6 +24451,209 @@ def reject_official_document(conn: sqlite3.Connection, document_id: str, payload
     return result
 
 
+def official_workflow_action_identity(action: str, document_id: str, actor_id: str, payload: Dict[str, Any]) -> Tuple[str, str]:
+    if action not in {"return_previous", "add_sign", "withdraw"}:
+        raise ValueError("official_workflow_action_invalid")
+    operation_id = str(payload.get("operation_id") or "")
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{8,120}", operation_id):
+        raise ValueError("official_workflow_operation_id_required")
+    content = {key: value for key, value in payload.items() if key not in {"ip_address", "user_agent"}}
+    request_hash = sha256_bytes(json.dumps({"action": action, "document_id": document_id, "actor_id": actor_id, "payload": content}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+    return operation_id, request_hash
+
+
+def official_workflow_replay_result(log: Dict[str, Any] | None, action: str, document_id: str, actor_id: str, request_hash: str) -> Dict[str, Any] | None:
+    if not log:
+        return None
+    evidence = parse_json_any(log.get("decision_evidence_json"), {}) or {}
+    if log.get("document_id") != document_id or log.get("actor_id") != actor_id or log.get("action") != action or evidence.get("request_sha256") != request_hash:
+        raise ValueError("official_workflow_operation_conflict")
+    return {**(evidence.get("action_result") or {}), "idempotent": True}
+
+
+def plan_official_workflow_mutation(
+    document: Dict[str, Any], steps: List[Dict[str, Any]], actor: Dict[str, Any],
+    action: str, payload: Dict[str, Any], *, decision_evidence: Dict[str, Any] | None = None,
+    target: Dict[str, Any] | None = None, stamp_request: Dict[str, Any] | None = None,
+    editor_clone: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build a bounded, immutable replacement generation for an atomic commit.
+
+    Authority, live Finance target eligibility and file review evidence are
+    checked by the caller. The database repeats CAS/identity/order checks.
+    """
+    operation_id, request_hash = official_workflow_action_identity(action, document["id"], actor["id"], payload)
+    generation = max((int(row.get("workflow_generation") or 1) for row in steps), default=0)
+    current_rows = sorted((dict(row) for row in steps if int(row.get("workflow_generation") or 1) == generation), key=lambda row: int(row["step_order"]))
+    current = next((row for row in current_rows if row.get("step_key") == document.get("current_step") and row.get("status") == "pending"), None)
+    expected_id = str(payload.get("expected_step_id") or "")
+    if not current or expected_id != current["id"] or document.get("current_status") != official_step_status(current["step_key"]) or current["step_key"] == "applicant_confirm":
+        raise ValueError("official_workflow_action_conflict")
+    if document.get("stamped_file_id") or (stamp_request and (stamp_request.get("status") in {"stamping", "stamped", "completed"} or stamp_request.get("stamped_file_id") or stamp_request.get("claim_token"))):
+        raise ValueError("official_workflow_action_conflict")
+    comment = str(payload.get("comment") or "").strip()
+    if not comment or len(comment) > 2000:
+        raise ValueError("official_workflow_action_comment_required")
+    timestamp = now()
+    current_index = current_rows.index(current)
+    if any(row.get("status") == "pending" for row in current_rows[:current_index]):
+        raise ValueError("official_workflow_action_conflict")
+    next_generation = generation if action == "withdraw" else generation + 1
+    new_rows: List[Dict[str, Any]] = []
+    result: Dict[str, Any] = {"action": action, "workflow_generation": next_generation, "current_step_id": "", "approval_restart_required": action == "withdraw"}
+    if action == "withdraw":
+        if actor["id"] != document.get("applicant_id"):
+            raise PermissionError("only_applicant_can_withdraw")
+        expected_revision = payload.get("expected_content_revision")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision != int(document.get("content_revision") or 0):
+            raise ValueError("compose_content_revision_conflict")
+    else:
+        if actor["id"] == document.get("applicant_id"):
+            raise PermissionError("applicant_cannot_self_approve")
+        if action == "add_sign":
+            if payload.get("placement", "after") != "after" or not target:
+                raise ValueError("official_workflow_add_sign_target_invalid")
+            if len(current_rows) >= OFFICIAL_WORKFLOW_MAX_NODES + 10:
+                raise ValueError("official_workflow_add_sign_limit")
+            if target["id"] in {document.get("applicant_id"), actor["id"], current.get("approver_user_id")}:
+                raise ValueError("official_workflow_add_sign_target_invalid")
+            if any(row.get("status") == "pending" and row.get("approver_user_id") == target["id"] for row in current_rows):
+                raise ValueError("official_workflow_add_sign_target_duplicate")
+            reset_index = current_index + 1
+            result["target_user_id"] = target["id"]
+        else:
+            previous_indices = [i for i, row in enumerate(current_rows[:current_index]) if row.get("status") == "approved"]
+            if not previous_indices:
+                raise ValueError("official_workflow_previous_step_unavailable")
+            reset_index = previous_indices[-1]
+            result["previous_step_id"] = current_rows[reset_index]["id"]
+        for index, old in enumerate(current_rows):
+            row = {key: old.get(key) for key in ("step_key", "step_name", "approver_user_id", "approver_name", "approver_role", "status", "comment", "approved_at", "review_started_at", "decision_actor_user_id")}
+            row.update({"id": "ODSTEP-" + sha256_bytes(f"{operation_id}:{old['id']}".encode())[:32].upper(), "document_id": document["id"], "workflow_generation": next_generation, "created_at": timestamp, "updated_at": timestamp})
+            prior_evidence = parse_json_any(old.get("decision_evidence_json"), {}) or {}
+            if index >= reset_index:
+                row.update({"status": "pending", "comment": "", "approved_at": None, "review_started_at": None, "decision_actor_user_id": None})
+                prior_evidence = {}
+            if action == "add_sign" and index == current_index:
+                row.update({"status": "approved", "comment": comment, "approved_at": timestamp, "decision_actor_user_id": actor["id"]})
+                prior_evidence = dict(decision_evidence or {})
+            row["decision_evidence_json"] = {**prior_evidence, "copied_from_step_id": old["id"]}
+            new_rows.append(row)
+            if action == "add_sign" and index == current_index:
+                suffix = sha256_bytes(operation_id.encode())[:24]
+                added_id = "ODSTEP-" + sha256_bytes(f"{operation_id}:added".encode())[:32].upper()
+                result["target_step_id"] = added_id
+                new_rows.append({"id": added_id, "document_id": document["id"], "workflow_generation": next_generation, "step_key": f"approval_add_{suffix}", "step_name": "加簽", "approver_user_id": target["id"], "approver_name": target.get("name") or "", "approver_role": target.get("role") or "簽核人", "status": "pending", "comment": "", "approved_at": None, "review_started_at": None, "decision_actor_user_id": None, "decision_evidence_json": {"added_by_operation_id": operation_id}, "created_at": timestamp, "updated_at": timestamp})
+        for index, row in enumerate(new_rows):
+            row["step_order"] = index + 1
+        next_pending = next(row for row in new_rows if row["status"] == "pending")
+        next_pending["review_started_at"] = timestamp
+        result["current_step_id"] = next_pending["id"]
+    snapshots = []
+    for row in new_rows:
+        snapshot = official_document_actor_snapshot_payload(document["id"], row, timestamp)
+        if snapshot:
+            snapshot["snapshot_json"] = parse_json_any(snapshot["snapshot_json"], {})
+            snapshots.append(snapshot)
+    patch = {"current_status": "draft" if action == "withdraw" else official_step_status(next_pending["step_key"]), "current_step": "" if action == "withdraw" else next_pending["step_key"], "content_revision": int(document.get("content_revision") or 0) + (1 if action == "withdraw" else 0), "metadata_json": parse_json_field(document.get("metadata_json"))}
+    result.update({"editor_revision_id": (editor_clone or {}).get("id") or "", "cloning": False})
+    log_evidence = {**(decision_evidence or {}), "operation_id": operation_id, "request_sha256": request_hash, "action_result": result}
+    return {
+        "operation_id": operation_id, "request_sha256": request_hash, "action": action,
+        "document_id": document["id"], "company_id": document["company_id"], "actor_id": actor["id"],
+        "principal_actor_id": actor["id"] if action == "withdraw" else current.get("approver_user_id") or "", "expected_step_id": current["id"],
+        "expected_status": document["current_status"], "expected_current_step": document["current_step"],
+        "expected_content_revision": int(document.get("content_revision") or 0), "expected_updated_at": document.get("updated_at") or "",
+        "expected_generation": generation, "workflow_generation": next_generation,
+        "steps": new_rows, "actor_snapshots": snapshots, "document_patch": patch,
+        "approval_log": {"id": operation_id, "document_id": document["id"], "step_id": current["id"], "actor_id": actor["id"], "actor_name": official_actor_name(actor), "principal_actor_id": actor["id"] if action == "withdraw" else current.get("approver_user_id") or None, "action": action, "comment": comment, "decision_evidence_json": log_evidence, "ip_address": str(payload.get("ip_address") or "")[:120], "user_agent": str(payload.get("user_agent") or "")[:180], "created_at": timestamp},
+        "timestamp": timestamp, "action_result": result, "decision_evidence": decision_evidence or {},
+        "clone_source_revision_id": str((stamp_request or {}).get("locked_editor_revision_id") or "") if action == "withdraw" else "",
+        "editor_clone": editor_clone or {},
+    }
+
+
+def plan_official_withdraw_editor_clone(document: Dict[str, Any], source: Dict[str, Any] | None, latest: Dict[str, Any] | None, actor: Dict[str, Any], operation_id: str) -> Dict[str, Any] | None:
+    if not source:
+        return None
+    if source.get("document_id") != document["id"]:
+        raise ValueError("editor_locked_revision_missing")
+    state = parse_json_any(source.get("editor_state_json"), {}) or {}
+    if canonical_editor_manifest(state) != source.get("manifest_sha256"):
+        raise ValueError("editor_manifest_hash_mismatch")
+    state["revisionNo"] = int((latest or source).get("revision_no") or 0) + 1
+    state["manifestSha256"] = canonical_editor_manifest(state)
+    return {"id": "ODREV-WITHDRAW-" + hashlib.md5(operation_id.encode()).hexdigest(), "document_id": document["id"], "revision_no": state["revisionNo"], "parent_revision_id": source["id"], "schema_version": source["schema_version"], "editor_state_json": state, "manifest_sha256": state["manifestSha256"], "renderer_version": source["renderer_version"], "created_by": actor["id"], "created_at": now()}
+
+
+def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    actor = official_session_user(session)
+    operation_id, request_hash = official_workflow_action_identity(action, document_id, actor["id"], payload)
+    witness = conn.execute("SELECT * FROM official_document_approval_logs WHERE id=?", (operation_id,)).fetchone()
+    replay = official_workflow_replay_result(row_to_dict(witness) if witness else None, action, document_id, actor["id"], request_hash)
+    if replay is not None:
+        return {**official_document_detail(conn, document_id, session), "action_result": replay}
+    document = official_document_row(conn, document_id)
+    steps = official_document_steps(conn, document_id)
+    current = current_official_pending_step(conn, document)
+    stamp_request = official_document_stamp_request(conn, document_id)
+    evidence, target, clone = {}, None, None
+    if action == "withdraw":
+        if actor["id"] != document.get("applicant_id"):
+            raise PermissionError("only_applicant_can_withdraw")
+        source_id = str((stamp_request or {}).get("locked_editor_revision_id") or "")
+        if source_id:
+            source = conn.execute("SELECT * FROM official_document_editor_revisions WHERE id=? AND document_id=?", (source_id, document_id)).fetchone()
+            if not source or source["manifest_sha256"] != stamp_request.get("editor_manifest_sha256"):
+                raise ValueError("editor_locked_revision_missing")
+            clone = plan_official_withdraw_editor_clone(document, row_to_dict(source), _editor_latest_revision_row(conn, document_id), actor, operation_id)
+    else:
+        assert_official_step_actor(actor, current, document, conn=conn)
+        document_evidence = sqlite_official_decision_document_evidence(conn, document, stamp_request)
+        review_access = sqlite_official_review_access_evidence(conn, document_id, current, actor["id"], document_evidence)
+        evidence = official_approval_decision_evidence(document, stamp_request, payload, has_attachments=bool(document_evidence["attachments"]), step=current, actor=actor, principal_actor_id=current["approver_user_id"], document_evidence=document_evidence, review_access=review_access)
+        if action == "add_sign":
+            target = active_user_by_id(conn, str(payload.get("target_user_id") or ""))
+            applicant = active_user_by_id(conn, document["applicant_id"]) or {}
+            if target and not official_designated_document_scope_allowed(target, document):
+                raise ValueError("official_workflow_designated_company_forbidden")
+            if not official_designated_actor_allowed(target, applicant, official_company_row(conn, document["company_id"]), document):
+                raise ValueError("official_workflow_add_sign_target_invalid")
+    plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
+    savepoint = "workflow_mutation_" + secrets.token_hex(4)
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        live_step = conn.execute("SELECT status,workflow_generation FROM official_document_approval_steps WHERE id=? AND document_id=?", (plan["expected_step_id"], document_id)).fetchone()
+        live_generation = conn.execute("SELECT MAX(workflow_generation) FROM official_document_approval_steps WHERE document_id=?", (document_id,)).fetchone()[0]
+        if not live_step or live_step["status"] != "pending" or live_step["workflow_generation"] != plan["expected_generation"] or live_generation != plan["expected_generation"]:
+            raise ValueError("official_workflow_action_conflict")
+        changed = conn.execute("UPDATE official_documents SET current_status=?,current_step=?,content_revision=?,updated_at=? WHERE id=? AND current_status=? AND current_step=? AND content_revision=? AND updated_at=?", (plan["document_patch"]["current_status"], plan["document_patch"]["current_step"], plan["document_patch"]["content_revision"], plan["timestamp"], document_id, plan["expected_status"], plan["expected_current_step"], plan["expected_content_revision"], plan["expected_updated_at"]))
+        if changed.rowcount != 1:
+            raise ValueError("official_workflow_action_conflict")
+        conn.execute("UPDATE official_document_approval_steps SET status='skipped',updated_at=? WHERE document_id=? AND workflow_generation=? AND status='pending'", (plan["timestamp"], document_id, plan["expected_generation"]))
+        for row in plan["steps"]:
+            insert_row(conn, "official_document_approval_steps", {**row, "decision_evidence_json": json.dumps(row["decision_evidence_json"], ensure_ascii=False)})
+        snapshot_official_document_approval_steps(conn, document_id, plan["steps"])
+        if action == "withdraw":
+            conn.execute("UPDATE official_document_stamp_requests SET status='cancelled',updated_at=? WHERE document_id=? AND status NOT IN ('stamping','stamped')", (plan["timestamp"], document_id))
+            if clone:
+                insert_row(conn, "official_document_editor_revisions", {**clone, "editor_state_json": json.dumps(clone["editor_state_json"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
+        insert_row(conn, "official_document_approval_logs", {**plan["approval_log"], "decision_evidence_json": json.dumps(plan["approval_log"]["decision_evidence_json"], ensure_ascii=False)})
+        recipient_id = document["applicant_id"] if action == "withdraw" else next(row["approver_user_id"] for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"])
+        recipient = active_user_by_id(conn, recipient_id) or {}
+        create_notification(conn, {"id": "NTF-WORKFLOW-" + sha256_bytes(operation_id.encode())[:32], "type": "簽核流程異動", "title": "簽核流程已更新", "target_user_id": recipient_id, "target_company_id": recipient.get("company_id") or "", "channel": "Email + 系統通知", "source": document_id, "body": "請至簽核紀錄查看待處理案件。", "created_at": plan["timestamp"]})
+        log_audit(conn, actor["id"], action, "official_documents", document_id, f"generation={plan['workflow_generation']};operation_id={operation_id}", actor_user_id=actor["id"], request_id=operation_id, metadata={"request_sha256": request_hash, "workflow_generation": plan["workflow_generation"]})
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    result = {**official_document_detail(conn, document_id, session), "action_result": {**plan["action_result"], "idempotent": False}}
+    if clone:
+        result["editor_revision"] = _editor_revision_public(clone)
+    return result
+
+
 def cancel_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
     document = official_document_row(conn, document_id)
@@ -24203,7 +24724,7 @@ def confirm_official_document(conn: sqlite3.Connection, document_id: str, payloa
         # receipt in this one endpoint, but the dispatch helper itself never
         # closes or approves on behalf of the applicant.
         complete_official_dispatch(conn, document_id, payload, session)
-    step = next((item for item in official_document_steps(conn, document_id) if item.get("step_key") == "applicant_confirm"), None)
+    step = next((item for item in current_official_document_steps(conn, document_id) if item.get("step_key") == "applicant_confirm"), None)
     if step and step.get("status") == "pending":
         conn.execute(
             "UPDATE official_document_approval_steps SET status = 'approved', comment = ?, approved_at = ?, updated_at = ? WHERE id = ?",
@@ -29256,7 +29777,7 @@ def resolve_seal_application_step_actors(
                     "key": key,
                     "name": step["step_name"],
                     "role": step["role"],
-                    "status": OFFICIAL_DOCUMENT_STEP_STATUS.get(key) or "pending",
+                    "status": official_step_status(key) or "pending",
                 },
                 applicant,
                 company,
@@ -34744,8 +35265,14 @@ def supabase_department_head_role(company: Dict[str, Any], department_name: str)
     return rows[0].get("manager_role") if rows else "主任"
 
 
-def supabase_resolve_official_step_approver(step: Dict[str, Any], applicant: Dict[str, Any], company: Dict[str, Any]) -> Dict[str, Any] | None:
-    key = step["key"]
+def supabase_resolve_official_step_approver(step: Dict[str, Any], applicant: Dict[str, Any], company: Dict[str, Any], document: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+    assignee = step.get("assignee") or {}
+    if assignee.get("type") == "user":
+        actor = supabase_user_by_id(assignee.get("user_id") or "")
+        if actor and not official_designated_document_scope_allowed(actor, document):
+            raise ValueError("official_workflow_designated_company_forbidden")
+        return actor if official_designated_actor_allowed(actor, applicant, company, document) else None
+    key = assignee.get("role_key") or step["key"]
     if key == "applicant_confirm":
         return applicant
     if key == "applicant_manager":
@@ -34793,12 +35320,19 @@ def supabase_resolve_official_step_approver(step: Dict[str, Any], applicant: Dic
 def supabase_official_applicant_workflow_readiness(
     session: Dict[str, Any] | None,
     route_code: str = "A",
+    document_category: str = "",
+    company_id: str = "",
+    unit: str = "",
+    source_type: str = "blank_editor",
 ) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
     route = roster_text(route_code or "A").upper()
-    company_id = roster_text(user.get("company_id"))
-    company = supabase_get("companies", company_id) if company_id else None
-    steps = (
+    if document_category:
+        route = official_seal_approval_context({"document_category": document_category})["approval_route_code"]
+    company_id = roster_text(company_id or user.get("company_id"))
+    company = official_editor_company(user, company_id) if company_id else None
+    config = supabase_official_workflow_config()
+    steps = configured_official_workflow_steps(config, document_category, user.get("logging_role_key") or user.get("role") if finance_workflow_actor(user) else "") if document_category else (
         official_workflow_steps_for_finance_applicant(
             route,
             user.get("logging_role_key") or user.get("role"),
@@ -34806,16 +35340,21 @@ def supabase_official_applicant_workflow_readiness(
         if finance_workflow_actor(user)
         else unified_official_workflow_steps(route)
     )
-    resolved = [
-        (step, supabase_resolve_official_step_approver(step, user, company or {}))
-        for step in steps
-    ]
-    return workflow_readiness_summary(
+    document = official_workflow_readiness_document(company_id, source_type)
+    resolved = []
+    for step in steps:
+        try:
+            resolved.append((step, supabase_resolve_official_step_approver(step, user, company or {}, document)))
+        except ValueError as error:
+            if str(error) != "official_workflow_designated_company_forbidden":
+                raise
+            resolved.append(({**step, "scope_failure": "designated_company_forbidden"}, None))
+    return {**workflow_readiness_summary(
         user,
         route,
         resolved,
         company_ready=bool(company),
-    )
+    ), "configurationVersion": config["version"]}
 
 
 def supabase_internal_launch_user_counts() -> Dict[str, int]:
@@ -35199,13 +35738,68 @@ def supabase_assert_official_document_uploads_av_clean(document: Dict[str, Any])
     return checked
 
 
+OFFICIAL_HISTORY_PAGE_SIZE = 200
+OFFICIAL_HISTORY_MAX_ROWS = 10000
+
+
+def supabase_official_history_rows(table: str, document_id: str, columns: Tuple[str, ...]) -> List[Dict[str, Any]]:
+    """Read one case with a stable keyset and fixed upper boundary.
+
+    Workflow generations are append-only. Concurrent later generations are
+    excluded by the boundary; decision CAS still rejects a stale generation.
+    No partial prefix may be mistaken for the current workflow or its history.
+    """
+    if table not in {"official_document_approval_steps", "official_document_approval_logs"} or not document_id:
+        raise ValueError("official_workflow_history_unavailable")
+    def key(row: Dict[str, Any]) -> Tuple[Any, ...]:
+        return tuple(int(row.get(column) or 1) if column in {"workflow_generation", "step_order"} else str(row.get(column) or "") for column in columns)
+    def relation(values: Tuple[Any, ...], *, upper: bool = False) -> str:
+        terms = []
+        for index, column in enumerate(columns):
+            prefix = [f"{columns[prior]}.eq.{json.dumps(values[prior], ensure_ascii=False)}" for prior in range(index)]
+            comparison = "lte" if upper and index == len(columns) - 1 else "lt" if upper else "gt"
+            pieces = [*prefix, f"{column}.{comparison}.{json.dumps(values[index], ensure_ascii=False)}"]
+            terms.append(f"and({','.join(pieces)})" if len(pieces) > 1 else pieces[0])
+        return f"or({','.join(terms)})"
+    order = ",".join(f"{column}.asc" for column in columns)
+    batch = supabase_filter_rows(table, {"document_id": document_id}, order=order, limit=OFFICIAL_HISTORY_PAGE_SIZE)
+    rows, seen, cursor, ceiling = [], set(), None, None
+    while True:
+        if not isinstance(batch, list):
+            raise ValueError("official_workflow_history_unavailable:invalid_page")
+        for row in sorted(batch, key=key):
+            row_id = str(row.get("id") or "")
+            position = key(row)
+            if not row_id or row_id in seen or row.get("document_id") != document_id or (cursor is not None and position <= cursor) or (ceiling is not None and position > ceiling):
+                raise ValueError("official_workflow_history_unavailable:inconsistent_page")
+            rows.append(row)
+            seen.add(row_id)
+            cursor = position
+        if len(rows) > OFFICIAL_HISTORY_MAX_ROWS:
+            raise ValueError("official_workflow_history_unavailable:too_large")
+        if ceiling is not None and cursor == ceiling:
+            return rows
+        if len(batch) < OFFICIAL_HISTORY_PAGE_SIZE:
+            if ceiling is not None:
+                raise ValueError("official_workflow_history_unavailable:incomplete_page")
+            return rows
+        if ceiling is None:
+            boundary = supabase_filter_rows(table, {"document_id": document_id}, order=",".join(f"{column}.desc" for column in columns), limit=1)
+            if not isinstance(boundary, list) or len(boundary) != 1 or boundary[0].get("document_id") != document_id:
+                raise ValueError("official_workflow_history_unavailable:boundary_missing")
+            ceiling = key(boundary[0])
+            if ceiling < cursor:
+                raise ValueError("official_workflow_history_unavailable:boundary_changed")
+            if ceiling == cursor:
+                return rows
+        params = {"select": "*", "document_id": f"eq.{document_id}", "order": order, "limit": str(OFFICIAL_HISTORY_PAGE_SIZE), "and": f"({relation(cursor)},{relation(ceiling, upper=True)})"}
+        batch = supabase_request("GET", f"{table}?{urllib.parse.urlencode(params)}")
+        if not batch:
+            raise ValueError("official_workflow_history_unavailable:incomplete_page")
+
+
 def supabase_official_document_steps(document_id: str) -> List[Dict[str, Any]]:
-    return supabase_filter_rows(
-        "official_document_approval_steps",
-        {"document_id": document_id},
-        order="workflow_generation.asc,step_order.asc",
-        limit=200,
-    )
+    return supabase_official_history_rows("official_document_approval_steps", document_id, ("workflow_generation", "step_order", "id"))
 
 
 def supabase_current_official_document_steps(document_id: str) -> List[Dict[str, Any]]:
@@ -35253,7 +35847,7 @@ def supabase_snapshot_official_document_approval_steps(
 
 
 def supabase_official_document_logs(document_id: str) -> List[Dict[str, Any]]:
-    return supabase_filter_rows("official_document_approval_logs", {"document_id": document_id}, order="created_at.desc", limit=200)
+    return list(reversed(supabase_official_history_rows("official_document_approval_logs", document_id, ("created_at", "id"))))
 
 
 def supabase_official_document_stamp_request(document_id: str) -> Dict[str, Any] | None:
@@ -36026,25 +36620,30 @@ def supabase_official_workflow_config() -> Dict[str, Any]:
     rows = supabase_filter_rows("settings", {"key": OFFICIAL_WORKFLOW_SETTING_KEY}, limit=1)
     if not rows:
         return normalize_official_workflow_config()
-    return normalize_official_workflow_config(parse_json_field(rows[0].get("value_json")))
+    return normalize_official_workflow_config({**parse_json_field(rows[0].get("value_json")), "version": int(rows[0].get("version") or 0)})
 
 
-def supabase_save_official_workflow_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+def supabase_save_official_workflow_config(payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    if not session or not can_write_table(session, "settings"):
+        raise PermissionError("workflow_config_manage_forbidden")
+    expected = payload.get("expected_version")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+        raise ValueError("official_workflow_config_expected_version_required")
     config = normalize_official_workflow_config(payload)
-    existing = supabase_filter_rows("settings", {"key": OFFICIAL_WORKFLOW_SETTING_KEY}, limit=1)
-    body = {
-        "key": OFFICIAL_WORKFLOW_SETTING_KEY,
-        "value_json": json.dumps(config, ensure_ascii=False),
-        "version": int(existing[0].get("version") or 0) + 1 if existing else 1,
-        "updated_at": now(),
-    }
-    supabase_request(
-        "POST",
-        "settings?on_conflict=key",
-        body,
-        prefer="resolution=merge-duplicates,return=representation",
-    )
-    return config
+    validate_official_config_designated_users(config, supabase_user_by_id, session["user"])
+    config["version"], config["updated_at"] = expected + 1, now()
+    # A lost-response retry must retain the same operation witness even when
+    # server time has advanced. The normalized version binds expected_version.
+    config_hash = sha256_bytes(json.dumps({key: value for key, value in config.items() if key != "updated_at"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+    raw = supabase_request("POST", "rpc/edoc_save_official_workflow_config", {"p_request": {
+        "operation_id": str(payload.get("operation_id") or f"ODCONFIG-{secrets.token_hex(16)}"),
+        "actor_id": session["user"]["id"], "expected_version": expected,
+        "config": config, "config_sha256": config_hash, "updated_at": config["updated_at"],
+    }})
+    response = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+    if not isinstance(response, dict) or not response.get("ok") or int(response.get("version") or 0) != expected + 1:
+        raise ValueError("official_workflow_config_version_conflict")
+    return normalize_official_workflow_config({**(response.get("config") or config), "version": response["version"]})
 
 
 def supabase_create_official_workflow_steps(
@@ -36055,7 +36654,7 @@ def supabase_create_official_workflow_steps(
     workflow_steps: List[Dict[str, Any]] | None = None,
 ) -> List[Dict[str, Any]]:
     seal_context = official_seal_context_from_document(document)
-    selected_workflow_steps = workflow_steps or (official_seal_workflow_steps(seal_context["approval_route_code"]) if seal_context else supabase_official_workflow_config()["steps"])
+    selected_workflow_steps = workflow_steps or (configured_official_workflow_steps(supabase_official_workflow_config(), seal_context["document_category"]) if seal_context else supabase_official_workflow_config()["steps"])
     all_existing = supabase_official_document_steps(document["id"])
     current_generation = max(
         (int(step.get("workflow_generation") or 1) for step in all_existing),
@@ -36121,7 +36720,7 @@ def supabase_create_official_workflow_steps(
     company = supabase_official_company_row(document["company_id"])
     resolved_steps: List[Tuple[Dict[str, Any], Dict[str, Any] | None]] = []
     for step in selected_workflow_steps:
-        approver = actor_plan.get(step["key"]) if actor_plan is not None else supabase_resolve_official_step_approver(step, applicant, company)
+        approver = actor_plan.get(step["key"]) if actor_plan is not None else supabase_resolve_official_step_approver(step, applicant, company, document)
         require_valid_finance_workflow_step_actor(
             step,
             applicant,
@@ -36189,7 +36788,7 @@ def supabase_plan_official_workflow_submission(
     """
     seal_context = official_seal_context_from_document(document)
     selected = workflow_steps or (
-        official_seal_workflow_steps(seal_context["approval_route_code"])
+        configured_official_workflow_steps(supabase_official_workflow_config(), seal_context["document_category"])
         if seal_context
         else supabase_official_workflow_config()["steps"]
     )
@@ -36210,7 +36809,7 @@ def supabase_plan_official_workflow_submission(
         approver = (
             actor_plan.get(step["key"])
             if actor_plan is not None
-            else supabase_resolve_official_step_approver(step, applicant, company)
+            else supabase_resolve_official_step_approver(step, applicant, company, document)
         )
         require_valid_finance_workflow_step_actor(
             step,
@@ -36296,6 +36895,9 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
             raise PermissionError("official_document_access_denied")
     files = supabase_official_document_files(document_id)
     logs = supabase_official_document_logs(document_id)
+    current_ids = {step["id"] for step in steps}
+    all_steps = official_step_decision_display(all_steps, logs)
+    steps = [step for step in all_steps if step["id"] in current_ids]
     stamp_request = supabase_official_document_stamp_request(document_id)
     dispatch_record = supabase_official_dispatch_record(document_id)
     package = official_application_package(document, files, steps, logs, stamp_request, dispatch_record)
@@ -36326,6 +36928,7 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         "stamp_request": package.get("stamp_request"),
         "dispatch_record": dispatch_record,
         "correction": correction,
+        **official_workflow_action_capabilities(document, steps, user, active_delegation),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
         "can_download": bool(is_participant or active_delegation),
@@ -38840,12 +39443,20 @@ def supabase_resubmit_official_document(
 def _supabase_official_submission_operation_ids(
     document: Dict[str, Any],
     applicant_id: str,
+    *,
+    workflow_generation: int | None = None,
 ) -> Tuple[str, str, str, str]:
     generation_key = (
         str(document.get("correction_requested_at") or "")
         if document.get("current_status") == "rejected" or document.get("correction_requested_at")
         else str(document.get("created_at") or document.get("id") or "")
     )
+    if workflow_generation is None:
+        workflow_generation = int((parse_json_field(document.get("metadata_json")).get("official_seal") or {}).get("submission_generation") or 0)
+    # Legacy locked cases retain their historical operation key. New submits
+    # bind their actual immutable generation, including withdraw/resubmit.
+    if workflow_generation:
+        generation_key += f"\nworkflow_generation={workflow_generation}"
     digest = hashlib.sha256(
         f"{document['id']}\n{applicant_id}\n{generation_key}".encode("utf-8")
     ).hexdigest().upper()
@@ -38995,9 +39606,10 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
     seal_context = official_seal_context_from_document(document)
     if not seal_context:
         raise ValueError("official_seal_document_category_required")
-    workflow_steps = official_seal_workflow_steps(seal_context["approval_route_code"])
+    workflow_config = supabase_official_workflow_config()
+    workflow_steps = configured_official_workflow_steps(workflow_config, seal_context["document_category"], user.get("logging_role_key") or user.get("role") if finance_workflow_actor(user) else "")
     actor_plan: Dict[str, Dict[str, Any]] | None = None
-    workflow_lock_metadata: Dict[str, Any] | None = None
+    workflow_lock_metadata = locked_official_config_metadata(document, workflow_config, seal_context["document_category"], workflow_steps)
     if is_production():
         snapshot = current_finance_bridge_snapshot(
             user.get("email") or "",
@@ -39006,25 +39618,26 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         finance_role = strict_finance_role_profile(
             (snapshot.get("identity") or {}).get("role")
         )["logging_role_key"]
-        workflow_steps = official_workflow_steps_for_finance_applicant(
-            seal_context["approval_route_code"],
-            finance_role,
-        )
-        user, actor_plan = sync_supabase_finance_snapshot(
+        workflow_steps = configured_official_workflow_steps(workflow_config, seal_context["document_category"], finance_role)
+        user, finance_actor_plan = sync_supabase_finance_snapshot(
             snapshot,
             auth_user_id=user.get("auth_user_id") or "",
             expected_user_id=user["id"],
             require_workflow=True,
-            required_step_keys=(step["key"] for step in workflow_steps),
+            required_step_keys=((step.get("assignee") or {}).get("role_key") or step["key"] for step in workflow_steps if (step.get("assignee") or {}).get("type") != "user"),
         )
+        company = supabase_official_company_row(document["company_id"])
+        actor_plan = {step["key"]: (supabase_resolve_official_step_approver(step, user, company, document) if (step.get("assignee") or {}).get("type") == "user" else finance_actor_plan.get((step.get("assignee") or {}).get("role_key") or step["key"])) for step in workflow_steps}
         workflow_lock_metadata = locked_official_finance_workflow_metadata(
             document,
             snapshot,
             finance_role,
             workflow_steps,
         )
+        workflow_lock_metadata = locked_official_config_metadata({**document, "metadata_json": workflow_lock_metadata}, workflow_config, seal_context["document_category"], workflow_steps)
         session = {**(session or {}), "user": user}
     require_official_document_application_company(user, document)
+    require_official_designated_document_scope(workflow_steps, document, supabase_user_by_id)
     # Resolve and validate every external witness before entering the database
     # transaction.  From the first workflow row through the document status
     # transition, only the service-role RPC below is allowed to mutate state.
@@ -39083,12 +39696,13 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         raise ValueError("official_workflow_actor_unresolved")
     first = steps[0]
     submitted_at = now()
-    first_status = OFFICIAL_DOCUMENT_STEP_STATUS.get(first["step_key"])
+    first_status = official_step_status(first["step_key"])
     if not first_status:
         raise ValueError("official_workflow_existing_steps_invalid")
     operation_id, audit_id, resubmit_log_id, resubmit_audit_id = (
-        _supabase_official_submission_operation_ids(document, user["id"])
+        _supabase_official_submission_operation_ids(document, user["id"], workflow_generation=workflow_plan["workflow_generation"])
     )
+    workflow_lock_metadata["official_seal"]["submission_generation"] = workflow_plan["workflow_generation"]
     comment = str(payload.get("comment") or "送出發文用印簽核")[:2000]
     decision_evidence = {
         "operation_id": operation_id,
@@ -39584,7 +40198,7 @@ def supabase_approve_official_document(document_id: str, payload: Dict[str, Any]
     if not claim.get("claimed"):
         raise ValueError("official_document_approval_already_claimed")
     if claim["transition"] == "auto_stamp":
-        result = supabase_auto_stamp_official_document(document_id, payload, user)
+        result = supabase_auto_stamp_official_document(document_id, payload, None if str(step["step_key"]).startswith("approval_") else user)
         return {**supabase_official_document_detail(document_id, session), "auto_stamp": result}
     return supabase_official_document_detail(document_id, session)
 
@@ -39671,6 +40285,51 @@ def supabase_reject_official_document(document_id: str, payload: Dict[str, Any],
     return result
 
 
+def supabase_mutate_official_workflow(document_id: str, action: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    actor = supabase_official_session_user(session)
+    operation_id, request_hash = official_workflow_action_identity(action, document_id, actor["id"], payload)
+    witnesses = supabase_filter_rows("official_document_approval_logs", {"id": operation_id}, limit=1)
+    replay = official_workflow_replay_result(witnesses[0] if witnesses else None, action, document_id, actor["id"], request_hash)
+    if replay is not None:
+        return {**supabase_official_document_detail(document_id, session), "action_result": replay}
+    document = supabase_official_document_row(document_id)
+    steps = supabase_official_document_steps(document_id)
+    current = supabase_current_official_pending_step(document)
+    stamp_request = supabase_official_document_stamp_request(document_id)
+    evidence, target, clone = {}, None, None
+    if action == "withdraw":
+        if actor["id"] != document.get("applicant_id"):
+            raise PermissionError("only_applicant_can_withdraw")
+        source_id = str((stamp_request or {}).get("locked_editor_revision_id") or "")
+        if source_id:
+            sources = supabase_filter_rows("official_document_editor_revisions", {"id": source_id, "document_id": document_id}, limit=1)
+            if not sources or sources[0].get("manifest_sha256") != stamp_request.get("editor_manifest_sha256"):
+                raise ValueError("editor_locked_revision_missing")
+            latest = supabase_filter_rows("official_document_editor_revisions", {"document_id": document_id}, order="revision_no.desc", limit=1)
+            clone = plan_official_withdraw_editor_clone(document, sources[0], latest[0] if latest else sources[0], actor, operation_id)
+    else:
+        assert_official_step_actor(actor, current, document, supabase_mode=True)
+        document_evidence = supabase_official_decision_document_evidence(document, stamp_request)
+        review_access = supabase_official_review_access_evidence(document_id, current, actor["id"], document_evidence)
+        evidence = official_approval_decision_evidence(document, stamp_request, payload, has_attachments=bool(document_evidence["attachments"]), step=current, actor=actor, principal_actor_id=current["approver_user_id"], document_evidence=document_evidence, review_access=review_access)
+        if action == "add_sign":
+            target = supabase_user_by_id(str(payload.get("target_user_id") or ""))
+            applicant = supabase_user_by_id(document["applicant_id"]) or {}
+            if target and not official_designated_document_scope_allowed(target, document):
+                raise ValueError("official_workflow_designated_company_forbidden")
+            if not official_designated_actor_allowed(target, applicant, supabase_official_company_row(document["company_id"]), document):
+                raise ValueError("official_workflow_add_sign_target_invalid")
+    plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
+    raw = supabase_request("POST", "rpc/edoc_mutate_official_workflow", {"p_request": plan})
+    response = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+    if not isinstance(response, dict) or not response.get("ok") or not response.get("committed") or response.get("document_id") != document_id or response.get("operation_id") != operation_id:
+        raise ValueError("official_workflow_action_conflict")
+    result = {**supabase_official_document_detail(document_id, session), "action_result": {**response.get("action_result", plan["action_result"]), "idempotent": bool(response.get("idempotent"))}}
+    if clone:
+        result["editor_revision"] = _editor_revision_public(clone)
+    return result
+
+
 def supabase_cancel_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
     document = supabase_official_document_row(document_id)
@@ -39699,7 +40358,9 @@ def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any]
         raise ValueError("official_document_not_ready_for_applicant_confirm")
     if document["current_status"] == "returned_to_applicant_for_send":
         supabase_complete_official_dispatch(document_id, payload, session)
-    step = next((item for item in supabase_official_document_steps(document_id) if item.get("step_key") == "applicant_confirm"), None)
+    all_steps = supabase_official_document_steps(document_id)
+    generation = max((int(row.get("workflow_generation") or 1) for row in all_steps), default=0)
+    step = next((item for item in all_steps if int(item.get("workflow_generation") or 1) == generation and item.get("step_key") == "applicant_confirm"), None)
     if step and step.get("status") == "pending":
         supabase_patch("official_document_approval_steps", step["id"], {"status": "approved", "comment": payload.get("comment") or "申請人確認完成", "approved_at": now(), "updated_at": now()})
     supabase_patch("official_documents", document_id, {"current_status": "closed", "current_step": "", "updated_at": now()})
@@ -46433,6 +47094,9 @@ class Handler(SimpleHTTPRequestHandler):
                         supabase_request("PATCH", f"auth_sessions?{qs}", {"revoked_at": now()})
                     self.send_json({"ok": True})
                     return
+                if parts == ["official-workflow-config", "candidates"] and method == "GET":
+                    self.send_json(official_workflow_candidates(supabase_current_session(self.bearer_token()), company_id=(query.get("company_id") or [""])[0]))
+                    return
                 if parts == ["official-workflow-config"] and method in {"GET", "PATCH"}:
                     session = supabase_current_session(self.bearer_token())
                     if not session:
@@ -46444,7 +47108,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if not can_write_table(session, "settings"):
                         self.send_json({"error": "forbidden", "detail": "workflow_config_manage_forbidden"}, 403)
                         return
-                    self.send_json(supabase_save_official_workflow_config(self.read_json()))
+                    self.send_json(supabase_save_official_workflow_config(self.read_json(), session))
                     return
                 if method == "GET" and parts in (["health"], ["healthz"]):
                     self.send_json(public_health_payload(database="supabase", project=SUPABASE_URL))
@@ -46973,8 +47637,11 @@ class Handler(SimpleHTTPRequestHandler):
                     session = supabase_current_session(self.bearer_token())
                     route_code = (query.get("route_code") or query.get("routeCode") or ["A"])[0]
                     self.send_json(
-                        supabase_official_applicant_workflow_readiness(session, route_code)
+                        supabase_official_applicant_workflow_readiness(session, route_code, (query.get("document_category") or [""])[0], (query.get("company_id") or [""])[0], (query.get("unit") or [""])[0], (query.get("source_type") or ["blank_editor"])[0])
                     )
+                    return
+                if method == "GET" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "workflow-candidates":
+                    self.send_json(official_workflow_candidates(supabase_current_session(self.bearer_token()), document_id=parts[1]))
                     return
                 if method == "POST" and parts == ["official-documents", "editor-drafts"]:
                     session = supabase_current_session(self.bearer_token())
@@ -47106,7 +47773,7 @@ class Handler(SimpleHTTPRequestHandler):
                     payload["user_agent"] = self.client_device()
                     self.send_json(supabase_upload_official_document_attachment(parts[1], payload, session), 201)
                     return
-                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position", "retry-stamp"}:
+                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position", "retry-stamp", "return-previous", "add-sign", "withdraw"}:
                     session = supabase_current_session(self.bearer_token())
                     # This route multiplexes applicant and approver actions.
                     # Managers/CEO intentionally have todo/records rather than
@@ -47118,7 +47785,9 @@ class Handler(SimpleHTTPRequestHandler):
                     payload["ip_address"] = self.client_ip()
                     payload["user_agent"] = self.client_device()
                     action = parts[2]
-                    if action == "submit":
+                    if action in {"return-previous", "add-sign", "withdraw"}:
+                        result = supabase_mutate_official_workflow(parts[1], action.replace("-", "_"), payload, session)
+                    elif action == "submit":
                         result = supabase_submit_official_document(parts[1], payload, session)
                     elif action == "approve":
                         result = supabase_approve_official_document(parts[1], payload, session)
@@ -47412,6 +48081,9 @@ class Handler(SimpleHTTPRequestHandler):
                         conn.commit()
                     self.send_json({"ok": True})
                     return
+                if parts == ["official-workflow-config", "candidates"] and method == "GET":
+                    self.send_json(official_workflow_candidates(current_session(conn, self.bearer_token()), company_id=(query.get("company_id") or [""])[0], conn=conn))
+                    return
                 if parts == ["official-workflow-config"] and method in {"GET", "PATCH"}:
                     session = current_session(conn, self.bearer_token())
                     if not session:
@@ -47423,7 +48095,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if not can_write_table(session, "settings"):
                         self.send_json({"error": "forbidden", "detail": "workflow_config_manage_forbidden"}, 403)
                         return
-                    config = save_local_official_workflow_config(conn, self.read_json())
+                    config = save_local_official_workflow_config(conn, self.read_json(), session)
                     conn.commit()
                     self.send_json(config)
                     return
@@ -48002,8 +48674,11 @@ class Handler(SimpleHTTPRequestHandler):
                     session = current_session(conn, self.bearer_token())
                     route_code = (query.get("route_code") or query.get("routeCode") or ["A"])[0]
                     self.send_json(
-                        official_applicant_workflow_readiness(conn, session, route_code)
+                        official_applicant_workflow_readiness(conn, session, route_code, (query.get("document_category") or [""])[0], (query.get("company_id") or [""])[0], (query.get("unit") or [""])[0], (query.get("source_type") or ["blank_editor"])[0])
                     )
+                    return
+                if method == "GET" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "workflow-candidates":
+                    self.send_json(official_workflow_candidates(current_session(conn, self.bearer_token()), document_id=parts[1], conn=conn))
                     return
                 if method == "POST" and parts == ["official-documents", "editor-drafts"]:
                     session = current_session(conn, self.bearer_token())
@@ -48176,12 +48851,14 @@ class Handler(SimpleHTTPRequestHandler):
                     conn.commit()
                     self.send_json(result, 201)
                     return
-                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position", "retry-stamp"}:
+                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position", "retry-stamp", "return-previous", "add-sign", "withdraw"}:
                     session = current_session(conn, self.bearer_token())
                     payload = self.read_json()
                     payload.setdefault("ip_address", self.client_ip())
                     payload.setdefault("user_agent", self.client_device())
-                    if parts[2] == "submit":
+                    if parts[2] in {"return-previous", "add-sign", "withdraw"}:
+                        result = mutate_official_workflow(conn, parts[1], parts[2].replace("-", "_"), payload, session)
+                    elif parts[2] == "submit":
                         result = submit_official_document(conn, parts[1], payload, session)
                     elif parts[2] == "approve":
                         result = approve_official_document(conn, parts[1], payload, session)

@@ -1,0 +1,457 @@
+-- Versioned document-category workflow settings and atomic workflow changes.
+-- Backend-only: no browser grants and no formal document-exchange calls.
+alter table public.official_documents drop constraint if exists official_documents_status_check;
+alter table public.official_documents add constraint official_documents_status_check check (
+  current_status in ('draft','pending_applicant_manager','pending_department_head',
+    'pending_admin_director','pending_general_affairs_review','pending_ceo','pending_approval',
+    'approved','stamping','stamped','pending_general_affairs_dispatch','returned_to_applicant_for_send',
+    'dispatched','sent_by_applicant','closed','rejected','cancelled','stamping_failed')
+);
+
+create or replace function edoc_private.official_workflow_step_status(p_key text)
+returns text language sql immutable security invoker set search_path='' as $function$
+  select case p_key
+    when 'applicant_manager' then 'pending_applicant_manager'
+    when 'department_head' then 'pending_department_head'
+    when 'accounting_review' then 'pending_department_head'
+    when 'ceo' then 'pending_ceo'
+    when 'admin_director' then 'pending_admin_director'
+    when 'general_affairs_review' then 'pending_general_affairs_review'
+    else case when p_key ~ '^approval_[a-zA-Z0-9_-]{1,100}$' then 'pending_approval' else null end
+  end
+$function$;
+revoke all on function edoc_private.official_workflow_step_status(text) from public,anon,authenticated,service_role;
+
+create or replace function edoc_private.preserve_official_decision_evidence()
+returns trigger language plpgsql security invoker set search_path='' as $function$
+begin
+  if coalesce(old.decision_evidence_json,'{}'::jsonb)-'copied_from_step_id'-'added_by_operation_id' <> '{}'::jsonb then
+    if new.decision_evidence_json is distinct from old.decision_evidence_json
+       or new.decision_actor_user_id is distinct from old.decision_actor_user_id then
+      raise exception using errcode='55000',message='official_document_decision_evidence_immutable';
+    end if;
+  else
+    -- Base approve sets status before its v2 wrapper writes the first decision.
+    -- Keep provenance without mistaking it for a completed review decision.
+    new.decision_evidence_json:=coalesce(new.decision_evidence_json,'{}'::jsonb)||
+      pg_catalog.jsonb_strip_nulls(pg_catalog.jsonb_build_object(
+        'copied_from_step_id',old.decision_evidence_json->'copied_from_step_id',
+        'added_by_operation_id',old.decision_evidence_json->'added_by_operation_id'));
+  end if;
+  return new;
+end $function$;
+revoke all on function edoc_private.preserve_official_decision_evidence() from public,anon,authenticated,service_role;
+drop trigger if exists preserve_official_decision_evidence on public.official_document_approval_steps;
+create trigger preserve_official_decision_evidence before update of decision_evidence_json,decision_actor_user_id
+  on public.official_document_approval_steps for each row execute function edoc_private.preserve_official_decision_evidence();
+
+-- Keep the reviewed approval/rejection evidence and actor guards. Only extend
+-- their status resolver and the final additional-review gate.
+do $extend_status$
+declare v_name text; v_sql text; v_before text; v_after text;
+begin
+  foreach v_name in array array['approval','rejection'] loop
+    v_sql := pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure(
+      'public.edoc_claim_official_document_' || v_name || '(text,text,text,text)'));
+    if v_sql is null then raise exception 'official_workflow_base_rpc_missing'; end if;
+    v_before := v_sql;
+    v_sql := pg_catalog.regexp_replace(v_sql,
+      'v_expected_status := case v_step\.step_key.*?\n  end;',
+      'v_expected_status := edoc_private.official_workflow_step_status(v_step.step_key);', 's');
+    if v_name = 'approval' then
+      v_sql := pg_catalog.regexp_replace(v_sql,
+        'v_next_status := case v_next_step\.step_key.*?\n    end;',
+        'v_next_status := edoc_private.official_workflow_step_status(v_next_step.step_key);', 's');
+      v_after := $guard$if v_step.step_key not in ('general_affairs_review', 'ceo')
+       and not (v_step.step_key ~ '^approval_[a-zA-Z0-9_-]{1,100}$' and exists (
+         select 1 from public.official_document_approval_steps ga
+         where ga.document_id = v_document.id and ga.workflow_generation = v_step.workflow_generation
+           and ga.step_key = 'general_affairs_review' and ga.status = 'approved'
+           and ga.step_order < v_step.step_order
+       )) then$guard$;
+      v_sql := pg_catalog.replace(v_sql,
+        'if v_step.step_key not in (''general_affairs_review'', ''ceo'') then', v_after);
+    end if;
+    if v_sql = v_before and pg_catalog.strpos(v_sql,'edoc_private.official_workflow_step_status') = 0 then
+      raise exception 'official_workflow_base_rpc_source_drift';
+    end if;
+    execute v_sql;
+  end loop;
+end $extend_status$;
+
+-- A new review generation still refers to the same immutable submission.
+-- Its action witness carries the original source evidence; it is not a new
+-- submission and must not renumber or regenerate the approved PDF.
+do $electronic_lineage$
+declare v_sql text; v_old text; v_new text;
+begin
+  v_sql:=pg_catalog.pg_get_functiondef('edoc_private.complete_electronic_compose(text,text)'::regprocedure);
+  v_old:=$old$select decision_evidence_json into v_submit_evidence from public.official_document_approval_logs
+    where document_id = p_document_id and action = 'submit'
+      and (decision_evidence_json->>'workflow_generation')::integer = v_generation
+    order by created_at desc limit 1;$old$;
+  v_new:=$new$select case when action='submit' then decision_evidence_json else decision_evidence_json->'submission_evidence' end
+    into v_submit_evidence from public.official_document_approval_logs
+    where document_id=p_document_id and action in ('submit','add_sign','return_previous')
+      and (decision_evidence_json->>'workflow_generation')::integer=v_generation
+    order by created_at desc limit 1;$new$;
+  if pg_catalog.strpos(v_sql,v_old)>0 then
+    execute pg_catalog.replace(v_sql,v_old,v_new);
+  elsif pg_catalog.strpos(v_sql,'submission_evidence')=0 then
+    raise exception 'official_workflow_electronic_lineage_source_drift';
+  end if;
+end $electronic_lineage$;
+
+create or replace function public.edoc_save_official_workflow_config(p_request jsonb)
+returns jsonb language plpgsql security definer set search_path='' set lock_timeout='5s' as $function$
+declare
+  v_actor text := nullif(pg_catalog.btrim(p_request->>'actor_id'),'');
+  v_operation text := nullif(pg_catalog.btrim(p_request->>'operation_id'),'');
+  v_hash text := p_request->>'config_sha256';
+  v_expected integer := (p_request->>'expected_version')::integer;
+  v_version integer;
+  v_config jsonb := p_request->'config';
+  v_category record;
+  v_node jsonb;
+  v_log public.audit_logs%rowtype;
+  v_time text := pg_catalog.to_char(pg_catalog.clock_timestamp(),'YYYY-MM-DD HH24:MI:SS');
+begin
+  if v_actor is null or v_operation is null or v_expected is null or v_expected < 0
+     or v_hash is null or v_hash !~ '^[a-fA-F0-9]{64}$'
+     or v_config->>'schema_version' is distinct from '3'
+     or pg_catalog.jsonb_typeof(v_config->'categories') is distinct from 'object'
+     or v_config->'categories' = '{}'::jsonb then
+    raise exception using errcode='22023',message='official_workflow_config_invalid';
+  end if;
+  if not exists (
+    select 1 from public.users u where u.id=v_actor and u.status='啟用' and (
+      u.role='執行長' or exists (
+        select 1 from public.roles r join public.role_permissions rp on rp.role_id=r.id
+        join public.permissions p on p.id=rp.permission_id
+        where r.name=u.role and r.status='啟用' and p.code in ('settings.manage','settings.system_manage')
+      )
+    )
+  ) then raise exception using errcode='42501',message='workflow_config_manage_forbidden'; end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('edoc:official-workflow-config',0));
+  select * into v_log from public.audit_logs where id='WFC-'||v_operation;
+  if found then
+    if v_log.actor_user_id is distinct from v_actor or v_log.action <> 'official_workflow_config'
+       or v_log.metadata_json::jsonb->>'config_sha256' is distinct from v_hash then
+      raise exception using errcode='PT409',message='official_workflow_operation_conflict';
+    end if;
+    return pg_catalog.jsonb_build_object('ok',true,'idempotent',true,
+      'version',(v_log.metadata_json::jsonb->>'version')::integer,'config',v_log.metadata_json::jsonb->'config');
+  end if;
+  select version into v_version from public.settings where key='official_workflow_config' for update;
+  v_version := coalesce(v_version,0);
+  if v_version <> v_expected then
+    raise exception using errcode='PT409',message='official_workflow_config_conflict';
+  end if;
+  for v_category in select * from pg_catalog.jsonb_each(v_config->'categories') loop
+    if pg_catalog.char_length(v_category.key)>100
+       or pg_catalog.jsonb_typeof(v_category.value->'nodes') is distinct from 'array'
+       or pg_catalog.jsonb_array_length(v_category.value->'nodes')>12 then
+      raise exception using errcode='22023',message='official_workflow_config_nodes_invalid';
+    end if;
+    if (select count(*) from pg_catalog.jsonb_array_elements(v_category.value->'nodes')) <>
+       (select count(distinct item->>'id') from pg_catalog.jsonb_array_elements(v_category.value->'nodes') item) then
+      raise exception using errcode='22023',message='official_workflow_config_node_duplicate';
+    end if;
+    for v_node in select * from pg_catalog.jsonb_array_elements(v_category.value->'nodes') loop
+      if coalesce(v_node->>'id','') !~ '^[a-zA-Z0-9_-]{1,64}$'
+         or coalesce(pg_catalog.char_length(pg_catalog.btrim(v_node->>'name')),0) not between 1 and 80
+         or coalesce(v_node->'assignee'->>'type','') not in ('role','user') then
+        raise exception using errcode='22023',message='official_workflow_config_node_invalid';
+      end if;
+      if v_node->'assignee'->>'type'='role' and coalesce(v_node->'assignee'->>'role_key','') not in
+         ('applicant_manager','department_head','ceo','admin_director') then
+        raise exception using errcode='22023',message='official_workflow_config_role_invalid';
+      end if;
+      if v_node->'assignee'->>'type'='user' and not exists (
+        select 1 from public.users u join public.users admin on admin.id=v_actor
+        where u.id=v_node->'assignee'->>'user_id' and u.status='啟用' and u.account_source='finance'
+          and nullif(u.finance_tenant_id::text,'') is not null and u.finance_tenant_id=admin.finance_tenant_id
+      ) then raise exception using errcode='42501',message='official_workflow_config_actor_forbidden'; end if;
+    end loop;
+  end loop;
+  v_version := v_version+1;
+  v_config := v_config || pg_catalog.jsonb_build_object('version',v_version,'updated_at',v_time);
+  insert into public.settings(key,value_json,version,updated_at)
+    values('official_workflow_config',v_config::text,v_version,v_time)
+    on conflict(key) do update set value_json=excluded.value_json,version=excluded.version,updated_at=excluded.updated_at;
+  insert into public.audit_logs(id,actor,actor_user_id,action,target_type,target_id,detail,
+    event_type,result,module_code,resource_type,resource_id,metadata_json,created_at)
+  values('WFC-'||v_operation,v_actor,v_actor,'official_workflow_config','settings','official_workflow_config',
+    'version='||v_version,'official_workflow_config','success','official_documents','settings','official_workflow_config',
+    pg_catalog.jsonb_build_object('operation_id',v_operation,'config_sha256',v_hash,'version',v_version,'config',v_config)::text,v_time);
+  return pg_catalog.jsonb_build_object('ok',true,'idempotent',false,'version',v_version,'config',v_config);
+end $function$;
+
+create or replace function public.edoc_mutate_official_workflow(p_request jsonb)
+returns jsonb language plpgsql security definer set search_path='' set lock_timeout='5s' as $function$
+declare
+  v_id text := p_request->>'document_id';
+  v_actor text := p_request->>'actor_id';
+  v_principal text := p_request->>'principal_actor_id';
+  v_operation text := p_request->>'operation_id';
+  v_action text := p_request->>'action';
+  v_hash text := p_request->>'request_sha256';
+  v_generation integer := (p_request->>'expected_generation')::integer;
+  v_new_generation integer := (p_request->>'workflow_generation')::integer;
+  v_time text := p_request->>'timestamp';
+  v_document public.official_documents%rowtype;
+  v_step public.official_document_approval_steps%rowtype;
+  v_old public.official_document_approval_steps%rowtype;
+  v_new public.official_document_approval_steps%rowtype;
+  v_previous public.official_document_approval_steps%rowtype;
+  v_first public.official_document_approval_steps%rowtype;
+  v_log public.official_document_approval_logs%rowtype;
+  v_stamp public.official_document_stamp_requests%rowtype;
+  v_clone public.official_document_editor_revisions%rowtype;
+  v_source public.official_document_editor_revisions%rowtype;
+  v_snapshot public.approval_step_actor_snapshots%rowtype;
+  v_evidence jsonb;
+  v_result jsonb := p_request->'action_result';
+  v_steps jsonb := coalesce(p_request->'steps','[]'::jsonb);
+  v_patch jsonb := p_request->'document_patch';
+  v_expected_count integer;
+  v_count integer;
+  v_added_count integer := 0;
+  v_old_id text;
+  v_target text;
+  v_submission_evidence jsonb;
+begin
+  if nullif(v_id,'') is null or nullif(v_actor,'') is null or nullif(v_operation,'') is null
+     or coalesce(v_action,'') not in ('return_previous','add_sign','withdraw')
+     or v_hash is null or v_hash !~ '^[a-fA-F0-9]{64}$'
+     or coalesce(pg_catalog.char_length(pg_catalog.btrim(p_request#>>'{approval_log,comment}')),0) not between 1 and 2000
+     or v_time is null or pg_catalog.jsonb_typeof(v_patch) is distinct from 'object'
+     or pg_catalog.jsonb_typeof(v_steps) is distinct from 'array' then
+    raise exception using errcode='22023',message='official_workflow_action_invalid';
+  end if;
+  -- Same lock order as approve/reject: document, expected step, then assets.
+  select * into v_document from public.official_documents where id=v_id for update;
+  if not found then raise exception using errcode='P0002',message='official_document_not_found'; end if;
+  if v_document.company_id is distinct from p_request->>'company_id' or not exists (
+    select 1 from public.users u where u.id=v_actor and u.status='啟用' and
+      (u.company_id=v_document.company_id or edoc_private.editor_v2_actor_in_company_scope(v_id,v_actor))
+  ) then raise exception using errcode='42501',message='official_document_company_forbidden'; end if;
+  select * into v_log from public.official_document_approval_logs where id=v_operation;
+  if found then
+    if v_log.document_id is distinct from v_id or v_log.actor_id is distinct from v_actor
+       or v_log.action is distinct from v_action or v_log.decision_evidence_json->>'request_sha256' is distinct from v_hash then
+      raise exception using errcode='PT409',message='official_workflow_operation_conflict';
+    end if;
+    return pg_catalog.jsonb_build_object('ok',true,'committed',true,'idempotent',true,
+      'document_id',v_id,'operation_id',v_operation,'action_result',v_log.decision_evidence_json->'action_result');
+  end if;
+  if v_patch->'metadata_json' is distinct from v_document.metadata_json::jsonb then
+    raise exception using errcode='22023',message='official_workflow_metadata_immutable';
+  end if;
+  select * into v_step from public.official_document_approval_steps
+    where id=p_request->>'expected_step_id' and document_id=v_id for update;
+  if not found then raise exception using errcode='PT409',message='official_workflow_step_conflict'; end if;
+  if v_document.current_status is distinct from p_request->>'expected_status'
+     or v_document.current_step is distinct from p_request->>'expected_current_step'
+     or v_document.content_revision is distinct from (p_request->>'expected_content_revision')::integer
+     or v_document.updated_at is distinct from p_request->>'expected_updated_at'
+     or v_step.status is distinct from 'pending' or v_step.step_key is distinct from v_document.current_step
+     or v_step.workflow_generation is distinct from v_generation
+     or v_generation is distinct from (select max(workflow_generation) from public.official_document_approval_steps where document_id=v_id)
+     or v_document.current_status is distinct from edoc_private.official_workflow_step_status(v_step.step_key) then
+    raise exception using errcode='PT409',message='official_workflow_step_conflict';
+  end if;
+  if exists(select 1 from public.official_document_approval_steps
+    where document_id=v_id and workflow_generation=v_generation and status='pending' and step_order<v_step.step_order) then
+    raise exception using errcode='PT409',message='official_workflow_step_conflict';
+  end if;
+  select * into v_stamp from public.official_document_stamp_requests where document_id=v_id order by created_at desc,id desc limit 1 for update;
+  if v_document.stamped_file_id is not null and v_document.stamped_file_id<>''
+     or v_stamp.status in ('stamping','stamped','completed') or nullif(v_stamp.claim_token,'') is not null then
+    raise exception using errcode='PT409',message='official_workflow_irreversible';
+  end if;
+  if v_action='withdraw' then
+    if v_actor is distinct from v_document.applicant_id or v_principal is distinct from v_actor then
+      raise exception using errcode='42501',message='official_document_withdraw_forbidden';
+    end if;
+    if v_patch->>'current_status' is distinct from 'draft' or coalesce(v_patch->>'current_step','')<>''
+       or (v_patch->>'content_revision')::integer is distinct from v_document.content_revision+1
+       or v_steps<>'[]'::jsonb or v_new_generation is distinct from v_generation then
+      raise exception using errcode='22023',message='official_workflow_withdraw_plan_invalid';
+    end if;
+    if nullif(v_stamp.locked_editor_revision_id,'') is not null then
+      select * into v_source from public.official_document_editor_revisions
+        where id=v_stamp.locked_editor_revision_id and document_id=v_id for update;
+      if not found or v_source.manifest_sha256 is distinct from v_stamp.editor_manifest_sha256
+         or p_request->>'clone_source_revision_id' is distinct from v_source.id then
+        raise exception using errcode='22023',message='editor_locked_revision_missing';
+      end if;
+      v_clone := pg_catalog.jsonb_populate_record(null::public.official_document_editor_revisions,p_request->'editor_clone');
+      if v_clone.id is null or v_clone.document_id is distinct from v_id
+         or v_clone.parent_revision_id is distinct from v_source.id or v_clone.created_by is distinct from v_actor
+         or v_clone.revision_no is distinct from (select coalesce(max(revision_no),0)+1 from public.official_document_editor_revisions where document_id=v_id)
+         or v_clone.schema_version is distinct from v_source.schema_version
+         or v_clone.manifest_sha256 !~ '^[a-fA-F0-9]{64}$'
+         or v_clone.editor_state_json::jsonb->>'revisionNo' is distinct from v_clone.revision_no::text
+         or v_clone.editor_state_json::jsonb->>'manifestSha256' is distinct from v_clone.manifest_sha256
+         or (v_clone.editor_state_json::jsonb-'revisionNo'-'manifestSha256') is distinct from
+            (v_source.editor_state_json::jsonb-'revisionNo'-'manifestSha256') then
+        raise exception using errcode='22023',message='editor_withdraw_clone_invalid';
+      end if;
+      insert into public.official_document_editor_revisions select (v_clone).*;
+      insert into public.official_document_rejection_jobs(id,document_id,expected_step_id,source_revision_id,target_revision_id,status,completed_at)
+        values('ODWITHDRAW-'||pg_catalog.md5(v_operation),v_id,v_step.id,v_source.id,v_clone.id,'completed',pg_catalog.clock_timestamp());
+      v_result := v_result || pg_catalog.jsonb_build_object('editor_revision_id',v_clone.id,'cloning',false);
+    end if;
+    update public.official_document_stamp_requests set status='cancelled',updated_at=v_time where document_id=v_id;
+    update public.official_document_approval_steps set status='skipped',updated_at=v_time
+      where document_id=v_id and workflow_generation=v_generation and status='pending';
+  else
+    if v_principal is distinct from v_step.approver_user_id or v_actor=v_document.applicant_id
+       or v_principal=v_document.applicant_id then
+      raise exception using errcode='42501',message='not_current_official_document_approver';
+    end if;
+    perform edoc_private.assert_official_document_decision_actor(v_id,v_document.company_id,v_principal,v_actor);
+    v_evidence := edoc_private.validate_official_document_decision_evidence(v_id,v_step.id,v_principal,v_actor,'approve',p_request->'decision_evidence');
+    select case when action='submit' then decision_evidence_json else decision_evidence_json->'submission_evidence' end
+      into v_submission_evidence from public.official_document_approval_logs
+      where document_id=v_id and action in ('submit','add_sign','return_previous')
+        and (decision_evidence_json->>'workflow_generation')::integer=v_generation
+      order by created_at desc limit 1;
+    if edoc_private.is_electronic_compose(v_document) and v_submission_evidence is null then
+      raise exception using errcode='22023',message='official_document_electronic_source_invalid';
+    end if;
+    if v_new_generation is distinct from v_generation+1
+       or (v_patch->>'content_revision')::integer is distinct from v_document.content_revision then
+      raise exception using errcode='PT409',message='official_workflow_generation_conflict';
+    end if;
+    select count(*) into v_expected_count from public.official_document_approval_steps where document_id=v_id and workflow_generation=v_generation;
+    if v_action='add_sign' then v_expected_count:=v_expected_count+1; end if;
+    select count(*),count(distinct item->>'id') into v_count,v_added_count from pg_catalog.jsonb_array_elements(v_steps) item;
+    if v_count<>v_expected_count or v_count<>v_added_count or v_count>30
+       or (select count(distinct (item->>'step_order')::integer) from pg_catalog.jsonb_array_elements(v_steps) item)<>v_count then
+      raise exception using errcode='22023',message='official_workflow_plan_invalid';
+    end if;
+    v_added_count:=0;
+    if v_action='return_previous' then
+      select * into v_previous from public.official_document_approval_steps
+        where document_id=v_id and workflow_generation=v_generation and step_order<v_step.step_order and status='approved'
+        order by step_order desc limit 1;
+      if not found then raise exception using errcode='22023',message='official_workflow_previous_step_unavailable'; end if;
+    end if;
+    for v_new in select * from pg_catalog.jsonb_populate_recordset(null::public.official_document_approval_steps,v_steps) order by step_order loop
+      if v_new.document_id is distinct from v_id or v_new.workflow_generation is distinct from v_new_generation
+         or coalesce(v_new.status,'') not in ('pending','approved') or v_new.id is null or v_new.step_order is null or v_new.step_order not between 1 and v_count
+         or exists(select 1 from public.official_document_approval_steps where id=v_new.id)
+         or (v_new.step_key<>'applicant_confirm' and edoc_private.official_workflow_step_status(v_new.step_key) is null) then
+        raise exception using errcode='22023',message='official_workflow_plan_invalid';
+      end if;
+      v_old_id := v_new.decision_evidence_json->>'copied_from_step_id';
+      if nullif(v_old_id,'') is null then
+        v_added_count:=v_added_count+1;
+        if v_action<>'add_sign' or v_new.step_key !~ '^approval_[a-zA-Z0-9_-]{1,100}$'
+           or v_new.step_order<>v_step.step_order+1 or v_new.status<>'pending'
+           or v_new.approver_user_id in (v_actor,v_principal,v_document.applicant_id)
+           or v_new.decision_evidence_json->>'added_by_operation_id' is distinct from v_operation
+           or exists(select 1 from public.official_document_approval_steps old
+             where old.document_id=v_id and old.workflow_generation=v_generation and old.status='pending' and old.approver_user_id=v_new.approver_user_id)
+           or not exists(select 1 from public.users u where u.id=v_new.approver_user_id and u.status='啟用'
+             and u.account_source='finance' and (u.company_id=v_document.company_id or edoc_private.editor_v2_actor_in_company_scope(v_id,u.id))) then
+          raise exception using errcode='42501',message='official_workflow_add_sign_actor_forbidden';
+        end if;
+        v_target:=v_new.approver_user_id;
+      else
+        select * into v_old from public.official_document_approval_steps
+          where id=v_old_id and document_id=v_id and workflow_generation=v_generation;
+        if not found or v_new.step_key is distinct from v_old.step_key or v_new.approver_user_id is distinct from v_old.approver_user_id
+           or v_new.step_name is distinct from v_old.step_name or v_new.approver_name is distinct from v_old.approver_name
+           or v_new.approver_role is distinct from v_old.approver_role
+           or v_new.step_order<>v_old.step_order+(case when v_action='add_sign' and v_old.step_order>v_step.step_order then 1 else 0 end) then
+          raise exception using errcode='22023',message='official_workflow_plan_reassignment_forbidden';
+        end if;
+        if v_action='return_previous' and v_old.step_order>=v_previous.step_order
+           or v_action='add_sign' and v_old.step_order>v_step.step_order then
+          if v_new.status<>'pending' or nullif(v_new.approved_at,'') is not null or nullif(v_new.decision_actor_user_id,'') is not null then
+            raise exception using errcode='22023',message='official_workflow_plan_reset_invalid';
+          end if;
+        elsif v_action='add_sign' and v_old.id=v_step.id then
+          if v_new.status<>'approved' or v_new.decision_actor_user_id is distinct from v_actor then
+            raise exception using errcode='22023',message='official_workflow_add_sign_approval_invalid';
+          end if;
+          v_new.decision_evidence_json:=v_evidence||pg_catalog.jsonb_build_object('copied_from_step_id',v_old.id);
+        elsif v_new.status is distinct from v_old.status or v_new.approved_at is distinct from v_old.approved_at
+           or v_new.comment is distinct from v_old.comment
+           or v_new.decision_actor_user_id is distinct from v_old.decision_actor_user_id
+           or (v_new.decision_evidence_json-'copied_from_step_id') is distinct from (v_old.decision_evidence_json-'copied_from_step_id') then
+          raise exception using errcode='22023',message='official_workflow_history_immutable';
+        end if;
+      end if;
+      insert into public.official_document_approval_steps select (v_new).*;
+    end loop;
+    if v_added_count<>(case when v_action='add_sign' then 1 else 0 end) then
+      raise exception using errcode='22023',message='official_workflow_added_step_count_invalid';
+    end if;
+    -- Every original node survives once; no substituted or silently dropped suffix.
+    if exists(select 1 from public.official_document_approval_steps old
+      where old.document_id=v_id and old.workflow_generation=v_generation and
+        (select count(*) from public.official_document_approval_steps fresh
+          where fresh.document_id=v_id and fresh.workflow_generation=v_new_generation
+            and fresh.decision_evidence_json->>'copied_from_step_id'=old.id)<>1) then
+      raise exception using errcode='22023',message='official_workflow_plan_lineage_invalid';
+    end if;
+    select * into v_first from public.official_document_approval_steps
+      where document_id=v_id and workflow_generation=v_new_generation and status='pending' order by step_order limit 1;
+    if not found or v_first.step_key='applicant_confirm'
+       or v_patch->>'current_step' is distinct from v_first.step_key
+       or v_patch->>'current_status' is distinct from edoc_private.official_workflow_step_status(v_first.step_key)
+       or v_result->>'current_step_id' is distinct from v_first.id then
+      raise exception using errcode='22023',message='official_workflow_current_step_invalid';
+    end if;
+    update public.official_document_approval_steps set review_started_at=v_time,updated_at=v_time where id=v_first.id;
+    update public.official_document_approval_steps set status='skipped',updated_at=v_time
+      where document_id=v_id and workflow_generation=v_generation and status='pending';
+    for v_snapshot in select * from pg_catalog.jsonb_populate_recordset(null::public.approval_step_actor_snapshots,coalesce(p_request->'actor_snapshots','[]'::jsonb)) loop
+      if v_snapshot.source_id is distinct from v_id or v_snapshot.source_type<>'official_document'
+         or not exists(select 1 from public.official_document_approval_steps s
+           where s.document_id=v_id and s.workflow_generation=v_new_generation and s.step_order=v_snapshot.step_no
+             and s.approver_user_id=v_snapshot.approver_user_id) then
+        raise exception using errcode='22023',message='official_workflow_snapshot_invalid';
+      end if;
+      insert into public.approval_step_actor_snapshots select (v_snapshot).*;
+    end loop;
+  end if;
+  update public.official_documents set current_status=v_patch->>'current_status',current_step=v_patch->>'current_step',
+    content_revision=(v_patch->>'content_revision')::integer,metadata_json=(v_patch->'metadata_json')::text,updated_at=v_time where id=v_id;
+  v_log:=pg_catalog.jsonb_populate_record(null::public.official_document_approval_logs,p_request->'approval_log');
+  if v_log.id is distinct from v_operation or v_log.document_id is distinct from v_id
+     or v_log.step_id is distinct from v_step.id or v_log.actor_id is distinct from v_actor
+     or v_log.principal_actor_id is distinct from v_principal or v_log.action is distinct from v_action then
+    raise exception using errcode='22023',message='official_workflow_log_invalid';
+  end if;
+  v_log.decision_evidence_json:=coalesce(v_log.decision_evidence_json,'{}'::jsonb)||pg_catalog.jsonb_build_object(
+    'operation_id',v_operation,'request_sha256',v_hash,'action_result',v_result,'decision_evidence',v_evidence,
+    'workflow_generation',v_new_generation,'submission_evidence',v_submission_evidence);
+  insert into public.official_document_approval_logs select (v_log).*;
+  insert into public.audit_logs(id,actor,actor_user_id,action,target_type,target_id,detail,
+    event_type,result,module_code,resource_type,resource_id,metadata_json,created_at)
+  values('AUD-WFA-'||v_operation,v_actor,v_actor,v_action,'official_documents',v_id,'step_id='||v_step.id,
+    v_action,'success','official_documents','official_documents',v_id,v_log.decision_evidence_json::text,v_time);
+  v_target:=case when v_action='withdraw' then v_document.applicant_id else v_first.approver_user_id end;
+  insert into public.notifications(id,type,title,target_role,target_user_id,target_company_id,target_email,
+    channel,status,priority,source,action_url,body,created_at)
+  select 'NOTIF-WFA-'||pg_catalog.md5(v_operation),'簽核流程異動',v_document.title||case when v_action='withdraw' then ' 已抽單' else ' 待簽核' end,
+    u.role,u.id,u.company_id,u.email,'Email + 系統通知','未讀','高',v_id,'/#approvalLog?document='||v_id,
+    v_log.comment,pg_catalog.clock_timestamp()
+  from public.users u where u.id=v_target and u.status='啟用' and nullif(pg_catalog.btrim(u.email),'') is not null
+    and (u.company_id=v_document.company_id or edoc_private.editor_v2_actor_in_company_scope(v_id,u.id));
+  if not found then raise exception using errcode='42501',message='notification_exact_target_required'; end if;
+  return pg_catalog.jsonb_build_object('ok',true,'committed',true,'idempotent',false,
+    'document_id',v_id,'operation_id',v_operation,'action_result',v_result);
+end $function$;
+
+revoke all on function public.edoc_save_official_workflow_config(jsonb) from public,anon,authenticated;
+revoke all on function public.edoc_mutate_official_workflow(jsonb) from public,anon,authenticated;
+grant execute on function public.edoc_save_official_workflow_config(jsonb) to service_role;
+grant execute on function public.edoc_mutate_official_workflow(jsonb) to service_role;
+notify pgrst,'reload schema';

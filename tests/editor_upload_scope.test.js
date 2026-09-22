@@ -21,6 +21,7 @@ const scopedFunctions = [
   'confirmUploadedPdfConversion', 'resolveUploadedPdfConversion',
   'loadPdfJsAsset', 'loadUploadedPdfIntoEditor', 'refreshUploadedEditorManifest',
   'hydrateUploadedEditorAuthorizedAssets', 'handleUploadedSealPdfChange',
+  'uploadedEditorDraftPrerequisiteIssue', 'uploadedPdfUploadBlockingMessage',
   'handleUploadedEditorImportPdf', 'handleUploadedEditorImage',
 ];
 const deferred = () => {
@@ -61,6 +62,7 @@ function harness() {
     normalizeEditorDegrees: value => ((value || 0) % 360 + 360) % 360,
     hashBlob: async () => 'HASH',
     ensureUploadedEditorDraft: async () => runtime.documentId,
+    uploadedEditorV2FeatureEnabled: () => true,
     backendRequest: async (url, options) => { events.push(['request', url, options]); return { upload_id: 'UP-A', asset_id: 'ASSET-A' }; },
     inspectPdfFileA4: async () => ({ valid: true }),
     validateUploadedPdfDocument: async () => {},
