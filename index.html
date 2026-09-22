@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
-    <link rel="stylesheet" href="styles.css?v=20260914-seal-front-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260922-seal-picker-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
@@ -1582,7 +1582,7 @@
                     </label>
                   </div>
                   <label>部門<select id="uploadedSealDepartment" required></select></label>
-                  <label>公司<select id="uploadedSealCompany" required></select></label>
+                  <label>用印公司<select id="uploadedSealCompany" required></select></label>
                   <label class="electronic-seal-application-wide">申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
                   <label class="electronic-seal-application-wide">用印原因<textarea id="uploadedSealReason" rows="3" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
                 </div>
@@ -1670,12 +1670,19 @@
 
               <p id="uploadedEditorToolNotice" role="status" hidden></p>
               <div class="electronic-seal-tools pdf-editor-general-options" id="uploadedEditorGeneralOptions">
-                <label>印章<select id="uploadedSealSealSelect"></select></label>
+                <div class="uploaded-seal-picker" id="uploadedSealPicker" role="group" aria-label="選擇用印款式與大小章">
+                  <div class="uploaded-seal-picker-company"><span>用印公司：<strong id="uploadedSealPickerCompany"></strong></span><button class="text-button" id="uploadedSealCompanyFocusBtn" type="button">變更公司</button></div>
+                  <label>用印款式<select id="uploadedSealCategorySelect" aria-describedby="uploadedSealPickerStatus"></select></label>
+                  <label>大小章<select id="uploadedSealSizeSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
+                  <label id="uploadedSealRecordLabel" hidden>印章名稱<select id="uploadedSealSealSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
+                  <p id="uploadedSealPickerStatus" role="status" aria-live="polite"></p>
+                </div>
                 <label>套用頁面<select id="uploadedSealStampType">
                   <option value="current_page">目前頁</option>
                   <option value="all_pages">全部頁</option>
                 </select></label>
                 <button class="secondary-button" id="addSelectedStampBtn" type="button">加入章位</button>
+                <p id="uploadedSealPlacementHint" class="uploaded-seal-placement-hint">點選文件放章，拖曳調整；列印位置與畫面相同。</p>
                 <div class="uploaded-text-tools" id="uploadedSealTextTools" hidden>
                   <label><span id="uploadedEditorTextInputLabel">文字</span><input id="uploadedSealTextInput" maxlength="500" placeholder="輸入要加入的文字" /></label>
                   <label>字級<input id="uploadedSealFontSize" type="number" min="8" max="72" step="1" value="14" /></label>
@@ -4215,6 +4222,6 @@
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260802-csp-r1"></script>
     <script src="editor-seam.js?v=20260911-r1"></script>
     <script src="editor-a4.js?v=20260911-r1"></script>
-    <script src="app.js?v=20260914-seal-front-r1"></script>
+    <script src="app.js?v=20260922-seal-picker-r1"></script>
   </body>
 </html>
