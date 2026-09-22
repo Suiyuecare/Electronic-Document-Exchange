@@ -169,6 +169,8 @@ class EditorStorageJobTestCase(unittest.TestCase):
             backend,
             "_supabase_claim_editor_storage_job",
             return_value=cleaning_job,
+        ), mock.patch.object(
+            backend, "_supabase_stale_editor_storage_jobs", return_value=[job],
         ):
             result = backend.supabase_cleanup_stale_official_editor_uploads(
                 document_id="OD-1"
@@ -217,6 +219,8 @@ class EditorStorageJobTestCase(unittest.TestCase):
             backend,
             "_supabase_claim_editor_storage_job",
             return_value=cleaning_job,
+        ), mock.patch.object(
+            backend, "_supabase_stale_editor_storage_jobs", return_value=[job],
         ):
             result = backend.supabase_cleanup_stale_official_editor_uploads(
                 document_id="OD-1"
@@ -270,6 +274,8 @@ class EditorStorageJobTestCase(unittest.TestCase):
         ), mock.patch.object(
             backend,
             "log_structured",
+        ), mock.patch.object(
+            backend, "_supabase_stale_editor_storage_jobs", return_value=[job],
         ):
             result = backend.supabase_cleanup_stale_official_editor_uploads(
                 document_id="OD-1"
@@ -303,6 +309,8 @@ class EditorStorageJobTestCase(unittest.TestCase):
             backend,
             "_supabase_claim_editor_storage_job",
         ) as claim, mock.patch.object(
+            backend, "_supabase_stale_editor_storage_jobs", return_value=[job],
+        ), mock.patch.object(
             backend,
             "supabase_storage_delete",
         ) as storage_delete:
