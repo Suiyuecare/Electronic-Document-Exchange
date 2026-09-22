@@ -166,6 +166,7 @@ let officialWorkflowSearchTerm = "";
 let officialWorkflowStatusFilter = "";
 const officialDocumentDetailReady = new Set();
 const officialDocumentDetailRequests = new Map();
+const officialReceiptRequests = new Map();
 const officialWorkflowReadinessByRoute = new Map();
 const officialWorkflowReadinessRequests = new Map();
 let officialDecisionPreviousFocus = null;
@@ -1147,7 +1148,9 @@ function approvalSelectionForType(type = "") {
     workflowTemplateKey: `official_seal_route_${route.code.toLowerCase()}_v1`,
     // This is a display/payload snapshot only.  The backend independently
     // derives and locks the authoritative route from the live Finance role.
-    approvalFlowNodes: approvalFlowNodesForCurrentApplicant(route.flowNodes || [])
+    approvalFlowNodes: Number(officialWorkflowConfig.schema_version) >= 3 && officialWorkflowConfig.categories?.[category.label]
+      ? [...officialWorkflowConfig.categories[category.label].nodes.map((node) => node.name), ...(officialWorkflowConfig.fixed_tail || []).map((node) => node.name)]
+      : approvalFlowNodesForCurrentApplicant(route.flowNodes || [])
   };
 }
 
@@ -3538,6 +3541,12 @@ function officialDocumentIsApplicant(item = {}) {
   ));
 }
 
+function officialDocumentCanConfirm(item = {}) {
+  return item.can_confirm === true && officialDocumentIsApplicant(item)
+    && item.current_step === "applicant_confirm"
+    && ["stamped", "dispatched", "sent_by_applicant"].includes(item.current_status);
+}
+
 function officialDocumentPendingStepMatchesRole(item = {}) {
   if (hasAuthenticatedBackendSession()) return item.can_act === true;
   if (!explicitFrontendFixturesEnabled()) return false;
@@ -4818,6 +4827,7 @@ const workflowReadinessReasonLabels = Object.freeze({
   actor_not_found: "找不到對應簽核人",
   actor_resolution_error: "簽核人解析失敗",
   non_finance_actor: "簽核人不是 Finance 正式人員",
+  designated_company_forbidden: "指定簽核人不屬於公文公司，請調整流程設定。",
   self_assignment: "簽核人不可與申請人相同",
   finance_company_required: "登入帳號尚未連動 Finance 公司",
   finance_unit_required: "登入帳號尚未連動 Finance 部門"
@@ -4825,6 +4835,19 @@ const workflowReadinessReasonLabels = Object.freeze({
 
 function workflowReadinessSelection(context) {
   return approvalSelectionForSelect(context === "compose" ? "#composeApprovalCategorySelect" : "#uploadedSealApprovalCategorySelect");
+}
+
+function workflowReadinessContextQuery(context) {
+  const selection = workflowReadinessSelection(context);
+  const companyId = context === "compose"
+    ? composeCompanyForOfficialApplication(document.querySelector("#composeCompanySelect")?.value)?.id || ""
+    : document.querySelector("#uploadedSealCompany")?.value || "";
+  const unit = context === "compose" ? activeUnit() : document.querySelector("#uploadedSealDepartment")?.value || "";
+  return { document_category: selection.documentCategory || "", company_id: companyId, unit, source_type: context === "compose" ? "blank_editor" : "uploaded_pdf" };
+}
+
+function workflowReadinessCacheKey(context, routeCode) {
+  return JSON.stringify([frontendSessionScope(), officialWorkflowConfig.version || 0, routeCode || workflowReadinessSelection(context).approvalRouteCode, workflowReadinessContextQuery(context)]);
 }
 
 function ensureWorkflowReadinessNotice(context) {
@@ -4867,14 +4890,20 @@ function renderWorkflowReadinessContext(context) {
   if (!notice) return;
   const selection = workflowReadinessSelection(context);
   const routeCode = selection.approvalRouteCode || "";
+  const cacheKey = workflowReadinessCacheKey(context, routeCode);
   if (!routeCode) {
     notice.dataset.state = "idle";
     notice.textContent = "選擇文件細項後，系統會向會計系統確認主管、主任與必要核定人。";
-  } else if (officialWorkflowReadinessRequests.has(routeCode)) {
+  } else if (officialWorkflowReadinessRequests.has(cacheKey)) {
     notice.dataset.state = "checking";
     notice.textContent = `正在向會計系統確認 ${routeCode} 級簽核關係…`;
   } else {
-    const readiness = officialWorkflowReadinessByRoute.get(routeCode);
+    const readiness = officialWorkflowReadinessByRoute.get(cacheKey);
+    if (readiness?.steps?.length) {
+      const selectors = context === "compose" ? ["#composeApprovalRoutePreview", "#composeApprovalFlow"] : ["#uploadedSealApprovalRoutePreview"];
+      const markup = readiness.steps.map((step, index) => `<li><span>${index + 1}</span><div><strong>${escapeDraftHtml(step.stepName || step.requiredRole || "簽核")}</strong><small>${escapeDraftHtml(step.approverName ? `待處理：${step.approverName}` : step.ready ? "依正式流程處理" : "尚未指定簽核人")}</small></div></li>`).join("");
+      selectors.forEach((selector) => { const target = document.querySelector(selector); if (target) target.innerHTML = markup; });
+    }
     if (!readiness) {
       notice.dataset.state = "checking";
       notice.textContent = `尚未完成 ${routeCode} 級簽核關係確認，送簽前會再次檢查。`;
@@ -4894,7 +4923,7 @@ function applyWorkflowReadinessSubmitGuards() {
   const composeSelection = workflowReadinessSelection("compose");
   const composeReady = workflowReadinessAllowsSubmit(
     composeSelection,
-    officialWorkflowReadinessByRoute.get(composeSelection.approvalRouteCode || "")
+    officialWorkflowReadinessByRoute.get(workflowReadinessCacheKey("compose"))
   );
   const composeSubmit = document.querySelector("#submitDispatchBtn");
   if (composeSubmit) {
@@ -4904,7 +4933,7 @@ function applyWorkflowReadinessSubmitGuards() {
   const uploadedSelection = workflowReadinessSelection("uploadedSeal");
   const uploadedReady = workflowReadinessAllowsSubmit(
     uploadedSelection,
-    officialWorkflowReadinessByRoute.get(uploadedSelection.approvalRouteCode || "")
+    officialWorkflowReadinessByRoute.get(workflowReadinessCacheKey("uploadedSeal"))
   );
   const uploadedSubmit = document.querySelector("#submitUploadedSealBtn");
   if (uploadedSubmit && !uploadedReady) {
@@ -4918,21 +4947,25 @@ function renderAllWorkflowReadinessContexts() {
   renderWorkflowReadinessContext("uploadedSeal");
 }
 
-async function loadOfficialWorkflowReadiness(routeCode, { silent = true, force = false } = {}) {
+async function loadOfficialWorkflowReadiness(routeCode, { silent = true, force = false, context = "uploadedSeal" } = {}) {
   const normalizedRoute = String(routeCode || "").trim().toUpperCase();
   if (!normalizedRoute || !["A", "B", "C", "D"].includes(normalizedRoute)) return null;
   if (!hasAuthenticatedBackendSession()) {
     renderAllWorkflowReadinessContexts();
     return null;
   }
-  if (!force && officialWorkflowReadinessByRoute.has(normalizedRoute)) {
+  const cacheKey = workflowReadinessCacheKey(context, normalizedRoute);
+  const scope = frontendSessionScope();
+  const query = new URLSearchParams({ route_code: normalizedRoute, ...workflowReadinessContextQuery(context) });
+  if (!force && officialWorkflowReadinessByRoute.has(cacheKey)) {
     renderAllWorkflowReadinessContexts();
-    return officialWorkflowReadinessByRoute.get(normalizedRoute);
+    return officialWorkflowReadinessByRoute.get(cacheKey);
   }
-  if (officialWorkflowReadinessRequests.has(normalizedRoute)) return officialWorkflowReadinessRequests.get(normalizedRoute);
+  if (officialWorkflowReadinessRequests.has(cacheKey)) return officialWorkflowReadinessRequests.get(cacheKey);
   const request = (async () => {
     try {
-      const result = await backendRequest(`/official-documents/workflow-readiness?route_code=${encodeURIComponent(normalizedRoute)}`);
+      const result = await backendRequest(`/official-documents/workflow-readiness?${query.toString()}`);
+      if (scope !== frontendSessionScope() || cacheKey !== workflowReadinessCacheKey(context, normalizedRoute)) return null;
       const normalized = {
         ...result,
         routeCode: String(result.routeCode || normalizedRoute).toUpperCase(),
@@ -4940,9 +4973,10 @@ async function loadOfficialWorkflowReadiness(routeCode, { silent = true, force =
         createDraftAllowed: result.createDraftAllowed === true,
         sourceOfTruth: result.sourceOfTruth || ""
       };
-      officialWorkflowReadinessByRoute.set(normalizedRoute, normalized);
+      officialWorkflowReadinessByRoute.set(cacheKey, normalized);
       return normalized;
     } catch (error) {
+      if (scope !== frontendSessionScope() || cacheKey !== workflowReadinessCacheKey(context, normalizedRoute)) return null;
       const failed = {
         routeCode: normalizedRoute,
         submitAllowed: false,
@@ -4954,15 +4988,15 @@ async function loadOfficialWorkflowReadiness(routeCode, { silent = true, force =
         sourceOfTruth: "finance",
         error: error.message || "無法讀取簽核關係"
       };
-      officialWorkflowReadinessByRoute.set(normalizedRoute, failed);
+      officialWorkflowReadinessByRoute.set(cacheKey, failed);
       if (!silent) showToast(`簽核關係確認失敗：${failed.error}`);
       return failed;
     } finally {
-      officialWorkflowReadinessRequests.delete(normalizedRoute);
-      renderAllWorkflowReadinessContexts();
+      officialWorkflowReadinessRequests.delete(cacheKey);
+      if (scope === frontendSessionScope()) renderAllWorkflowReadinessContexts();
     }
   })();
-  officialWorkflowReadinessRequests.set(normalizedRoute, request);
+  officialWorkflowReadinessRequests.set(cacheKey, request);
   renderAllWorkflowReadinessContexts();
   return request;
 }
@@ -4971,7 +5005,7 @@ function refreshWorkflowReadinessForContext(context, options = {}) {
   const selection = workflowReadinessSelection(context);
   renderWorkflowReadinessContext(context);
   if (!selection.approvalRouteCode) return Promise.resolve(null);
-  return loadOfficialWorkflowReadiness(selection.approvalRouteCode, options);
+  return loadOfficialWorkflowReadiness(selection.approvalRouteCode, { ...options, context });
 }
 
 function replaceConfigArray(target, rows) {
@@ -5341,6 +5375,7 @@ async function loadRouteBackendData(target, silent = true) {
   if (!hasAuthenticatedBackendSession() || routeBackendDataLoaded.has(target)) return;
   routeBackendDataLoaded.add(target);
   try {
+    if (["workflow", "settings"].includes(target)) await loadFinanceCompanyDirectory();
     if (["compose", "contractSeal", "electronicSeal"].includes(target)) {
       await loadFinanceCompanyDirectory();
       const officialCompanyId = document.querySelector("#officialCompanySelect")?.value || "";
@@ -5352,7 +5387,7 @@ async function loadRouteBackendData(target, silent = true) {
       uploadedSealEditorRuntime.directoryLoading = false;
       renderUploadedSealWorkbench();
     }
-    if (["compose", "workflow"].includes(target)) await loadOfficialWorkflowConfig(silent);
+    if (["compose", "workflow", "settings", "contractSeal", "electronicSeal"].includes(target)) await loadOfficialWorkflowConfig(silent);
     if (target === "compose") await refreshWorkflowReadinessForContext("compose", { silent });
     if (["contractSeal", "electronicSeal"].includes(target)) await refreshWorkflowReadinessForContext("uploadedSeal", { silent });
     if (target === "workflow") await loadWorkflowDelegations(silent);
@@ -5828,6 +5863,8 @@ function leaveApp() {
   stopFinanceDirectoryAutoRefresh();
   clearFinanceDirectoryCache();
   clearUploadedEditorSensitivePreviews();
+  resetOfficialWorkflowConfigEditor();
+  closeOfficialDecisionDialog();
   clearComposeAutosave();
   composeAutosaveRestoredForIdentity = "";
   resetComposeAsyncScope();
@@ -5935,6 +5972,7 @@ function clearFrontendSeedRecordsForAuthenticatedSession() {
 function applyAuthUser() {
   if (!authState?.user) return;
   const { user, permissions = [] } = authState;
+  if (officialWorkflowConfigEditor.scope !== frontendSessionScope()) resetOfficialWorkflowConfigEditor();
   clearFrontendSeedRecordsForAuthenticatedSession();
   officialWorkflowReadinessByRoute.clear();
   officialWorkflowReadinessRequests.clear();
@@ -9303,6 +9341,7 @@ const officialStatusLabels = {
   pending_admin_director: "行政部門主任",
   pending_general_affairs_review: "總務專員",
   pending_ceo: "執行長",
+  pending_approval: "待簽核",
   approved: "已核准",
   stamping: "用印中",
   stamped: "已完成用印",
@@ -9551,7 +9590,10 @@ function officialWorkflowEndpoint(scope = officialWorkflowScope) {
   return "/official-documents";
 }
 
-async function loadOfficialWorkflow(scope = officialWorkflowScope) {
+async function loadOfficialWorkflow(scope = officialWorkflowScope, { isCurrent = () => true } = {}) {
+  const sessionScope = frontendSessionScope();
+  const current = () => sessionScope === frontendSessionScope() && isCurrent();
+  if (!current()) return;
   officialWorkflowScope = scope;
   if (scope === "new") {
     renderOfficialWorkflow();
@@ -9560,11 +9602,14 @@ async function loadOfficialWorkflow(scope = officialWorkflowScope) {
   const params = new URLSearchParams();
   if (officialWorkflowStatusFilter) params.set("status", officialWorkflowStatusFilter);
   try {
-    officialWorkflowItems = await backendRequest(`${officialWorkflowEndpoint(scope)}${params.toString() ? `?${params}` : ""}`);
+    const items = await backendRequest(`${officialWorkflowEndpoint(scope)}${params.toString() ? `?${params}` : ""}`);
+    if (!current()) return;
+    officialWorkflowItems = items;
     officialDocumentDetailReady.clear();
     officialDocumentDetailRequests.clear();
     if (!officialWorkflowItems.some((item) => item.id === selectedOfficialDocumentId)) selectedOfficialDocumentId = officialWorkflowItems[0]?.id || "";
   } catch (error) {
+    if (!current()) return;
     officialWorkflowItems = [];
     showToast(`發文簽核載入失敗：${error.message}`);
   }
@@ -9583,13 +9628,16 @@ function resetOfficialWorkflowListFilters() {
   if (searchInput) searchInput.value = "";
 }
 
-async function showSubmittedOfficialDocument(documentId) {
+async function showSubmittedOfficialDocument(documentId, { isCurrent = () => true } = {}) {
+  const sessionScope = frontendSessionScope();
+  const current = () => sessionScope === frontendSessionScope() && isCurrent();
+  if (!current()) return;
   selectedOfficialDocumentId = documentId;
   editingOfficialDocumentId = "";
   officialWorkflowScope = "mine";
   resetOfficialWorkflowListFilters();
-  await loadOfficialWorkflow("mine");
-  if (documentId) await loadOfficialDocumentDetail(documentId);
+  await loadOfficialWorkflow("mine", { isCurrent: current });
+  if (current() && documentId) await loadOfficialDocumentDetail(documentId, { isCurrent: current });
 }
 
 async function loadApprovalProgressFromBackend() {
@@ -10097,7 +10145,10 @@ function renderOfficialWorkflowList() {
   });
 }
 
-async function ensureOfficialDocumentDetail(documentId) {
+async function ensureOfficialDocumentDetail(documentId, { isCurrent = () => true } = {}) {
+  const sessionScope = frontendSessionScope();
+  const current = () => sessionScope === frontendSessionScope() && isCurrent();
+  if (!current()) return null;
   if (!documentId) throw new Error("未指定發文案件。");
   if (officialDocumentDetailReady.has(documentId)) {
     return officialWorkflowItems.find((item) => item.id === documentId) || null;
@@ -10105,22 +10156,27 @@ async function ensureOfficialDocumentDetail(documentId) {
   if (officialDocumentDetailRequests.has(documentId)) return officialDocumentDetailRequests.get(documentId);
   const request = (async () => {
     const detail = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
+    if (!current() || officialDocumentDetailRequests.get(documentId) !== request) return null;
     const index = officialWorkflowItems.findIndex((item) => item.id === documentId);
     if (index >= 0) officialWorkflowItems[index] = detail;
     else officialWorkflowItems.unshift(detail);
     officialDocumentDetailReady.add(documentId);
     return detail;
-  })().finally(() => officialDocumentDetailRequests.delete(documentId));
+  })().finally(() => { if (officialDocumentDetailRequests.get(documentId) === request) officialDocumentDetailRequests.delete(documentId); });
   officialDocumentDetailRequests.set(documentId, request);
   return request;
 }
 
-async function loadOfficialDocumentDetail(documentId) {
+async function loadOfficialDocumentDetail(documentId, { isCurrent = () => true } = {}) {
+  const sessionScope = frontendSessionScope();
+  const current = () => sessionScope === frontendSessionScope() && isCurrent();
   try {
-    await ensureOfficialDocumentDetail(documentId);
+    await ensureOfficialDocumentDetail(documentId, { isCurrent: current });
   } catch (error) {
+    if (!current()) return;
     showToast(`發文詳情載入失敗：${error.message}`);
   }
+  if (!current()) return;
   renderOfficialWorkflow();
 }
 
@@ -10144,23 +10200,16 @@ function officialIsElectronicCompose(item = {}) {
 }
 
 function latestOfficialStampedFile(item = {}) {
-  const files = officialApplicationFiles(item);
+  const files = officialApplicationFiles(item).filter((file) => !file.document_id || file.document_id === item.id);
   const lockedFileId = String(item.stamped_file_id || item.stampedFileId || "");
+  // A generated candidate is not final until the server commits its locked ID.
+  if (!lockedFileId) return null;
   if (officialIsElectronicCompose(item)) {
     // Never substitute a newer, unapproved draft for the approved electronic file.
     return files.find((file) => lockedFileId && String(file.id || "") === lockedFileId
       && file.file_type === "generated_pdf") || null;
   }
-  const stampedFiles = files.filter((file) => file.file_type === "stamped_pdf");
-  if (lockedFileId) {
-    const lockedFile = stampedFiles.find((file) => String(file.id || "") === lockedFileId);
-    if (lockedFile) return lockedFile;
-  }
-  return [...stampedFiles].sort((left, right) => {
-    const versionDelta = Number(right.version || 0) - Number(left.version || 0);
-    if (versionDelta) return versionDelta;
-    return String(right.created_at || "").localeCompare(String(left.created_at || ""));
-  })[0] || null;
+  return files.find((file) => file.file_type === "stamped_pdf" && String(file.id || "") === lockedFileId) || null;
 }
 
 function renderOfficialFinalStampedDownload(item = {}) {
@@ -10169,12 +10218,13 @@ function renderOfficialFinalStampedDownload(item = {}) {
   const label = electronic ? "已核准電子公文" : "最終用印檔";
   const documentId = escapeDraftHtml(item.id || "");
   if (!file) {
+    const missingLockedFile = Boolean(item.stamped_file_id || item.stampedFileId);
     return `
       <section class="official-final-download pending" data-final-stamped-download>
         <div>
           <span>${label}</span>
-          <strong>尚未產生</strong>
-          <p>${electronic ? "完成簽核" : "完成用印"}後，申請人、流程中的簽核人與總務可依同一申請單權限在此下載。</p>
+          <strong>${missingLockedFile ? "核定版本暫時無法取得" : "尚未產生"}</strong>
+          <p>${missingLockedFile ? "請重新整理案件；若仍無法取得，請通知管理員。為避免誤用，系統不會以其他版本替代。" : `${electronic ? "完成簽核" : "完成用印"}後，申請人、流程中的簽核人與總務可依同一申請單權限在此下載。`}</p>
         </div>
       </section>
     `;
@@ -10191,15 +10241,28 @@ function renderOfficialFinalStampedDownload(item = {}) {
   `;
 }
 
-function renderOfficialSteps(item) {
-  const steps = item?.approval_steps || [];
+function officialApprovalStepActor(step = {}) {
+  const assigned = step.approver_name || step.approver_role || "尚未指派";
+  if (!["approved", "rejected"].includes(step.status)) {
+    return { name: assigned, label: `${step.status === "pending" ? "待處理" : "原指派"}：${assigned}`, delegated: "" };
+  }
+  const actorId = String(step.decision_actor_id || step.decision_actor_user_id || "");
+  const actual = step.decision_actor_name || `簽核人待確認${actorId ? `（識別碼末六碼：${actorId.slice(-6)}）` : ""}`;
+  return {
+    name: actual, label: `已由：${actual}`,
+    delegated: actorId && step.approver_user_id && actorId !== step.approver_user_id ? `原指派：${assigned}` : ""
+  };
+}
+
+function renderOfficialStepRows(item, steps) {
   if (!steps.length) return `<p class="empty-text">尚未建立簽核節點。</p>`;
   return `<div class="official-step-list">${steps.map((step) => `
-    <article class="official-step-row ${safeHtmlClassToken(step.status, "pending")} ${step.step_key === item.current_step ? "current" : ""}">
+    <article class="official-step-row ${safeHtmlClassToken(step.status, "pending")} ${step.status === "pending" && step.step_key === item.current_step ? "current" : ""}">
       <time>${escapeHtml(step.step_order)}</time>
       <div>
         <strong>${escapeHtml(step.step_name)}</strong>
-        <span>${escapeHtml(step.approver_name || step.approver_role || "未指定")} · ${escapeHtml(step.status)}</span>
+        <span>${escapeHtml(officialApprovalStepActor(step).label)} · ${escapeHtml(({ approved: "已通過", rejected: "已退回", cancelled: "本輪已取消", skipped: "本輪已取消", pending: step.step_key === item.current_step ? "待處理" : "待後續" })[step.status] || step.status)}</span>
+        ${officialApprovalStepActor(step).delegated ? `<small>${escapeHtml(officialApprovalStepActor(step).delegated)}</small>` : ""}
         ${step.comment ? `<small>${escapeHtml(step.comment)}</small>` : ""}
       </div>
       <span>${escapeHtml(step.approved_at || "")}</span>
@@ -10207,13 +10270,34 @@ function renderOfficialSteps(item) {
   `).join("")}</div>`;
 }
 
+function renderOfficialSteps(item) {
+  return renderOfficialStepRows(item, latestOfficialApprovalSteps(item));
+}
+
+function renderOfficialApprovalHistory(item) {
+  const rows = Array.isArray(item.approval_step_history) && item.approval_step_history.length
+    ? item.approval_step_history : latestOfficialApprovalSteps(item);
+  if (!rows.length) return "";
+  const generations = [...new Set(rows.map((step) => Number(step.workflow_generation || 1)))].sort((left, right) => right - left);
+  const stepGenerations = new Map(rows.map((step) => [step.id, Number(step.workflow_generation || 1)]));
+  const changes = (item.logs || item.process_logs || []).filter((log) => ["submit", "resubmit", "return_previous", "add_sign", "withdraw", "reject"].includes(log.action));
+  return `<details class="official-approval-history"><summary>完整簽核歷程（${generations.length} 輪）</summary>${generations.map((generation) => {
+    const steps = rows.filter((step) => Number(step.workflow_generation || 1) === generation).sort((left, right) => Number(left.step_order || 0) - Number(right.step_order || 0));
+    const events = changes.filter((log) => {
+      const evidence = parseJsonMaybe(log.decision_evidence_json) || {};
+      return (stepGenerations.get(log.step_id) || Number(evidence.workflow_generation || 0)) === generation;
+    });
+    return `<section class="official-history-generation" data-workflow-generation="${generation}"><h5>第 ${generation} 輪${generation === generations[0] ? " · 最新流程" : " · 歷史紀錄"}</h5>${renderOfficialStepRows(item, steps)}${events.length ? `<h5>本輪異動與原因</h5>${renderOfficialLogs(events)}` : ""}</section>`;
+  }).join("")}</details>`;
+}
+
 function renderOfficialLogs(logs = [], emptyText = "尚無紀錄。") {
   if (!logs.length) return `<p class="empty-text">${escapeHtml(emptyText)}</p>`;
   return `<div class="timeline">${logs.map((log) => `
     <article class="timeline-item">
-      <time>${escapeHtml((log.created_at || "").slice(11, 16))}</time>
+      <time datetime="${escapeHtml(log.created_at || "")}">${escapeHtml(log.created_at || "時間未記錄")}</time>
       <div>
-        <strong>${escapeHtml(log.action)} · ${escapeHtml(log.actor_name || "")}</strong>
+        <strong>${escapeHtml(({ submit: "送出簽核", resubmit: "重新送簽", approve: "通過", reject: "退回申請人", return_previous: "退回上一關", add_sign: "通過並加簽", withdraw: "申請人抽單" })[log.action] || log.action)} · ${escapeHtml(log.actor_name || "")}</strong>
         <p>${escapeHtml(log.comment || log.file_id || "")}</p>
       </div>
     </article>
@@ -10284,6 +10368,21 @@ function renderOfficialDispatchInfo(item = {}) {
   `;
 }
 
+function officialDocumentAvailableActions(item) {
+  const supported = ["approve", "reject", "return-previous", "add-sign", "withdraw"];
+  if (Array.isArray(item?.available_actions)) return item.available_actions.filter((action) => supported.includes(action));
+  return item?.can_act === true ? ["approve", "reject"] : [];
+}
+
+function officialWorkflowActionLabel(action) {
+  return ({ approve: "通過", reject: "退回申請人", "return-previous": "退回上一關", "add-sign": "通過並加簽", withdraw: "抽單" })[action] || "簽核";
+}
+
+function renderOfficialWorkflowActionButtons(item, source = "workflow") {
+  const ids = { approve: "officialApproveBtn", reject: "officialRejectBtn", "return-previous": "officialReturnPreviousBtn", "add-sign": "officialAddSignBtn", withdraw: "officialWithdrawBtn" };
+  return officialDocumentAvailableActions(item).map((action) => `<button class="${action === "approve" ? "primary-button" : "secondary-button"}" type="button" ${source === "workflow" ? `id="${ids[action]}"` : ""} data-progress-official-action="${action}" data-progress-official-id="${escapeDraftHtml(item.id)}">${officialWorkflowActionLabel(action)}</button>`).join("");
+}
+
 function renderOfficialWorkflowDetail() {
   const target = document.querySelector("#officialWorkflowDetail");
   const form = document.querySelector("#officialWorkflowForm");
@@ -10312,14 +10411,7 @@ function renderOfficialWorkflowDetail() {
   const files = officialApplicationFiles(item);
   const stampError = item.stamp_request?.error_message || item.auto_stamp?.detail || "";
   const canCorrectOfficial = officialDocumentIsApplicant(item) && ["draft", "rejected"].includes(item.current_status);
-  const canConfirmOfficial = Boolean(
-    item.can_confirm
-    || (
-      officialDocumentIsApplicant(item)
-      && item.current_step === "applicant_confirm"
-      && ["stamped", "dispatched", "sent_by_applicant"].includes(item.current_status)
-    )
-  );
+  const canConfirmOfficial = officialDocumentCanConfirm(item);
   target.innerHTML = `
     <div class="doc-detail">
       <strong>發文申請單 · ${escapeHtml(item.title || item.subject || item.id)}</strong>
@@ -10345,7 +10437,7 @@ function renderOfficialWorkflowDetail() {
       <p>${escapeHtml(item.description || item.subject || "")}</p>
       <div class="official-action-bar">
         ${officialDocumentHasEditorV2(item) ? `<button class="secondary-button" type="button" data-open-editor-review="${escapeDraftHtml(item.id)}">查看 PDF 編輯版</button>` : ""}
-        ${item.can_act && !canConfirmOfficial ? `<button class="primary-button" type="button" id="officialApproveBtn">核准</button><button class="secondary-button" type="button" id="officialRejectBtn">駁回</button>` : ""}
+        ${!canConfirmOfficial ? renderOfficialWorkflowActionButtons(item) : ""}
         ${canConfirmOfficial ? `<button class="primary-button" type="button" id="officialConfirmBtn">確認結案</button>` : ""}
         ${canCorrectOfficial ? `<button class="primary-button" type="button" id="officialCorrectBtn">${item.current_status === "rejected" ? "補正並重新送簽" : "編輯草稿"}</button>` : ""}
         ${item.can_retry_stamp ? `<button class="primary-button" type="button" id="officialRetryStampBtn">重試自動用印</button>` : ""}
@@ -10355,16 +10447,16 @@ function renderOfficialWorkflowDetail() {
       ${renderOfficialFiles(files, item.id)}
       <h4>簽核流程</h4>
       ${renderOfficialSteps(item)}
+      ${renderOfficialApprovalHistory(item)}
       <h4>簽核與用印歷程</h4>
       ${renderOfficialLogs(officialProcessLogs(item), "尚無簽核或用印紀錄。")}
       <h4>下載紀錄</h4>
       ${renderOfficialLogs(officialDownloadLogs(item), "尚無下載紀錄。")}
     </div>
   `;
-  document.querySelector("#officialApproveBtn")?.addEventListener("click", () => openOfficialDecisionDialog(item, "approve", "workflow"));
-  document.querySelector("#officialRejectBtn")?.addEventListener("click", () => openOfficialDecisionDialog(item, "reject", "workflow"));
+  target.querySelectorAll("[data-progress-official-action]").forEach((button) => button.addEventListener("click", () => void openOfficialDecisionDialog(item, button.dataset.progressOfficialAction, "workflow")));
   document.querySelector("#officialCorrectBtn")?.addEventListener("click", () => void beginOfficialCorrection(item));
-  document.querySelector("#officialConfirmBtn")?.addEventListener("click", confirmOfficialDocument);
+  document.querySelector("#officialConfirmBtn")?.addEventListener("click", () => void confirmOfficialDocument(item.id));
   document.querySelector("#officialRetryStampBtn")?.addEventListener("click", retryOfficialStamp);
   target.querySelectorAll("[data-open-editor-review]").forEach((button) => button.addEventListener("click", () => void openOfficialDocumentEditorReview(button.dataset.openEditorReview)));
   document.querySelector("#officialDispatchProofTemplateBtn")?.addEventListener("click", downloadDispatchProofLaunchSmokeTemplate);
@@ -11117,7 +11209,12 @@ function updateOfficialDecisionSubmitAvailability() {
   const submit = document.querySelector("#officialDecisionSubmitBtn");
   if (!submit) return;
   const { documentId, action } = officialDecisionState;
+  if (officialDecisionState.busy || officialDecisionState.candidateLoading) { submit.disabled = true; return; }
   const fullDetailReady = Boolean(documentId && officialDocumentDetailReady.has(documentId));
+  if (action === "withdraw") {
+    submit.disabled = !(fullDetailReady && (document.querySelector("#officialWithdrawComment")?.value.trim().length || 0) >= 6);
+    return;
+  }
   const evidenceReady = officialDecisionEvidenceComplete();
   if (action === "reject") {
     const categoryReady = Boolean(document.querySelector("#officialRejectCategory")?.value);
@@ -11127,13 +11224,16 @@ function updateOfficialDecisionSubmitAvailability() {
     return;
   }
   const commentReady = (document.querySelector("#officialApprovalComment")?.value.trim().length || 0) >= 2;
-  submit.disabled = !(fullDetailReady && evidenceReady && commentReady);
+  const targetReady = action !== "add-sign" || (officialDecisionState.candidates || []).some((person) => person.id === document.querySelector("#officialAddSignPerson")?.value);
+  submit.disabled = !(fullDetailReady && evidenceReady && commentReady && targetReady);
 }
 
 function renderOfficialDecisionEvidence(item) {
   const evidence = document.querySelector("#officialDecisionEvidence");
   const actions = document.querySelector("#officialDecisionEvidenceActions");
   if (!evidence || !actions) return;
+  const operationId = officialDecisionState.operationId;
+  const scope = frontendSessionScope();
   evidence.dataset.applicationReviewed = "false";
   evidence.querySelector("#officialDecisionApplicationDetails")?.remove();
   const { source, attachments, edited } = officialDecisionEvidenceFiles(item);
@@ -11178,6 +11278,7 @@ function renderOfficialDecisionEvidence(item) {
       } else if (kind === "editor") {
         reviewed = !edited || await downloadOfficialWorkflowFile(item.id, edited.id);
       }
+      if (scope !== frontendSessionScope() || officialDecisionState.operationId !== operationId || officialDecisionState.documentId !== item.id) return;
       if (reviewed) markOfficialDecisionEvidenceReviewed(kind);
       if (!reviewed && button.isConnected) button.disabled = false;
     });
@@ -11219,7 +11320,8 @@ function trapOfficialDecisionFocus(event) {
 }
 
 async function openOfficialDecisionDialog(item, action, source = "workflow") {
-  if (!item?.id || !["approve", "reject"].includes(action)) return showToast("找不到可處理的簽核案件。");
+  const openScope = frontendSessionScope();
+  if (!item?.id || !["approve", "reject", "return-previous", "add-sign", "withdraw"].includes(action)) return showToast("找不到可處理的簽核案件。");
   if (!officialDocumentDetailReady.has(item.id)) {
     showToast("正在載入完整申請資料與附件，完成後才能作成決定。");
     try {
@@ -11229,10 +11331,12 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
       return;
     }
   }
-  if (item.can_act !== true) return showToast("這筆案件目前不在您的簽核權限範圍內，請重新整理案件。");
+  if (openScope !== frontendSessionScope()) return;
+  if (!officialDocumentAvailableActions(item).includes(action)) return showToast("這筆案件目前不在您的簽核權限範圍內，請重新整理案件。");
   const pendingStep = (item.approval_steps || []).find((step) => step.step_key === item.current_step && step.status === "pending");
-  if (!pendingStep?.id) return showToast("簽核關卡已更新，請重新整理後再操作。");
-  officialDecisionState = { documentId: item.id, action, source };
+  const expectedStepId = item.workflow_action_context?.expected_step_id || pendingStep?.id;
+  if (!expectedStepId) return showToast("簽核關卡已更新，請重新整理後再操作。");
+  officialDecisionState = { documentId: item.id, action, source, operationId: crypto.randomUUID(), expectedStepId, expectedContentRevision: item.workflow_action_context?.expected_content_revision ?? item.content_revision, scope: frontendSessionScope(), candidates: [], candidateLoading: action === "add-sign", busy: false };
   const modal = document.querySelector("#officialDecisionModal");
   const form = document.querySelector("#officialDecisionForm");
   const approval = document.querySelector("#officialApprovalReviewFields");
@@ -11244,17 +11348,32 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
     error.hidden = true;
     error.textContent = "";
   }
-  const isApprove = action === "approve";
+  const isApprove = ["approve", "return-previous", "add-sign"].includes(action);
+  document.querySelector("#officialApprovalCommentLabel").textContent = action === "return-previous" ? "退回上一關原因" : action === "add-sign" ? "通過與加簽意見" : "核准意見";
+  document.querySelector("#officialApprovalComment").placeholder = action === "return-previous" ? "請說明需要前一關重新審核的原因（至少 2 個字）" : "請填寫核准判斷或注意事項（至少 2 個字）";
   approval.hidden = !isApprove;
-  rejection.hidden = isApprove;
+  rejection.hidden = action !== "reject";
   approval.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = !isApprove; });
-  rejection.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = isApprove; });
+  rejection.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = action !== "reject"; });
+  const actionFields = document.querySelector("#officialWorkflowActionFields");
+  actionFields.hidden = !["return-previous", "add-sign", "withdraw"].includes(action);
+  document.querySelector("#officialAddSignPersonLabel").hidden = action !== "add-sign";
+  document.querySelector("#officialAddSignPerson").disabled = action !== "add-sign";
+  document.querySelector("#officialAddSignPerson").innerHTML = '<option value="">載入可加簽人員中…</option>';
+  document.querySelector("#officialWithdrawCommentLabel").hidden = action !== "withdraw";
+  document.querySelector("#officialWithdrawComment").disabled = action !== "withdraw";
+  const previous = item.workflow_action_context?.previous_step;
+  document.querySelector("#officialWorkflowActionExplanation").textContent = action === "add-sign"
+    ? "會通過目前這一關，接著交給指定人員加簽；加簽通過後繼續後續流程。"
+    : action === "return-previous" ? `退回${[previous?.name, previous?.approver_name].filter(Boolean).join(" · ") || "上一關"}重新審核，不會退回申請人修改文件。`
+      : "抽單後停止本輪簽核並回到草稿；既有簽核與抽單紀錄會保留。";
+  document.querySelector("#officialDecisionEvidence").hidden = action === "withdraw";
   ["#officialReviewOriginal", "#officialReviewAttachments", "#officialReviewEdited"].forEach((selector) => {
     const checkbox = document.querySelector(selector);
     if (checkbox) checkbox.disabled = true;
   });
-  document.querySelector("#officialDecisionModalTitle").textContent = isApprove ? "確認核准" : "退回補正";
-  document.querySelector("#officialDecisionSubmitBtn").textContent = isApprove ? "確認核准" : "確認駁回並通知申請人";
+  document.querySelector("#officialDecisionModalTitle").textContent = `確認${officialWorkflowActionLabel(action)}`;
+  document.querySelector("#officialDecisionSubmitBtn").textContent = `確認${officialWorkflowActionLabel(action)}`;
   document.querySelector("#officialDecisionSubmitBtn").disabled = true;
   const dueDate = document.querySelector("#officialCorrectionDueDate");
   if (dueDate) {
@@ -11266,7 +11385,7 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   const summary = officialApplicationSummary(item);
   document.querySelector("#officialDecisionSummary").innerHTML = `
     <strong>${escapeHtml(item.title || item.subject || item.id)}</strong>
-    <p>${escapeHtml(item.id)} · ${escapeHtml(item.current_step_name || pendingStep.step_name || item.current_step)}</p>
+    <p>${escapeHtml(item.id)} · ${escapeHtml(item.current_step_name || pendingStep?.step_name || item.current_step)}</p>
     <small>原稿／版本 ${summary.versionCount} · 附件 ${summary.attachmentCount} · prepared SHA-256：${escapeHtml(integrity.preparedSha256 || "非 PDF Editor V2 案件")} · manifest SHA-256：${escapeHtml(integrity.manifestSha256 || "非 PDF Editor V2 案件")}</small>
   `;
   renderOfficialDecisionEvidence(item);
@@ -11274,7 +11393,26 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   modal.classList.remove("hidden");
   document.body.classList.add("modal-open");
   updateOfficialDecisionSubmitAvailability();
-  window.setTimeout(() => document.querySelector("[data-decision-evidence]:not([disabled])")?.focus(), 0);
+  if (action === "add-sign") void loadOfficialAddSignCandidates(item.id, officialDecisionState.operationId);
+  window.setTimeout(() => document.querySelector(action === "withdraw" ? "#officialWithdrawComment" : "[data-decision-evidence]:not([disabled])")?.focus(), 0);
+}
+
+async function loadOfficialAddSignCandidates(documentId, operationId) {
+  const scope = frontendSessionScope();
+  try {
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/workflow-candidates`);
+    if (scope !== frontendSessionScope() || officialDecisionState.operationId !== operationId) return;
+    const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+    officialDecisionState.candidates = candidates;
+    document.querySelector("#officialAddSignPerson").innerHTML = `<option value="">${candidates.length ? "請選擇加簽人員" : "目前沒有符合權限的加簽人員"}</option>${candidates.map((person) => `<option value="${escapeDraftHtml(person.id)}">${escapeDraftHtml([person.name, person.unit, person.role].filter(Boolean).join(" · "))}</option>`).join("")}`;
+  } catch (error) {
+    if (scope !== frontendSessionScope() || officialDecisionState.operationId !== operationId) return;
+    const notice = document.querySelector("#officialDecisionError");
+    notice.hidden = false;
+    notice.textContent = `加簽人員載入失敗，請關閉後重試：${error.message}`;
+  } finally {
+    if (scope === frontendSessionScope() && officialDecisionState.operationId === operationId) { officialDecisionState.candidateLoading = false; updateOfficialDecisionSubmitAvailability(); }
+  }
 }
 
 async function mutateOfficialDocument(action, decisionPayload = {}, item = officialCurrentItem(), source = "workflow") {
@@ -11283,15 +11421,18 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
     return false;
   }
   const pendingStep = (item.approval_steps || []).find((step) => step.step_key === item.current_step && step.status === "pending");
-  if (!pendingStep?.id) {
+  const expectedStepId = decisionPayload.expected_step_id || item.workflow_action_context?.expected_step_id || pendingStep?.id;
+  if (!expectedStepId || !officialDocumentAvailableActions(item).includes(action)) {
     showToast("簽核關卡已更新，請重新整理後再操作。");
     return false;
   }
+  const scope = frontendSessionScope();
   try {
     const result = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}/${action}`, {
       method: "POST",
-      body: JSON.stringify({ ...decisionPayload, expected_step_id: pendingStep.id })
+      body: JSON.stringify({ ...decisionPayload, expected_step_id: expectedStepId })
     });
+    if (scope !== frontendSessionScope()) return false;
     selectedOfficialDocumentId = result.id;
     const index = officialWorkflowItems.findIndex((entry) => entry.id === result.id);
     if (index >= 0) officialWorkflowItems[index] = result;
@@ -11303,9 +11444,31 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
       renderApprovalLog();
     }
     refreshDashboardWorkEntryPoints();
-    showToast(action === "approve" ? "已完成核准並保存檢閱證據。" : "已駁回並通知申請人補正。");
+    showToast(({ approve: "已完成核准並保存檢閱證據。", reject: "已退回申請人補正。", "return-previous": "已退回上一關重新審核。", "add-sign": "已通過本關並交由指定人員加簽。", withdraw: "已抽單並保留簽核歷程，可重新編輯草稿。" })[action]);
     return true;
   } catch (error) {
+    if (scope !== frontendSessionScope()) return false;
+    if (error.status === 409) {
+      officialDocumentDetailReady.delete(item.id);
+      officialDocumentDetailRequests.delete(item.id);
+      item.can_act = false;
+      item.available_actions = [];
+      if (officialDecisionState.documentId === item.id) closeOfficialDecisionDialog();
+      let refreshed = false;
+      try {
+        refreshed = Boolean(await ensureOfficialDocumentDetail(item.id, { isCurrent: () => scope === frontendSessionScope() }));
+      } catch (_refreshError) {
+        // Keep decisions blocked until the full, latest detail can be loaded.
+      }
+      if (scope !== frontendSessionScope()) return false;
+      renderOfficialWorkflow();
+      renderApprovalLog();
+      renderElectronicSealWorkQueue();
+      showToast(refreshed
+        ? "案件已由其他人或裝置更新，已載入最新版本。請重新檢閱後再決定；系統未重送本次操作。"
+        : "案件已更新，但最新完整資料尚未載入。請重新整理後再檢閱；目前不開放簽核，系統未重送本次操作。");
+      return false;
+    }
     showToast(error.message || "簽核操作失敗。");
     return false;
   }
@@ -11313,11 +11476,12 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
 
 async function submitOfficialDecision(event) {
   event.preventDefault();
-  const { documentId, action, source } = officialDecisionState;
+  const { documentId, action, source, operationId, expectedStepId, expectedContentRevision, scope } = officialDecisionState;
+  if (officialDecisionState.busy || (scope && scope !== frontendSessionScope())) return;
   const item = officialWorkflowItems.find((entry) => entry.id === documentId);
   const error = document.querySelector("#officialDecisionError");
   const submit = document.querySelector("#officialDecisionSubmitBtn");
-  if (!item || !["approve", "reject"].includes(action)) return closeOfficialDecisionDialog();
+  if (!item || !officialDocumentAvailableActions(item).includes(action)) return closeOfficialDecisionDialog();
   if (!officialDocumentDetailReady.has(documentId)) {
     if (error) {
       error.hidden = false;
@@ -11325,7 +11489,7 @@ async function submitOfficialDecision(event) {
     }
     return;
   }
-  if (!officialDecisionEvidenceComplete()) {
+  if (action !== "withdraw" && !officialDecisionEvidenceComplete()) {
     if (error) {
       error.hidden = false;
       error.textContent = "請先查看申請資料、原稿或送簽版、全部附件與 PDF 編輯版，完成全部檢閱後才能核准或駁回。";
@@ -11336,7 +11500,7 @@ async function submitOfficialDecision(event) {
   const integrity = officialDecisionIntegrity(item);
   const reviewAcknowledgements = officialDecisionReviewAcknowledgements();
   let payload;
-  if (action === "approve") {
+  if (["approve", "return-previous", "add-sign"].includes(action)) {
     const comment = document.querySelector("#officialApprovalComment")?.value.trim() || "";
     if (!Object.values(reviewAcknowledgements).every(Boolean)) {
       if (error) {
@@ -11359,6 +11523,22 @@ async function submitOfficialDecision(event) {
       manifest_sha256: integrity.manifestSha256,
       review_acknowledgements: reviewAcknowledgements
     };
+    if (action === "add-sign") {
+      const targetUserId = document.querySelector("#officialAddSignPerson")?.value || "";
+      if (officialDecisionState.candidateLoading || !(officialDecisionState.candidates || []).some((person) => person.id === targetUserId)) {
+        if (error) { error.hidden = false; error.textContent = "請從正式人員清單選擇加簽人員。"; }
+        return;
+      }
+      payload.target_user_id = targetUserId;
+      payload.placement = "after";
+    }
+  } else if (action === "withdraw") {
+    const comment = document.querySelector("#officialWithdrawComment")?.value.trim() || "";
+    if (comment.length < 6) {
+      if (error) { error.hidden = false; error.textContent = "請填寫至少 6 個字的抽單原因。"; }
+      return;
+    }
+    payload = { comment, expected_content_revision: expectedContentRevision };
   } else {
     const reasonCategory = document.querySelector("#officialRejectCategory")?.value || "";
     const comment = document.querySelector("#officialRejectComment")?.value.trim() || "";
@@ -11388,29 +11568,50 @@ async function submitOfficialDecision(event) {
       review_acknowledgements: reviewAcknowledgements
     };
   }
+  if (["return-previous", "add-sign", "withdraw"].includes(action)) Object.assign(payload, { operation_id: operationId, expected_step_id: expectedStepId });
+  officialDecisionState.busy = true;
   if (submit) submit.disabled = true;
   const ok = await mutateOfficialDocument(action, payload, item, source);
+  if (officialDecisionState.operationId !== operationId) return;
+  officialDecisionState.busy = false;
   if (submit) updateOfficialDecisionSubmitAvailability();
   if (ok) closeOfficialDecisionDialog();
 }
 
-async function confirmOfficialDocument() {
-  const item = officialCurrentItem();
-  if (!item) return showToast("請先選擇發文申請單。");
+async function confirmOfficialDocument(documentId = selectedOfficialDocumentId) {
+  const item = officialWorkflowItems.find((entry) => entry.id === documentId);
+  if (!item || !officialDocumentCanConfirm(item)) return false;
+  const scope = frontendSessionScope();
+  const key = `${scope}:${documentId}`;
+  if (officialReceiptRequests.has(key)) return false;
+  const operation = {};
+  officialReceiptRequests.set(key, operation);
+  const current = () => scope === frontendSessionScope() && officialReceiptRequests.get(key) === operation;
   try {
-    const result = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}/confirm`, {
+    const detail = await ensureOfficialDocumentDetail(documentId, { isCurrent: current });
+    if (!current() || !detail || !officialDocumentCanConfirm(detail)) return false;
+    if (!confirmOperation("確認收件並結案", "請確認已收到並檢查核定文件。確認後案件將結案，簽核歷程與檔案仍可查閱。")) return false;
+    if (!current()) return false;
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/confirm`, {
       method: "POST",
       body: JSON.stringify({ comment: "申請人確認完成並結案" })
     });
-    selectedOfficialDocumentId = result.id;
+    if (!current()) return false;
     const index = officialWorkflowItems.findIndex((entry) => entry.id === result.id);
     if (index >= 0) officialWorkflowItems[index] = result;
     else officialWorkflowItems.unshift(result);
+    officialDocumentDetailReady.add(result.id);
     renderOfficialWorkflow();
+    renderApprovalLog();
+    renderElectronicSealWorkQueue();
     refreshDashboardWorkEntryPoints();
     showToast("已確認完成並結案。");
+    return true;
   } catch (error) {
-    showToast(`確認結案失敗：${error.message}`);
+    if (current()) showToast(`確認結案失敗：${error.message}`);
+    return false;
+  } finally {
+    if (officialReceiptRequests.get(key) === operation) officialReceiptRequests.delete(key);
   }
 }
 
@@ -16249,6 +16450,7 @@ function mutateWorkflowTemplateConfig(key, action) {
 }
 
 function upsertSettingsWorkflowTemplate() {
+  if (hasAuthenticatedBackendSession()) return showToast("正式案件請使用文件類型的簽核流程設定。");
   const key = document.querySelector("#settingsWorkflowTemplateKey").value.trim().replace(/[^\w-]/g, "");
   const name = document.querySelector("#settingsWorkflowTemplateName").value.trim();
   const routeCode = document.querySelector("#settingsWorkflowTemplateRoute").value;
@@ -16273,6 +16475,15 @@ function upsertSettingsWorkflowTemplate() {
 function renderSettingsWorkflowTemplates() {
   const list = document.querySelector("#settingsWorkflowTemplateList");
   if (!list) return;
+  const live = hasAuthenticatedBackendSession();
+  document.querySelector("#settingsWorkflowTemplateForm")?.toggleAttribute("hidden", live);
+  document.querySelector("#settingsAddWorkflowTemplateBtn")?.toggleAttribute("hidden", live);
+  document.querySelector("#workflowTemplateForm")?.closest(".workflow-engine-layout")?.toggleAttribute("hidden", live);
+  if (live) {
+    list.innerHTML = '<p class="field-hint">正式案件使用各文件類型的簽核流程，不使用本機範本。</p><button class="secondary-button" type="button" data-open-official-workflow-config>前往簽核流程設定</button>';
+    list.querySelector("[data-open-official-workflow-config]")?.addEventListener("click", () => { setView("workflow"); document.querySelector("#officialWorkflowConfigPanel")?.scrollIntoView({ block: "start", behavior: "smooth" }); });
+    return;
+  }
   list.innerHTML = workflowTemplateConfigs.map((item) => `
     <article class="address-card">
       <strong>${escapeHtml(item.name)}</strong>
@@ -20380,6 +20591,7 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     official_document_company_forbidden: "只能為登入帳號所屬的 Finance 公司建立公文或用印申請。",
     official_document_create_forbidden: "你目前沒有建立發文申請單的權限。",
     official_document_create_id_conflict: "這個草稿識別碼已被其他案件使用，請重新開啟撰寫公文，不會覆寫原案件。",
+    official_workflow_history_unavailable: "簽核歷程暫時無法完整載入，請重新整理；持續失敗請通知管理員。",
     official_document_numbering_unavailable: "發文字號服務尚未完成設定，草稿未完成保存；請通知管理員套用配號資料庫更新後再重試。",
     official_document_number_immutable: "發文字號一經配發即固定，不能修改或重新產生。",
     official_dispatch_date_required: "請填寫發文日期。",
@@ -20393,6 +20605,7 @@ function friendlyBackendErrorMessage(message = "", status = 0) {
     invalid_official_seal_document_category: "公文用印文件類型不在允許清單中，請重新選擇。",
     official_seal_route_mismatch: "文件類型與 A／B／C／D 簽核流程不一致，請重新整理後再送出。",
     official_seal_route_actor_unresolved: "簽核流程中有部門找不到可指派成員，請聯絡系統管理員確認人員設定。",
+    official_workflow_designated_company_forbidden: "指定簽核人不屬於公文公司，請調整流程設定。",
     official_document_access_denied: "你不在這張申請單的流程或授權名單內，無法查看。",
     official_document_download_forbidden: "你沒有下載這份文件的權限。",
     official_document_seal_required: "請先選擇有效印章，才能送出用印簽核。",
@@ -21878,9 +22091,144 @@ function selectedOfficialWorkflowSteps() {
     .map((input) => input.dataset.officialWorkflowStep);
 }
 
+const officialWorkflowConfigEditor = { categories: null, version: null, selectedCategory: "", dirty: false, saving: false, loading: false, conflict: false, candidates: [], candidateLoading: false, candidateRequest: 0 };
+
+function resetOfficialWorkflowConfigEditor() {
+  const request = officialWorkflowConfigEditor.candidateRequest + 1;
+  Object.assign(officialWorkflowConfigEditor, { scope: frontendSessionScope(), categories: null, version: null, selectedCategory: "", dirty: false, saving: false, loading: false, conflict: false, candidates: [], candidateLoading: false, candidateRequest: request });
+  officialWorkflowConfig = { enabled_steps: [], steps: [], locked: true };
+  officialWorkflowReadinessByRoute.clear();
+  officialWorkflowReadinessRequests.clear();
+}
+
+function canManageOfficialWorkflowConfig() {
+  return hasBackendPermission("settings.system_manage") || hasBackendPermission("settings.manage");
+}
+
+function currentOfficialWorkflowConfigNodes() {
+  return officialWorkflowConfigEditor.categories?.[officialWorkflowConfigEditor.selectedCategory]?.nodes || [];
+}
+
+function renderEditableOfficialWorkflowConfig() {
+  const editor = officialWorkflowConfigEditor;
+  const canManage = canManageOfficialWorkflowConfig();
+  const locked = !canManage || editor.saving || editor.loading || editor.conflict;
+  const category = document.querySelector("#officialWorkflowCategorySelect");
+  const categories = Object.keys(editor.categories || {});
+  if (!categories.includes(editor.selectedCategory)) editor.selectedCategory = categories[0] || "";
+  category.innerHTML = categories.map((name) => `<option value="${escapeDraftHtml(name)}">${escapeDraftHtml(name)}</option>`).join("");
+  category.value = editor.selectedCategory;
+  category.disabled = editor.saving || editor.loading;
+  const companySelect = document.querySelector("#officialWorkflowCandidateCompany");
+  const previousCompany = companySelect.value;
+  const companies = financeDirectoryCompanies();
+  companySelect.innerHTML = `<option value="">請選擇公司</option>${companies.map((company) => `<option value="${escapeDraftHtml(company.id)}">${escapeDraftHtml(company.name)}</option>`).join("")}`;
+  companySelect.value = companies.some((company) => company.id === previousCompany) ? previousCompany : companies.find((company) => company.id === authState?.user?.company_id)?.id || "";
+  companySelect.disabled = locked || editor.candidateLoading;
+  const roles = officialWorkflowConfig.available_roles || [];
+  const rows = document.querySelector("#officialWorkflowNodeRows");
+  const nodes = currentOfficialWorkflowConfigNodes();
+  rows.innerHTML = nodes.map((node, index) => {
+    const byUser = node.assignee?.type === "user";
+    const candidates = editor.candidates;
+    const userId = node.assignee?.user_id || "";
+    const unknownUser = userId && !candidates.some((person) => person.id === userId);
+    return `<article class="workflow-config-node" data-workflow-node="${index}">
+      <strong>第 ${index + 1} 關</strong>
+      <label>關卡名稱<input data-workflow-node-name="${index}" maxlength="80" value="${escapeDraftHtml(node.name || "")}"${locked ? " disabled" : ""}></label>
+      <label>簽核方式<select data-workflow-node-type="${index}"${locked ? " disabled" : ""}><option value="role"${byUser ? "" : " selected"}>組織關係</option><option value="user"${byUser ? " selected" : ""}>指定人員</option></select></label>
+      <label>${byUser ? "簽核人員" : "組織角色"}<select data-workflow-node-assignee="${index}"${locked || (byUser && editor.candidateLoading) ? " disabled" : ""}>
+        ${byUser ? `<option value="">${editor.candidateLoading ? "載入人員中…" : "請選擇正式人員"}</option>${unknownUser ? `<option value="${escapeDraftHtml(userId)}" selected>已設定人員（請選對應公司核對）</option>` : ""}${candidates.map((person) => `<option value="${escapeDraftHtml(person.id)}"${person.id === userId ? " selected" : ""}>${escapeDraftHtml([person.name, person.unit, person.role].filter(Boolean).join(" · "))}</option>`).join("")}`
+          : roles.map((role) => `<option value="${escapeDraftHtml(role.key)}"${role.key === node.assignee?.role_key ? " selected" : ""}>${escapeDraftHtml(role.name)}</option>`).join("")}
+      </select></label>
+      <div class="workflow-config-node-actions"><button class="secondary-button" type="button" data-workflow-node-move="${index}" data-offset="-1" aria-label="第 ${index + 1} 關往前"${locked || index === 0 ? " disabled" : ""}>↑</button><button class="secondary-button" type="button" data-workflow-node-move="${index}" data-offset="1" aria-label="第 ${index + 1} 關往後"${locked || index === nodes.length - 1 ? " disabled" : ""}>↓</button><button class="text-button" type="button" data-workflow-node-remove="${index}"${locked ? " disabled" : ""}>移除</button></div>
+    </article>`;
+  }).join("") || `<p class="empty-text">尚無前段審核關卡；總務執行與申請人收件仍會保留。</p>`;
+  const changed = () => { editor.dirty = true; document.querySelector("#officialWorkflowConfigMessage").textContent = "尚未儲存，儲存後才會套用到新送簽案件。"; };
+  rows.querySelectorAll("[data-workflow-node-name]").forEach((input) => input.addEventListener("input", () => { if (locked) return; nodes[Number(input.dataset.workflowNodeName)].name = input.value.trim(); changed(); }));
+  rows.querySelectorAll("[data-workflow-node-type]").forEach((select) => select.addEventListener("change", () => {
+    if (locked) return;
+    nodes[Number(select.dataset.workflowNodeType)].assignee = select.value === "user" ? { type: "user", user_id: "" } : { type: "role", role_key: roles[0]?.key || "applicant_manager" };
+    changed(); renderEditableOfficialWorkflowConfig();
+  }));
+  rows.querySelectorAll("[data-workflow-node-assignee]").forEach((select) => select.addEventListener("change", () => {
+    if (locked) return;
+    const node = nodes[Number(select.dataset.workflowNodeAssignee)];
+    if (node.assignee.type === "user") node.assignee.user_id = select.value;
+    else { node.assignee.role_key = select.value; node.name = roles.find((role) => role.key === select.value)?.name || node.name; }
+    changed(); renderEditableOfficialWorkflowConfig();
+  }));
+  rows.querySelectorAll("[data-workflow-node-move]").forEach((button) => button.addEventListener("click", () => {
+    if (locked) return;
+    const index = Number(button.dataset.workflowNodeMove), target = index + Number(button.dataset.offset);
+    if (target < 0 || target >= nodes.length) return;
+    [nodes[index], nodes[target]] = [nodes[target], nodes[index]]; changed(); renderEditableOfficialWorkflowConfig();
+  }));
+  rows.querySelectorAll("[data-workflow-node-remove]").forEach((button) => button.addEventListener("click", () => {
+    if (locked) return; nodes.splice(Number(button.dataset.workflowNodeRemove), 1); changed(); renderEditableOfficialWorkflowConfig();
+  }));
+  document.querySelector("#officialWorkflowNodeAddBtn").disabled = locked || nodes.length >= 12;
+  document.querySelector("#officialWorkflowConfigSaveBtn").hidden = !canManage;
+  document.querySelector("#officialWorkflowConfigSaveBtn").disabled = locked;
+  document.querySelector("#officialWorkflowConfigReloadBtn").disabled = editor.saving || editor.loading;
+  document.querySelector("#officialWorkflowFixedTail").textContent = `審核通過 → ${(officialWorkflowConfig.fixed_tail || []).map((step) => step.name).join(" → ") || "總務執行 → 申請人收件"}（固定）`;
+  document.querySelector("#officialWorkflowConfigStatus").textContent = editor.conflict ? "版本衝突" : editor.saving ? "儲存中…" : editor.loading ? "讀取中…" : `版本 ${editor.version}${canManage ? " · 可編輯" : " · 僅檢視"}`;
+}
+
+async function loadOfficialWorkflowCandidates() {
+  const editor = officialWorkflowConfigEditor;
+  const company = document.querySelector("#officialWorkflowCandidateCompany")?.value || "";
+  const request = ++editor.candidateRequest;
+  const scope = frontendSessionScope();
+  editor.candidates = [];
+  if (!company || !canManageOfficialWorkflowConfig()) { editor.candidateLoading = false; renderEditableOfficialWorkflowConfig(); return; }
+  editor.candidateLoading = true;
+  renderEditableOfficialWorkflowConfig();
+  try {
+    const result = await backendRequest(`/official-workflow-config/candidates?company_id=${encodeURIComponent(company)}`);
+    if (request !== editor.candidateRequest || scope !== frontendSessionScope()) return;
+    editor.candidates = Array.isArray(result.candidates) ? result.candidates : [];
+  } catch (error) {
+    if (request === editor.candidateRequest && scope === frontendSessionScope()) document.querySelector("#officialWorkflowConfigMessage").textContent = `人員載入失敗：${error.message}`;
+  } finally {
+    if (request === editor.candidateRequest && scope === frontendSessionScope()) { editor.candidateLoading = false; renderEditableOfficialWorkflowConfig(); }
+  }
+}
+
+function renderOfficialWorkflowWorkspace() {
+  const host = document.querySelector("#workflow");
+  if (!host) return;
+  const live = hasAuthenticatedBackendSession();
+  const proxy = document.querySelector("#workflowProxyForm")?.closest(".workflow-engine-layout");
+  [...host.children].forEach((child) => {
+    if (child.id === "officialWorkflowConfigPanel") return;
+    const hide = child !== proxy;
+    if (live && hide) { child.hidden = true; child.dataset.legacyWorkflowHidden = "true"; }
+    else if (!live && child.dataset.legacyWorkflowHidden) { child.hidden = false; delete child.dataset.legacyWorkflowHidden; }
+  });
+  const actionPanel = document.querySelector("#workflowActionForm")?.closest(".panel");
+  if (actionPanel) actionPanel.hidden = live;
+  if (proxy) proxy.classList.toggle("official-proxy-only", live);
+}
+
 function renderOfficialWorkflowConfig() {
+  renderOfficialWorkflowWorkspace();
   const panel = document.querySelector("#officialWorkflowConfigPanel");
   if (!panel) return;
+  const editable = Number(officialWorkflowConfig.schema_version) >= 3 && officialWorkflowConfig.categories;
+  document.querySelector("#officialWorkflowEditableConfig")?.toggleAttribute("hidden", !editable);
+  document.querySelector("#officialWorkflowConfigSteps")?.toggleAttribute("hidden", Boolean(editable));
+  document.querySelector("#officialWorkflowConfigPreview")?.toggleAttribute("hidden", Boolean(editable));
+  if (editable) {
+    if (!officialWorkflowConfigEditor.categories) {
+      officialWorkflowConfigEditor.categories = structuredClone(officialWorkflowConfig.categories);
+      officialWorkflowConfigEditor.version = officialWorkflowConfig.version;
+    }
+    renderEditableOfficialWorkflowConfig();
+    renderComposeApprovalRoute();
+    renderUploadedSealApprovalRoute();
+    return;
+  }
   const policyLocked = officialWorkflowConfig.locked === true;
   const canManage = !policyLocked && (activeRole() === "執行長" || hasBackendPermission("settings.system_manage") || hasBackendPermission("system_permissions.manage"));
   const enabled = new Set(officialWorkflowConfig.enabled_steps || []);
@@ -21906,20 +22254,83 @@ function renderOfficialWorkflowConfig() {
   renderComposeApprovalRoute();
 }
 
-async function loadOfficialWorkflowConfig(silent = true) {
+async function loadOfficialWorkflowConfig(silent = true, { discardChanges = false } = {}) {
   if (!hasAuthenticatedBackendSession()) return;
+  if (officialWorkflowConfigEditor.saving || officialWorkflowConfigEditor.loading || (officialWorkflowConfigEditor.dirty && !discardChanges)) return;
+  const scope = frontendSessionScope();
+  officialWorkflowConfigEditor.loading = true;
+  if (officialWorkflowConfigEditor.categories) renderEditableOfficialWorkflowConfig();
   try {
-    officialWorkflowConfig = await backendRequest("/official-workflow-config");
+    const result = await backendRequest("/official-workflow-config");
+    if (scope !== frontendSessionScope() || (officialWorkflowConfigEditor.dirty && !discardChanges)) return;
+    officialWorkflowConfig = result;
+    officialWorkflowConfigEditor.categories = null;
+    officialWorkflowConfigEditor.dirty = false;
+    officialWorkflowConfigEditor.conflict = false;
     renderOfficialWorkflowConfig();
+    const message = document.querySelector("#officialWorkflowConfigMessage");
+    if (message) message.textContent = "已載入最新流程。修改後請按儲存流程。";
+    if (Number(officialWorkflowConfig.schema_version) >= 3) void loadOfficialWorkflowCandidates();
   } catch (error) {
+    if (scope !== frontendSessionScope()) return;
+    const status = document.querySelector("#officialWorkflowConfigStatus");
+    if (status) status.textContent = "流程讀取失敗，請重新載入";
+    const message = document.querySelector("#officialWorkflowConfigMessage");
+    if (message) message.textContent = `流程讀取失敗，原畫面保留：${error.message}`;
     if (!silent) showToast(`簽核流程讀取失敗：${error.message}`);
+  } finally {
+    if (scope === frontendSessionScope()) {
+      officialWorkflowConfigEditor.loading = false;
+      if (officialWorkflowConfigEditor.categories) renderEditableOfficialWorkflowConfig();
+    }
+  }
+}
+
+async function saveEditableOfficialWorkflowConfig() {
+  const editor = officialWorkflowConfigEditor;
+  if (!canManageOfficialWorkflowConfig() || editor.saving || editor.loading || editor.conflict) return;
+  const roles = new Set((officialWorkflowConfig.available_roles || []).map((role) => role.key));
+  for (const [category, config] of Object.entries(editor.categories || {})) {
+    const nodes = config.nodes || [];
+    if (nodes.length > 12 || nodes.some((node) => !node.name?.trim() || (node.assignee?.type === "user" ? !node.assignee.user_id : !roles.has(node.assignee?.role_key)))) {
+      editor.selectedCategory = category;
+      renderEditableOfficialWorkflowConfig();
+      document.querySelector("#officialWorkflowConfigMessage").textContent = "請填妥各關卡名稱與簽核人員／組織角色；每類最多 12 關。";
+      return;
+    }
+  }
+  const scope = frontendSessionScope();
+  const payload = { expected_version: editor.version, categories: structuredClone(editor.categories) };
+  editor.saving = true;
+  renderEditableOfficialWorkflowConfig();
+  try {
+    const result = await backendRequest("/official-workflow-config", { method: "PATCH", body: JSON.stringify(payload) });
+    if (scope !== frontendSessionScope()) return;
+    officialWorkflowConfig = result;
+    editor.categories = structuredClone(result.categories);
+    editor.version = result.version;
+    editor.dirty = false;
+    officialWorkflowReadinessByRoute.clear();
+    officialWorkflowReadinessRequests.clear();
+    document.querySelector("#officialWorkflowConfigMessage").textContent = "已儲存，之後送簽案件套用新流程；進行中案件維持原流程。";
+    renderAllWorkflowReadinessContexts();
+    showToast("簽核流程已儲存。");
+  } catch (error) {
+    if (scope !== frontendSessionScope()) return;
+    editor.conflict = error.status === 409;
+    document.querySelector("#officialWorkflowConfigMessage").textContent = editor.conflict
+      ? "其他管理員已更新流程。您的修改仍保留；請先記下變更，再按重新載入取得最新版本。"
+      : `儲存失敗，修改仍保留：${error.message}`;
+  } finally {
+    if (scope === frontendSessionScope()) { editor.saving = false; renderEditableOfficialWorkflowConfig(); }
   }
 }
 
 async function saveOfficialWorkflowConfig() {
-  if (activeRole() !== "執行長" && !hasBackendPermission("settings.system_manage") && !hasBackendPermission("system_permissions.manage")) {
+  if (!canManageOfficialWorkflowConfig()) {
     return showToast("只有執行長或系統管理員可以調整發文簽核流程。");
   }
+  if (Number(officialWorkflowConfig.schema_version) >= 3) return saveEditableOfficialWorkflowConfig();
   try {
     officialWorkflowConfig = await backendRequest("/official-workflow-config", {
       method: "PATCH",
@@ -22059,13 +22470,15 @@ function approvalLogRecords() {
     const steps = rawSteps.map((step, index) => ({
       no: String(step.step_order || index + 1).padStart(2, "0"),
       title: step.step_name || officialWorkflowStepLabels[step.step_key] || step.step_key,
-      owner: step.approver_name || step.approver_role || "尚未指派",
+      owner: officialApprovalStepActor(step).name,
+      actorLabel: officialApprovalStepActor(step).label,
+      delegated: officialApprovalStepActor(step).delegated,
       state: step.status === "approved" ? "done" : step.status === "rejected" ? "returned" : step.step_key === item.current_step ? "current" : "pending",
-      status: step.status === "approved" ? "已核准" : step.status === "rejected" ? "已退回" : step.step_key === item.current_step ? "待處理" : "待後續",
+      status: step.status === "approved" ? "已核准" : step.status === "rejected" ? "已退回" : ["cancelled", "skipped"].includes(step.status) ? "本輪已取消" : step.step_key === item.current_step ? "待處理" : "待後續",
       time: step.approved_at || "尚未到關",
       comment: step.comment || "尚未填寫簽核意見。"
     }));
-    const currentStep = steps.find((step) => ["current", "returned"].includes(step.state)) || steps.at(-1);
+    const currentStep = item.current_status === "draft" ? { title: "草稿", owner: item.applicant_name || "申請人" } : steps.find((step) => ["current", "returned"].includes(step.state)) || steps.at(-1);
     return {
       officialDocument: item,
       task: {
@@ -22351,13 +22764,16 @@ function renderApprovalLog() {
                 <strong>${escapeHtml(step.title)}</strong>
                 <span>${escapeHtml(step.status)}</span>
               </div>
-              <p>${escapeHtml(step.owner)}</p>
+              <p>${escapeHtml(step.actorLabel || step.owner)}</p>
+              ${step.delegated ? `<small>${escapeHtml(step.delegated)}</small>` : ""}
               <details class="approval-step-history"><summary>時間與意見</summary><small>${escapeHtml(step.time)}</small><em>${escapeHtml(step.comment)}</em></details>
             </div>
           </li>
         `).join("")}
       </ol>
-      ${canActOfficial ? `<div class="official-action-bar approval-review-decisions"><button class="primary-button" type="button" data-progress-official-action="approve" data-progress-official-id="${escapeHtml(officialDocument.id)}">核准</button><button class="secondary-button" type="button" data-progress-official-action="reject" data-progress-official-id="${escapeHtml(officialDocument.id)}">駁回</button></div>` : ""}
+      ${officialDocument && officialDetailReady ? renderOfficialApprovalHistory(officialDocument) : ""}
+      ${officialDocument && officialDetailReady ? `<div class="official-action-bar approval-review-decisions">${renderOfficialWorkflowActionButtons(officialDocument, "approvalLog")}</div>` : ""}
+      ${officialDocument && officialDetailReady && officialDocumentCanConfirm(officialDocument) ? `<div class="official-action-bar"><button class="primary-button" type="button" data-approval-log-confirm="${escapeHtml(officialDocument.id)}">確認收件並結案</button></div>` : ""}
       ${canCorrectOfficial ? `<div class="official-action-bar approval-review-decisions"><button class="primary-button" type="button" data-correct-official-id="${escapeHtml(officialDocument.id)}">${officialDocument.current_status === "rejected" ? "補正並重新送簽" : "繼續編輯草稿"}</button></div>` : ""}
     `;
     if (officialDocument && !officialDetailReady && !officialDocumentDetailRequests.has(officialDocument.id)) {
@@ -22387,6 +22803,13 @@ function renderApprovalLog() {
   });
   detail.querySelectorAll("[data-progress-official-action]").forEach((button) => {
     button.addEventListener("click", () => actOnOfficialDocumentFromProgress(button.dataset.progressOfficialId, button.dataset.progressOfficialAction));
+  });
+  detail.querySelectorAll("[data-approval-log-confirm]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try { await confirmOfficialDocument(button.dataset.approvalLogConfirm); }
+      finally { if (button.isConnected) button.disabled = false; }
+    });
   });
   detail.querySelectorAll("[data-open-editor-review]").forEach((button) => {
     button.addEventListener("click", () => void openOfficialDocumentEditorReview(button.dataset.openEditorReview));
@@ -22671,6 +23094,7 @@ function selectedWorkflowIds() {
 }
 
 function mutateWorkflowTasks(ids, status) {
+  if (hasAuthenticatedBackendSession()) return showToast("正式案件請至簽核紀錄開啟案件操作。");
   ids.forEach((id) => {
     const task = workflowTasks.find((item) => item.id === id);
     if (task) {
@@ -22697,6 +23121,7 @@ function mutateWorkflowTasks(ids, status) {
 }
 
 function moveApprovalToNextStep() {
+  if (hasAuthenticatedBackendSession()) return showToast("正式案件請至簽核紀錄開啟案件操作。");
   const task = currentWorkflowTask();
   if (!task) return showToast("請先選取簽核案件。");
   const steps = approvalTemplateForTask(task);
@@ -22782,6 +23207,7 @@ function exportApprovalProgress() {
 }
 
 function applyWorkflowTemplate() {
+  if (hasAuthenticatedBackendSession()) return showToast("正式案件請使用文件類型的簽核流程設定。");
   const categoryValue = document.querySelector("#workflowDocumentCategorySelect")?.value || "";
   const category = approvalCategoryForType(categoryValue);
   const route = approvalRouteForType(categoryValue);
@@ -22923,6 +23349,7 @@ async function revokeWorkflowProxy(id) {
 }
 
 function runWorkflowAdvancedAction() {
+  if (hasAuthenticatedBackendSession()) return showToast("正式案件請至簽核紀錄開啟案件操作。");
   const action = document.querySelector("#workflowActionSelect").value;
   const target = document.querySelector("#workflowActionTarget").value;
   const comment = document.querySelector("#workflowComment").value.trim();
@@ -25868,24 +26295,43 @@ function editorDraftPayload() {
   };
 }
 
-async function ensureUploadedEditorDraft() {
-  if (uploadedSealEditorRuntime.documentId) return uploadedSealEditorRuntime.documentId;
+function uploadedEditorDraftPrerequisiteIssue() {
+  if (uploadedSealEditorRuntime.documentId) return null;
   if (hasAuthenticatedBackendSession() && !document.querySelector("#uploadedSealCompany")?.value) {
-    focusOfficialWorkflowField("#uploadedSealCompany");
-    throw new Error("請先選擇申請公司，再上傳 PDF。");
+    return { selector: "#uploadedSealCompany", message: "請先選擇用印公司，再選擇 PDF。" };
   }
-  if (!uploadedEditorV2FeatureEnabled()) throw new Error("此公司尚未開啟 PDF Editor V2，無法建立新草稿。");
   const approvalSelection = approvalSelectionForSelect("#uploadedSealApprovalCategorySelect");
   if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) {
-    setOfficialFieldValidity("#uploadedSealApprovalCategorySelect", "#uploadedSealApprovalCategoryHint", false, "請先選擇用印文件類型；系統會依 A／B／C／D 級鎖定簽核關係人。");
-    focusOfficialWorkflowField("#uploadedSealApprovalCategorySelect");
-    throw new Error("請先選擇用印文件類型，再上傳 PDF。");
+    return { selector: "#uploadedSealApprovalCategorySelect", hint: "#uploadedSealApprovalCategoryHint", message: "請先選擇用印文件類型，再選擇 PDF。" };
   }
-  if (uploadedSealEditorRuntime.draftCreatePromise) return uploadedSealEditorRuntime.draftCreatePromise;
   if (hasAuthenticatedBackendSession() && !document.querySelector("#uploadedSealDepartment")?.value.trim()) {
-    focusOfficialWorkflowField("#uploadedSealDepartment");
-    throw new Error("請先選擇申請部門，再上傳 PDF。");
+    return { selector: "#uploadedSealDepartment", message: "請先選擇申請部門，再選擇 PDF。" };
   }
+  return null;
+}
+
+function showUploadedEditorDraftPrerequisite(issue) {
+  const fields = document.querySelector("#uploadedSealApplicationFields");
+  if (fields) fields.hidden = false;
+  renderUploadedSealApplicationDisclosure();
+  setOfficialFieldValidity(issue.selector, issue.hint || null, false, issue.message);
+  focusOfficialWorkflowField(issue.selector);
+  if (!uploadedSealEditorState.pages.length) {
+    clearUploadedEditorUploadError();
+    setUploadedPdfA4Status("idle", "");
+    setUploadedEditorSaveStatus("idle", "請先完成申請資訊");
+  }
+  showToast(issue.message);
+}
+
+async function ensureUploadedEditorDraft() {
+  if (uploadedSealEditorRuntime.documentId) return uploadedSealEditorRuntime.documentId;
+  const prerequisite = uploadedEditorDraftPrerequisiteIssue();
+  if (prerequisite) throw Object.assign(new Error(prerequisite.message), {
+    code: "editor_application_incomplete", applicationIssue: prerequisite
+  });
+  if (!uploadedEditorV2FeatureEnabled()) throw new Error("此公司尚未開啟 PDF Editor V2，無法建立新草稿。");
+  if (uploadedSealEditorRuntime.draftCreatePromise) return uploadedSealEditorRuntime.draftCreatePromise;
   const applicationPayload = editorDraftPayload();
   const creationScope = uploadedSealApplicationScopeSnapshot();
   const operation = backendRequest("/official-documents/editor-drafts", {
@@ -27503,23 +27949,26 @@ function renderUploadedEditorChangeSummary() {
 async function showUploadedEditorReview(mode) {
   if (!["original", "edited", "prepared", "changes"].includes(mode)) return;
   if (!finishUploadedEditorTextEdit()) return;
+  const reviewScope = uploadedSealApplicationScopeSnapshot();
   if (mode !== "prepared") invalidateUploadedEditorSubmissionPreview();
   const reviewGeneration = ++uploadedSealEditorRuntime.reviewGeneration;
+  const isCurrent = () => uploadedSealApplicationScopeIsCurrent(reviewScope)
+    && reviewGeneration === uploadedSealEditorRuntime.reviewGeneration;
   uploadedSealEditorRuntime.reviewMode = mode;
   const reviewSelect = document.querySelector("#uploadedEditorReviewSelect");
   if (reviewSelect) reviewSelect.value = mode;
   try {
     if (mode === "changes" && !uploadedSealEditorRuntime.changeSummary) await loadUploadedEditorChangeSummary();
-    if (reviewGeneration !== uploadedSealEditorRuntime.reviewGeneration || uploadedSealEditorRuntime.reviewMode !== mode) return;
+    if (!isCurrent() || uploadedSealEditorRuntime.reviewMode !== mode) return;
     await renderUploadedPdfPage();
   } catch (error) {
-    if (reviewGeneration !== uploadedSealEditorRuntime.reviewGeneration) return;
+    if (!isCurrent()) return;
     uploadedSealEditorRuntime.reviewMode = "edited";
     if (reviewSelect) reviewSelect.value = "edited";
     showToast(`預覽載入失敗：${error.message}`);
     await renderUploadedPdfPage();
   }
-  if (reviewGeneration !== uploadedSealEditorRuntime.reviewGeneration) return;
+  if (!isCurrent()) return;
   if (reviewSelect) reviewSelect.value = uploadedSealEditorRuntime.reviewMode;
   renderUploadedSealWorkbench();
 }
@@ -28592,18 +29041,20 @@ async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
 async function preflightUploadedEditor() {
   if (!finishUploadedEditorTextEdit()) throw new Error("請先完成文字編輯。");
   if (!uploadedSealEditorRuntime.documentId) throw new Error("尚未建立 PDF 編輯草稿。");
+  const preflightScope = uploadedSealApplicationScopeSnapshot();
   ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
   await saveUploadedEditorState({ immediate: true });
+  if (!uploadedSealApplicationScopeIsCurrent(preflightScope)) return null;
   if (uploadedSealEditorRuntime.conflict) throw new Error("版本衝突尚未處理，不能送簽。");
-  const preflightScope = uploadedSealApplicationScopeSnapshot();
   const preflightGeneration = uploadedSealEditorRuntime.dirtyGeneration;
   const status = document.querySelector("#uploadedEditorPreflightStatus");
   if (status) status.textContent = "後端正在產生精準確認版…";
-  const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/editor-preflight`, {
+  const result = await backendRequest(`/official-documents/${encodeURIComponent(preflightScope.documentId)}/editor-preflight`, {
     method: "POST",
     body: JSON.stringify({ editorRevisionId: uploadedSealEditorRuntime.revisionId, manifestSha256: uploadedSealEditorState.manifestSha256 })
   });
-  if (!uploadedSealApplicationScopeIsCurrent(preflightScope) || uploadedSealEditorRuntime.dirtyGeneration !== preflightGeneration) {
+  if (!uploadedSealApplicationScopeIsCurrent(preflightScope)) return null;
+  if (uploadedSealEditorRuntime.dirtyGeneration !== preflightGeneration) {
     throw new Error("草稿或內容已變更，請重新預覽後再送簽。");
   }
   if (result.status !== "prepared") throw new Error("確認版尚未完成，請稍後再試。");
@@ -28641,14 +29092,23 @@ async function refreshUploadedEditorAccess() {
   }
 }
 
+function uploadedPdfUploadBlockingMessage() {
+  if (uploadedSealEditorRuntime.companyChanging) return "公司切換中，請稍候再上傳。";
+  if (uploadedSealEditorRuntime.locked || uploadedSealApplicationRuntime.editable === false) return "此案件已送簽鎖定，不能更換 PDF。";
+  if (uploadedSealApplicationRuntime.submissionBusy) return "案件正在送簽，請稍候。";
+  if (uploadedSealEditorRuntime.uploading) return "PDF 正在上傳與檢查，請稍候。";
+  if (uploadedSealEditorRuntime.reviewMode !== "edited") return "請先切回編輯版再更換 PDF。";
+  if (uploadedSealEditorRuntime.directoryLoading) return "正在載入公司與印章權限，請稍候。";
+  return "";
+}
+
 function openUploadedPdfPicker() {
   const input = document.querySelector("#uploadedSealPdfInput");
   if (!input) return;
-  if (uploadedSealEditorRuntime.companyChanging) return showToast("公司切換中，請稍候再上傳。");
-  if (uploadedSealEditorRuntime.locked) return showToast("此案件已送簽鎖定，不能更換 PDF。");
-  if (uploadedSealEditorRuntime.uploading) return showToast("PDF 正在上傳與檢查，請稍候。");
-  if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再更換 PDF。");
-  if (uploadedSealEditorRuntime.directoryLoading) return showToast("正在載入公司與印章權限，請稍候。");
+  const blocked = uploadedPdfUploadBlockingMessage();
+  if (blocked) return showToast(blocked);
+  const prerequisite = uploadedEditorDraftPrerequisiteIssue();
+  if (prerequisite) return showUploadedEditorDraftPrerequisite(prerequisite);
   if (!uploadedEditorV2FeatureEnabled()) {
     showToast("正在重新載入公司與 PDF 編輯權限，完成後請再按一次。");
     void refreshUploadedEditorAccess();
@@ -28663,6 +29123,16 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
   const input = document.querySelector("#uploadedSealPdfInput");
   const file = fileOverride instanceof File ? fileOverride : input?.files?.[0];
   if (!file) return;
+  const blocked = uploadedPdfUploadBlockingMessage();
+  if (blocked) { input.value = ""; return showToast(blocked); }
+  const prerequisite = uploadedEditorDraftPrerequisiteIssue();
+  if (prerequisite) { input.value = ""; return showUploadedEditorDraftPrerequisite(prerequisite); }
+  if (!uploadedEditorV2FeatureEnabled()) {
+    input.value = "";
+    showToast("正在重新載入公司與 PDF 編輯權限，完成後請再選擇 PDF。");
+    void refreshUploadedEditorAccess();
+    return;
+  }
   if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
     input.value = "";
     return showToast("請上傳 PDF 檔。");
@@ -28719,6 +29189,10 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     showToast(`PDF 已安全載入，共 ${uploadedSealPageCount} 頁。`);
   } catch (error) {
     if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
+    if (error?.code === "editor_application_incomplete" && error.applicationIssue) {
+      showUploadedEditorDraftPrerequisite(error.applicationIssue);
+      return;
+    }
     await reportEditorUploadFailure(intent, error);
     if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
     setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
@@ -28785,7 +29259,7 @@ function renderElectronicSealWorkQueue() {
         <div class="row-actions">
           <button class="segment" type="button" data-electronic-seal-open="${escapeHtml(item.id)}">${["draft", "rejected"].includes(item.current_status) && officialDocumentIsApplicant(item) ? "繼續編輯" : "查看 PDF 與章位"}</button>
           ${item.can_retry_stamp ? `<button class="segment" type="button" data-electronic-seal-retry="${escapeHtml(item.id)}">重試用印</button>` : ""}
-          ${item.can_confirm ? `<button class="segment" type="button" data-electronic-seal-confirm="${escapeHtml(item.id)}">確認收件</button>` : ""}
+          ${officialDocumentCanConfirm(item) ? `<button class="segment" type="button" data-electronic-seal-confirm="${escapeHtml(item.id)}">確認收件</button>` : ""}
           ${stamped ? `<button class="segment" type="button" data-electronic-seal-download="${escapeHtml(stamped.id)}" data-document-id="${escapeHtml(item.id)}">下載用印後檔案</button>` : ""}
         </div>
       </article>
@@ -28804,10 +29278,9 @@ function renderElectronicSealWorkQueue() {
   });
   list.querySelectorAll("[data-electronic-seal-confirm]").forEach((button) => {
     button.addEventListener("click", async () => {
-      selectedOfficialDocumentId = button.dataset.electronicSealConfirm;
-      await ensureOfficialDocumentDetail(selectedOfficialDocumentId);
-      await confirmOfficialDocument();
-      renderElectronicSealWorkQueue();
+      button.disabled = true;
+      try { await confirmOfficialDocument(button.dataset.electronicSealConfirm); }
+      finally { if (button.isConnected) button.disabled = false; }
     });
   });
   list.querySelectorAll("[data-electronic-seal-download]").forEach((button) => {
@@ -29066,7 +29539,7 @@ async function initializeUploadedSealWorkspace() {
 const uploadedSealApplicationRuntime = {
   documentId: "", savedKey: "", timer: 0, promise: null, error: "",
   editable: true, retryCount: 0, openPromise: null, epoch: 0,
-  submissionPreview: null, submissionBusy: false
+  submissionPreview: null, submissionBusy: false, submissionOperation: null
 };
 
 function uploadedSealApplicationScopeSnapshot() {
@@ -29118,7 +29591,7 @@ function renderUploadedEditorSubmissionActions() {
   if (!button) return;
   const current = uploadedEditorSubmissionPreviewIsCurrent();
   const selection = workflowReadinessSelection("uploadedSeal");
-  const workflowReady = workflowReadinessAllowsSubmit(selection, officialWorkflowReadinessByRoute.get(selection.approvalRouteCode || ""));
+  const workflowReady = workflowReadinessAllowsSubmit(selection, officialWorkflowReadinessByRoute.get(workflowReadinessCacheKey("uploadedSeal")));
   const hasSeal = uploadedSealOptions.some(officialSealHasCurrentFile);
   button.textContent = uploadedSealApplicationRuntime.submissionBusy ? "處理中…" : current ? "確認內容並送簽" : "預覽送簽確認版";
   button.disabled = uploadedSealApplicationRuntime.submissionBusy
@@ -29176,6 +29649,8 @@ function resetUploadedSealApplicationSaving() {
   uploadedSealApplicationRuntime.promise = null;
   uploadedSealApplicationRuntime.editable = true;
   uploadedSealApplicationRuntime.retryCount = 0;
+  uploadedSealApplicationRuntime.submissionBusy = false;
+  uploadedSealApplicationRuntime.submissionOperation = null;
   invalidateUploadedEditorSubmissionPreview();
 }
 
@@ -29427,10 +29902,16 @@ async function submitUploadedSealApplication() {
   if (!uploadedSealEditorState.pages.length || !uploadedSealEditorRuntime.documentId) return showToast("請先完成 PDF 上傳、掃毒與預檢。");
   const seals = uploadedSealEditorState.elements.filter((element) => element.kind === "seal");
   if (!seals.length) return showToast("請先加入至少一個用印處。");
+  const submissionScope = uploadedSealApplicationScopeSnapshot();
+  const operation = {};
+  const isCurrent = () => uploadedSealApplicationScopeIsCurrent(submissionScope)
+    && uploadedSealApplicationRuntime.submissionOperation === operation;
+  uploadedSealApplicationRuntime.submissionOperation = operation;
   try {
     uploadedSealApplicationRuntime.submissionBusy = true;
     renderUploadedSealWorkbench();
-    const readiness = await loadOfficialWorkflowReadiness(approvalSelection.approvalRouteCode, { silent: false, force: true });
+    const readiness = await loadOfficialWorkflowReadiness(approvalSelection.approvalRouteCode, { silent: false, force: true, context: "uploadedSeal" });
+    if (!isCurrent()) return;
     if (!workflowReadinessAllowsSubmit(approvalSelection, readiness)) {
       renderWorkflowReadinessContext("uploadedSeal");
       document.querySelector("#uploadedSealWorkflowReadinessNotice")?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -29442,8 +29923,11 @@ async function submitUploadedSealApplication() {
         throw new Error("內容已變更，請先返回修改，再重新產生送簽確認版。");
       }
       await syncUploadedSealApplicationDraft();
+      if (!isCurrent()) return;
       await preflightUploadedEditor();
+      if (!isCurrent()) return;
       await showUploadedEditorReview("prepared");
+      if (!isCurrent()) return;
       if (uploadedSealEditorRuntime.reviewMode !== "prepared" || !uploadedSealEditorRuntime.preparedPdfDocument) {
         throw new Error("送簽確認版尚未成功顯示，請重試預覽；目前未送簽。");
       }
@@ -29456,7 +29940,8 @@ async function submitUploadedSealApplication() {
     }
     // This is a second, explicit user action on the exact displayed snapshot.
     if (!uploadedEditorSubmissionPreviewIsCurrent()) throw new Error("確認版已失效，請重新預覽後再送簽。");
-    const result = await backendRequest(`/official-documents/${encodeURIComponent(uploadedSealEditorRuntime.documentId)}/submit`, {
+    const submittedFingerprint = uploadedEditorSubmissionFingerprint();
+    const result = await backendRequest(`/official-documents/${encodeURIComponent(submissionScope.documentId)}/submit`, {
       method: "POST",
       body: JSON.stringify({
         comment: contractMode ? "合約 PDF V2 編輯確認後送出簽核" : "電子用印 PDF V2 編輯確認後送出簽核",
@@ -29466,20 +29951,30 @@ async function submitUploadedSealApplication() {
         preparedSha256: uploadedSealEditorRuntime.preparedSha256
       })
     });
+    if (!isCurrent()) return;
+    if (submittedFingerprint !== uploadedEditorSubmissionFingerprint()) {
+      showToast("送簽回應已收到，但畫面內容已變更。請重新開啟原案件確認送簽狀態。");
+      return;
+    }
     uploadedSealEditorRuntime.locked = true;
     invalidateUploadedEditorSubmissionPreview();
     document.querySelector("#uploadedPdfEditor")?.setAttribute("data-editor-locked", "true");
     setUploadedEditorSaveStatus("locked", "已送簽並鎖定");
-    await showSubmittedOfficialDocument(result.id || uploadedSealEditorRuntime.documentId);
+    await showSubmittedOfficialDocument(result.id || submissionScope.documentId, { isCurrent });
+    if (!isCurrent()) return;
     addSealAudit("鎖定 PDF V2 送簽版本", `document ${uploadedSealEditorRuntime.documentId} · revision ${uploadedSealEditorState.revisionNo} · manifest ${uploadedSealEditorState.manifestSha256.slice(0, 16)}… · prepared ${uploadedSealEditorRuntime.preparedSha256.slice(0, 16)}…`);
     showToast(contractMode ? "合約用印確認版已鎖定並送出簽核。" : "電子用印確認版已鎖定並送出簽核。");
     renderUploadedSealWorkbench();
   } catch (error) {
+    if (!isCurrent()) return;
     addSealAudit("PDF V2 送簽失敗", error.message);
     showToast(`送簽失敗：${error.message}`);
   } finally {
-    uploadedSealApplicationRuntime.submissionBusy = false;
-    renderUploadedSealWorkbench();
+    if (isCurrent()) {
+      uploadedSealApplicationRuntime.submissionBusy = false;
+      uploadedSealApplicationRuntime.submissionOperation = null;
+      renderUploadedSealWorkbench();
+    }
   }
 }
 
@@ -30618,7 +31113,7 @@ document.querySelector("#composeForm").addEventListener("submit", async (event) 
     return;
   }
   const selection = workflowReadinessSelection("compose");
-  const readiness = await loadOfficialWorkflowReadiness(selection.approvalRouteCode, { silent: false, force: true });
+  const readiness = await loadOfficialWorkflowReadiness(selection.approvalRouteCode, { silent: false, force: true, context: "compose" });
   if (!workflowReadinessAllowsSubmit(selection, readiness)) {
     renderWorkflowReadinessContext("compose");
     setComposeStep("fill", { force: true });
@@ -30852,7 +31347,7 @@ document.querySelector("#inboundModal").addEventListener("click", (event) => {
   if (event.target.id === "inboundModal") closeInboundModal();
 });
 document.querySelector("#officialDecisionForm")?.addEventListener("submit", (event) => void submitOfficialDecision(event));
-["#officialApprovalComment", "#officialRejectCategory", "#officialRejectComment", "#officialCorrectionDueDate"].forEach((selector) => {
+["#officialApprovalComment", "#officialRejectCategory", "#officialRejectComment", "#officialCorrectionDueDate", "#officialAddSignPerson", "#officialWithdrawComment"].forEach((selector) => {
   document.querySelector(selector)?.addEventListener("input", updateOfficialDecisionSubmitAvailability);
   document.querySelector(selector)?.addEventListener("change", updateOfficialDecisionSubmitAvailability);
 });
@@ -32042,6 +32537,26 @@ document.querySelector("#settingsWorkflowTemplateForm")?.addEventListener("submi
   upsertSettingsWorkflowTemplate();
 });
 document.querySelector("#officialWorkflowConfigSaveBtn")?.addEventListener("click", saveOfficialWorkflowConfig);
+document.querySelector("#officialWorkflowConfigReloadBtn")?.addEventListener("click", () => {
+  if (officialWorkflowConfigEditor.saving || officialWorkflowConfigEditor.loading) return;
+  if (officialWorkflowConfigEditor.dirty && !window.confirm("重新載入會放棄尚未儲存的流程修改，是否繼續？")) return;
+  void loadOfficialWorkflowConfig(false, { discardChanges: true });
+});
+document.querySelector("#officialWorkflowCategorySelect")?.addEventListener("change", (event) => {
+  officialWorkflowConfigEditor.selectedCategory = event.target.value;
+  renderEditableOfficialWorkflowConfig();
+});
+document.querySelector("#officialWorkflowCandidateCompany")?.addEventListener("change", () => void loadOfficialWorkflowCandidates());
+document.querySelector("#officialWorkflowNodeAddBtn")?.addEventListener("click", () => {
+  const editor = officialWorkflowConfigEditor, nodes = currentOfficialWorkflowConfigNodes();
+  if (!canManageOfficialWorkflowConfig() || editor.saving || editor.loading || editor.conflict || nodes.length >= 12) return;
+  const role = officialWorkflowConfig.available_roles?.[0];
+  if (!role) return;
+  nodes.push({ id: `review_${crypto.randomUUID()}`, name: role.name, assignee: { type: "role", role_key: role.key } });
+  editor.dirty = true;
+  renderEditableOfficialWorkflowConfig();
+  document.querySelector(`[data-workflow-node-name="${nodes.length - 1}"]`)?.focus();
+});
 document.querySelectorAll("[data-official-workflow-step]").forEach((input) => {
   input.addEventListener("change", () => {
     officialWorkflowConfig = { ...officialWorkflowConfig, enabled_steps: selectedOfficialWorkflowSteps(), steps: [] };

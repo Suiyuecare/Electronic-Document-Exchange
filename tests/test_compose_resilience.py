@@ -81,12 +81,12 @@ class ComposeResilienceTest(unittest.TestCase):
 
     def test_submission_rechecks_content_revision_after_workflow_resolution(self):
         draft = self.create(metadata={"source": "compose_form"})
-        original = backend.official_workflow_steps_for_document
-        def competing_edit(conn, document):
-            steps = original(conn, document)
-            conn.execute("UPDATE official_documents SET content_revision=content_revision+1,subject=? WHERE id=?", ("競爭更新", document["id"]))
+        original = backend.configured_official_workflow_steps
+        def competing_edit(*args, **kwargs):
+            steps = original(*args, **kwargs)
+            self.conn.execute("UPDATE official_documents SET content_revision=content_revision+1,subject=? WHERE id=?", ("競爭更新", draft["id"]))
             return steps
-        with mock.patch.object(backend, "official_workflow_steps_for_document", side_effect=competing_edit), mock.patch.object(
+        with mock.patch.object(backend, "configured_official_workflow_steps", side_effect=competing_edit), mock.patch.object(
             backend, "assert_official_document_uploads_av_clean",
         ) as scan:
             with self.assertRaisesRegex(ValueError, "compose_content_revision_conflict"):

@@ -340,7 +340,7 @@ class OfficialDecisionEvidenceRegressionTests(unittest.TestCase):
         )
 
         submission = javascript_function(self.js, "submitOfficialDecision")
-        approve_branch = submission.index('if (action === "approve")')
+        approve_branch = submission.index('if (["approve", "return-previous", "add-sign"].includes(action))')
         common_guard = submission[:approve_branch]
         self.assertRegex(
             common_guard,

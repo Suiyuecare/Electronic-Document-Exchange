@@ -111,7 +111,7 @@ mobile=true;hasSelection=false;closeApprovalLogMobileDetail();assert.equal(remov
 ''')
 
     def test_approval_evidence_precedes_decision_and_empty_has_one_surface(self):
-        self.run_js(["closeApprovalLogMobileDetail", "renderApprovalLog"], r'''
+        self.run_js(["closeApprovalLogMobileDetail", "officialDocumentCanConfirm", "officialDocumentAvailableActions", "officialWorkflowActionLabel", "renderOfficialWorkflowActionButtons", "renderApprovalLog"], r'''
 const node=()=>({innerHTML:'',textContent:'',hidden:false,dataset:{},classList:{toggle(){}},querySelectorAll:()=>[],querySelector:()=>null,removeAttribute(){}});
 const list=node(),detail=node(),full=node(),panel=node(),page=node(),layout=node(),back=node();full.parentElement=node();
 const nodes={'#approvalLogList':list,'#approvalLogDetail':detail,'#approvalLogOpenWorkflowBtn':full,'#approvalLogCount':node(),'#approvalLogScope':node(),'#approvalLogDetailPanel':panel,'.approval-log-layout':layout,'#approvalLogBackBtn':back,'#approvalLog':page};
@@ -122,7 +122,7 @@ let records=[{task:{id:'case1',title:'Synthetic',role:'Manager',step:'Manager',s
 const approvalLogRecords=()=>records,filteredApprovalLogRecords=()=>records,isRouteAllowed=()=>false,canSeeCompanyWideDocs=()=>false,approvalProgressCategory=()=> 'my_pending';
 const escapeHtml=x=>String(x||''),escapeDraftHtml=escapeHtml,approvalRecordTimeMeta=()=>({label:'送出時間',value:'fixture',actorLabel:'申請人',progress:'0/1 關'}),approvalRecordIsOverdue=()=>false;
 const officialDocumentDetailReady=new Set(['case1']),officialDocumentIsApplicant=()=>false,renderOfficialHumanProgress=()=>'',officialDocumentHasEditorV2=()=>false;
-const officialApplicationFiles=()=>[],renderOfficialFiles=()=>'<div data-fixture-evidence>file.pdf</div>',renderOfficialFinalStampedDownload=()=>'',safeHtmlClassToken=x=>x;
+const officialApplicationFiles=()=>[],renderOfficialFiles=()=>'<div data-fixture-evidence>file.pdf</div>',renderOfficialFinalStampedDownload=()=>'',renderOfficialApprovalHistory=()=>'',safeHtmlClassToken=x=>x;
 renderApprovalLog();assert.equal(panel.hidden,false);assert.ok(detail.innerHTML.indexOf('data-fixture-evidence')<detail.innerHTML.indexOf('data-progress-official-action="approve"'));assert.match(detail.innerHTML,/approval-review-decisions/);
 official.can_act=false;renderApprovalLog();assert.doesNotMatch(detail.innerHTML,/data-progress-official-action="approve"/);
 records=[];renderApprovalLog();assert.equal(panel.hidden,true);assert.equal(detail.innerHTML,'');assert.equal((list.innerHTML.match(/ux-empty-state/g)||[]).length,1);assert.equal(full.disabled,true);

@@ -149,6 +149,7 @@ jobs:
             python -m unittest -v \
               tests.test_editor_applicant_selection_postgres \
               tests.test_editor_cross_company_workflow_postgres \
+              tests.test_configurable_workflow_postgres \
               tests.test_editor_storage_v2_paths_postgres
 
           eval "$(supabase status -o env)"

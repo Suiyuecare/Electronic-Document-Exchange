@@ -26,7 +26,7 @@ class EditorApplicationAutosaveTest(unittest.TestCase):
             'invalidateUploadedEditorSubmissionPreview', 'uploadedEditorSubmissionFingerprint',
             'uploadedEditorSubmissionPreviewIsCurrent',
             'uploadedSealApplicationScopeSnapshot', 'uploadedSealApplicationScopeIsCurrent',
-            'resetUploadedSealApplicationSaving', 'ensureUploadedEditorDraft',
+            'resetUploadedSealApplicationSaving', 'ensureUploadedEditorDraft', 'uploadedEditorDraftPrerequisiteIssue',
         ]
         def runtime_function(name):
             # These top-level helpers include a default argument calling another

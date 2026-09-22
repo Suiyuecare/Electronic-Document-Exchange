@@ -260,7 +260,8 @@ class ComposeOutputBackendTest(unittest.TestCase):
                 with ExitStack() as stack:
                     mocks = {
                         "supabase_official_session_user": user, "supabase_official_document_row": document,
-                        "official_seal_context_from_document": {"approval_route_code": "A"}, "is_production": False,
+                        "official_seal_context_from_document": {"approval_route_code": "A", "document_category": "合作意向書"}, "is_production": False,
+                        "supabase_official_workflow_config": backend.normalize_official_workflow_config({}),
                         "supabase_lock_official_editor_submission": None, "supabase_ensure_official_generated_pdf": source,
                         "supabase_user_by_id": user, "supabase_official_document_detail": document,
                         "supabase_plan_official_workflow_submission": {"workflow_generation": step["workflow_generation"],

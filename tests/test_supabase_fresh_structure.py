@@ -669,6 +669,8 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         repair_rpcs = {
             "edoc_save_compose_draft": "20260911133144_compose_resilience_drafts_revision.sql",
             "edoc_copy_editor_conflict": "20260911133603_editor_conflict_copy_atomic.sql",
+            "edoc_save_official_workflow_config": "20260922074613_configurable_official_workflows.sql",
+            "edoc_mutate_official_workflow": "20260922074613_configurable_official_workflows.sql",
         }
         later_granted_rpc_names: set[str] = set()
         for rpc_name, migration_name in repair_rpcs.items():
@@ -700,7 +702,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             (granted_rpc_names - {"edoc_company_seal_dimensions_are_valid"}) | later_granted_rpc_names,
             required_rpc_names,
         )
-        self.assertEqual(len(required_rpc_names), 25)
+        self.assertEqual(len(required_rpc_names), 27)
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
         fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
         self.assertIn("from information_schema.table_privileges", cutover)

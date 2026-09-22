@@ -63,6 +63,7 @@
     "20260911133603_editor_conflict_copy_atomic.sql",
     "20260913055452_editor_applicant_selection_scope.sql",
     "20260913060040_editor_cross_company_workflow_scope.sql",
-    "20260913130517_editor_storage_v2_opaque_paths.sql"
+    "20260913130517_editor_storage_v2_opaque_paths.sql",
+    "20260922074613_configurable_official_workflows.sql"
   ]
 }

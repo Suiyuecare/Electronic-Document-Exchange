@@ -323,10 +323,13 @@ class DelegatedReviewHttpRegressionTest(unittest.TestCase):
                         if scenario == "closed":
                             conn.execute("UPDATE official_documents SET current_status='closed' WHERE id=?", (document["id"],))
                         else:
-                            for step in document["approval_steps"]:
+                            # Detail rows also carry read-only audit display
+                            # fields; a new generation must copy persisted data.
+                            persisted_steps = backend.current_official_document_steps(conn, document["id"])
+                            for step in persisted_steps:
                                 newer = {**step, "id": step["id"] + "-GEN2", "workflow_generation": 2}
                                 if newer["step_key"] == "applicant_manager":
-                                    newer["approver_user_id"] = next(item["approver_user_id"] for item in document["approval_steps"] if item["step_key"] == "department_head")
+                                    newer["approver_user_id"] = next(item["approver_user_id"] for item in persisted_steps if item["step_key"] == "department_head")
                                 backend.insert_row(conn, "official_document_approval_steps", newer)
                     for scope in ("", "all", "todo"):
                         records = self.api("GET", "/api/official-documents?scope=" + scope, delegate)
