@@ -76,7 +76,7 @@ function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve
     def test_route_uses_narrow_loader_and_exposes_retry(self):
         source = (ROOT / "app.js").read_text()
         route = extract_function(source, "loadRouteBackendData")
-        inbound = re.search(r'if \(target === "inbound"\) \{(.*?)\n    \}', route, re.S).group(1)
+        inbound = re.search(r'if \(target === "inbound"\) await ([^\n]+)', route).group(1)
         self.assertIn("loadInboundDocuments(silent)", inbound)
         self.assertNotIn("syncDatabaseFromBackend", inbound)
         self.assertIn('document.querySelector("#inboundReloadBtn")?.addEventListener("click"', source)

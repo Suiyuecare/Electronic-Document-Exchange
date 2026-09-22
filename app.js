@@ -1397,6 +1397,7 @@ function clearUploadedEditorSensitivePreviews() {
   uploadedSealEditorState = emptyUploadedSealEditorState();
   uploadedSealPdf = null;
   uploadedSealEditorRuntime.renderTask?.cancel?.();
+  uploadedSealEditorRuntime.canvasPaint = null;
   uploadedSealEditorRuntime.renderNonce += 1;
   const canvas = document.querySelector("#uploadedPdfCanvas");
   canvas?.getContext?.("2d")?.clearRect(0, 0, canvas.width, canvas.height);
@@ -1434,6 +1435,7 @@ const uploadedSealEditorRuntime = {
   saveTimer: 0,
   renderNonce: 0,
   renderTask: null,
+  canvasPaint: null,
   pdfDocuments: new Map(),
   pageProxies: new Map(),
   assetFiles: new Map(),
@@ -5369,45 +5371,115 @@ function runAuthenticatedStartupSyncs(silent = true) {
 }
 
 const routeBackendDataLoaded = new Set();
+const routeBackendDataRequests = new Map();
+const routeBackendDataErrors = new Map();
+let routeBackendDataScope = "";
+
+function renderWorkspaceLoadStatus() {
+  const notice = document.querySelector("#workspaceLoadStatus");
+  if (!notice) return;
+  const sameSession = routeBackendDataScope === frontendSessionScope() && hasAuthenticatedBackendSession();
+  const loading = sameSession && routeBackendDataRequests.has(activeRouteTarget);
+  const failed = sameSession && routeBackendDataErrors.has(activeRouteTarget);
+  notice.hidden = !loading && !failed;
+  notice.dataset.state = loading ? "loading" : failed ? "error" : "idle";
+  const label = document.querySelector("#workspaceLoadLabel");
+  if (label) label.textContent = loading ? "正在更新工作區…" : failed ? "部分資料未載入，已保留目前內容。" : "";
+  const retry = document.querySelector("#workspaceLoadRetryBtn");
+  if (retry) retry.hidden = !failed || loading;
+}
+
+function resetRouteBackendData() {
+  routeBackendDataLoaded.clear();
+  routeBackendDataRequests.clear();
+  routeBackendDataErrors.clear();
+  routeBackendDataScope = "";
+  renderWorkspaceLoadStatus();
+}
 
 async function loadRouteBackendData(target, silent = true) {
-  if (target === "inbound" && inboundDocumentLoadState.scope !== frontendSessionScope()) routeBackendDataLoaded.delete(target);
-  if (!hasAuthenticatedBackendSession() || routeBackendDataLoaded.has(target)) return;
-  routeBackendDataLoaded.add(target);
-  try {
-    if (["workflow", "settings"].includes(target)) await loadFinanceCompanyDirectory();
-    if (["compose", "contractSeal", "electronicSeal"].includes(target)) {
-      await loadFinanceCompanyDirectory();
-      const officialCompanyId = document.querySelector("#officialCompanySelect")?.value || "";
-      if (officialCompanyId) await loadOfficialSealOptions(officialCompanyId);
-    }
-    if (["contractSeal", "electronicSeal"].includes(target)) {
-      renderUploadedSealCompanyOptions();
-      await loadUploadedSealOptions(document.querySelector("#uploadedSealCompany")?.value || "");
-      uploadedSealEditorRuntime.directoryLoading = false;
-      renderUploadedSealWorkbench();
-    }
-    if (["compose", "workflow", "settings", "contractSeal", "electronicSeal"].includes(target)) await loadOfficialWorkflowConfig(silent);
-    if (target === "compose") await refreshWorkflowReadinessForContext("compose", { silent });
-    if (["contractSeal", "electronicSeal"].includes(target)) await refreshWorkflowReadinessForContext("uploadedSeal", { silent });
-    if (target === "workflow") await loadWorkflowDelegations(silent);
-    if (target === "inbound") {
-      await Promise.all([loadInboundDocuments(silent), loadInternalDispatches(silent), loadInboundAssigneeCandidates()]);
-    }
-    if (target === "seals") await loadCompanySealModule(true);
-    if (target === "jobs") await syncJobsFromBackend(silent);
-    if (target === "database") await syncDatabaseFromBackend(silent);
-    if (target === "reports") await loadUiUsageSummary(silent);
-    if (["ops", "settings"].includes(target)) await syncGoLiveAuditFromBackend(silent);
-  } catch (error) {
-    routeBackendDataLoaded.delete(target);
-    if (["contractSeal", "electronicSeal"].includes(target)) {
-      uploadedSealEditorRuntime.directoryLoading = false;
-      setUploadedEditorSaveStatus("error", "公司與印章權限載入失敗，請按選擇 PDF 重試");
-      renderUploadedSealWorkbench();
-    }
-    console.warn(`[edoc-route:${target}] background data load failed`, error);
+  if (!hasAuthenticatedBackendSession()) { renderWorkspaceLoadStatus(); return; }
+  const scope = frontendSessionScope();
+  if (routeBackendDataScope !== scope) {
+    resetRouteBackendData();
+    routeBackendDataScope = scope;
   }
+  if (target === "inbound" && inboundDocumentLoadState.scope !== frontendSessionScope()) routeBackendDataLoaded.delete(target);
+  if (routeBackendDataRequests.has(target)) {
+    renderWorkspaceLoadStatus();
+    return routeBackendDataRequests.get(target).promise;
+  }
+  if (routeBackendDataLoaded.has(target)) { renderWorkspaceLoadStatus(); return; }
+  const entry = { promise: null };
+  const retrying = routeBackendDataErrors.has(target);
+  const current = () => hasAuthenticatedBackendSession() && scope === frontendSessionScope()
+    && routeBackendDataRequests.get(target) === entry;
+  routeBackendDataRequests.set(target, entry);
+  routeBackendDataErrors.delete(target);
+  renderWorkspaceLoadStatus();
+  entry.promise = (async () => {
+    try {
+      const uploadRoute = ["contractSeal", "electronicSeal"].includes(target);
+      const needsDirectory = ["workflow", "settings", "compose", "contractSeal", "electronicSeal"].includes(target);
+      // Entry forms can read their directory and workflow rules together.
+      // Settings must populate the company picker before loading candidates.
+      if (needsDirectory) {
+        if (["workflow", "settings"].includes(target)) {
+          await loadFinanceCompanyDirectory();
+          if (!current()) return;
+          await loadOfficialWorkflowConfig(silent, { throwOnError: true });
+        } else {
+          await Promise.all([loadFinanceCompanyDirectory(), loadOfficialWorkflowConfig(silent, { throwOnError: true })]);
+        }
+        if (!current()) return;
+        if (financeDirectoryState.status === "error") throw new Error("公司與部門資料暫時無法更新");
+      }
+      if (uploadRoute) {
+        renderUploadedSealCompanyOptions();
+        const [, readiness] = await Promise.all([
+          loadUploadedSealOptions(document.querySelector("#uploadedSealCompany")?.value || "", { throwOnError: true }),
+          refreshWorkflowReadinessForContext("uploadedSeal", { silent, force: retrying })
+        ]);
+        if (!current()) return;
+        if (readiness?.error) throw new Error("簽核資料暫時無法更新");
+        uploadedSealEditorRuntime.directoryLoading = false;
+        renderUploadedSealWorkbench();
+      }
+      if (target === "compose") {
+        const companyId = document.querySelector("#officialCompanySelect")?.value || "";
+        const [, readiness] = await Promise.all([
+          companyId ? loadOfficialSealOptions(companyId, { throwOnError: true }) : Promise.resolve(),
+          refreshWorkflowReadinessForContext("compose", { silent, force: retrying })
+        ]);
+        if (!current()) return;
+        if (readiness?.error) throw new Error("簽核資料暫時無法更新");
+      }
+      if (target === "workflow") await loadWorkflowDelegations(silent);
+      if (target === "inbound") await Promise.all([loadInboundDocuments(silent), loadInternalDispatches(silent), loadInboundAssigneeCandidates()]);
+      if (target === "seals") await loadCompanySealModule(true);
+      if (target === "jobs") await syncJobsFromBackend(silent);
+      if (target === "database") await syncDatabaseFromBackend(silent);
+      if (target === "reports") await loadUiUsageSummary(silent);
+      if (["ops", "settings"].includes(target)) await syncGoLiveAuditFromBackend(silent);
+      if (current()) routeBackendDataLoaded.add(target);
+    } catch (error) {
+      if (!current()) return;
+      routeBackendDataLoaded.delete(target);
+      routeBackendDataErrors.set(target, true);
+      if (["contractSeal", "electronicSeal"].includes(target)) {
+        uploadedSealEditorRuntime.directoryLoading = false;
+        setUploadedEditorSaveStatus("error", "公司與印章權限載入失敗，請重試");
+        renderUploadedSealWorkbench();
+      }
+      console.warn(`[edoc-route:${target}] background data load failed`, error);
+    } finally {
+      if (current()) {
+        routeBackendDataRequests.delete(target);
+        renderWorkspaceLoadStatus();
+      }
+    }
+  })();
+  return entry.promise;
 }
 
 function setModuleEntryProgress(percent, title, detail) {
@@ -5704,7 +5776,7 @@ async function refreshFinanceDirectory({ silent = true } = {}) {
   if (!hasAuthenticatedBackendSession()) return null;
   if (financeDirectoryRefreshPromise) return financeDirectoryRefreshPromise;
   const now = Date.now();
-  if (financeDirectoryState.lastAttemptAt && now - financeDirectoryState.lastAttemptAt < FINANCE_DIRECTORY_REFRESH_INTERVAL_MS) {
+  if (financeDirectoryState.status !== "error" && financeDirectoryState.lastAttemptAt && now - financeDirectoryState.lastAttemptAt < FINANCE_DIRECTORY_REFRESH_INTERVAL_MS) {
     return { throttled: true, state: financeDirectoryState };
   }
   financeDirectoryState.lastAttemptAt = now;
@@ -5756,6 +5828,8 @@ function stopFinanceDirectoryAutoRefresh() {
 }
 
 function clearFinanceDirectoryCache() {
+  resetRouteBackendData();
+  loadOfficialSealOptions.requestNo = (loadOfficialSealOptions.requestNo || 0) + 1;
   financeDirectoryRefreshGeneration += 1;
   companySealCompanies = [];
   companyRegistry = [];
@@ -9960,19 +10034,30 @@ function renderOfficialDispatchUnitOptions({ selected = "", preferAccount = fals
   if (selectionLocked) select.disabled = true;
 }
 
-async function loadOfficialSealOptions(companyId = document.querySelector("#officialCompanySelect")?.value || "") {
-  if (!companyId) {
+async function loadOfficialSealOptions(companyId = document.querySelector("#officialCompanySelect")?.value || "", { throwOnError = false } = {}) {
+  const requestNo = loadOfficialSealOptions.requestNo = (loadOfficialSealOptions.requestNo || 0) + 1;
+  const actorScope = frontendSessionScope();
+  const isCurrent = () => requestNo === loadOfficialSealOptions.requestNo
+    && hasAuthenticatedBackendSession() && actorScope === frontendSessionScope()
+    && companyId === (document.querySelector("#officialCompanySelect")?.value || "");
+  if (!companyId || !hasAuthenticatedBackendSession()) {
     officialSealOptions = [];
     renderOfficialSealOptions();
     return;
   }
+  let loadError = null;
   try {
     const result = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals`);
-    officialSealOptions = Array.isArray(result) ? result.filter((item) => item.is_active !== 0 && item.is_active !== false) : [];
+    if (!isCurrent()) return;
+    if (!Array.isArray(result)) throw new Error("seal_list_response_invalid");
+    officialSealOptions = result.filter((item) => item.is_active !== 0 && item.is_active !== false);
   } catch (error) {
+    if (!isCurrent()) return;
     officialSealOptions = [];
+    loadError = error;
   }
   renderOfficialSealOptions();
+  if (loadError && throwOnError) throw loadError;
 }
 
 function renderOfficialSealOptions() {
@@ -22092,8 +22177,12 @@ function selectedOfficialWorkflowSteps() {
 }
 
 const officialWorkflowConfigEditor = { categories: null, version: null, selectedCategory: "", dirty: false, saving: false, loading: false, conflict: false, candidates: [], candidateLoading: false, candidateRequest: 0 };
+let officialWorkflowConfigLoadRequest = null;
+let officialWorkflowConfigLoadGeneration = 0;
 
 function resetOfficialWorkflowConfigEditor() {
+  officialWorkflowConfigLoadGeneration += 1;
+  officialWorkflowConfigLoadRequest = null;
   const request = officialWorkflowConfigEditor.candidateRequest + 1;
   Object.assign(officialWorkflowConfigEditor, { scope: frontendSessionScope(), categories: null, version: null, selectedCategory: "", dirty: false, saving: false, loading: false, conflict: false, candidates: [], candidateLoading: false, candidateRequest: request });
   officialWorkflowConfig = { enabled_steps: [], steps: [], locked: true };
@@ -22254,35 +22343,64 @@ function renderOfficialWorkflowConfig() {
   renderComposeApprovalRoute();
 }
 
-async function loadOfficialWorkflowConfig(silent = true, { discardChanges = false } = {}) {
+async function loadOfficialWorkflowConfig(silent = true, { discardChanges = false, throwOnError = false } = {}) {
   if (!hasAuthenticatedBackendSession()) return;
-  if (officialWorkflowConfigEditor.saving || officialWorkflowConfigEditor.loading || (officialWorkflowConfigEditor.dirty && !discardChanges)) return;
   const scope = frontendSessionScope();
-  officialWorkflowConfigEditor.loading = true;
-  if (officialWorkflowConfigEditor.categories) renderEditableOfficialWorkflowConfig();
+  if (officialWorkflowConfigLoadRequest && officialWorkflowConfigLoadRequest.scope !== scope) {
+    officialWorkflowConfigLoadGeneration += 1;
+    officialWorkflowConfigLoadRequest = null;
+    officialWorkflowConfigEditor.loading = false;
+  }
+  if (officialWorkflowConfigEditor.saving || (officialWorkflowConfigEditor.dirty && !discardChanges)) return;
+  let request = officialWorkflowConfigLoadRequest;
+  if (!request) {
+    request = { scope, generation: ++officialWorkflowConfigLoadGeneration, promise: null, errorNotified: false };
+    officialWorkflowConfigLoadRequest = request;
+    const current = () => hasAuthenticatedBackendSession() && scope === frontendSessionScope()
+      && officialWorkflowConfigLoadRequest === request && officialWorkflowConfigLoadGeneration === request.generation;
+    officialWorkflowConfigEditor.loading = true;
+    if (officialWorkflowConfigEditor.categories) renderEditableOfficialWorkflowConfig();
+    request.promise = (async () => {
+      try {
+        const result = await backendRequest("/official-workflow-config");
+        if (!current() || officialWorkflowConfigEditor.saving || (officialWorkflowConfigEditor.dirty && !discardChanges)) return;
+        officialWorkflowConfig = result;
+        officialWorkflowConfigEditor.categories = null;
+        officialWorkflowConfigEditor.dirty = false;
+        officialWorkflowConfigEditor.conflict = false;
+        renderOfficialWorkflowConfig();
+        const message = document.querySelector("#officialWorkflowConfigMessage");
+        if (message) message.textContent = "已載入最新流程。修改後請按儲存流程。";
+        if (Number(officialWorkflowConfig.schema_version) >= 3) void loadOfficialWorkflowCandidates();
+        return result;
+      } catch (error) {
+        if (!current()) return;
+        const status = document.querySelector("#officialWorkflowConfigStatus");
+        if (status) status.textContent = "流程讀取失敗，請重新載入";
+        const message = document.querySelector("#officialWorkflowConfigMessage");
+        if (message) message.textContent = `流程讀取失敗，原畫面保留：${error.message}`;
+        throw error;
+      } finally {
+        if (current()) {
+          officialWorkflowConfigLoadRequest = null;
+          officialWorkflowConfigEditor.loading = false;
+          if (officialWorkflowConfigEditor.categories) renderEditableOfficialWorkflowConfig();
+        }
+      }
+    })();
+  }
+  // Every caller waits for the shared request. Background callers consume
+  // failures; route loaders may opt in to rejection to display their retry UI.
   try {
-    const result = await backendRequest("/official-workflow-config");
-    if (scope !== frontendSessionScope() || (officialWorkflowConfigEditor.dirty && !discardChanges)) return;
-    officialWorkflowConfig = result;
-    officialWorkflowConfigEditor.categories = null;
-    officialWorkflowConfigEditor.dirty = false;
-    officialWorkflowConfigEditor.conflict = false;
-    renderOfficialWorkflowConfig();
-    const message = document.querySelector("#officialWorkflowConfigMessage");
-    if (message) message.textContent = "已載入最新流程。修改後請按儲存流程。";
-    if (Number(officialWorkflowConfig.schema_version) >= 3) void loadOfficialWorkflowCandidates();
+    return await request.promise;
   } catch (error) {
-    if (scope !== frontendSessionScope()) return;
-    const status = document.querySelector("#officialWorkflowConfigStatus");
-    if (status) status.textContent = "流程讀取失敗，請重新載入";
-    const message = document.querySelector("#officialWorkflowConfigMessage");
-    if (message) message.textContent = `流程讀取失敗，原畫面保留：${error.message}`;
-    if (!silent) showToast(`簽核流程讀取失敗：${error.message}`);
-  } finally {
-    if (scope === frontendSessionScope()) {
-      officialWorkflowConfigEditor.loading = false;
-      if (officialWorkflowConfigEditor.categories) renderEditableOfficialWorkflowConfig();
+    if (!hasAuthenticatedBackendSession() || scope !== frontendSessionScope()
+      || officialWorkflowConfigLoadGeneration !== request.generation) return;
+    if (!silent && !request.errorNotified) {
+      request.errorNotified = true;
+      showToast(`簽核流程讀取失敗：${error.message}`);
     }
+    if (throwOnError) throw error;
   }
 }
 
@@ -25524,10 +25642,10 @@ function focusUploadedSealCompany() {
   select?.focus({ preventScroll: true });
 }
 
-async function loadUploadedSealOptions(companyId = document.querySelector("#uploadedSealCompany")?.value || "") {
+async function loadUploadedSealOptions(companyId = document.querySelector("#uploadedSealCompany")?.value || "", { throwOnError = false } = {}) {
   const requestNo = ++uploadedSealOptionsRequestNo;
   const actorScope = frontendSessionScope();
-  const isCurrent = () => requestNo === uploadedSealOptionsRequestNo && actorScope === frontendSessionScope()
+  const isCurrent = () => requestNo === uploadedSealOptionsRequestNo && hasAuthenticatedBackendSession() && actorScope === frontendSessionScope()
     && companyId === (document.querySelector("#uploadedSealCompany")?.value || "");
   if (!companyId || !hasAuthenticatedBackendSession()) {
     uploadedSealEditorRuntime.sealOptionsLoading = false;
@@ -25538,15 +25656,16 @@ async function loadUploadedSealOptions(companyId = document.querySelector("#uplo
   }
   uploadedSealEditorRuntime.sealOptionsLoading = true;
   renderUploadedSealOptions();
+  let loadError = null;
   try {
     const result = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals?editor=1`);
     if (!isCurrent()) return;
-    uploadedSealOptions = Array.isArray(result)
-      ? result.filter((seal) => seal.is_active !== 0 && seal.is_active !== false)
-      : [];
+    if (!Array.isArray(result)) throw new Error("seal_list_response_invalid");
+    uploadedSealOptions = result.filter((seal) => seal.is_active !== 0 && seal.is_active !== false);
   } catch (error) {
     if (!isCurrent()) return;
     uploadedSealOptions = [];
+    loadError = error;
     showToast(`印章清單載入失敗：${error.message}`);
   }
   uploadedSealEditorRuntime.sealOptionsLoading = false;
@@ -25558,6 +25677,7 @@ async function loadUploadedSealOptions(companyId = document.querySelector("#uplo
   // Refresh toolbar and seam actions too, including the unchanged-geometry
   // path, so a render during loading cannot leave valid actions disabled.
   renderUploadedSealWorkbench();
+  if (loadError && throwOnError) throw loadError;
 }
 
 function selectedUploadedSeal() {
@@ -26349,7 +26469,10 @@ async function ensureUploadedEditorDraft() {
     uploadedSealApplicationRuntime.savedKey = uploadedSealApplicationKey(applicationPayload);
     uploadedSealApplicationRuntime.editable = true;
     scheduleUploadedSealApplicationSave();
-    setUploadedEditorSaveStatus("saved", "私密草稿已建立");
+    setUploadedEditorSaveStatus(
+      uploadedSealEditorRuntime.uploading ? "checking" : "saved",
+      uploadedSealEditorRuntime.uploading ? "私密草稿已建立，正在準備上傳" : "私密草稿已建立"
+    );
     return uploadedSealEditorRuntime.documentId;
   }).finally(() => {
     if (uploadedSealApplicationScopeIsCurrent(creationScope, false)
@@ -26361,15 +26484,22 @@ async function ensureUploadedEditorDraft() {
 
 async function requestEditorUpload(file, assetKind = "source_pdf") {
   const requestScope = uploadedSealApplicationScopeSnapshot();
-  const documentId = await ensureUploadedEditorDraft();
+  // Both are required before authorization, but reading this local file does
+  // not depend on creating the private draft. Attach handlers to both tasks
+  // immediately so either failure is handled, without a second mutation.
+  const [draftResult, hashResult] = await Promise.allSettled([ensureUploadedEditorDraft(), hashBlob(file)]);
+  // Let a started draft creation settle before reporting failure. Otherwise a
+  // late successful creation can overwrite the upload error with "saved".
+  if (draftResult.status === "rejected") throw draftResult.reason;
+  if (hashResult.status === "rejected") throw hashResult.reason;
+  const documentId = draftResult.value;
+  const sha256 = hashResult.value;
   // Draft creation may set the document ID, but must never adopt a different
   // session/epoch or an unrelated draft after its awaited result arrives.
   if (!uploadedSealApplicationScopeIsCurrent(requestScope, false) || documentId !== uploadedSealEditorRuntime.documentId) {
     throw new Error("登入或草稿已切換，請重新上傳。");
   }
   const scope = uploadedSealApplicationScopeSnapshot();
-  const sha256 = await hashBlob(file);
-  if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，請重新上傳。");
   const intent = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/editor-uploads`, {
     method: "POST",
     body: JSON.stringify({
@@ -27668,6 +27798,61 @@ async function ensureUploadedOriginalPdfProxy(page, runtime) {
   return pdf.getPage(Number(page.sourcePageIndex) + 1);
 }
 
+async function paintUploadedPdfCanvas(proxy, viewport, reviewMode, sourceKey = "") {
+  const canvas = document.querySelector("#uploadedPdfCanvas");
+  const stage = document.querySelector("#uploadedPdfStage");
+  if (!canvas || !stage || !proxy) return false;
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const outputScale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  const width = Math.floor(viewport.width * outputScale);
+  const height = Math.floor(viewport.height * outputScale);
+  const key = JSON.stringify([scope, reviewMode, sourceKey, uploadedSealEditorRuntime.currentPageId,
+    viewport.width, viewport.height, viewport.scale, viewport.rotation, viewport.transform, outputScale]);
+  const existing = uploadedSealEditorRuntime.canvasPaint;
+  if (existing && existing.key === key && existing.proxy === proxy && existing.canvas === canvas
+    && (!existing.started || (canvas.width === width && canvas.height === height
+      && canvas.style.width === existing.cssWidth && canvas.style.height === existing.cssHeight))) {
+    return existing.promise;
+  }
+  const previousTask = uploadedSealEditorRuntime.renderTask;
+  previousTask?.cancel?.();
+  const paint = { key, proxy, canvas, started: false, promise: null };
+  uploadedSealEditorRuntime.canvasPaint = paint;
+  const current = () => uploadedSealEditorRuntime.canvasPaint === paint
+    && uploadedSealApplicationScopeIsCurrent(scope)
+    && uploadedSealEditorRuntime.reviewMode === reviewMode;
+  paint.promise = (async () => {
+    try {
+      // PDF.js must finish releasing the old canvas before the next page uses it.
+      if (previousTask?.promise) await previousTask.promise.catch(() => {});
+      if (!current()) return false;
+      canvas.width = width;
+      canvas.height = height;
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+      // CSSOM serializes fractional pixels (e.g. 509.090895… -> 509.091).
+      // Compare its canonical readback while the key keeps exact geometry.
+      paint.cssWidth = canvas.style.width;
+      paint.cssHeight = canvas.style.height;
+      stage.style.width = `${viewport.width}px`;
+      stage.style.height = `${viewport.height}px`;
+      paint.started = true;
+      const task = proxy.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport,
+        transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
+        annotationMode: window.pdfjsLib.AnnotationMode?.DISABLE ?? 0 });
+      uploadedSealEditorRuntime.renderTask = task;
+      await task.promise;
+      return current();
+    } catch (error) {
+      const report = current() && error?.name !== "RenderingCancelledException";
+      if (uploadedSealEditorRuntime.canvasPaint === paint) uploadedSealEditorRuntime.canvasPaint = null;
+      if (report) throw error;
+      return false;
+    }
+  })();
+  return paint.promise;
+}
+
 async function renderUploadedPdfPage() {
   const canvas = document.querySelector("#uploadedPdfCanvas");
   const stage = document.querySelector("#uploadedPdfStage");
@@ -27679,6 +27864,8 @@ async function renderUploadedPdfPage() {
   const reviewMode = uploadedSealEditorRuntime.reviewMode;
   const renderNonce = ++uploadedSealEditorRuntime.renderNonce;
   if (reviewMode === "changes") {
+    uploadedSealEditorRuntime.renderTask?.cancel?.();
+    uploadedSealEditorRuntime.canvasPaint = null;
     canvas.hidden = true;
     stage.hidden = true;
     renderUploadedEditorSvgLayer();
@@ -27702,6 +27889,8 @@ async function renderUploadedPdfPage() {
     return renderUploadedReadOnlyPdfProxy(originalProxy, originalProxy.rotate, "不可變原稿", renderNonce, reviewMode);
   }
   if (!page || !runtime) {
+    uploadedSealEditorRuntime.renderTask?.cancel?.();
+    uploadedSealEditorRuntime.canvasPaint = null;
     canvas.hidden = true;
     empty?.toggleAttribute("hidden", false);
     stampLayer?.toggleAttribute("hidden", true);
@@ -27720,21 +27909,11 @@ async function renderUploadedPdfPage() {
   const viewport = runtime.proxy.getViewport({ scale: uploadedSealEditorRuntime.zoom, rotation: page.rotation });
   uploadedSealEditorRuntime.currentViewport = viewport;
   uploadedSealEditorRuntime.currentPageProxy = runtime.proxy;
-  const outputScale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
-  canvas.width = Math.floor(viewport.width * outputScale);
-  canvas.height = Math.floor(viewport.height * outputScale);
-  canvas.style.width = `${viewport.width}px`;
-  canvas.style.height = `${viewport.height}px`;
-  stage.style.width = `${viewport.width}px`;
-  stage.style.height = `${viewport.height}px`;
-  const context = canvas.getContext("2d", { alpha: false });
-  uploadedSealEditorRuntime.renderTask?.cancel?.();
-  const renderTask = runtime.proxy.render({ canvasContext: context, viewport, transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0], annotationMode: window.pdfjsLib.AnnotationMode?.DISABLE ?? 0 });
-  uploadedSealEditorRuntime.renderTask = renderTask;
   try {
-    await renderTask.promise;
+    if (!await paintUploadedPdfCanvas(runtime.proxy, viewport, reviewMode, page.sourceAssetId)) return;
   } catch (error) {
-    if (error?.name !== "RenderingCancelledException") showToast("PDF 頁面顯示失敗，請重新整理後再試。");
+    if (renderNonce === uploadedSealEditorRuntime.renderNonce) showToast("PDF 頁面顯示失敗，請重新整理後再試。");
+    return;
   }
   if (renderNonce !== uploadedSealEditorRuntime.renderNonce || uploadedSealEditorRuntime.reviewMode !== reviewMode) return;
   renderUploadedEditorSvgLayer();
@@ -27756,18 +27935,9 @@ async function renderUploadedReadOnlyPdfProxy(proxy, rotation, label, renderNonc
   const runtime = { proxy };
   const scale = uploadedSealEditorRuntime.fitPage ? calculateUploadedEditorFitScale(runtime, rotation) : uploadedSealEditorRuntime.zoom;
   const viewport = proxy.getViewport({ scale, rotation });
-  const ratio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
-  canvas.width = Math.floor(viewport.width * ratio);
-  canvas.height = Math.floor(viewport.height * ratio);
-  canvas.style.width = `${viewport.width}px`;
-  canvas.style.height = `${viewport.height}px`;
-  stage.style.width = `${viewport.width}px`;
-  stage.style.height = `${viewport.height}px`;
   uploadedSealEditorRuntime.currentViewport = viewport;
-  uploadedSealEditorRuntime.renderTask?.cancel?.();
-  const task = proxy.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0], annotationMode: window.pdfjsLib.AnnotationMode?.DISABLE ?? 0 });
-  uploadedSealEditorRuntime.renderTask = task;
-  try { await task.promise; } catch (error) { if (error?.name !== "RenderingCancelledException") throw error; }
+  if (!await paintUploadedPdfCanvas(proxy, viewport, reviewMode,
+    `${uploadedSealEditorRuntime.preparedFileId || ""}:${uploadedSealEditorRuntime.preparedSha256 || ""}`)) return;
   if (renderNonce !== uploadedSealEditorRuntime.renderNonce || uploadedSealEditorRuntime.reviewMode !== reviewMode) return;
   const svg = document.querySelector("#uploadedEditorSvgLayer");
   svg?.replaceChildren();
@@ -29169,14 +29339,16 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
       setUploadedEditorSaveStatus("saved", "已取消上傳，目前內容保持不變");
       return;
     }
-    setUploadedEditorSaveStatus("uploading", "TUS 私密直傳中 0%");
+    setUploadedEditorSaveStatus("checking", "正在準備私密草稿與檔案驗證");
     intent = await requestEditorUpload(file, "source_pdf");
-    await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) setUploadedEditorSaveStatus("uploading", `TUS 私密直傳中 ${Math.round(progress * 100)}%`); });
+    setUploadedEditorSaveStatus("uploading", "正在上傳 PDF…");
+    await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) setUploadedEditorSaveStatus("uploading", `PDF 已上傳 ${Math.round(progress * 100)}%`); });
     assertEditorUploadCurrent(intent);
     setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
     const finalized = await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
     const resolved = await resolveUploadedPdfConversion(file, intent, finalized);
     if (!resolved) return;
+    setUploadedEditorSaveStatus("checking", "安全檢查完成，正在載入 PDF 編輯頁面");
     await loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: false });
     assertEditorUploadCurrent(intent);
     uploadedSealPdf = { file: resolved.file, name: resolved.file.name, size: resolved.file.size, hash: resolved.intent.sha256, assetId: resolved.finalized.asset?.id || resolved.finalized.asset?.asset_id || resolved.intent.asset_id };
@@ -32591,6 +32763,7 @@ document.querySelector("#headerNotificationBtn")?.addEventListener("click", () =
   }, 80);
 });
 document.querySelector("#headerRefreshBtn")?.addEventListener("click", refreshCurrentWorkspace);
+document.querySelector("#workspaceLoadRetryBtn")?.addEventListener("click", () => void loadRouteBackendData(activeRouteTarget, false));
 document.querySelector("#returnPortalBtn")?.addEventListener("click", () => {
   returnToLoggingPortalModulePicker();
 });

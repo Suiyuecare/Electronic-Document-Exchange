@@ -446,7 +446,7 @@ class SeparateSupabaseStorageTests(unittest.TestCase):
             )
 
         self.assertEqual(promoted, (expected_path, storage_job["id"], "A" * 32))
-        self.assertEqual(download.call_count, 2)
+        self.assertEqual(download.call_count, 1)
 
         with mock.patch.object(
             backend,

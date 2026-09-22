@@ -25876,7 +25876,13 @@ def _inspect_editor_pdf_object_safety(root: Any) -> None:
         seen.add(identity)
         if len(seen) > 200000:
             raise ValueError("editor_pdf_structure_too_complex")
-        value = _pdf_resolved(raw)
+        try:
+            resolver = getattr(raw, "get_object", None)
+            value = resolver() if callable(resolver) else raw
+        except Exception:
+            raise ValueError("editor_pdf_corrupt:unresolved_object") from None
+        if hasattr(raw, "idnum") and value is None:
+            raise ValueError("editor_pdf_corrupt:unresolved_object")
         if isinstance(value, dict):
             if str(value.get("/FT") or "") == "/Sig" or value.get("/ByteRange") is not None:
                 raise ValueError("editor_pdf_digital_signature_not_supported")
@@ -25907,8 +25913,11 @@ def inspect_editor_pdf(data: bytes, *, allow_non_a4: bool = False) -> Dict[str, 
         reader = PdfReader(io.BytesIO(data), strict=True)
         if reader.is_encrypted:
             raise ValueError("editor_pdf_encrypted")
+        # Walk parsed dictionaries (including stream dictionaries), not raw
+        # encoded stream bytes: scanned images can coincidentally contain /JS,
+        # /ByteRange or /XFA without defining any executable PDF object.
+        _inspect_editor_pdf_object_safety(reader.trailer.get("/Root"))
         root = _pdf_resolved(reader.trailer.get("/Root")) or {}
-        _inspect_editor_pdf_object_safety(root)
         names = _pdf_resolved(root.get("/Names")) or {}
         if root.get("/OpenAction") is not None or root.get("/AA") is not None:
             action = _pdf_resolved(root.get("/OpenAction")) or _pdf_resolved(root.get("/AA")) or {}
@@ -25917,12 +25926,10 @@ def inspect_editor_pdf(data: bytes, *, allow_non_a4: bool = False) -> Dict[str, 
             raise ValueError("editor_pdf_javascript_not_supported")
         if names.get("/EmbeddedFiles") is not None:
             raise ValueError("editor_pdf_embedded_files_not_supported")
-        if names.get("/JavaScript") is not None or b"/JavaScript" in data or b"/JS" in data:
+        if names.get("/JavaScript") is not None:
             raise ValueError("editor_pdf_javascript_not_supported")
-        if b"/ByteRange" in data:
-            raise ValueError("editor_pdf_digital_signature_not_supported")
         acroform = _pdf_resolved(root.get("/AcroForm")) or {}
-        if acroform.get("/XFA") is not None or b"/XFA" in data:
+        if acroform.get("/XFA") is not None:
             raise ValueError("editor_pdf_xfa_not_supported")
         fields = _pdf_resolved(acroform.get("/Fields")) or []
         for raw_field in fields:
@@ -36944,11 +36951,18 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
 def supabase_list_official_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = supabase_official_session_user(session)
     query = query or {}
-    rows = supabase_filter_rows("official_documents", {}, order="created_at.desc", limit=300)
     status = (query.get("status") or [""])[0]
     company_id = (query.get("company_id") or [""])[0]
     applicant_id = (query.get("applicant_id") or [""])[0]
     scope = (query.get("scope") or [""])[0]
+    filters = {key: value for key, value in (
+        ("current_status", status), ("company_id", company_id), ("applicant_id", applicant_id),
+    ) if value}
+    if scope == "mine":
+        if applicant_id and applicant_id != user.get("id"):
+            return []
+        filters["applicant_id"] = str(user.get("id") or "")
+    rows = supabase_filter_rows("official_documents", filters, order="created_at.desc", limit=300)
     user_company_id = str(user.get("company_id") or "").strip()
     items: List[Dict[str, Any]] = []
     for item in rows:
@@ -36957,6 +36971,10 @@ def supabase_list_official_documents(query: Dict[str, List[str]] | None, session
         if company_id and item.get("company_id") != company_id:
             continue
         if applicant_id and item.get("applicant_id") != applicant_id:
+            continue
+        # Avoid loading four child resources for somebody else's request.
+        # Keep this check even though the Data API also filters the query.
+        if scope == "mine" and item.get("applicant_id") != user.get("id"):
             continue
         all_steps = supabase_official_document_steps(item["id"])
         if all_steps:
@@ -37563,6 +37581,7 @@ def _supabase_promote_editor_asset_to_immutable_storage(
     bucket = str(claimed.get("final_bucket") or "")
     final_path = str(claimed.get("final_path") or "")
     try:
+        promoted = None
         try:
             supabase_storage_upload(
                 final_path,
@@ -37577,8 +37596,12 @@ def _supabase_promote_editor_asset_to_immutable_storage(
                 raise ValueError("editor_asset_promotion_failed") from upload_error
             if len(existing) != len(data) or sha256_bytes(existing) != digest.upper():
                 raise ValueError("editor_immutable_asset_conflict") from None
+            promoted = existing
 
-        promoted = supabase_storage_download(final_path, bucket)
+        # The digest path is server-only and create-only. An exact readback on
+        # retry is already the verification; downloading it again adds no proof.
+        if promoted is None:
+            promoted = supabase_storage_download(final_path, bucket)
         if len(promoted) != len(data) or sha256_bytes(promoted) != digest.upper():
             raise ValueError("editor_immutable_asset_verification_failed")
         return final_path, str(claimed.get("id") or ""), lease_token
@@ -37694,30 +37717,30 @@ def supabase_fail_official_editor_upload(
     return {"ok": True, "idempotent": False, "asset": _editor_asset_public(refreshed)}
 
 
+def _supabase_stale_editor_storage_jobs(document_id: str, before: datetime) -> List[Dict[str, Any]]:
+    # Storage job expiry has a canonical ISO format enforced by the schema.
+    # Read one bounded due-work batch, not five unfiltered status inventories.
+    params = {
+        "select": "*",
+        "status": "in.(pending,promoting,committed,cleaning,cleanup_failed)",
+        "token_expires_at": f"lt.{before.isoformat(timespec='seconds')}",
+        "order": "token_expires_at.asc,id.asc",
+        "limit": "500",
+    }
+    if document_id:
+        params["document_id"] = f"eq.{document_id}"
+    rows = supabase_request("GET", f"official_document_editor_storage_jobs?{urllib.parse.urlencode(params)}")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or (document_id and row.get("document_id") != document_id) for row in rows):
+        raise RuntimeError("editor_storage_cleanup_scope_invalid")
+    return rows
+
+
 def supabase_cleanup_stale_official_editor_uploads(*, document_id: str = "") -> Dict[str, Any]:
-    jobs: List[Dict[str, Any]] = []
-    for status in (
-        "pending",
-        "promoting",
-        "committed",
-        "cleaning",
-        "cleanup_failed",
-    ):
-        filters: Dict[str, Any] = {"status": status}
-        if document_id:
-            filters["document_id"] = document_id
-        jobs.extend(
-            supabase_filter_rows(
-                "official_document_editor_storage_jobs",
-                filters,
-                order="token_expires_at.asc",
-                limit=500,
-            )
-        )
+    grace = timedelta(minutes=5)
+    jobs = _supabase_stale_editor_storage_jobs(document_id, datetime.now() - grace)
 
     cleaned: List[str] = []
     failed: List[str] = []
-    grace = timedelta(minutes=5)
     for job in jobs:
         expires_at = parse_time(str(job.get("token_expires_at") or ""))
         if expires_at == datetime.min or expires_at + grace >= datetime.now():

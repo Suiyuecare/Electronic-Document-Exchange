@@ -102,6 +102,7 @@ const event={preventDefault(){}};
 
     CONFIG_SETUP = r'''
 let scope='actor',calls=[],rendered=0;
+let officialWorkflowConfigLoadRequest=null,officialWorkflowConfigLoadGeneration=0;
 let officialWorkflowConfig={schema_version:3,version:8,available_roles:[{key:'applicant_manager',name:'主管'}]};
 const original={synthetic:{nodes:[{id:'N',name:'指定審核',assignee:{type:'user',user_id:'FORMAL'}}]}};
 const officialWorkflowConfigEditor={categories:structuredClone(original),version:8,dirty:true,saving:false,conflict:false};
