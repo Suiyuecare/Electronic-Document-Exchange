@@ -71,6 +71,31 @@ begin
 end;
 $compose_editor_resilience_gate$;
 
+do $worklist_receipt_rpc_gate$
+declare
+  v_proc record;
+  v_rpc text;
+  v_role text;
+begin
+  foreach v_rpc in array array['edoc_confirm_official_document(jsonb)','edoc_list_official_document_candidates(jsonb)'] loop
+    select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure('public.' || v_rpc);
+    if not found then raise exception 'worklist_receipt_rpc_missing'; end if;
+    if v_proc.prosecdef or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+       or not pg_catalog.has_function_privilege('service_role',v_proc.oid,'EXECUTE') then
+      raise exception 'worklist_receipt_rpc_security_mismatch';
+    end if;
+    foreach v_role in array array['anon','authenticated'] loop
+      if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+        raise exception 'worklist_receipt_rpc_browser_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,pg_catalog.acldefault('f',v_proc.proowner))) a where a.grantee=0 and a.privilege_type='EXECUTE') then
+      raise exception 'worklist_receipt_rpc_public_grant';
+    end if;
+  end loop;
+end;
+$worklist_receipt_rpc_gate$;
+
 do $configurable_workflow_gate$
 declare
   v_schema text := 'public';

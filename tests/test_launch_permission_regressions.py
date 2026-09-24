@@ -24,11 +24,10 @@ class SupabaseListScopeRegressionTest(unittest.TestCase):
         session = {"user": user, "permissions": ["official_documents.all_records"] if privileged else []}
         with (
             mock.patch.object(backend, "supabase_official_session_user", return_value=user),
-            mock.patch.object(backend, "supabase_filter_rows", return_value=copy.deepcopy(rows)),
-            mock.patch.object(backend, "supabase_official_document_steps", return_value=[]),
-            mock.patch.object(backend, "supabase_official_document_actor_snapshots", return_value=[]),
-            mock.patch.object(backend, "supabase_official_dispatch_record", return_value=None),
-            mock.patch.object(backend, "supabase_official_document_stamp_request", return_value=None),
+            mock.patch.object(backend, "supabase_request", return_value={"items": [
+                {"document": {**row, "created_at": f"2026-09-{24-index:02d} 10:00:00"}, "steps": [], "snapshots": []}
+                for index, row in enumerate(copy.deepcopy(rows))
+            ]}),
         ):
             return backend.supabase_list_official_documents({"scope": [scope]}, session)
 
