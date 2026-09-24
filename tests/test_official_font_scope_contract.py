@@ -59,7 +59,7 @@ class OfficialFontScopeContractTest(unittest.TestCase):
         self.assertIn("official_pdf_font_missing_glyphs", javascript)
         self.assertIn("內容含教育部標準楷書不支援的罕見字元", javascript)
         self.assertIn("entry-bootstrap.js?v=20260914-early-handoff-r1", html)
-        self.assertIn("styles.css?v=20260924-seven-fixes-r1", html)
+        self.assertIn("styles.css?v=20260925-finance-header-r1", html)
         self.assertIn("app.js?v=20260924-seven-fixes-r1", html)
 
         editor_rule = css[css.index("#uploadedSealTextInput") : css.index(".draft-preview-heading-actions")]

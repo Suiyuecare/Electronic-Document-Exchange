@@ -11307,7 +11307,7 @@ body[data-session-state="revalidating"] .workspace::after {
 .topbar {
   display: grid;
   grid-template-areas: "title bell actions status";
-  grid-template-columns: minmax(0, 1fr) max-content max-content max-content;
+  grid-template-columns: max-content max-content max-content minmax(0, 1fr);
   column-gap: 10px;
   align-content: center;
   align-items: center;
@@ -11319,6 +11319,15 @@ body[data-session-state="revalidating"] .workspace::after {
   border-bottom: 1px solid var(--line);
   background: rgba(255, 250, 242, 0.92);
   backdrop-filter: blur(16px);
+  font-optical-sizing: auto;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.topbar > div.mobile-topbar-heading {
+  display: flex;
+  min-width: 0;
 }
 
 .mobile-topbar-heading {
@@ -11333,7 +11342,8 @@ body[data-session-state="revalidating"] .workspace::after {
   color: var(--ink);
   font-size: 22px;
   font-weight: 1000;
-  line-height: 1.2;
+  line-height: normal;
+  letter-spacing: 0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -11358,6 +11368,36 @@ body[data-session-state="revalidating"] .workspace::after {
 .topbar-notification-button {
   grid-area: bell;
   border-radius: 8px;
+  display: inline-flex;
+  width: 30px;
+  min-width: 30px;
+  height: 26px;
+  min-height: 0;
+  padding: 5px 7px;
+  align-items: center;
+  justify-content: center;
+  border-color: #ead8c2;
+  color: #7c3f00;
+}
+
+.topbar-notification-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.header-notification-dot {
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border: 1.5px solid #fff;
+  background: var(--accent);
+}
+
+.topbar-notification-button:hover {
+  border-color: #ead8c2;
+  background: #fff;
+  color: #7c3f00;
 }
 
 .module-switch-actions {
@@ -11371,14 +11411,43 @@ body[data-session-state="revalidating"] .workspace::after {
 }
 
 .module-switch-button {
+  flex: 0 0 auto;
+  gap: 0;
   min-height: 38px;
   padding: 8px 14px;
   font-size: 13px;
+  line-height: normal;
 }
 
 .module-switch-button.primary {
   border-color: var(--accent);
   background: var(--accent);
+}
+
+.module-switch-button:hover {
+  border-color: var(--line);
+  background: #fff;
+  box-shadow: 0 8px 20px rgba(160, 86, 10, 0.12);
+  transform: translateY(-1px);
+}
+
+.module-switch-button.primary:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.module-todo-badge {
+  display: inline-flex;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 6px;
+  margin-left: 6px;
+  align-items: center;
+  justify-content: center;
+  background: #c2410c;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
 }
 
 .top-info {
@@ -11390,6 +11459,14 @@ body[data-session-state="revalidating"] .workspace::after {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Keep Finance's compact desktop sequence without letting an unusually long
+   page title push account controls outside the available workspace. */
+@media (min-width: 1181px) {
+  .topbar > .mobile-topbar-heading {
+    max-width: 360px;
+  }
 }
 
 .badge.ok,
