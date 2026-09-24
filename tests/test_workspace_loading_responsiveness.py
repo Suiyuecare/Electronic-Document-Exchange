@@ -27,10 +27,10 @@ const tick=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
 function setup(){
  const nodes={};for(const name of ['workspaceLoadStatus','workspaceLoadLabel','workspaceLoadRetryBtn'])nodes['#'+name]={hidden:true,textContent:'',dataset:{}};
  nodes['#uploadedSealCompany']={value:'company-a'};nodes['#officialCompanySelect']={value:'compose-company'};
- const c={console:{warn(){}},Map,Set,Promise,Error,scope:'user-a:company-a',authenticated:true,activeRouteTarget:'electronicSeal',calls:[],pending:[],renders:0,
+ const c={console:{warn(){}},Map,Set,Promise,Error,scope:'user-a:company-a',authenticated:true,activeRouteTarget:'electronicSeal',headerBackendSyncState:{status:'idle',syncedAt:''},calls:[],pending:[],renders:0,
    routeBackendDataLoaded:new Set(),routeBackendDataRequests:new Map(),routeBackendDataErrors:new Map(),routeBackendDataScope:'',
    uploadedSealEditorRuntime:{directoryLoading:true},financeDirectoryState:{status:'synced'},inboundDocumentLoadState:{scope:'user-a:company-a'},
-   document:{querySelector:s=>nodes[s]||null},nodes,frontendSessionScope:()=>c.scope,hasAuthenticatedBackendSession:()=>c.authenticated,
+   document:{querySelector:s=>nodes[s]||null},nodes,frontendSessionScope:()=>c.scope,hasAuthenticatedBackendSession:()=>c.authenticated,updateHeaderStatus(){},
    renderUploadedSealCompanyOptions(){},renderUploadedSealWorkbench(){c.renders++},setUploadedEditorSaveStatus(){}};
  for(const name of ['loadFinanceCompanyDirectory','loadOfficialWorkflowConfig','loadUploadedSealOptions','loadOfficialSealOptions','refreshWorkflowReadinessForContext','loadWorkflowDelegations','loadInboundDocuments','loadInternalDispatches','loadInboundAssigneeCandidates','loadCompanySealModule','syncJobsFromBackend','syncDatabaseFromBackend','loadUiUsageSummary','syncGoLiveAuditFromBackend'])
    c[name]=(...args)=>{const d=deferred();c.calls.push({name,args});c.pending.push({name,...d});return d.promise};

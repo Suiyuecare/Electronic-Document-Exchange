@@ -15793,6 +15793,136 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
     }
 
 
+OFFICIAL_OPERATIONAL_REPORT_MAX_ROWS = 5000
+
+
+def official_operational_report_from_rows(
+    rows: Iterable[Dict[str, Any]], *, period: str, period_start: str, unit: str = "", agency: str = "",
+) -> Dict[str, Any]:
+    period_labels = {"today": "今日", "7d": "近 7 日", "30d": "近 30 日", "ytd": "本年度"}
+    unit_filter = str(unit or "").strip()
+    agency_filter = str(agency or "").strip().casefold()
+    selected = []
+    for row in rows:
+        row_unit = str(row.get("applicant_department_name") or row.get("dispatch_unit") or "未設定單位").strip()
+        recipient = str(row.get("recipient") or "")
+        subject = str(row.get("subject") or "")
+        if unit_filter and row_unit != unit_filter:
+            continue
+        if agency_filter and agency_filter not in f"{recipient} {subject}".casefold():
+            continue
+        selected.append((row, row_unit))
+    completed_statuses = {"closed", "dispatched", "sent_by_applicant"}
+    returned_statuses = {"rejected", "returned", "returned_to_applicant_for_send"}
+    cancelled_statuses = {"cancelled", "withdrawn"}
+    status_counts: Dict[str, int] = {}
+    units: Dict[str, Dict[str, int]] = {}
+    completed = returned = cancelled = pending = drafts = 0
+    for row, row_unit in selected:
+        status = str(row.get("current_status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        group = units.setdefault(row_unit, {"unit": row_unit, "total": 0, "pending": 0, "completed": 0, "draft": 0})
+        group["total"] += 1
+        if status in completed_statuses:
+            completed += 1
+            group["completed"] += 1
+        elif status in returned_statuses:
+            returned += 1
+        elif status in cancelled_statuses:
+            cancelled += 1
+        elif status == "draft":
+            drafts += 1
+            group["draft"] += 1
+        else:
+            pending += 1
+            group["pending"] += 1
+    return {
+        "period": period_labels[period],
+        "periodStart": period_start,
+        "unit": unit_filter or "全部單位",
+        "agency": str(agency or "").strip() or "全部受文者",
+        "total": len(selected),
+        "pending": pending,
+        "completed": completed,
+        "returned": returned,
+        "cancelled": cancelled,
+        "draft": drafts,
+        "statusRows": [{"status": key, "count": value} for key, value in sorted(status_counts.items(), key=lambda item: (-item[1], item[0]))],
+        "unitRows": sorted(units.values(), key=lambda item: (-item["pending"], -item["total"], item["unit"])),
+        "scope": "僅含目前登入公司、所選期間的電子用印案件；不包含政府交換或未接入的 SLA 指標。",
+        "generatedAt": now(),
+    }
+
+
+def official_operational_report_period(period: str) -> Dict[str, str]:
+    allowed = {"today", "7d", "30d", "ytd"}
+    if period not in allowed:
+        raise ValueError("operational_report_period_invalid")
+    reporting_timezone = ZoneInfo("Asia/Taipei")
+    today = datetime.now(reporting_timezone).date()
+    start = {
+        "today": today,
+        "7d": today - timedelta(days=6),
+        "30d": today - timedelta(days=29),
+        "ytd": today.replace(month=1, day=1),
+    }[period]
+    local_start = datetime.combine(start, datetime.min.time(), tzinfo=reporting_timezone)
+    local_end = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=reporting_timezone)
+    sqlite_start = local_start.astimezone().replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+    sqlite_end = local_end.astimezone().replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+    utc_start = local_start.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+    utc_end = local_end.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+    return {
+        "today": today.isoformat(),
+        "periodStart": start.isoformat(),
+        "sqliteStart": sqlite_start,
+        "sqliteEnd": sqlite_end,
+        "supabaseStart": utc_start,
+        "supabaseEnd": utc_end,
+    }
+
+
+def official_operational_report(
+    query: Dict[str, List[str]] | None, session: Dict[str, Any] | None, *, conn: sqlite3.Connection | None = None,
+) -> Dict[str, Any]:
+    if not session_has_any_permission(session, ["reports.operational_view"]):
+        raise PermissionError("operational_report_forbidden")
+    query = query or {}
+    period = str((query.get("period") or ["7d"])[0])
+    period_bounds = official_operational_report_period(period)
+    today = period_bounds["today"]
+    period_start = period_bounds["periodStart"]
+    unit = str((query.get("unit") or [""])[0])[:120].strip()
+    agency = str((query.get("agency") or [""])[0])[:120].strip()
+    user = official_session_user(session) if conn is not None else supabase_official_session_user(session)
+    company_id = str(user.get("company_id") or "").strip()
+    if not company_id:
+        raise ValueError("finance_company_required")
+    if conn is not None:
+        rows = conn.execute(
+            """SELECT id,current_status,created_at,updated_at,applicant_department_name,dispatch_unit,recipient,subject
+                 FROM official_documents WHERE company_id=? AND created_at>=? AND created_at<?
+                 ORDER BY created_at DESC LIMIT ?""",
+            (company_id, period_bounds["sqliteStart"], period_bounds["sqliteEnd"], OFFICIAL_OPERATIONAL_REPORT_MAX_ROWS + 1),
+        ).fetchall()
+        if len(rows) > OFFICIAL_OPERATIONAL_REPORT_MAX_ROWS:
+            raise ValueError("operational_report_window_too_large")
+        data = [row_to_dict(row) for row in rows]
+    else:
+        params = urllib.parse.urlencode({
+            "select": "id,current_status,created_at,updated_at,applicant_department_name,dispatch_unit,recipient,subject",
+            "company_id": f"eq.{company_id}",
+            "created_at": f"gte.{period_bounds['supabaseStart']}",
+            "and": f"(created_at.lt.{period_bounds['supabaseEnd']})",
+            "order": "created_at.desc",
+            "limit": str(OFFICIAL_OPERATIONAL_REPORT_MAX_ROWS + 1),
+        })
+        data = supabase_request("GET", f"official_documents?{params}")
+        if len(data) > OFFICIAL_OPERATIONAL_REPORT_MAX_ROWS:
+            raise ValueError("operational_report_window_too_large")
+    return official_operational_report_from_rows(data, period=period, period_start=period_start, unit=unit, agency=agency)
+
+
 def dashboard(conn: sqlite3.Connection, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
     def scalar(sql: str, params: Tuple[Any, ...] = ()) -> int:
         return int(conn.execute(sql, params).fetchone()[0])
@@ -24403,6 +24533,10 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
             if not official_designated_actor_allowed(target, applicant, official_company_row(conn, document["company_id"]), document):
                 raise ValueError("official_workflow_add_sign_target_invalid")
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
+    if action != "withdraw":
+        next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
+        if not next_step or not active_user_by_id(conn, str(next_step.get("approver_user_id") or "")):
+            raise ValueError("official_workflow_next_approver_inactive")
     savepoint = "workflow_mutation_" + secrets.token_hex(4)
     conn.execute(f"SAVEPOINT {savepoint}")
     try:
@@ -40063,6 +40197,10 @@ def supabase_mutate_official_workflow(document_id: str, action: str, payload: Di
             if not official_designated_actor_allowed(target, applicant, supabase_official_company_row(document["company_id"]), document):
                 raise ValueError("official_workflow_add_sign_target_invalid")
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
+    if action != "withdraw":
+        next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
+        if not next_step or not supabase_user_by_id(str(next_step.get("approver_user_id") or "")):
+            raise ValueError("official_workflow_next_approver_inactive")
     raw = supabase_request("POST", "rpc/edoc_mutate_official_workflow", {"p_request": plan})
     response = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
     if not isinstance(response, dict) or not response.get("ok") or not response.get("committed") or response.get("document_id") != document_id or response.get("operation_id") != operation_id:
@@ -47136,6 +47274,22 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["dashboard"]:
                     self.send_json(supabase_dashboard())
                     return
+                if method == "GET" and parts == ["reports", "operational-summary"]:
+                    session = supabase_current_session(self.bearer_token())
+                    if not session:
+                        self.send_json({"error": "unauthorized"}, 401)
+                        return
+                    if not session_has_any_permission(session, ["reports.operational_view"]):
+                        self.send_json({"error": "forbidden", "detail": "operational_report_forbidden"}, 403)
+                        return
+                    try:
+                        report = official_operational_report(query, session)
+                    except ValueError as exc:
+                        code = str(exc)
+                        self.send_json({"error": code, "detail": code}, 422)
+                        return
+                    self.send_json(report)
+                    return
                 if method == "GET" and parts == ["search"]:
                     session = supabase_current_session(self.bearer_token())
                     self.send_json(supabase_canonical_records_search(query, session))
@@ -48026,6 +48180,22 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["dashboard"]:
                     session = current_session(conn, self.bearer_token())
                     self.send_json(dashboard(conn, session))
+                    return
+                if method == "GET" and parts == ["reports", "operational-summary"]:
+                    session = current_session(conn, self.bearer_token())
+                    if not session:
+                        self.send_json({"error": "unauthorized"}, 401)
+                        return
+                    if not session_has_any_permission(session, ["reports.operational_view"]):
+                        self.send_json({"error": "forbidden", "detail": "operational_report_forbidden"}, 403)
+                        return
+                    try:
+                        report = official_operational_report(query, session, conn=conn)
+                    except ValueError as exc:
+                        code = str(exc)
+                        self.send_json({"error": code, "detail": code}, 422)
+                        return
+                    self.send_json(report)
                     return
                 if method == "GET" and parts == ["search"]:
                     session = current_session(conn, self.bearer_token())

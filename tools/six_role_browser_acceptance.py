@@ -27,7 +27,7 @@ from tests.support.five_account_browser_fixture import BROWSER_ROLES, isolated_b
 from tests.test_five_account_http_acceptance import FiveAccountHttpAcceptanceTest, QuietAcceptanceHandler
 
 ROUTES = ("dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings")
-VIEWPORTS = {"desktop": (1440, 1000), "mobile": (390, 844)}
+VIEWPORTS = {"desktop": (1440, 1000), "tablet": (900, 1100), "mobile": (390, 844)}
 SESSION = "edoc-roles-20260908"
 TELEMETRY = """<script>
 window.__fixtureTiming={loaderVisibleMs:null,appInteractiveMs:null};
@@ -53,6 +53,7 @@ AUDIT_JS = """(()=>{
  shortTargets:controls.filter(e=>{let r=e.getBoundingClientRect();return r.width<44||r.height<44}).map(e=>({id:e.id,tag:e.tagName,text:(e.getAttribute('aria-label')||e.textContent||e.type||'').trim().slice(0,50),width:Math.round(e.getBoundingClientRect().width),height:Math.round(e.getBoundingClientRect().height)})),
  smallInputs:controls.filter(e=>e.matches('input,select,textarea')&&parseFloat(getComputedStyle(e).fontSize)<16).map(e=>({id:e.id,fontSize:getComputedStyle(e).fontSize})),
  errors:window.__fixtureErrors||[],timing:window.__fixtureTiming||{},
+ composePrimaryFields:page?.id==='compose'?Object.fromEntries(['#subject','#bodyText','.compose-attachment-disclosure','.compose-ai-assist-disclosure'].map(s=>{const e=page.querySelector(s),r=e?.getBoundingClientRect();return [s,e?{top:Math.round(r.top+scrollY),visible:visible(e)}:null]})):null,
  firstContentfulPaintMs:performance.getEntriesByName('first-contentful-paint')[0]?.startTime??null,
  navigationLinks:[...document.querySelectorAll('.sidebar .nav-item')].map(e=>({route:e.dataset.target,hidden:!visible(e)}))};})()"""
 

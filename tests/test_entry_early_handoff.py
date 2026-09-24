@@ -72,10 +72,12 @@ const session = {token:'synthetic-session',user:{id:'synthetic-user',name:'Synth
         self.run_case("""
 runBootstrap(); await tick();
 assert.equal(requests.length,1); assert.equal(requests[0][0],'/api/auth/handoff-session');
-assert.deepEqual(requests[0][1],{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-EDOC-Handoff-Exchange':'1'},body:'{}'});
+const {signal,...requestOptions}=requests[0][1];
+assert.deepEqual(requestOptions,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-EDOC-Handoff-Exchange':'1'},body:'{}'});
+assert.ok(signal instanceof AbortSignal);
 assert.deepEqual(redirects,[buildLoggingPortalUrl()]);
 const destination=new URL(redirects[0]),next=new URL(destination.searchParams.get('next'));
-assert.equal(destination.searchParams.get('module'),'edoc');assert.equal(next.hash,'');
+assert.equal(destination.searchParams.get('module'),'edoc');assert.equal(next.hash,'#compose');
 assert.equal(next.searchParams.has('localLogin'),false);assert.equal(next.searchParams.get('tab'),'work');
 assert.equal(entered.length,0);assert.equal(persisted.length,0);
 assert.equal(await resumePostedHandoffSession(),null);assert.equal(requests.length,1);
@@ -242,8 +244,8 @@ assert.equal(requests.length,0);assert.equal(redirects.length,0);
 
     def test_head_script_is_cache_busted_and_precedes_main_bundle(self):
         html = (ROOT / "index.html").read_text(encoding="utf-8")
-        self.assertIn("entry-bootstrap.js?v=20260914-early-handoff-r1", html)
-        self.assertIn("app.js?v=20260924-seven-fixes-r1", html)
+        self.assertIn("entry-bootstrap.js?v=20260925-handoff-recovery-r2", html)
+        self.assertIn("app.js?v=20260925-role-audit-r1", html)
         self.assertLess(html.index('src="entry-bootstrap.js'), html.index('src="app.js'))
 
 
