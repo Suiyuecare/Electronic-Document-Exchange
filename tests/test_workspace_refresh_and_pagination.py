@@ -23,7 +23,7 @@ class WorkspaceRefreshAndPaginationTest(unittest.TestCase):
         self.run_js(["refreshCurrentWorkspace"], r"""
 const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {resolve,reject,promise}};
 const nodes={};for(const id of ['headerRefreshBtn','mobileDrawerRefreshBtn'])nodes['#'+id]={disabled:false,textContent:'重新整理',setAttribute(k,v){this[k]=v},removeAttribute(k){delete this[k]}};
-const c={console,Promise,scope:'actor-a',activeRouteTarget:'approvalLog',workspaceRefreshRequest:null,officialWorkflowScope:'all',officialWorkflowPage:{query:null},calls:[],pending:[],toasts:[],routeBackendDataErrors:new Map(),routeBackendDataLoaded:new Set(['approvalLog']),
+const c={console,Promise,scope:'actor-a',activeRouteTarget:'approvalLog',workspaceRefreshRequest:null,headerBackendSyncState:{status:'idle',syncedAt:''},officialWorkflowScope:'all',officialWorkflowPage:{query:null},calls:[],pending:[],toasts:[],routeBackendDataErrors:new Map(),routeBackendDataLoaded:new Set(['approvalLog']),
  document:{querySelector:s=>nodes[s]||null},frontendSessionScope:()=>c.scope,hasAuthenticatedBackendSession:()=>true,showToast:s=>c.toasts.push(s),renderWorkspaceLoadStatus(){},updateHeaderStatus(){}};
 for(const name of ['loadRouteBackendData','syncNotificationsFromBackend','loadApprovalProgressFromBackend','loadOfficialWorkflow','syncDashboardFromBackend','loadInternalDispatches','loadArchiveRecordsFromBackend'])c[name]=(...args)=>{const d=defer();c.calls.push({name,args});c.pending.push(d);return d.promise};
 vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);

@@ -53,8 +53,8 @@ class ComposeLayoutV2ContractTest(unittest.TestCase):
         ids = [
             "composeCompanySelect", "docType", "contactAddress", "contactOwner",
             "contactPhone", "contactFax", "contactEmail", "recipient", "dispatchDate",
-            "dispatchNo", "priority", "attachments", "attachmentDetails", "documentPurpose",
-            "generateFromPurposeBtn", "subject", "bodyText", "copyRecipients",
+            "dispatchNo", "priority", "subject", "bodyText", "attachments", "attachmentDetails",
+            "documentPurpose", "generateFromPurposeBtn", "copyRecipients",
             "composeOutputMode", "largeSealType", "smallSealType", "composeApprovalCategorySelect",
         ]
         positions = [self.dom.elements[identity]["position"] for identity in ids]

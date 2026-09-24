@@ -123,6 +123,7 @@
     credentials: "same-origin",
     cache: "no-store",
     headers: { "Content-Type": "application/json", "X-EDOC-Handoff-Exchange": "1" },
+    ...(typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? { signal: AbortSignal.timeout(6000) } : {}),
     body: "{}"
   }));
   window.__edocEarlyHandoffResponse = responsePromise;
@@ -138,7 +139,9 @@
     const returnUrl = new URL(window.location.href);
     ["payload", "signature", "token", "email", "role", "scope", "portal"].forEach((key) => returnUrl.searchParams.delete(key));
     returnUrl.searchParams.delete("localLogin");
-    returnUrl.hash = "";
+    const resumableRoutes = new Set(["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"]);
+    const requestedRoute = returnUrl.hash.replace(/^#/, "");
+    returnUrl.hash = resumableRoutes.has(requestedRoute) ? requestedRoute : "";
     const loginUrl = new URL(portalUrl);
     loginUrl.searchParams.set("module", "edoc");
     loginUrl.searchParams.set("next", returnUrl.toString());

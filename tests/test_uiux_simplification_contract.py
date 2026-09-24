@@ -174,7 +174,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn("background: #c2410c; font-size: 10px; font-weight: 900;", normalized)
         self.assertIn('d="M6 17h12M8 17V9a4 4 0 0 1 8 0v8M10 20h4"', self.html)
         self.assertIn('id="moduleTodoBadge" hidden', self.html)
-        self.assertIn("styles.css?v=20260925-finance-header-r1", self.html)
+        self.assertIn("styles.css?v=20260925-role-ux-r1", self.html)
 
     def test_mobile_shell_has_four_primary_actions_and_six_item_drawer(self) -> None:
         nav_start = self.html.index('<nav class="mobile-primary-nav"')

@@ -19,9 +19,9 @@ class SixRoleBrowserFixtureContractTests(unittest.TestCase):
         self.assertIn('if (interfaceFontStylesheet.sheet) applyInterfaceFont();', js)
         self.assertIn('interfaceFontStylesheet.addEventListener("load", applyInterfaceFont, { once: true });', js)
         self.assertNotRegex(html, r'id="interfaceFontStylesheet"[^>]*onload=')
-        self.assertIn("entry-bootstrap.js?v=20260914-early-handoff-r1", html)
-        self.assertIn("styles.css?v=20260925-finance-header-r1", html)
-        self.assertIn("app.js?v=20260924-seven-fixes-r1", html)
+        self.assertIn("entry-bootstrap.js?v=20260925-handoff-recovery-r2", html)
+        self.assertIn("styles.css?v=20260925-role-ux-r1", html)
+        self.assertIn("app.js?v=20260925-role-audit-r1", html)
         self.assertIn("edukai", js.lower())
 
     def test_mobile_header_touch_targets_are_at_least_44px(self):
@@ -33,7 +33,7 @@ class SixRoleBrowserFixtureContractTests(unittest.TestCase):
     def test_six_roles_and_six_existing_routes_are_explicit(self):
         self.assertEqual(len(set(BROWSER_ROLES)), 6)
         self.assertEqual(ROUTES, ("dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"))
-        self.assertEqual(VIEWPORTS, {"desktop": (1440, 1000), "mobile": (390, 844)})
+        self.assertEqual(VIEWPORTS, {"desktop": (1440, 1000), "tablet": (900, 1100), "mobile": (390, 844)})
 
     def test_only_new_loopback_origin_is_accepted(self):
         require_local_origin("http://127.0.0.1:54321")
