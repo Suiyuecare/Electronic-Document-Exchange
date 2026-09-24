@@ -150,6 +150,9 @@ jobs:
               tests.test_editor_applicant_selection_postgres \
               tests.test_editor_cross_company_workflow_postgres \
               tests.test_configurable_workflow_postgres \
+              tests.test_official_receipt_confirmation_postgres \
+              tests.test_official_listing_postgres \
+              tests.test_official_dispatch_generation_postgres \
               tests.test_editor_storage_v2_paths_postgres
 
           eval "$(supabase status -o env)"
@@ -238,7 +241,7 @@ jobs:
           python -m pip install --disable-pip-version-check pglast==7.14
 
       - name: Compile Python backend
-        run: python -m py_compile backend.py api/index.py compose_resilience.py editor_seam.py official_writing.py
+        run: python -m py_compile backend.py api/index.py compose_resilience.py editor_seam.py official_writing.py official_listing.py
 
       - name: Reject embedded private credentials without printing their values
         run: python tools/verify_no_embedded_credentials.py

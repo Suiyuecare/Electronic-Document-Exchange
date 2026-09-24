@@ -64,6 +64,9 @@
     "20260913055452_editor_applicant_selection_scope.sql",
     "20260913060040_editor_cross_company_workflow_scope.sql",
     "20260913130517_editor_storage_v2_opaque_paths.sql",
-    "20260922074613_configurable_official_workflows.sql"
+    "20260922074613_configurable_official_workflows.sql",
+    "20260924154226_atomic_official_receipt_confirmation.sql",
+    "20260924154315_scoped_official_document_listing.sql",
+    "20260924155456_latest_generation_dispatch_owner.sql"
   ]
 }

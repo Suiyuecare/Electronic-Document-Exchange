@@ -27,6 +27,8 @@ class VercelPackagingTestCase(unittest.TestCase):
         python_build = next(item for item in config["builds"] if item.get("src") == "api/index.py")
         self.assertIn("official_writing.py", python_build["config"]["includeFiles"])
         self.assertTrue((ROOT / "official_writing.py").is_file())
+        self.assertIn("official_listing.py", python_build["config"]["includeFiles"])
+        self.assertTrue((ROOT / "official_listing.py").is_file())
 
     def test_production_env_template_includes_dedicated_app_secret(self) -> None:
         values = {}

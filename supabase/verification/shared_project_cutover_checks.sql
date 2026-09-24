@@ -67,6 +67,31 @@ begin
 end;
 $compose_editor_resilience_gate$;
 
+do $worklist_receipt_rpc_gate$
+declare
+  v_proc record;
+  v_rpc text;
+  v_role text;
+begin
+  foreach v_rpc in array array['edoc_confirm_official_document(jsonb)','edoc_list_official_document_candidates(jsonb)'] loop
+    select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure('edoc.' || v_rpc);
+    if not found then raise exception 'worklist_receipt_rpc_missing'; end if;
+    if v_proc.prosecdef or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+       or not pg_catalog.has_function_privilege('edoc_backend',v_proc.oid,'EXECUTE') then
+      raise exception 'worklist_receipt_rpc_security_mismatch';
+    end if;
+    foreach v_role in array array['anon','authenticated','service_role','authenticator'] loop
+      if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+        raise exception 'worklist_receipt_rpc_browser_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,pg_catalog.acldefault('f',v_proc.proowner))) a where a.grantee=0 and a.privilege_type='EXECUTE') then
+      raise exception 'worklist_receipt_rpc_public_grant';
+    end if;
+  end loop;
+end;
+$worklist_receipt_rpc_gate$;
+
 do $configurable_workflow_gate$
 declare
   v_schema text := 'edoc';
@@ -196,13 +221,16 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 64
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 67
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133144_compose_resilience_drafts_revision.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133603_editor_conflict_copy_atomic.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913055452_editor_applicant_selection_scope.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913060040_editor_cross_company_workflow_scope.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913130517_editor_storage_v2_opaque_paths.sql')
-      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260922074613_configurable_official_workflows.sql'),
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260922074613_configurable_official_workflows.sql')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924154226_atomic_official_receipt_confirmation.sql')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924154315_scoped_official_document_listing.sql')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924155456_latest_generation_dispatch_owner.sql'),
       (select count(*)::text from edoc_private.shared_project_migration_ledger)
     ),
     (

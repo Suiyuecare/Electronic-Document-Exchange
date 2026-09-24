@@ -12857,3 +12857,5 @@ body[data-session-state="revalidating"] .workspace::after {
   .workflow-config-node-actions button { flex: 1 1 0; width: auto; }
   #officialDecisionModal input, #officialDecisionModal select, #officialDecisionModal textarea { font-size: 16px; }
 }
+.official-list-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0; color: var(--muted, #73675e); }
+.official-list-pagination button { min-height: 44px; }

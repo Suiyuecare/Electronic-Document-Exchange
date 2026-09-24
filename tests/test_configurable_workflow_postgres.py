@@ -99,8 +99,9 @@ class ConfigurableWorkflowPostgresTest(fixture.EditorCrossCompanyWorkflowPostgre
         files=[]
         for row in (source,prepared):
             log="ACCESS-"+uuid.uuid4().hex
-            self.insert("official_document_approval_logs",id=log,document_id=doc,actor_id=actor,file_id=row["id"],action="download_file",created_at="2026-09-23 10:00:00")
-            access.append({"file_id":row["id"],"access_log_id":log,"action":"download_file","accessed_at":"2026-09-23 10:00:00"})
+            accessed_at=self.pg.execute("SELECT to_char(clock_timestamp(),'YYYY-MM-DD HH24:MI:SS')").fetchone()[0]
+            self.insert("official_document_approval_logs",id=log,document_id=doc,actor_id=actor,file_id=row["id"],action="download_file",created_at=accessed_at)
+            access.append({"file_id":row["id"],"access_log_id":log,"action":"download_file","accessed_at":accessed_at})
             files.append({"id":row["id"],"type":row["file_type"],"sha256":row["file_hash"],"size":row["file_size"],"version":row["version"]})
         return {"schema_version":2,"decision_type":"approve","expected_step_id":step_id,"principal_actor_id":actor,"decision_actor_user_id":actor,
             "review_acknowledgements":{"original_reviewed":True,"edited_version_reviewed":True,"attachments_reviewed":True},
@@ -248,15 +249,18 @@ class ConfigurableWorkflowPostgresTest(fixture.EditorCrossCompanyWorkflowPostgre
     def electronic_review(self,doc,step_id,actor):
         file_id="FILE-"+doc
         access_id="ACCESS-"+uuid.uuid4().hex
+        # Use the database clock that activates review steps, so this actual
+        # access witness remains later than the step when tests run tomorrow.
+        accessed_at=self.pg.execute("SELECT to_char(clock_timestamp(),'YYYY-MM-DD HH24:MI:SS')").fetchone()[0]
         self.insert("official_document_approval_logs",id=access_id,document_id=doc,actor_id=actor,
-                    file_id=file_id,action="download_file",created_at="2026-09-23 10:00:00")
+                    file_id=file_id,action="download_file",created_at=accessed_at)
         started=self.pg.execute("SELECT review_started_at FROM official_document_approval_steps WHERE id=%s",(step_id,)).fetchone()[0]
         return {"schema_version":2,"decision_type":"approve","expected_step_id":step_id,"principal_actor_id":actor,"decision_actor_user_id":actor,
             "review_acknowledgements":{"original_reviewed":True,"edited_version_reviewed":True,"attachments_reviewed":True},
             "source_file":{"id":file_id,"type":"generated_pdf","sha256":"A"*64,"version":1,"size":123},
             "legacy_renderer":True,"prepared_file":None,"attachments":[],"attachments_manifest_sha256":hashlib.sha256(b"").hexdigest(),
             "review_access":{"server_verified":True,"step_started_at":started,"required_file_ids":[file_id],
-                "access_logs":[{"file_id":file_id,"access_log_id":access_id,"action":"download_file","accessed_at":"2026-09-23 10:00:00"}]}}
+                "access_logs":[{"file_id":file_id,"access_log_id":access_id,"action":"download_file","accessed_at":accessed_at}]}}
 
     def electronic_action(self,doc,action,target=None):
         document=self.pg.execute("SELECT to_jsonb(d) FROM official_documents d WHERE id=%s",(doc,)).fetchone()[0]

@@ -168,6 +168,7 @@ const task=showUploadedEditorReview('prepared');uploadedSealEditorRuntime.docume
     LIST_SETUP = r'''
 let session='actor',valid=true,renders=0,toasts=[],calls=[];const frontendSessionScope=()=>session;
 let officialWorkflowItems=[{id:'B'}],selectedOfficialDocumentId='B',editingOfficialDocumentId='',officialWorkflowScope='mine',officialWorkflowStatusFilter='';
+const officialWorkflowPage={generation:0,scope:'',query:null,cursor:'',hasMore:false,loading:false,error:false};let officialWorkflowSearchTerm='';const renderOfficialWorkflowPagination=()=>{};
 const officialDocumentDetailReady=new Set(),officialDocumentDetailRequests=new Map();
 const defer=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return {promise,resolve,reject}};
 const gate=defer();let backendRequest=async(path)=>{calls.push(path);return gate.promise};

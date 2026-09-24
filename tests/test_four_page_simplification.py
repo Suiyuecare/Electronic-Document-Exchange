@@ -80,6 +80,7 @@ class FourPageSimplificationTests(unittest.TestCase):
     def test_home_expansion_does_not_duplicate_handlers_or_hide_issue_count(self):
         self.run_js(["renderDailyActionCenter"], r'''
 let dailyActionCache=[],dailyActionExpanded=false,internalDispatchLoadStatus='idle',homeRenders=0;
+const officialWorkflowPage={hasMore:false,loading:false,error:false};const hasAuthenticatedBackendSession=()=>true;
 const items=Array.from({length:8},(_,i)=>({tone:i===7?'issue':'normal',badge:'fixture',title:'Case '+i,meta:'m',body:'b',action:'View'}));
 const dailyActionItems=()=>items,escapeHtml=x=>String(x),renderHomeMyCases=()=>homeRenders++;
 const grid={innerHTML:'',querySelector:()=>null},count={},expand={setAttribute(k,v){this[k]=v}};
@@ -117,6 +118,7 @@ const list=node(),detail=node(),full=node(),panel=node(),page=node(),layout=node
 const nodes={'#approvalLogList':list,'#approvalLogDetail':detail,'#approvalLogOpenWorkflowBtn':full,'#approvalLogCount':node(),'#approvalLogScope':node(),'#approvalLogDetailPanel':panel,'.approval-log-layout':layout,'#approvalLogBackBtn':back,'#approvalLog':page};
 const document={querySelector:s=>nodes[s]||null,querySelectorAll:()=>[]};
 let selectedWorkflowTaskId='case1',approvalLogFilter='my_pending';
+const officialWorkflowPage={loading:false,error:false,hasMore:false};const hasAuthenticatedBackendSession=()=>true;
 const official={id:'case1',current_status:'pending',current_step:'manager',can_act:true,approval_steps:[{id:'step1',step_key:'manager',status:'pending'}]};
 let records=[{task:{id:'case1',title:'Synthetic',role:'Manager',step:'Manager',status:'待簽核'},doc:{subject:'Synthetic'},steps:[],officialDocument:official,requester:'Applicant'}];
 const approvalLogRecords=()=>records,filteredApprovalLogRecords=()=>records,isRouteAllowed=()=>false,canSeeCompanyWideDocs=()=>false,approvalProgressCategory=()=> 'my_pending';

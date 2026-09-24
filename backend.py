@@ -149,6 +149,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_commit_official_document_submission",
     "edoc_complete_official_document_dispatch",
     "edoc_complete_official_document_stamp",
+    "edoc_confirm_official_document",
     "edoc_copy_editor_conflict",
     "edoc_create_company_seal_file_version",
     "edoc_create_finance_login_session_v2",
@@ -157,6 +158,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_fail_official_document_stamp",
     "edoc_finalize_editor_asset_v2",
     "edoc_finalize_official_document_resubmit",
+    "edoc_list_official_document_candidates",
     "edoc_mutate_inbound_document_v1",
     "edoc_mutate_official_workflow",
     "edoc_register_official_archive_export",
@@ -20503,19 +20505,27 @@ def official_document_steps(conn: sqlite3.Connection, document_id: str) -> List[
     ).fetchall()]
 
 
-def current_official_document_steps(conn: sqlite3.Connection, document_id: str) -> List[Dict[str, Any]]:
-    rows = official_document_steps(conn, document_id)
+def latest_official_workflow_steps(steps: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Project the active generation without changing immutable workflow history."""
+    rows = list(steps)
     if not rows:
         return []
     generation = max(int(row.get("workflow_generation") or 1) for row in rows)
     return [row for row in rows if int(row.get("workflow_generation") or 1) == generation]
 
 
+def current_official_document_steps(conn: sqlite3.Connection, document_id: str) -> List[Dict[str, Any]]:
+    return latest_official_workflow_steps(official_document_steps(conn, document_id))
+
+
 def official_step_decision_display(steps: List[Dict[str, Any]], logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Read-only audit projection; never treat an assignment as a decision."""
     by_id = {(row.get("document_id"), str(row.get("id") or "")): row for row in steps}
     evidence_by_id = {key: parse_json_any(row.get("decision_evidence_json"), {}) or {} for key, row in by_id.items()}
-    step_logs, receipt_logs = {}, {}
+    step_logs, receipt_logs, unlinked_receipts, completed_receipts = {}, {}, {}, {}
+    for step in steps:
+        if step.get("step_key") == "applicant_confirm" and step.get("status") == "approved":
+            completed_receipts.setdefault(step.get("document_id"), []).append(step)
     for log in logs:
         if not log.get("actor_id") or log.get("action") not in {"approve", "add_sign", "reject", "confirm"}:
             continue
@@ -20523,6 +20533,7 @@ def official_step_decision_display(steps: List[Dict[str, Any]], logs: List[Dict[
         step_logs.setdefault(key, []).append(log)
         if log.get("action") == "confirm" and not log.get("step_id"):
             receipt_logs.setdefault((log.get("document_id"), log.get("created_at"), log.get("actor_id")), []).append(log)
+            unlinked_receipts.setdefault(log.get("document_id"), []).append(log)
     for group in (*step_logs.values(), *receipt_logs.values()):
         group.sort(key=lambda log: (str(log.get("created_at") or ""), str(log.get("id") or "")))
     conflict = object()
@@ -20581,6 +20592,15 @@ def official_step_decision_display(steps: List[Dict[str, Any]], logs: List[Dict[
         summary = lineage_summary(source.get("document_id"), str(source.get("id") or ""), frozenset(actions), actor_id)
         if source.get("step_key") == "applicant_confirm" and source.get("approved_at"):
             receipts = receipt_logs.get((source.get("document_id"), source.get("approved_at"), source.get("approver_user_id")), [])
+            # Legacy receipt writes could cross a clock second. Match without
+            # timestamps only when the document has exactly one completed
+            # receipt and one actual confirmation witness by its applicant.
+            # Ambiguous histories remain unknown; assignments are never proof.
+            legacy = unlinked_receipts.get(source.get("document_id"), [])
+            if (not receipts and len(completed_receipts.get(source.get("document_id"), [])) == 1
+                    and len(legacy) == 1 and legacy[0].get("actor_id") == source.get("approver_user_id")
+                    and str(legacy[0].get("created_at") or "") >= str(source["approved_at"])):
+                receipts = legacy
             summary = merge(summary, summarize(receipts, actions, actor_id))
         witness, witnessed_actor = summary
         # Legacy rows with no actual-actor field need an unambiguous audit
@@ -20871,8 +20891,8 @@ def official_dispatch_record(conn: sqlite3.Connection, document_id: str) -> Dict
 
 
 def official_dispatch_workflow_owner(steps: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    """Return the immutable GA actor selected by this document's workflow."""
-    step = next((item for item in steps if item.get("step_key") == "general_affairs_review"), None)
+    """Return the immutable GA actor selected by the current workflow generation."""
+    step = next((item for item in latest_official_workflow_steps(steps) if item.get("step_key") == "general_affairs_review"), None)
     owner_id = str((step or {}).get("approver_user_id") or "").strip()
     if not step or not owner_id:
         raise ValueError("official_dispatch_owner_unresolved:general_affairs_review")
@@ -21065,11 +21085,11 @@ def can_retry_official_stamp(
     user: Dict[str, Any] | None,
     workflow_steps: Iterable[Dict[str, Any]] | None,
 ) -> bool:
-    """Only this document's immutable GA approver may request a retry."""
+    """Only the current generation's immutable GA approver may request a retry."""
     if not user:
         return False
     assigned = next(
-        (step for step in (workflow_steps or []) if step.get("step_key") == "general_affairs_review"),
+        (step for step in latest_official_workflow_steps(workflow_steps or []) if step.get("step_key") == "general_affairs_review"),
         None,
     )
     return bool(
@@ -22058,246 +22078,9 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
     }
 
 
-def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    user = official_session_user(session)
-    query = query or {}
-    where: List[str] = []
-    params: List[Any] = []
-    user_company_id = str(user.get("company_id") or "").strip()
-    if user_company_id:
-        where.append(
-            """
-            (
-              d.company_id = ?
-              OR d.applicant_id = ?
-              OR EXISTS (
-                SELECT 1 FROM official_document_approval_steps participant_step
-                WHERE participant_step.document_id = d.id
-                  AND (participant_step.approver_user_id = ? OR participant_step.decision_actor_user_id = ?)
-              )
-              OR EXISTS (
-                SELECT 1 FROM approval_step_actor_snapshots participant_snapshot
-                WHERE participant_snapshot.source_id = d.id
-                  AND participant_snapshot.source_type IN ('official_document', 'official_documents', 'official_document_application')
-                  AND participant_snapshot.approver_user_id = ?
-              )
-            )
-            """
-        )
-        params.extend([user_company_id, user["id"], user["id"], user["id"], user["id"]])
-    if query.get("status"):
-        where.append("d.current_status = ?")
-        params.append(query["status"][0])
-    if query.get("company_id"):
-        where.append("d.company_id = ?")
-        params.append(query["company_id"][0])
-    if query.get("applicant_id"):
-        where.append("d.applicant_id = ?")
-        params.append(query["applicant_id"][0])
-    scope = (query.get("scope") or [""])[0]
-    if scope == "mine":
-        where.append("d.applicant_id = ?")
-        params.append(user["id"])
-    elif scope == "todo":
-        where.append(
-            """
-            (
-              EXISTS (
-                SELECT 1 FROM official_document_approval_steps s
-                WHERE s.document_id = d.id
-                  AND s.status = 'pending'
-                  AND s.step_key = d.current_step
-                  AND (
-                    s.approver_user_id = ?
-                    OR EXISTS (
-                      SELECT 1 FROM official_workflow_delegations delegation
-                      WHERE delegation.company_id = d.company_id
-                        AND delegation.principal_user_id = s.approver_user_id
-                        AND delegation.delegate_user_id = ?
-                        AND delegation.status = 'active'
-                        AND delegation.starts_at <= ?
-                        AND delegation.ends_at > ?
-                    )
-                  )
-              )
-              OR EXISTS (
-                SELECT 1 FROM official_document_dispatch_records r
-                WHERE r.document_id = d.id
-                  AND r.dispatch_status = 'pending'
-                  AND r.dispatch_owner_user_id = ?
-              )
-              OR (
-                EXISTS (
-                  SELECT 1 FROM official_document_approval_steps ga
-                  WHERE ga.document_id = d.id
-                    AND ga.step_key = 'general_affairs_review'
-                    AND ga.approver_user_id = ?
-                )
-                AND EXISTS (
-                  SELECT 1 FROM official_document_stamp_requests sr
-                  WHERE sr.document_id = d.id
-                    AND sr.id = (
-                      SELECT latest_sr.id FROM official_document_stamp_requests latest_sr
-                      WHERE latest_sr.document_id = d.id
-                      ORDER BY latest_sr.created_at DESC, latest_sr.id DESC LIMIT 1
-                    )
-                    AND sr.stamped_file_id IS NULL
-                    AND (
-                      (d.current_status = 'approved' AND d.current_step = 'auto_stamp' AND (
-                        sr.status IN ('pending','approved','failed')
-                        OR (sr.status = 'stamping' AND (sr.claim_expires_at IS NULL OR sr.claim_expires_at <= ?))
-                      ))
-                      OR (d.current_status = 'stamping_failed' AND d.current_step = 'general_affairs_review' AND (
-                        sr.status IN ('pending','failed')
-                        OR (sr.status = 'stamping' AND (sr.claim_expires_at IS NULL OR sr.claim_expires_at <= ?))
-                      ))
-                      OR (
-                        d.current_status = 'stamping' AND d.current_step = 'auto_stamp'
-                        AND sr.status = 'stamping'
-                        AND (sr.claim_expires_at IS NULL OR sr.claim_expires_at <= ?)
-                      )
-                    )
-                )
-              )
-            )
-            """
-        )
-        timestamp = now()
-        params.extend([user["id"], user["id"], timestamp, timestamp, user["id"], user["id"], timestamp, timestamp, timestamp])
-    elif not user_company_id or not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
-        where.append(
-            """
-            (
-              d.applicant_id = ?
-              OR EXISTS (
-                SELECT 1 FROM official_document_approval_steps s
-                WHERE s.document_id = d.id AND (s.approver_user_id = ? OR s.decision_actor_user_id = ?)
-              )
-              OR EXISTS (
-                SELECT 1 FROM approval_step_actor_snapshots a
-                WHERE a.source_id = d.id
-                  AND a.source_type IN ('official_document', 'official_documents', 'official_document_application')
-                  AND a.approver_user_id = ?
-              )
-              OR EXISTS (
-                SELECT 1
-                FROM official_document_approval_steps s
-                JOIN official_workflow_delegations delegation
-                  ON delegation.company_id = d.company_id
-                 AND delegation.principal_user_id = s.approver_user_id
-                 AND delegation.delegate_user_id = ?
-                 AND delegation.status = 'active'
-                 AND delegation.starts_at <= ?
-                 AND delegation.ends_at > ?
-                WHERE s.document_id = d.id
-                  AND s.status = 'pending'
-                  AND s.step_key = d.current_step
-              )
-            )
-            """
-        )
-        timestamp = now()
-        params.extend([user["id"], user["id"], user["id"], user["id"], user["id"], timestamp, timestamp])
-    sql = "SELECT d.* FROM official_documents d"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY d.created_at DESC LIMIT 300"
-    rows = []
-    for row in conn.execute(sql, params).fetchall():
-        item = row_to_dict(row)
-        all_steps = official_document_steps(conn, item["id"])
-        if all_steps:
-            workflow_generation = max(int(step.get("workflow_generation") or 1) for step in all_steps)
-            current_steps = [
-                step
-                for step in all_steps
-                if int(step.get("workflow_generation") or 1) == workflow_generation
-            ]
-        else:
-            current_steps = []
-        actor_snapshots = official_document_actor_snapshots(conn, item["id"])
-        current_pending = next(
-            (
-                step
-                for step in current_steps
-                if step.get("status") == "pending"
-                and step.get("step_key") == item.get("current_step")
-            ),
-            None,
-        )
-        active_delegation = official_document_active_read_delegation(item, all_steps, user, conn=conn)
-        seal_context = official_seal_context_from_document(item)
-        item["official_seal"] = seal_context
-        item["document_category"] = (seal_context or {}).get("document_category") or ""
-        item["approval_route_code"] = (seal_context or {}).get("approval_route_code") or ""
-        item["approval_route_name"] = (seal_context or {}).get("approval_route_name") or ""
-        item["approval_steps"] = current_steps
-        raw_stamp_request = official_document_stamp_request(conn, item["id"])
-        item["stamp_request"] = official_application_package(item, [], [], [], raw_stamp_request).get("stamp_request")
-        dispatch_record = official_dispatch_record(conn, item["id"])
-        item["dispatch_record"] = dispatch_record
-        item["current_step_name"] = next(
-            (
-                step["step_name"]
-                for step in current_steps
-                if step.get("step_key") == item.get("current_step")
-            ),
-            "",
-        )
-        item["can_download"] = bool(active_delegation) or canDownloadOfficialDocument(
-            user,
-            item,
-            all_steps,
-            actor_snapshots,
-        )
-        item["can_manage_dispatch"] = official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(
-            user,
-            item,
-            dispatch_record,
-            session,
-            current_steps,
-        )
-        item["can_retry_stamp"] = bool(
-            official_stamp_recoverable(item, raw_stamp_request)
-            and can_retry_official_stamp(user, current_steps)
-        )
-        item["can_confirm"] = bool(
-            user.get("id") == item.get("applicant_id")
-            and item.get("current_step") == "applicant_confirm"
-            and item.get("current_status")
-            in {"stamped", "dispatched", "sent_by_applicant"}
-        )
-        item["can_act"] = bool(
-            current_pending
-            and (
-                current_pending.get("approver_user_id") == user.get("id")
-                or active_delegation
-            )
-        )
-        item["acting_for_user_id"] = (
-            current_pending.get("approver_user_id")
-            if active_delegation and current_pending
-            else ""
-        )
-        item["delegation_id"] = (
-            active_delegation.get("id") if active_delegation else ""
-        )
-        # SQL only narrows the candidate set. Historical pending rows can
-        # satisfy its delegation EXISTS even after a workflow is superseded;
-        # the current-generation authority above must decide final visibility.
-        if scope == "todo" and not (
-            item["can_act"]
-            or item["can_retry_stamp"]
-            or (dispatch_record and dispatch_record.get("dispatch_status") == "pending" and dispatch_record.get("dispatch_owner_user_id") == user.get("id"))
-        ):
-            continue
-        if scope not in {"mine", "todo"} and not item["can_download"] and (
-            not user_company_id
-            or not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"])
-        ):
-            continue
-        rows.append(item)
-    return rows
+def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> Any:
+    from official_listing import list_sqlite
+    return list_sqlite(sys.modules[__name__], conn, query, session)
 
 
 def require_official_creation_company(user: Dict[str, Any], requested_company_id: Any) -> str:
@@ -24714,24 +24497,56 @@ def cancel_official_document(conn: sqlite3.Connection, document_id: str, payload
 
 def confirm_official_document(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
-    document = official_document_row(conn, document_id)
-    if document["applicant_id"] != user["id"]:
-        raise PermissionError("only_applicant_can_confirm")
-    if document["current_status"] not in {"returned_to_applicant_for_send", "stamped", "dispatched", "sent_by_applicant"}:
-        raise ValueError("official_document_not_ready_for_applicant_confirm")
-    if document["current_status"] == "returned_to_applicant_for_send":
-        # The applicant may complete their applicant-owned dispatch and confirm
-        # receipt in this one endpoint, but the dispatch helper itself never
-        # closes or approves on behalf of the applicant.
-        complete_official_dispatch(conn, document_id, payload, session)
-    step = next((item for item in current_official_document_steps(conn, document_id) if item.get("step_key") == "applicant_confirm"), None)
-    if step and step.get("status") == "pending":
-        conn.execute(
-            "UPDATE official_document_approval_steps SET status = 'approved', comment = ?, approved_at = ?, updated_at = ? WHERE id = ?",
-            (payload.get("comment") or "申請人確認完成", now(), now(), step["id"]),
-        )
-    conn.execute("UPDATE official_documents SET current_status = 'closed', current_step = '', updated_at = ? WHERE id = ?", (now(), document_id))
-    insert_official_log(conn, document_id, "confirm", user, payload.get("comment") or "申請人確認已用印版本", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    savepoint = f"official_receipt_{secrets.token_hex(4)}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        document = official_document_row(conn, document_id)
+        if document["applicant_id"] != user["id"]:
+            raise PermissionError("only_applicant_can_confirm")
+        steps = current_official_document_steps(conn, document_id)
+        receipts = [item for item in steps if item.get("step_key") == "applicant_confirm"]
+        if len(receipts) != 1 or receipts[0].get("approver_user_id") != user["id"]:
+            raise ValueError("official_document_receipt_step_conflict")
+        step = receipts[0]
+        existing = conn.execute(
+            "SELECT id FROM official_document_approval_logs WHERE document_id = ? AND step_id = ? AND actor_id = ? AND action = 'confirm'",
+            (document_id, step["id"], user["id"]),
+        ).fetchone()
+        idempotent = bool(document["current_status"] == "closed" and step.get("status") == "approved"
+                          and step.get("decision_actor_user_id") == user["id"] and existing)
+        if not idempotent:
+            if (document["current_status"] not in {"returned_to_applicant_for_send", "stamped", "dispatched", "sent_by_applicant"}
+                    or step.get("status") != "pending"
+                    or any(row.get("status") != "approved" for row in steps if row["id"] != step["id"])):
+                raise ValueError("official_document_not_ready_for_applicant_confirm")
+            if document["current_status"] == "returned_to_applicant_for_send":
+                # Nested savepoints keep applicant dispatch, receipt, and both
+                # audit trails all-or-nothing. This never dispatches externally.
+                complete_official_dispatch(conn, document_id, payload, session)
+                document = official_document_row(conn, document_id)
+            if document.get("current_step") != "applicant_confirm":
+                raise ValueError("official_document_receipt_step_conflict")
+            timestamp = now()
+            evidence = {**(parse_json_any(step.get("decision_evidence_json"), {}) or {}),
+                        "schema_version": 1, "decision_type": "confirm", "expected_step_id": step["id"],
+                        "workflow_generation": int(step.get("workflow_generation") or 1),
+                        "decision_actor_user_id": user["id"], "principal_actor_id": user["id"], "confirmed_at": timestamp}
+            log = insert_official_log(conn, document_id, "confirm", user, payload.get("comment") or "申請人確認已用印版本",
+                                     step_id=step["id"], principal_actor_id=user["id"], decision_evidence=evidence,
+                                     ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+            evidence["confirmation_log_id"] = log["id"]
+            changed = conn.execute(
+                "UPDATE official_document_approval_steps SET status = 'approved', comment = ?, approved_at = ?, updated_at = ?, decision_actor_user_id = ?, decision_evidence_json = ? WHERE id = ? AND status = 'pending'",
+                (payload.get("comment") or "申請人確認完成", timestamp, timestamp, user["id"], json.dumps(evidence, ensure_ascii=False), step["id"]),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("official_document_receipt_step_conflict")
+            conn.execute("UPDATE official_documents SET current_status = 'closed', current_step = '', updated_at = ? WHERE id = ?", (timestamp, document_id))
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
     return official_document_detail(conn, document_id, session)
 
 
@@ -25422,7 +25237,7 @@ def retry_official_document_stamp(conn: sqlite3.Connection, document_id: str, pa
     stamp_request = official_document_stamp_request(conn, document_id)
     if not official_stamp_recoverable(document, stamp_request):
         raise ValueError("official_document_not_recoverable_for_stamp")
-    steps = official_document_steps(conn, document_id)
+    steps = current_official_document_steps(conn, document_id)
     if not can_retry_official_stamp(user, steps):
         raise PermissionError("official_stamp_retry_forbidden")
     unapproved_steps = [
@@ -36948,104 +36763,9 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
     }
 
 
-def supabase_list_official_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    user = supabase_official_session_user(session)
-    query = query or {}
-    status = (query.get("status") or [""])[0]
-    company_id = (query.get("company_id") or [""])[0]
-    applicant_id = (query.get("applicant_id") or [""])[0]
-    scope = (query.get("scope") or [""])[0]
-    filters = {key: value for key, value in (
-        ("current_status", status), ("company_id", company_id), ("applicant_id", applicant_id),
-    ) if value}
-    if scope == "mine":
-        if applicant_id and applicant_id != user.get("id"):
-            return []
-        filters["applicant_id"] = str(user.get("id") or "")
-    rows = supabase_filter_rows("official_documents", filters, order="created_at.desc", limit=300)
-    user_company_id = str(user.get("company_id") or "").strip()
-    items: List[Dict[str, Any]] = []
-    for item in rows:
-        if status and item.get("current_status") != status:
-            continue
-        if company_id and item.get("company_id") != company_id:
-            continue
-        if applicant_id and item.get("applicant_id") != applicant_id:
-            continue
-        # Avoid loading four child resources for somebody else's request.
-        # Keep this check even though the Data API also filters the query.
-        if scope == "mine" and item.get("applicant_id") != user.get("id"):
-            continue
-        all_steps = supabase_official_document_steps(item["id"])
-        if all_steps:
-            workflow_generation = max(
-                int(step.get("workflow_generation") or 1) for step in all_steps
-            )
-            steps = [
-                step
-                for step in all_steps
-                if int(step.get("workflow_generation") or 1)
-                == workflow_generation
-            ]
-        else:
-            steps = []
-        actor_snapshots = supabase_official_document_actor_snapshots(item["id"])
-        is_applicant = item.get("applicant_id") == user.get("id")
-        is_participant = user.get("id") in official_document_participant_ids(
-            item,
-            all_steps,
-            actor_snapshots,
-        )
-        if user_company_id and str(item.get("company_id") or "") != user_company_id and not is_participant:
-            continue
-        dispatch_record = supabase_official_dispatch_record(item["id"])
-        current_pending = next((step for step in steps if step.get("status") == "pending" and step.get("step_key") == item.get("current_step")), None)
-        active_delegation = official_document_active_read_delegation(item, all_steps, user, supabase_mode=True)
-        is_current_todo = bool(current_pending and (current_pending.get("approver_user_id") == user.get("id") or active_delegation))
-        is_dispatch_todo = bool(
-            dispatch_record
-            and dispatch_record.get("dispatch_status") == "pending"
-            and dispatch_record.get("dispatch_owner_user_id") == user.get("id")
-        )
-        stamp_request = supabase_official_document_stamp_request(item["id"])
-        is_stamp_retry_todo = official_stamp_recoverable(item, stamp_request) and can_retry_official_stamp(user, steps)
-        if scope == "mine" and not is_applicant:
-            continue
-        if scope == "todo" and not (is_current_todo or is_dispatch_todo or is_stamp_retry_todo):
-            continue
-        # Unknown scope values must never bypass the normal record boundary.
-        # Only the explicit mine/todo views have their own narrower checks.
-        if scope not in {"mine", "todo"} and not is_applicant and not is_participant and not active_delegation and (not user_company_id or not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"])):
-            continue
-        seal_context = official_seal_context_from_document(item)
-        item["official_seal"] = seal_context
-        item["document_category"] = (seal_context or {}).get("document_category") or ""
-        item["approval_route_code"] = (seal_context or {}).get("approval_route_code") or ""
-        item["approval_route_name"] = (seal_context or {}).get("approval_route_name") or ""
-        item["approval_steps"] = steps
-        item["stamp_request"] = official_application_package(item, [], [], [], stamp_request).get("stamp_request")
-        item["dispatch_record"] = dispatch_record
-        item["current_step_name"] = next((step["step_name"] for step in steps if step.get("step_key") == item.get("current_step")), "")
-        item["can_download"] = bool(is_participant or active_delegation)
-        item["can_manage_dispatch"] = official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(
-            user,
-            item,
-            dispatch_record,
-            session,
-            steps,
-        )
-        item["can_retry_stamp"] = bool(is_stamp_retry_todo)
-        item["can_confirm"] = bool(
-            is_applicant
-            and item.get("current_step") == "applicant_confirm"
-            and item.get("current_status")
-            in {"stamped", "dispatched", "sent_by_applicant"}
-        )
-        item["can_act"] = is_current_todo
-        item["acting_for_user_id"] = current_pending.get("approver_user_id") if active_delegation and current_pending else ""
-        item["delegation_id"] = active_delegation.get("id") if active_delegation else ""
-        items.append(item)
-    return items
+def supabase_list_official_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> Any:
+    from official_listing import list_supabase
+    return list_supabase(sys.modules[__name__], query, session)
 
 
 def _supabase_editor_latest_revision(document_id: str) -> Dict[str, Any] | None:
@@ -40377,17 +40097,23 @@ def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any]
     document = supabase_official_document_row(document_id)
     if document["applicant_id"] != user["id"]:
         raise PermissionError("only_applicant_can_confirm")
-    if document["current_status"] not in {"returned_to_applicant_for_send", "stamped", "dispatched", "sent_by_applicant"}:
-        raise ValueError("official_document_not_ready_for_applicant_confirm")
-    if document["current_status"] == "returned_to_applicant_for_send":
-        supabase_complete_official_dispatch(document_id, payload, session)
     all_steps = supabase_official_document_steps(document_id)
     generation = max((int(row.get("workflow_generation") or 1) for row in all_steps), default=0)
     step = next((item for item in all_steps if int(item.get("workflow_generation") or 1) == generation and item.get("step_key") == "applicant_confirm"), None)
-    if step and step.get("status") == "pending":
-        supabase_patch("official_document_approval_steps", step["id"], {"status": "approved", "comment": payload.get("comment") or "申請人確認完成", "approved_at": now(), "updated_at": now()})
-    supabase_patch("official_documents", document_id, {"current_status": "closed", "current_step": "", "updated_at": now()})
-    supabase_insert_official_log(document_id, "confirm", user, payload.get("comment") or "申請人確認已用印版本", ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
+    if not step:
+        raise ValueError("official_document_receipt_step_conflict")
+    if "proof_file_id" in payload:
+        raise ValueError("official_dispatch_proof_file_server_managed")
+    raw = supabase_request("POST", "rpc/edoc_confirm_official_document", {"p_request": {
+        "document_id": document_id, "actor_id": user["id"], "expected_step_id": step["id"],
+        "workflow_generation": generation, "comment": payload.get("comment") or "申請人確認已用印版本",
+        "dispatch": {key: payload.get(key) for key in ("external_official_document_number", "dispatch_date", "recipient", "recipient_contact", "dispatch_note")},
+        "ip_address": payload.get("ip_address") or "", "user_agent": (payload.get("user_agent") or "")[:180],
+    }})
+    result = _supabase_stamp_rpc_result(raw, "confirmed", "official_document_confirm_invalid_response")
+    if (result.get("document_id") != document_id or result.get("step_id") != step["id"]
+            or result.get("actor_id") != user["id"] or not result.get("confirmed")):
+        raise RuntimeError("official_document_confirm_invalid_response")
     return supabase_official_document_detail(document_id, session)
 
 
@@ -40683,7 +40409,7 @@ def supabase_retry_official_document_stamp(document_id: str, payload: Dict[str, 
     stamp_request = supabase_official_document_stamp_request(document_id)
     if not official_stamp_recoverable(document, stamp_request):
         raise ValueError("official_document_not_recoverable_for_stamp")
-    steps = supabase_official_document_steps(document_id)
+    steps = latest_official_workflow_steps(supabase_official_document_steps(document_id))
     if not can_retry_official_stamp(user, steps):
         raise PermissionError("official_stamp_retry_forbidden")
     unapproved_steps = [

@@ -15,28 +15,34 @@ class OfficialListReadBudgetTest(unittest.TestCase):
         self.rows = [
             {"id": f"SYNTHETIC-{index:03d}", "company_id": "COMPANY-A",
              "applicant_id": "ACTOR" if index == 0 else "OTHER",
-             "current_status": "draft", "current_step": "", "metadata_json": "{}"}
+             "current_status": "draft", "current_step": "", "metadata_json": "{}",
+             "created_at": "2026-09-24 10:00:00"}
             for index in range(100)
         ]
         self.session = {"user": {"id": "ACTOR", "company_id": "COMPANY-A"},
                         "permissions": ["official_documents.all_records"]}
 
-    def request(self, method, path, *_args, **_kwargs):
-        self.assertEqual(method, "GET")
-        parsed = urlparse(path)
-        self.calls.append((parsed.path, parse_qs(parsed.query)))
-        # Return an intentionally unfiltered source to exercise the independent
-        # local scope defense as well as the actual request filter contract.
-        return [dict(row) for row in self.rows] if parsed.path == "official_documents" else []
+    def request(self, method, path, payload, **_kwargs):
+        self.assertEqual((method, path), ("POST", "rpc/edoc_list_official_document_candidates"))
+        query = payload["p_request"]
+        self.calls.append((path, query))
+        rows = sorted(self.rows, key=lambda r: (r["created_at"], r["id"]), reverse=True)
+        if query["scope"] == "mine":
+            rows = [r for r in rows if r["applicant_id"] == query["actor_id"]]
+        for source, key in (("status", "current_status"), ("company_id", "company_id"), ("applicant_id", "applicant_id")):
+            if query[source]:
+                rows = [r for r in rows if r[key] == query[source]]
+        if query["after_id"]:
+            rows = [r for r in rows if (r["created_at"], r["id"]) < (query["after_created_at"], query["after_id"])]
+        return {"items": [{"document": dict(r), "steps": [], "snapshots": []} for r in rows[:query["limit"]]]}
 
     def test_mine_reads_only_its_one_case_not_all_100_child_resources(self):
         with mock.patch.object(backend, "supabase_request", side_effect=self.request):
             rows = backend.supabase_list_official_documents({"scope": ["mine"]}, self.session)
         self.assertEqual([row["id"] for row in rows], ["SYNTHETIC-000"])
-        self.assertEqual(len(self.calls), 5)  # Previously 1 + 4 * 100 = 401.
-        self.assertEqual(self.calls[0][1]["applicant_id"], ["eq.ACTOR"])
-        for _table, query in self.calls[1:]:
-            self.assertIn(["eq.SYNTHETIC-000"], (query.get("document_id"), query.get("source_id")))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][1]["actor_id"], "ACTOR")
+        self.assertEqual(self.calls[0][1]["scope"], "mine")
 
     def test_conflicting_mine_applicant_filter_does_not_query_or_expand_access(self):
         with mock.patch.object(backend, "supabase_request", side_effect=self.request):
@@ -49,9 +55,9 @@ class OfficialListReadBudgetTest(unittest.TestCase):
         with mock.patch.object(backend, "supabase_request", side_effect=self.request):
             result = backend.supabase_list_official_documents(query, self.session)
         self.assertEqual(len(result), 1)
-        self.assertEqual(len(self.calls), 5)
-        self.assertEqual({key: self.calls[0][1][key] for key in ("current_status", "company_id", "applicant_id")},
-                         {"current_status": ["eq.draft"], "company_id": ["eq.COMPANY-A"], "applicant_id": ["eq.ACTOR"]})
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual({key: self.calls[0][1][key] for key in ("status", "company_id", "applicant_id")},
+                         {"status": "draft", "company_id": "COMPANY-A", "applicant_id": "ACTOR"})
 
     def test_unknown_scope_still_cannot_bypass_participant_access(self):
         self.session["permissions"] = []
@@ -59,11 +65,19 @@ class OfficialListReadBudgetTest(unittest.TestCase):
             rows = backend.supabase_list_official_documents({"scope": ["arbitrary"]}, self.session)
         self.assertEqual([row["id"] for row in rows], ["SYNTHETIC-000"])
 
-    def test_all_list_is_unchanged_and_not_misrepresented_as_batched(self):
+    def test_all_100_records_are_batched_instead_of_401_sequential_requests(self):
         with mock.patch.object(backend, "supabase_request", side_effect=self.request):
             rows = backend.supabase_list_official_documents({"scope": ["all"]}, self.session)
         self.assertEqual(len(rows), 100)
-        self.assertEqual(len(self.calls), 401)
+        self.assertEqual(len(self.calls), 2)  # One full batch plus end-of-list probe.
+
+    def test_first_page_uses_one_batched_read_and_exposes_cursor(self):
+        with mock.patch.object(backend, "supabase_request", side_effect=self.request):
+            result = backend.supabase_list_official_documents({"scope": ["all"], "page_size": ["50"]}, self.session)
+        self.assertEqual(len(result["items"]), 50)
+        self.assertTrue(result["has_more"])
+        self.assertTrue(result["next_cursor"])
+        self.assertEqual(len(self.calls), 1)
 
 
 class UploadCleanupReadBudgetTest(unittest.TestCase):
