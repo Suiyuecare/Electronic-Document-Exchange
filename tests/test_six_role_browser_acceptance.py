@@ -20,7 +20,7 @@ class SixRoleBrowserFixtureContractTests(unittest.TestCase):
         self.assertIn('interfaceFontStylesheet.addEventListener("load", applyInterfaceFont, { once: true });', js)
         self.assertNotRegex(html, r'id="interfaceFontStylesheet"[^>]*onload=')
         self.assertIn("entry-bootstrap.js?v=20260914-early-handoff-r1", html)
-        self.assertIn("styles.css?v=20260924-seven-fixes-r1", html)
+        self.assertIn("styles.css?v=20260925-finance-header-r1", html)
         self.assertIn("app.js?v=20260924-seven-fixes-r1", html)
         self.assertIn("edukai", js.lower())
 

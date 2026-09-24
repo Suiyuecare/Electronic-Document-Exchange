@@ -141,7 +141,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn("width: 300px; height: 100%;", normalized)
         self.assertIn(".nav-list { flex: 1; grid-template-columns: 1fr;", normalized)
         self.assertIn('.topbar { display: grid; grid-template-areas: "title bell actions status";', normalized)
-        self.assertIn("grid-template-columns: minmax(0, 1fr) max-content max-content max-content;", normalized)
+        self.assertIn("grid-template-columns: max-content max-content max-content minmax(0, 1fr);", normalized)
         self.assertIn("min-height: 82px; height: 82px; max-height: 82px;", normalized)
         self.assertIn(".brand-mark { width: 58px; height: 58px; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px;", normalized)
         self.assertIn(".profile-avatar { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 6px;", normalized)
@@ -165,6 +165,16 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         logo = ROOT / "assets" / "suiyue-logo-transparent.png"
         self.assertTrue(logo.is_file())
         self.assertEqual(logo.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_finance_header_has_no_legacy_title_spacer_and_matches_controls(self) -> None:
+        normalized = re.sub(r"\s+", " ", self.css)
+        self.assertIn(".topbar > div.mobile-topbar-heading { display: flex; min-width: 0;", normalized)
+        self.assertIn(".topbar-notification-button svg { width: 14px; height: 14px;", normalized)
+        self.assertIn(".module-todo-badge { display: inline-flex; min-width: 19px; height: 19px;", normalized)
+        self.assertIn("background: #c2410c; font-size: 10px; font-weight: 900;", normalized)
+        self.assertIn('d="M6 17h12M8 17V9a4 4 0 0 1 8 0v8M10 20h4"', self.html)
+        self.assertIn('id="moduleTodoBadge" hidden', self.html)
+        self.assertIn("styles.css?v=20260925-finance-header-r1", self.html)
 
     def test_mobile_shell_has_four_primary_actions_and_six_item_drawer(self) -> None:
         nav_start = self.html.index('<nav class="mobile-primary-nav"')
