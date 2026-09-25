@@ -42,6 +42,11 @@ class EditorPdfUploadSharedForwardPostgresTest(postgres_fixture.ComposeOutputPos
         super().setUpClass()
         cls.pg.execute("SET ROLE postgres")
         try:
+            # The lightweight compose fixture creates a schema-shaped storage
+            # jobs table from SQLite. Recreate the real released table before
+            # replaying its migration so the asset_id uniqueness contract used
+            # by the conflict-copy migration is present.
+            cls.pg.execute("DROP TABLE edoc.official_document_editor_storage_jobs")
             for name in (
                 "20260827194500_promote_editor_tus_staging_to_immutable.sql",
                 "20260911133603_editor_conflict_copy_atomic.sql",
