@@ -80,6 +80,7 @@ function harness() {
     clearUploadedEditorUploadError: () => events.push(['clearError']),
     renderUploadedSealWorkbench: () => events.push(['render']),
     setUploadedEditorSaveStatus: (...args) => events.push(['status', ...args]),
+    setUploadedPdfUploadProgress: (...args) => events.push(['uploadProgress', ...args]),
     setUploadedPdfA4Status: (...args) => events.push(['a4Status', ...args]),
     showUploadedEditorUploadError: () => events.push(['uploadError']),
     showToast: message => events.push(['toast', message]),

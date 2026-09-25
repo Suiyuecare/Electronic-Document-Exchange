@@ -26,14 +26,15 @@ function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve
 const tick=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
 function setup(){
  const nodes={};for(const name of ['workspaceLoadStatus','workspaceLoadLabel','workspaceLoadRetryBtn'])nodes['#'+name]={hidden:true,textContent:'',dataset:{}};
- nodes['#uploadedSealCompany']={value:'company-a'};nodes['#officialCompanySelect']={value:'compose-company'};
+ nodes['#uploadedSealCompany']={value:'company-a'};nodes['#officialCompanySelect']={value:'compose-company'};nodes['#composeCompanySelect']={value:'compose-company-name'};
  const c={console:{warn(){}},Map,Set,Promise,Error,scope:'user-a:company-a',authenticated:true,activeRouteTarget:'electronicSeal',headerBackendSyncState:{status:'idle',syncedAt:''},calls:[],pending:[],renders:0,
    routeBackendDataLoaded:new Set(),routeBackendDataRequests:new Map(),routeBackendDataErrors:new Map(),routeBackendDataScope:'',
    uploadedSealEditorRuntime:{directoryLoading:true},financeDirectoryState:{status:'synced'},inboundDocumentLoadState:{scope:'user-a:company-a'},
    document:{querySelector:s=>nodes[s]||null},nodes,frontendSessionScope:()=>c.scope,hasAuthenticatedBackendSession:()=>c.authenticated,updateHeaderStatus(){},
    renderUploadedSealCompanyOptions(){},renderUploadedSealWorkbench(){c.renders++},setUploadedEditorSaveStatus(){}};
- for(const name of ['loadFinanceCompanyDirectory','loadOfficialWorkflowConfig','loadUploadedSealOptions','loadOfficialSealOptions','refreshWorkflowReadinessForContext','loadWorkflowDelegations','loadInboundDocuments','loadInternalDispatches','loadInboundAssigneeCandidates','loadCompanySealModule','syncJobsFromBackend','syncDatabaseFromBackend','loadUiUsageSummary','syncGoLiveAuditFromBackend'])
+ for(const name of ['loadFinanceCompanyDirectory','loadOfficialWorkflowConfig','loadOfficialWorkflowCandidates','renderEditableOfficialWorkflowConfig','loadUploadedSealOptions','loadOfficialSealOptions','refreshWorkflowReadinessForContext','loadWorkflowDelegations','loadInboundDocuments','loadInternalDispatches','loadInboundAssigneeCandidates','loadCompanySealModule','syncJobsFromBackend','syncDatabaseFromBackend','loadUiUsageSummary','syncGoLiveAuditFromBackend'])
    c[name]=(...args)=>{const d=deferred();c.calls.push({name,args});c.pending.push({name,...d});return d.promise};
+ c.loadComposeSealOptions=(...args)=>{c.calls.push({name:'loadComposeSealOptions',args});return Promise.resolve([])};
  vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);return c;
 }
 const resolveAll=c=>c.pending.forEach(d=>d.resolve());
@@ -83,13 +84,20 @@ const resolveAll=c=>c.pending.forEach(d=>d.resolve());
  assert.equal(c.routeBackendDataLoaded.has('electronicSeal'),true);assert.equal(c.routeBackendDataErrors.size,0);
 
  c=setup();c.activeRouteTarget='compose';const compose=c.loadRouteBackendData('compose');resolveAll(c);await tick();
- assert.deepEqual(c.calls.slice(2).map(x=>x.name),['loadOfficialSealOptions','refreshWorkflowReadinessForContext']);
- resolveAll(c);await compose;assert.equal(c.calls[2].args[0],'compose-company');
+ assert.deepEqual(c.calls.slice(2).map(x=>x.name),['loadComposeSealOptions','loadOfficialSealOptions','refreshWorkflowReadinessForContext']);
+ resolveAll(c);await compose;assert.equal(c.calls[2].args[0],'compose-company-name');assert.equal(c.calls[3].args[0],'compose-company');
 
  c=setup();c.activeRouteTarget='settings';const settings=c.loadRouteBackendData('settings');
- assert.deepEqual(c.calls.map(x=>x.name),['loadFinanceCompanyDirectory']);
- c.pending[0].resolve();await tick();assert.equal(c.calls[1].name,'loadOfficialWorkflowConfig');
- resolveAll(c);await tick();resolveAll(c);await settings;
+ assert.deepEqual(c.calls.map(x=>x.name),['loadFinanceCompanyDirectory','loadOfficialWorkflowConfig']);
+ assert.equal(c.calls[1].args[1].deferCandidates,true);
+ resolveAll(c);await settings;
+ assert.equal(c.calls.some(x=>x.name==='loadOfficialWorkflowCandidates'),true);
+ assert.equal(c.routeBackendDataLoaded.has('settings'),true);
+ assert.equal(c.calls.some(x=>x.name==='syncGoLiveAuditFromBackend'),false);
+
+ c=setup();const ops=c.loadRouteBackendData('ops');
+ assert.deepEqual(c.calls.map(x=>x.name),['syncGoLiveAuditFromBackend']);
+ resolveAll(c);await ops;assert.equal(c.routeBackendDataLoaded.has('ops'),true);
 
  c=setup();const background=c.loadRouteBackendData('electronicSeal');c.activeRouteTarget='dashboard';await c.loadRouteBackendData('dashboard');
  assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);resolveAll(c);await tick();resolveAll(c);await background;

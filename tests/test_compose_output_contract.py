@@ -145,6 +145,9 @@ class ComposeOutputContractTest(unittest.TestCase):
           const nodes={"#composeOutputMode":mode,"#largeSealType":large,"#smallSealType":small,"#composeSealFields":fields,"#composeSealModeHint":hint};
           global.document={querySelector:s=>nodes[s]};
           const composeSealTypes=["無","一般章","公司設立章"];
+          const composeSealOptionsForSelectedCompany=()=>[{seal_size_type:"large_seal"},{seal_size_type:"small_seal"}];
+          const composeSealOptionsAreLoadingForSelectedCompany=()=>false;
+          const composeSealOptionsLoading=false,composeSealOptionsError=false;
           syncComposeElectronicExchangeMode();
           const electronic={hidden:fields.hidden,disabled:large.disabled&&small.disabled,hint:hint.textContent};
           mode.value="physical"; syncComposeElectronicExchangeMode();

@@ -24,6 +24,7 @@ const document={querySelector:key=>nodes[key]||null};const window={confirm:()=>t
 const hasAuthenticatedBackendSession=()=>true,approvalSelectionForSelect=()=>selection,uploadedEditorV2FeatureEnabled=()=>feature;
 const renderUploadedSealApplicationDisclosure=()=>{},setOfficialFieldValidity=(...args)=>events.push(['field',...args]),focusOfficialWorkflowField=key=>events.push(['focus',key]);
 const showToast=text=>events.push(['toast',text]),clearUploadedEditorUploadError=()=>events.push(['clear']),setUploadedPdfA4Status=(...args)=>events.push(['a4',...args]),setUploadedEditorSaveStatus=(...args)=>events.push(['status',...args]);
+const setUploadedPdfUploadProgress=(...args)=>events.push(['progress',...args]);
 const refreshUploadedEditorAccess=async()=>events.push(['access']);
 const PDF_EDITOR_MAX_FILE_BYTES=50*1024*1024;
 const uploadedSealApplicationScopeSnapshot=()=>({}),uploadedSealApplicationScopeIsCurrent=()=>true,renderUploadedSealWorkbench=()=>{};
