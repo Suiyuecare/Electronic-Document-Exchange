@@ -46,6 +46,7 @@ def run(output, roles=("staff", "ceo")):
                     browser.evaluate("localStorage.clear();sessionStorage.clear();localStorage.setItem('suiyuecare-edoc-session'," + json.dumps(json.dumps(auth)) + ");true")
                     browser.run("open", fixture.origin + f"/?fixture={time.monotonic_ns()}#compose")
                     browser.until("window.__fixtureTiming?.appInteractiveMs&&document.querySelector('.view.active')?.id==='compose'&&document.querySelector('#composeApprovalCategorySelect').options.length>1")
+                    browser.until("composeSealOptionsCompanyId===composeCompanyForOfficialApplication(document.querySelector('#composeCompanySelect').value)?.id&&!composeSealOptionsLoading")
                     browser.run("snapshot", "-i")
                     browser.run("screenshot", str(output / f"{role}-{device}-initial.png"))
                     if not browser.evaluate("document.body.innerText.trim().length>0&&!document.querySelector('[data-nextjs-dialog],.vite-error-overlay')"):
@@ -54,9 +55,18 @@ def run(output, roles=("staff", "ceo")):
                     checks = row["checks"]
                     checks["dateDefaultsToTaipeiToday"] = browser.evaluate("document.querySelector('#dispatchDate').value===new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())")
                     checks["faxDefaultsToNA"] = browser.evaluate("document.querySelector('#contactFax').value==='N/A'")
+                    seal_options = browser.evaluate("(()=>{const eligible=composeSealOptions.filter(s=>(s.is_active===true||s.is_active===1)&&officialSealHasCurrentFile(s));const expected=size=>['無',...new Set(eligible.filter(s=>s.seal_size_type===size).map(composeSealTypeLabel).filter(Boolean))];const large=[...document.querySelector('#largeSealType').options].map(o=>o.value),small=[...document.querySelector('#smallSealType').options].map(o=>o.value);return {large,small,expectedLarge:expected('large_seal'),expectedSmall:expected('small_seal'),largeDisabled:document.querySelector('#largeSealType').disabled,smallDisabled:document.querySelector('#smallSealType').disabled,company:document.querySelector('#composeCompanySelect').value,companyId:composeSealOptionsCompanyId,loading:composeSealOptionsLoading,error:composeSealOptionsError}})()")
+                    checks["companySpecificSealChoicesMatchCurrentVault"] = seal_options["large"] == seal_options["expectedLarge"] and seal_options["small"] == seal_options["expectedSmall"] and seal_options["largeDisabled"] == (len(seal_options["expectedLarge"]) == 1) and seal_options["smallDisabled"] == (len(seal_options["expectedSmall"]) == 1)
+                    if not checks["companySpecificSealChoicesMatchCurrentVault"]:
+                        checks["sealAvailabilityDiagnostics"] = seal_options
                     browser.click_visible("#composeNextBtn")
                     checks["missingFieldsStayEditableWithSummary"] = browser.evaluate("activeComposeStep==='fill'&&!document.querySelector('#composeValidationSummary').hidden&&!!document.querySelector('#composeForm [aria-invalid=true]')")
+                    # The AI prompt is intentionally inside a collapsed optional
+                    # disclosure; open it before interacting so the browser
+                    # never falls through to whichever field was last focused.
+                    browser.click_visible(".compose-ai-assist-disclosure > summary")
                     browser.run("fill", "#documentPurpose", "去識別化測試，申請更新公文資料。")
+                    checks["aiPromptTargetsTheRequestedField"] = browser.evaluate("document.querySelector('#documentPurpose').value==='去識別化測試，申請更新公文資料。'&&document.querySelector('#contactPhone').value==='02-66045432 #'")
                     browser.until("composeSaveState.title==='私人雲端草稿已保存'&&!composeCloudOperation")
                     cloud_id = browser.evaluate("composeCloudDraftId")
                     with backend.connect() as conn:

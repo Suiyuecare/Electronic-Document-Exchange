@@ -128,6 +128,59 @@
   color: #6d28d9;
 }
 
+.pdf-editor-upload-progress {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  border: 1px solid #f2d6b4;
+  border-radius: 10px;
+  background: #fffaf3;
+  color: #76502e;
+  font-size: 12px;
+  font-weight: 700;
+}
+.pdf-editor-upload-progress[hidden] { display: none; }
+.pdf-editor-upload-progress progress {
+  display: block;
+  width: 100%;
+  height: 10px;
+  border: 0;
+  border-radius: 999px;
+  accent-color: #ed8900;
+}
+.pdf-editor-upload-progress progress::-webkit-progress-bar { border-radius: 999px; background: #f1e7d9; }
+.pdf-editor-upload-progress progress::-webkit-progress-value { border-radius: 999px; background: #ed8900; }
+.pdf-editor-upload-progress progress::-moz-progress-bar { border-radius: 999px; background: #ed8900; }
+.pdf-editor-upload-progress[data-state="uploading"] span { color: #9a4b08; font-variant-numeric: tabular-nums; }
+.pdf-editor-upload-progress[data-state="uploading-pending"] span { color: #9a4b08; font-variant-numeric: tabular-nums; }
+.pdf-editor-upload-progress[data-state="finalizing"] { border-color: #cbd5e1; background: #f8fafc; }
+.pdf-editor-upload-progress[data-state="finalizing"] progress { accent-color: #64748b; }
+
+.compose-seal-availability {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  color: #79521e;
+  font-size: 12px;
+}
+.compose-seal-availability[hidden] { display: none; }
+.compose-seal-availability #composeSealRetryBtn { min-height: 36px; }
+
+.pdf-editor-upload-progress progress:not([value]) {
+  background: linear-gradient(90deg, #f1e7d9 0 35%, #ed8900 45% 60%, #f1e7d9 70% 100%);
+  background-size: 220% 100%;
+  animation: pdf-upload-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes pdf-upload-indeterminate { to { background-position: -220% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .pdf-editor-upload-progress progress:not([value]) { animation: none; background: #ed8900; opacity: .65; }
+}
+
 .pdf-editor-conflict-action {
   color: #b91c1c;
 }

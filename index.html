@@ -1223,25 +1223,21 @@
                   </label>
                   <div class="inline-fields" id="composeSealFields">
                     <label>
-                      大章
-                      <select id="largeSealType">
-                        <option>無</option>
-                        <option selected>一般章</option>
-                        <option>公司設立章</option>
-                        <option>銀行印鑑章</option>
-                        <option>圖記章</option>
-                      </select>
+                    大章
+                    <select id="largeSealType">
+                        <option value="無" selected>無</option>
+                    </select>
+                  </label>
+                  <label>
+                    小章
+                    <select id="smallSealType">
+                        <option value="無" selected>無</option>
+                    </select>
                     </label>
-                    <label>
-                      小章
-                      <select id="smallSealType">
-                        <option selected>無</option>
-                        <option>一般章</option>
-                        <option>公司設立章</option>
-                        <option>銀行印鑑章</option>
-                        <option>圖記章</option>
-                      </select>
-                    </label>
+                  </div>
+                  <div class="compose-seal-availability" id="composeSealAvailabilityNotice" role="status" aria-live="polite" hidden>
+                    <span id="composeSealAvailabilityHint"></span>
+                    <button class="text-button" id="composeSealRetryBtn" type="button" hidden>重新載入</button>
                   </div>
                   <small class="field-hint compose-essential-hint" id="composeSealModeHint">電子與實體公文都須完成簽核；此選項不會啟用政府電子公文正式交換。</small>
                 </section>
@@ -1655,6 +1651,10 @@
                 </div>
                 <button class="secondary-button" id="uploadedPdfReplaceBtn" type="button" aria-controls="uploadedSealPdfInput">選擇 PDF</button>
                 <input id="uploadedSealPdfInput" type="file" accept="application/pdf,.pdf" aria-describedby="uploadedPdfA4Rule" hidden />
+              </div>
+              <div class="pdf-editor-upload-progress" id="uploadedPdfUploadProgress" data-state="hidden" role="group" aria-label="PDF 上傳進度" hidden>
+                <progress id="uploadedPdfUploadProgressBar" max="100" value="0" aria-label="PDF 檔案傳輸進度">0%</progress>
+                <span id="uploadedPdfUploadProgressLabel">準備上傳 PDF…</span>
               </div>
               <div class="pdf-a4-rule pdf-editor-a4-rule" id="uploadedPdfA4Rule" data-state="idle">
                 <strong>A4 直式、橫式皆可</strong>

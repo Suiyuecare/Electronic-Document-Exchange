@@ -192,6 +192,11 @@ const COMPANY_SEAL_ASPECT_RATIO_TOLERANCE = 0.01;
 const COMPANY_SEAL_CALIBRATION_SQUARE_TOLERANCE_MM = 0.01;
 const COMPANY_SEAL_GEOMETRY_COMPARISON_TOLERANCE = 1e-4;
 let officialSealOptions = [];
+let composeSealOptions = [];
+let composeSealOptionsCompanyId = "";
+let composeSealOptionsRequestNo = 0;
+let composeSealOptionsLoading = false;
+let composeSealOptionsError = false;
 let editingOfficialDocumentId = "";
 let officialDecisionState = { documentId: "", action: "", source: "workflow" };
 let officialStampPositionSeq = 1;
@@ -5544,18 +5549,29 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
       const uploadRoute = ["contractSeal", "electronicSeal"].includes(target);
       const needsDirectory = ["workflow", "settings", "compose", "contractSeal", "electronicSeal"].includes(target);
       // Entry forms can read their directory and workflow rules together.
-      // Settings must populate the company picker before loading candidates.
+      // Settings also reads them together, but defers workflow candidates until
+      // the Finance company picker has been populated.
       if (needsDirectory) {
-        if (["workflow", "settings"].includes(target)) {
+        if (target === "workflow") {
           await loadFinanceCompanyDirectory();
           if (!current()) return;
           await loadOfficialWorkflowConfig(silent, { throwOnError: true });
+        } else if (target === "settings") {
+          await Promise.all([
+            loadFinanceCompanyDirectory(),
+            loadOfficialWorkflowConfig(silent, { throwOnError: true, deferCandidates: true })
+          ]);
+          if (!current()) return;
+          if (financeDirectoryState.status === "error") throw new Error("公司與部門資料暫時無法更新");
+          renderEditableOfficialWorkflowConfig();
+          void loadOfficialWorkflowCandidates();
         } else {
           await Promise.all([loadFinanceCompanyDirectory(), loadOfficialWorkflowConfig(silent, { throwOnError: true })]);
         }
         if (!current()) return;
         if (financeDirectoryState.status === "error") throw new Error("公司與部門資料暫時無法更新");
       }
+      if (target === "compose") void loadComposeSealOptions(document.querySelector("#composeCompanySelect")?.value || "", { force: true });
       if (uploadRoute) {
         renderUploadedSealCompanyOptions();
         const [, readiness] = await Promise.all([
@@ -5588,7 +5604,10 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
         await loadUiUsageSummary(silent);
         if (isProductionEdocHost()) await loadOfficialOperationalReport();
       }
-      if (["ops", "settings"].includes(target)) await syncGoLiveAuditFromBackend(silent);
+      // The production Go/No-Go audit is only needed on the operations page.
+      // Fetching it while opening everyday settings adds a slow, unrelated
+      // request to the page's blocking load sequence.
+      if (target === "ops") await syncGoLiveAuditFromBackend(silent);
       if (current()) {
         routeBackendDataLoaded.add(target);
         headerBackendSyncState = { status: "synced", syncedAt: new Date().toISOString() };
@@ -7560,6 +7579,97 @@ function composeOutputMode() {
   return document.querySelector("#composeOutputMode")?.value === "electronic" ? "electronic" : "physical";
 }
 
+function composeSealOptionsForSelectedCompany() {
+  const companyId = composeCompanyForOfficialApplication(document.querySelector("#composeCompanySelect")?.value || "")?.id || "";
+  return companyId && companyId === composeSealOptionsCompanyId
+    ? composeSealOptions.filter((seal) => (seal.is_active === true || seal.is_active === 1) && officialSealHasCurrentFile(seal))
+    : [];
+}
+
+function composeSealOptionsAreLoadingForSelectedCompany() {
+  const companyId = composeCompanyForOfficialApplication(document.querySelector("#composeCompanySelect")?.value || "")?.id || "";
+  return composeSealOptionsLoading || Boolean(companyId && hasAuthenticatedBackendSession() && companyId !== composeSealOptionsCompanyId);
+}
+
+function composeSealTypeLabel(seal) {
+  return ({
+    general_seal: "一般章",
+    establishment_seal: "公司設立章",
+    bank_seal: "銀行印鑑章",
+    official_seal: "圖記章"
+  })[seal?.seal_category] || "";
+}
+
+function renderComposeSealTypeOptions() {
+  const controls = [
+    { selector: "#largeSealType", size: "large_seal", emptyLabel: "一般章" },
+    { selector: "#smallSealType", size: "small_seal", emptyLabel: "無" }
+  ];
+  const available = composeSealOptionsForSelectedCompany().filter(officialSealHasCurrentFile);
+  controls.forEach(({ selector, size, emptyLabel }) => {
+    const select = document.querySelector(selector);
+    if (!select) return;
+    const previous = select.value;
+    const preferred = select.dataset.composeSealPreferred || previous;
+    const labels = [...new Set(available
+      .filter((seal) => seal.seal_size_type === size)
+      .map(composeSealTypeLabel)
+      .filter(Boolean))];
+    select.innerHTML = [`<option value="無">無</option>`, ...labels.map((label) => `<option value="${escapeDraftHtml(label)}">${escapeDraftHtml(label)}</option>`)].join("");
+    const fallback = emptyLabel !== "無" && labels.includes(emptyLabel) ? emptyLabel : labels[0] || "無";
+    select.value = labels.includes(preferred) ? preferred : fallback;
+    if (composeSealOptionsLoading || composeSealOptionsError) select.dataset.composeSealPreferred = preferred;
+    else delete select.dataset.composeSealPreferred;
+    select.disabled = composeOutputMode() === "electronic" || composeSealOptionsLoading || composeSealOptionsError || !labels.length;
+  });
+  const notice = document.querySelector("#composeSealAvailabilityNotice");
+  const hint = document.querySelector("#composeSealAvailabilityHint");
+  const retry = document.querySelector("#composeSealRetryBtn");
+  const electronic = composeOutputMode() === "electronic";
+  const hasSeal = available.length > 0;
+  const loading = composeSealOptionsAreLoadingForSelectedCompany();
+  if (notice) notice.hidden = electronic || (hasSeal && !loading && !composeSealOptionsError);
+  if (hint) {
+    const companyName = document.querySelector("#composeCompanySelect")?.value || "此公司";
+    hint.textContent = loading ? "正在載入此公司的印章…"
+      : composeSealOptionsError ? "印章清單讀取失敗，請重新載入。"
+        : !hasSeal ? `${companyName} 尚無已上傳的可用印章；請先聯絡總務。` : "";
+  }
+  if (retry) retry.hidden = electronic || !composeSealOptionsError;
+}
+
+async function loadComposeSealOptions(companyName = document.querySelector("#composeCompanySelect")?.value || "", { force = false } = {}) {
+  const company = composeCompanyForOfficialApplication(companyName);
+  const companyId = company?.id || "";
+  const scope = frontendSessionScope();
+  if (!force && companyId === composeSealOptionsCompanyId && !composeSealOptionsLoading && !composeSealOptionsError) return composeSealOptions;
+  const requestNo = ++composeSealOptionsRequestNo;
+  const current = () => requestNo === composeSealOptionsRequestNo
+    && hasAuthenticatedBackendSession() && scope === frontendSessionScope()
+    && companyId === (composeCompanyForOfficialApplication(document.querySelector("#composeCompanySelect")?.value || "")?.id || "");
+  composeSealOptionsCompanyId = companyId;
+  composeSealOptions = [];
+  composeSealOptionsLoading = Boolean(companyId && hasAuthenticatedBackendSession());
+  composeSealOptionsError = false;
+  renderComposeSealTypeOptions();
+  if (!companyId || !hasAuthenticatedBackendSession()) return [];
+  try {
+    const result = await backendRequest(`/companies/${encodeURIComponent(companyId)}/seals`);
+    if (!current()) return [];
+    if (!Array.isArray(result)) throw new Error("seal_list_response_invalid");
+    composeSealOptions = result.filter((seal) => (seal.is_active === true || seal.is_active === 1) && officialSealHasCurrentFile(seal));
+    return composeSealOptions;
+  } catch (_error) {
+    if (current()) composeSealOptionsError = true;
+    return [];
+  } finally {
+    if (current()) {
+      composeSealOptionsLoading = false;
+      renderComposeSealTypeOptions();
+    }
+  }
+}
+
 function ensureComposeDraftRequestId() {
   if (!composeDraftRequestId) composeDraftRequestId = `OD-${crypto.randomUUID()}`;
   return composeDraftRequestId;
@@ -7611,8 +7721,10 @@ function syncComposeElectronicExchangeMode(_changedSelect = null) {
   const electronic = composeOutputMode() === "electronic";
   const fields = document.querySelector("#composeSealFields");
   if (fields) fields.hidden = electronic;
-  largeSelect.disabled = electronic;
-  smallSelect.disabled = electronic;
+  const available = composeSealOptionsForSelectedCompany();
+  const sealOptionsLoading = composeSealOptionsAreLoadingForSelectedCompany();
+  largeSelect.disabled = electronic || sealOptionsLoading || composeSealOptionsError || !available.some((seal) => seal.seal_size_type === "large_seal");
+  smallSelect.disabled = electronic || sealOptionsLoading || composeSealOptionsError || !available.some((seal) => seal.seal_size_type === "small_seal");
   const hint = document.querySelector("#composeSealModeHint");
   if (hint) {
     hint.textContent = electronic
@@ -10362,17 +10474,9 @@ function renderOfficialSealOptions() {
   if (!select) return;
   const previousValue = select.value;
   const readySeals = officialSealOptions.filter(officialSealHasCurrentFile);
-  if (!officialSealOptions.length) {
-    select.innerHTML = `<option value="">請先建立並上傳印章版本</option>`;
-    updateOfficialSealCurrentHint();
-    return;
-  }
   select.innerHTML = [
-    readySeals.length ? "" : `<option value="">請先上傳 Seal Vault current 版本</option>`,
-    ...officialSealOptions.map((item) => {
-      const ready = officialSealHasCurrentFile(item);
-      return `<option value="${escapeDraftHtml(item.id)}"${ready ? "" : " disabled"}>${escapeDraftHtml(item.seal_name || item.id)}${ready ? "" : "（尚無 current 版本）"}</option>`;
-    })
+    readySeals.length ? "" : `<option value="">此公司尚未設定可用印章</option>`,
+    ...readySeals.map((item) => `<option value="${escapeDraftHtml(item.id)}">${escapeDraftHtml(item.seal_name || item.id)}</option>`)
   ].join("");
   if (readySeals.some((item) => item.id === previousValue)) select.value = previousValue;
   else if (readySeals[0]) select.value = readySeals[0].id;
@@ -22823,7 +22927,7 @@ function renderOfficialWorkflowConfig() {
   renderComposeApprovalRoute();
 }
 
-async function loadOfficialWorkflowConfig(silent = true, { discardChanges = false, throwOnError = false } = {}) {
+async function loadOfficialWorkflowConfig(silent = true, { discardChanges = false, throwOnError = false, deferCandidates = false } = {}) {
   if (!hasAuthenticatedBackendSession()) return;
   const scope = frontendSessionScope();
   if (officialWorkflowConfigLoadRequest && officialWorkflowConfigLoadRequest.scope !== scope) {
@@ -22851,7 +22955,7 @@ async function loadOfficialWorkflowConfig(silent = true, { discardChanges = fals
         renderOfficialWorkflowConfig();
         const message = document.querySelector("#officialWorkflowConfigMessage");
         if (message) message.textContent = "已載入最新流程。修改後請按儲存流程。";
-        if (Number(officialWorkflowConfig.schema_version) >= 3) void loadOfficialWorkflowCandidates();
+        if (Number(officialWorkflowConfig.schema_version) >= 3 && !deferCandidates) void loadOfficialWorkflowCandidates();
         return result;
       } catch (error) {
         if (!current()) return;
@@ -24839,7 +24943,7 @@ function renderCompanySealModule() {
     </article>
   `).join("");
 
-  const activeSeals = companySealLibrary.filter((seal) => seal.is_active || seal.is_active === 1);
+  const activeSeals = companySealLibrary.filter((seal) => (seal.is_active || seal.is_active === 1) && officialSealHasCurrentFile(seal));
   const selectedUsageSealId = document.querySelector("#sealUsageSealSelect")?.value || selectedCompanySealId;
   document.querySelector("#sealUsageSealSelect").innerHTML = activeSeals.map((seal) => `
     <option value="${escapeDraftHtml(seal.id)}"${seal.id === selectedUsageSealId ? " selected" : ""}>${escapeDraftHtml(seal.seal_name)}｜${escapeDraftHtml(companySealRefName("category", seal.seal_category))}｜${escapeDraftHtml(companySealRefName("size", seal.seal_size_type))}</option>
@@ -26074,9 +26178,13 @@ function uploadedSealCompanyRecords() {
 }
 
 function uploadedSealPickerCategoryOptions(records = uploadedSealCompanyRecords()) {
-  const options = companySealRefOptions("category").map((item) => ({ ...item }));
+  const ready = records.filter(officialSealHasCurrentFile);
+  const availableCodes = new Set(ready.map((seal) => seal.seal_category).filter(Boolean));
+  const options = companySealRefOptions("category")
+    .filter((item) => availableCodes.has(item.code))
+    .map((item) => ({ ...item }));
   // Keep server-defined categories visible instead of coercing them to "other".
-  records.forEach((seal) => {
+  ready.forEach((seal) => {
     if (seal.seal_category && !options.some((item) => item.code === seal.seal_category)) {
       options.push({ code: seal.seal_category, name: companySealRefName("category", seal.seal_category) });
     }
@@ -26101,30 +26209,44 @@ function renderUploadedSealOptions() {
   const previousCategory = initialized ? categorySelect.value : "";
   const previousSize = initialized ? sizeSelect.value : "";
   const first = ready.find((seal) => seal.seal_category === "general_seal") || ready[0];
-  const category = previousCategory || first?.seal_category || "general_seal";
-  const size = previousSize || first?.seal_size_type || "large_seal";
-  if (!categories.some((item) => item.code === category)) categories.push({ code: category, name: category });
-  categorySelect.innerHTML = categories.map((item) => `<option value="${escapeDraftHtml(item.code)}">${escapeDraftHtml(item.name)}</option>`).join("");
+  const category = categories.some((item) => item.code === previousCategory)
+    ? previousCategory
+    : first?.seal_category || categories[0]?.code || "";
+  const availableSizes = [...new Set(ready.filter((seal) => seal.seal_category === category).map((seal) => seal.seal_size_type).filter(Boolean))];
+  const sizeRefs = companySealRefOptions("size");
+  const sizes = availableSizes.map((code) => ({
+    code,
+    name: sizeRefs.find((item) => item.code === code)?.name || (code === "small_seal" ? "小章" : code === "large_seal" ? "大章" : code)
+  }));
+  const size = sizes.some((item) => item.code === previousSize)
+    ? previousSize
+    : first?.seal_category === category && availableSizes.includes(first.seal_size_type)
+      ? first.seal_size_type
+      : sizes[0]?.code || "";
+  categorySelect.innerHTML = categories.length
+    ? categories.map((item) => `<option value="${escapeDraftHtml(item.code)}">${escapeDraftHtml(item.name)}</option>`).join("")
+    : `<option value="">${companyId ? "此公司尚無可用印章" : "請先選擇用印公司"}</option>`;
   categorySelect.value = category;
   categorySelect.dataset.companyId = companyId;
   categorySelect.dataset.initialized = String(initialized || records.length > 0);
-  sizeSelect.innerHTML = `<option value="large_seal">大章</option><option value="small_seal">小章</option>`;
+  sizeSelect.innerHTML = sizes.length
+    ? sizes.map((item) => `<option value="${escapeDraftHtml(item.code)}">${escapeDraftHtml(item.name)}</option>`).join("")
+    : `<option value="">尚無可用尺寸</option>`;
   sizeSelect.value = size;
-  const matching = records.filter((seal) => seal.seal_category === category && seal.seal_size_type === size);
-  const usable = matching.filter(officialSealHasCurrentFile);
+  const usable = ready.filter((seal) => seal.seal_category === category && seal.seal_size_type === size);
   select.innerHTML = [
     usable.length ? "" : `<option value="">此款式尚無可用${size === "small_seal" ? "小章" : "大章"}</option>`,
-    ...matching.map((seal) => `<option value="${escapeDraftHtml(seal.id)}"${officialSealHasCurrentFile(seal) ? "" : " disabled"}>${escapeDraftHtml(seal.seal_name || seal.id)}${officialSealHasCurrentFile(seal) ? "" : "（尚未啟用）"}</option>`)
+    ...usable.map((seal) => `<option value="${escapeDraftHtml(seal.id)}">${escapeDraftHtml(seal.seal_name || seal.id)}</option>`)
   ].join("");
   // Only choose within the exact category/size. Never replace a missing choice
   // with another purpose's seal, even if that is the company's only ready seal.
   select.value = usable.some((seal) => seal.id === previousId) ? previousId : usable[0]?.id || "";
   const readOnly = uploadedSealPickerReadOnly();
-  categorySelect.disabled = readOnly || !companyId;
-  sizeSelect.disabled = readOnly || !companyId;
+  categorySelect.disabled = readOnly || !companyId || !categories.length;
+  sizeSelect.disabled = readOnly || !companyId || !sizes.length;
   select.disabled = readOnly || !usable.length;
   const recordLabel = document.querySelector("#uploadedSealRecordLabel");
-  if (recordLabel) recordLabel.hidden = matching.length <= 1;
+  if (recordLabel) recordLabel.hidden = usable.length <= 1;
   const companyLabel = document.querySelector("#uploadedSealPickerCompany");
   if (companyLabel) companyLabel.textContent = company?.selectedOptions?.[0]?.textContent || "尚未選擇";
   const companyButton = document.querySelector("#uploadedSealCompanyFocusBtn");
@@ -26138,7 +26260,8 @@ function renderUploadedSealOptions() {
     status.textContent = uploadedSealEditorRuntime.sealOptionsLoading ? "正在載入印章…"
       : !companyId ? "請先選擇用印公司。"
         : seal ? `${categoryLabel} · ${size === "small_seal" ? "小章" : "大章"} · ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（尺寸固定）`
-          : `此公司尚無可用的${categoryLabel}${size === "small_seal" ? "小章" : "大章"}，請另選款式或聯絡印章管理人。`;
+          : !ready.length ? "此公司目前尚未上傳任何可用印章。"
+            : `此公司尚無可用的${categoryLabel}${size === "small_seal" ? "小章" : "大章"}，請另選款式或聯絡印章管理人。`;
   }
 }
 
@@ -26692,6 +26815,29 @@ function setUploadedEditorSaveStatus(kind, message) {
   status.title = message;
 }
 
+function setUploadedPdfUploadProgress(state = "hidden", percent = null, label = "") {
+  const panel = document.querySelector("#uploadedPdfUploadProgress");
+  const bar = document.querySelector("#uploadedPdfUploadProgressBar");
+  const text = document.querySelector("#uploadedPdfUploadProgressLabel");
+  if (!panel || !bar || !text) return;
+  const visible = state !== "hidden";
+  panel.hidden = !visible;
+  panel.dataset.state = visible ? state : "hidden";
+  if (label) text.textContent = label;
+  const hasPercentage = percent !== null && percent !== undefined && Number.isFinite(Number(percent));
+  const value = Number(percent);
+  if (state === "uploading" && hasPercentage) {
+    const bounded = Math.max(0, Math.min(100, value));
+    bar.value = bounded;
+    bar.setAttribute("value", String(bounded));
+    bar.setAttribute("aria-valuetext", `${Math.round(bounded)}% 已傳輸`);
+    text.textContent = label || `PDF 已傳輸 ${Math.round(bounded)}%`;
+  } else {
+    bar.removeAttribute("value");
+    bar.removeAttribute("aria-valuetext");
+  }
+}
+
 function clearUploadedEditorUploadError() {
   const panel = document.querySelector("#uploadedEditorUploadError");
   const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
@@ -27240,6 +27386,7 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
     const baseHeaders = {};
     const uploadIsSameOrigin = new URL(intent.upload_url, window.location.href).origin === window.location.origin;
     if (uploadIsSameOrigin && isHeaderSafeToken(authState?.token)) baseHeaders.Authorization = `Bearer ${authState.token}`;
+    onProgress(0, "sending");
     const response = await fetch(intent.upload_url, {
       method: intent.method || "PUT",
       headers: { ...baseHeaders, "Content-Type": file.type || "application/octet-stream" },
@@ -27248,7 +27395,7 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
       redirect: "error"
     });
     if (!response.ok) throw await editorTusResponseError(response, "本機直傳驗收");
-    onProgress(1);
+    onProgress(1, "confirmed");
     return { uploadUrl: intent.upload_url, offset: file.size };
   }
   const endpoint = validateEditorTusEndpoint(intent);
@@ -27312,7 +27459,7 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
   let offset = 0;
   const createOffset = Number(createResponse.headers.get("Upload-Offset") || 0);
   if (Number.isFinite(createOffset) && createOffset >= 0) offset = createOffset;
-  onProgress(Math.min(1, offset / Math.max(1, file.size)));
+  onProgress(Math.min(1, offset / Math.max(1, file.size)), "confirmed");
   const chunkSize = 6 * 1024 * 1024;
   let attempts = 0;
   const retryDelays = [0, 1000, 3000, 5000];
@@ -27322,6 +27469,9 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
     let response = null;
     let failure = null;
     try {
+      // Fetch does not expose upload-body events. Keep the bar indeterminate
+      // while each chunk is in flight, then report only server-confirmed bytes.
+      onProgress(Math.min(1, offset / Math.max(1, file.size)), "sending");
       response = await fetch(uploadUrl, {
         method: "PATCH",
         headers: {
@@ -27343,7 +27493,7 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
     if (response?.ok) {
       offset = Number(response.headers.get("Upload-Offset") || end);
       attempts = 0;
-      onProgress(Math.min(1, offset / Math.max(1, file.size)));
+      onProgress(Math.min(1, offset / Math.max(1, file.size)), "confirmed");
       continue;
     }
     if (!failure?.retryable || attempts >= retryDelays.length - 1) throw failure;
@@ -27351,7 +27501,7 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
     await waitForTusRetry(retryDelays[attempts]);
     try {
       offset = await editorTusRemoteOffset(uploadUrl, baseHeaders);
-      onProgress(Math.min(1, offset / Math.max(1, file.size)));
+      onProgress(Math.min(1, offset / Math.max(1, file.size)), "confirmed");
     } catch (headError) {
       if (attempts >= retryDelays.length - 1 || !headError.retryable) throw headError;
     }
@@ -30050,6 +30200,7 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
   uploadedSealEditorRuntime.finalizingAsset = false;
   uploadedSealEditorRuntime.finalizationError = false;
   clearUploadedEditorUploadError();
+  setUploadedPdfUploadProgress("checking", null, "正在準備檔案…");
   const fileName = document.querySelector("#uploadedPdfFileName");
   if (fileName) fileName.textContent = `正在檢查 ${file.name}`;
   renderUploadedSealWorkbench();
@@ -30060,11 +30211,13 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
       uploadedSealEditorRuntime.documentId
       && (uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration)
     ) {
+      setUploadedPdfUploadProgress("preparing", null, "正在保存目前草稿…");
       setUploadedEditorSaveStatus("saving", "正在保存目前版本，再更換 PDF");
       await saveUploadedEditorState({ immediate: true });
       if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
       if (uploadedSealEditorRuntime.conflict) throw new Error("目前草稿有版本衝突，請先重新載入或保留本機版本。");
     }
+    setUploadedPdfUploadProgress("checking", null, "正在檢查 PDF 頁面…");
     setUploadedPdfA4Status("checking", "正在檢查每一頁是否為 A4…");
     preparation = await confirmUploadedPdfConversion(file);
     if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
@@ -30072,11 +30225,20 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
       setUploadedEditorSaveStatus("saved", "已取消上傳，目前內容保持不變");
       return;
     }
+    setUploadedPdfUploadProgress("preparing", null, "正在準備檔案傳輸…");
     setUploadedEditorSaveStatus("checking", "正在準備 PDF 編輯器");
     intent = await requestEditorUpload(file, "source_pdf", preparation.sha256);
+    setUploadedPdfUploadProgress("uploading", 0, "PDF 已傳輸 0%");
     setUploadedEditorSaveStatus("uploading", "正在上傳 PDF…");
-    await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) setUploadedEditorSaveStatus("uploading", `PDF 已上傳 ${Math.round(progress * 100)}%`); });
+    await performTusUpload(file, intent, (progress, phase) => {
+      if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
+      const percent = Math.round(progress * 100);
+      const sending = phase === "sending";
+      setUploadedPdfUploadProgress(sending ? "uploading-pending" : "uploading", percent, sending ? `PDF 傳輸中 · 已完成 ${percent}%` : `PDF 已傳輸 ${percent}%`);
+      setUploadedEditorSaveStatus("uploading", sending ? `PDF 傳輸中 · ${percent}%` : `PDF 已上傳 ${percent}%`);
+    });
     assertEditorUploadCurrent(intent);
+    setUploadedPdfUploadProgress("finalizing", null, "檔案已傳完，正在載入編輯頁面…");
     const uploadCompleteAt = performance.now();
     if (preparation.report.valid) {
       const finalizePromise = finalizeEditorUpload(intent, file, { allowA4Conversion: true });
@@ -30139,6 +30301,7 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     showToast(`PDF 無法開啟：${pdfA4UiErrorMessage(error)}`);
   } finally {
     if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) {
+      setUploadedPdfUploadProgress("hidden");
       uploadedSealEditorRuntime.uploading = false;
       if (preparation && uploadedSealEditorRuntime.pendingFinalization?.preparation !== preparation) {
         discardUploadedPdfPreparation(preparation);
@@ -32383,6 +32546,10 @@ document.querySelector("#composeNextAction").addEventListener("click", (event) =
 syncComposeElectronicExchangeMode();
 document.querySelector("#composeOutputMode")?.addEventListener("change", () => {
   syncComposeElectronicExchangeMode();
+  const companyId = composeCompanyForOfficialApplication(document.querySelector("#composeCompanySelect")?.value || "")?.id || "";
+  if (composeOutputMode() === "physical" && companyId && (companyId !== composeSealOptionsCompanyId || composeSealOptionsError)) {
+    void loadComposeSealOptions(document.querySelector("#composeCompanySelect")?.value || "", { force: true });
+  }
   markDraftDirty();
 });
 document.querySelector("#dispatchDate")?.addEventListener("input", markDraftDirty);
@@ -32406,9 +32573,13 @@ document.querySelector("#attachmentDetails")?.addEventListener("input", (event) 
 document.querySelector("#composeCompanySelect")?.addEventListener("change", (event) => {
   event.currentTarget.dataset.userEdited = "true";
   event.currentTarget.dataset.autoDefault = "false";
+  void loadComposeSealOptions(event.currentTarget.value, { force: true });
   applyComposeContactDefaults(false);
   officialWorkflowReadinessByRoute.clear();
   void refreshWorkflowReadinessForContext("compose", { silent: true, force: true });
+});
+document.querySelector("#composeSealRetryBtn")?.addEventListener("click", () => {
+  void loadComposeSealOptions(document.querySelector("#composeCompanySelect")?.value || "", { force: true });
 });
 document.querySelector("#copyRecipients")?.addEventListener("change", () => {
   syncComposeCopyRecipientsDefault(false);

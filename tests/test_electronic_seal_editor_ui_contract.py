@@ -402,7 +402,7 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         self.assertIn("uploadLocation.origin !== endpointUrl.origin", upload)
         self.assertIn('uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/sign/")', upload)
         self.assertIn("editorTusRemoteOffset(uploadUrl, baseHeaders)", upload)
-        self.assertIn("onProgress(Math.min(1, offset / Math.max(1, file.size)))", upload)
+        self.assertIn('onProgress(Math.min(1, offset / Math.max(1, file.size)), "confirmed")', upload)
         self.assertGreaterEqual(upload.count('redirect: "error"'), 3)
         self.assertIn('redirect: "error"', offset_probe)
 

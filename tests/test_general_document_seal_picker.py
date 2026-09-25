@@ -77,12 +77,12 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
         value = self.run_js('backendRequest=async()=>[seal("BANK","bank_seal","small_seal")];await loadUploadedSealOptions("A");console.log(JSON.stringify({id:selectedUploadedSeal().id,size:nodes["#uploadedSealSizeSelect"].value}));')
         self.assertEqual(value, {"id": "BANK", "size": "small_seal"})
 
-    def test_user_selected_missing_size_never_falls_back_to_bank_or_large(self):
+    def test_missing_size_is_not_offered_and_available_seal_remains_selected(self):
         value = self.run_js('uploadedSealOptions=[seal("GENERAL"),seal("BANK","bank_seal","small_seal")];renderUploadedSealOptions();select("general_seal","small_seal");renderUploadedSealOptions();console.log(JSON.stringify({id:selectedUploadedSeal()?.id||null,value:nodes["#uploadedSealSealSelect"].value,disabled:nodes["#uploadedSealSealSelect"].disabled,status:nodes["#uploadedSealPickerStatus"].textContent}));')
-        self.assertIsNone(value["id"])
-        self.assertEqual(value["value"], "")
-        self.assertTrue(value["disabled"])
-        self.assertIn("一般章小章", value["status"])
+        self.assertEqual(value["id"], "GENERAL")
+        self.assertEqual(value["value"], "GENERAL")
+        self.assertFalse(value["disabled"])
+        self.assertIn("一般章 · 大章", value["status"])
 
     def test_size_and_category_change_only_selects_exact_match(self):
         value = self.run_js('uploadedSealOptions=[seal("GENERAL"),seal("BANK-S","bank_seal","small_seal"),seal("EST-L","establishment_seal")];renderUploadedSealOptions();select("bank_seal","small_seal");const small=selectedUploadedSeal().id;select("establishment_seal","large_seal");console.log(JSON.stringify({small,large:selectedUploadedSeal().id}));')
@@ -98,7 +98,11 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
         value = self.run_js('uploadedSealOptions=[{...seal("INACTIVE"),is_active:false},seal("EMPTY","general_seal","large_seal","A",false),{...seal("UNSCOPED"),company_id:""}];renderUploadedSealOptions();console.log(JSON.stringify({selected:selectedUploadedSeal(),status:nodes["#uploadedSealPickerStatus"].dataset.state,options:nodes["#uploadedSealSealSelect"].options.map(x=>x.value)}));')
         self.assertIsNone(value["selected"])
         self.assertEqual(value["status"], "empty")
-        self.assertEqual(value["options"], ["", "EMPTY"])
+        self.assertEqual(value["options"], [""])
+
+    def test_only_current_company_seal_categories_and_sizes_are_offered(self):
+        value = self.run_js('uploadedSealOptions=[seal("BANK-S","bank_seal","small_seal"),seal("EMPTY","general_seal","large_seal","A",false),{...seal("OTHER","official_seal"),company_id:"B"}];renderUploadedSealOptions();console.log(JSON.stringify({categories:nodes["#uploadedSealCategorySelect"].options.map(x=>x.value),sizes:nodes["#uploadedSealSizeSelect"].options.map(x=>x.value),seals:nodes["#uploadedSealSealSelect"].options.map(x=>x.value),selected:selectedUploadedSeal()?.id||null}));')
+        self.assertEqual(value, {"categories": ["bank_seal"], "sizes": ["small_seal"], "seals": ["BANK-S"], "selected": "BANK-S"})
 
     def test_record_selector_only_appears_for_multiple_matching_records(self):
         value = self.run_js('uploadedSealOptions=[seal("ONE"),seal("BANK","bank_seal")];renderUploadedSealOptions();const one=nodes["#uploadedSealRecordLabel"].hidden;uploadedSealOptions.push(seal("TWO"));renderUploadedSealOptions();nodes["#uploadedSealSealSelect"].value="TWO";changeUploadedSealPickerSelection();console.log(JSON.stringify({one,multiple:nodes["#uploadedSealRecordLabel"].hidden,selected:selectedUploadedSeal().id}));')
