@@ -53,6 +53,13 @@ Finance tenant backfill 的結構性 sentinel。sentinel 不是帳號、公司�
 8. 執行 `supabase/verification/production_cutover_checks.sql`；所有 required table/RPC、RLS、grant 與 demo-data 檢查必須通過，`fresh_finance_bootstrap_sentinel`、`invalid_finalized_editor_assets`、`invalid_editor_storage_jobs`、`active_editor_storage_job_leases`、`expired_editor_storage_job_leases`、已逾期的 `editor_storage_cleanup_backlog` 必須為 0，且 immutable trigger/function 檢查必須為 true。`promoting`／`cleaning` 使用五分鐘 durable lease 與 compare-and-set；部署或回復時不得略過有效 lease，也不得把過期 lease 直接標為成功，必須由 cleanup worker 接管並完成或留下 bounded machine error code。
 9. 以隔離的五個正式測試帳號完成 TUS 上傳、finalize、簽核、用印、收件與下載；另以不同 bytes 重播尚未到期的 staging capability，確認 `editor-final/` 的 path、hash 與下載內容不變。證據完成後才解除 PDF Editor 維護狀態。
 
+### PDF 編輯器上傳政策（2026-09-25）
+
+- 使用者選取來源 PDF／匯入 PDF 後，瀏覽器即先做 SHA-256 與結構預檢；完成直傳後可先開啟編輯畫布，後端同步 finalize 與草稿保存仍在背景完成。同步成功前不可送簽或切換案件，失敗時必須保留本頁內容並提供重試。
+- 來源 PDF／匯入 PDF 不執行病毒特徵掃描，資料庫與稽核狀態記錄為 `not_scanned`，不可稱為掃毒通過。仍拒絕無效／加密 PDF、JavaScript、內嵌附件及不符合既有版面規則的檔案；圖片仍須掃描。此取捨代表 PDF 中未知惡意程式不會被特徵掃描攔截，使用者應只上傳可信任來源的 PDF。
+- 獨立專案依序套用一般 migration manifest；核准共享專案只可套用由 `tools/editor_pdf_upload_shared_forward.py` 產生並與 source hash 綁定的 `supabase/shared-project-migrations/20260925050100_shared_editor_pdf_upload_preflight.sql`。不得把一般 `supabase/migrations` SQL 直接推到共享的 `public` schema。
+- 遷移後執行 `supabase/verification/shared_project_cutover_checks.sql`，要求 `migration_ledger_complete` 與 `editor_pdf_preflight_status_guard` 通過；並完成 CI 中的 local Supabase TUS 上傳、PDF 預檢、編輯保存及五帳號測試後才可重開編輯器。
+
 `supabase/recovery/complete_edoc_runtime_recovery_20260827.sql` 是 2026-08-27 的唯讀災難復原快照，不在 `supabase/migrations`、不在 migration manifest，也不得用 `supabase db push` 套到既有正式資料庫。可線性部署的主資料庫變更只有 manifest 內的純 forward migrations；本次相關檔案依序為：
 
 1. `20260827050436_complete_edoc_runtime_schema_parity.sql`：以 idempotent DDL 補齊 fresh bootstrap 與既有環境的 runtime tables、欄位、constraints、RLS、trigger 與 service-only RPC；不啟用正式交換 provider。

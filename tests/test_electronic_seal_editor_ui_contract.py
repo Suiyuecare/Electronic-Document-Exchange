@@ -248,15 +248,26 @@ class ElectronicSealPageContractTest(unittest.TestCase):
     def test_a4_upload_becomes_an_editable_pdfjs_canvas(self) -> None:
         handler = javascript_function(self.js, "handleUploadedSealPdfChange")
         for operation in (
-            "requestEditorUpload(file, \"source_pdf\")",
+            "requestEditorUpload(file, \"source_pdf\", preparation.sha256)",
             "performTusUpload(file, intent",
             "confirmUploadedPdfConversion(file)",
-            "finalizeEditorUpload(intent, file, { allowA4Conversion: true })",
-            "resolveUploadedPdfConversion(file, intent, finalized)",
-            "loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: false })",
+            "const finalizePromise = finalizeEditorUpload(intent, file, { allowA4Conversion: true })",
+            "loadUploadedPdfIntoEditor(file, intent, null, { append: false, preparation })",
+            "finishPendingEditorPdfFinalization(uploadedSealEditorRuntime.pendingFinalization)",
             "ensureUploadedEditorPagesA4(uploadedSealEditorState.pages)",
         ):
             self.assertIn(operation, handler)
+        self.assertNotIn("掃毒與 PDF 預檢中", handler)
+        self.assertLess(handler.index("await loadUploadedPdfIntoEditor(file, intent, null"), handler.index("finishPendingEditorPdfFinalization("))
+
+        finish = javascript_function(self.js, "finishPendingEditorPdfFinalization")
+        self.assertIn("applyEditorRevisionFromResponse(finalized)", finish)
+        self.assertIn("await saveUploadedEditorState({ immediate: true })", finish)
+
+        import_handler = javascript_function(self.js, "handleUploadedEditorImportPdf")
+        self.assertNotIn("掃毒與 PDF 預檢中", import_handler)
+        self.assertIn("requestEditorUpload(file, \"import_pdf\", preparation.sha256)", import_handler)
+        self.assertIn("finishPendingEditorPdfFinalization(pending)", import_handler)
 
         loader = javascript_function(self.js, "loadUploadedPdfIntoEditor")
         for editable_state in (
@@ -274,6 +285,17 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         self.assertIn('role="application"', editor)
         for tool in ("select", "seal", "text"):
             self.assertIn(f'data-editor-tool="{tool}"', editor)
+
+    def test_editor_pdf_upload_policy_is_narrow_and_auditable(self) -> None:
+        migration_path = ROOT / "supabase/migrations/20260925044708_editor_pdf_uploads_skip_antivirus_preflight_required.sql"
+        migration = migration_path.read_text(encoding="utf-8")
+        self.assertIn("asset.asset_kind = 'source_pdf'", migration)
+        self.assertIn("v_asset.asset_kind not in ('source_pdf', 'import_pdf')", migration)
+        self.assertIn("asset.preflight_status = 'passed'", migration)
+        self.assertIn("v_file_object.purpose = 'official-editor'", migration)
+        self.assertIn("v_file_object.version_label = 'editor-asset-source_pdf'", migration)
+        self.assertIn("scan_status = v_asset_patch->>'scan_status'", migration)
+        self.assertIn("image", migration.lower())
 
     def test_review_versions_are_consolidated_into_one_compact_picker(self) -> None:
         editor = html_element(self.page, "uploadedPdfEditor")

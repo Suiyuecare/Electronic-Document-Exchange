@@ -20612,7 +20612,7 @@ def assert_official_document_uploads_av_clean(
             if row["file_object_id"]
             else None
         )
-        checked.append(require_official_file_av_clean(row, file_object))
+        checked.append(_sqlite_require_official_file_ready(conn, str(document["id"]), row, file_object))
     return checked
 
 
@@ -23902,7 +23902,7 @@ def _sqlite_verify_decision_file(
         "SELECT * FROM file_objects WHERE id = ?",
         (file_row["file_object_id"],),
     ).fetchone()
-    require_official_file_av_clean(file_row, object_row)
+    _sqlite_require_official_file_ready(conn, document_id, file_row, object_row)
     stored_object, data = read_file_object_bytes(conn, file_row["file_object_id"])
     verify_official_file_bytes(file_row, stored_object, data)
     return _official_decision_file_entry(file_row)
@@ -25404,7 +25404,7 @@ def official_document_download_file(conn: sqlite3.Connection, document_id: str, 
     if not file_meta.get("file_object_id"):
         raise ValueError("official_document_file_object_missing")
     object_record = conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_meta["file_object_id"],)).fetchone()
-    require_official_file_av_clean(file_meta, object_record)
+    _sqlite_require_official_file_ready(conn, document_id, file_meta, object_record)
     object_row, data = read_file_object_bytes(conn, file_meta["file_object_id"])
     verify_official_file_bytes(file_meta, object_row, data)
     insert_official_log(conn, document_id, "download_file", user, file_meta["file_type"], file_id=file_id, ip_address=ip_address, user_agent=user_agent)
@@ -25416,10 +25416,12 @@ def local_editor_asset_download(conn: sqlite3.Connection, document_id: str, asse
     _validate_editor_asset_access_token(document_id, asset_id, expires, token)
     document = official_document_row(conn, document_id)
     user = _editor_assert_document_access(conn, document, session, write=False)
-    row = conn.execute("SELECT * FROM official_document_editor_assets WHERE id = ? AND document_id = ? AND upload_status = 'finalized' AND scan_status = 'passed'", (asset_id, document_id)).fetchone()
+    row = conn.execute("SELECT * FROM official_document_editor_assets WHERE id = ? AND document_id = ? AND upload_status = 'finalized'", (asset_id, document_id)).fetchone()
     if not row:
         raise ValueError("editor_asset_not_found")
     asset = row_to_dict(row)
+    if not editor_asset_preflight_is_ready(asset):
+        raise ValueError("editor_asset_not_ready")
     if asset.get("asset_kind") == "prepared_pdf" or not asset.get("file_object_id"):
         raise PermissionError("editor_asset_download_forbidden")
     _, data = read_file_object_bytes(conn, asset["file_object_id"])
@@ -26946,6 +26948,143 @@ def create_official_editor_upload_intent(conn: sqlite3.Connection, document_id: 
     }
 
 
+EDITOR_PDF_NO_AV_ASSET_KINDS = frozenset({"source_pdf", "import_pdf"})
+
+
+def editor_asset_preflight_is_ready(asset: Dict[str, Any]) -> bool:
+    """Check the upload lifecycle without treating a structural preflight as AV."""
+    if asset.get("upload_status") != "finalized" or asset.get("preflight_status") != "passed":
+        return False
+    scan_status = str(asset.get("scan_status") or "").strip().lower()
+    if scan_status in {"passed", "已通過", "clean"}:
+        return True
+    return str(asset.get("asset_kind") or "") in EDITOR_PDF_NO_AV_ASSET_KINDS and scan_status == "not_scanned"
+
+
+def _editor_source_file_matches_unscanned_preflight(
+    asset: Dict[str, Any] | None,
+    file_meta: Dict[str, Any],
+    file_object: Dict[str, Any],
+) -> bool:
+    """Narrow AV exception: only a finalized, structurally checked editor source PDF."""
+    if (
+        file_meta.get("file_type") != "original_pdf"
+        or str(file_meta.get("document_id") or "") != str(file_object.get("document_id") or "")
+        or str(file_object.get("scan_status") or "").strip().lower() != "not_scanned"
+        or not asset
+        or asset.get("asset_kind") != "source_pdf"
+        or asset.get("upload_status") != "finalized"
+        or asset.get("scan_status") != "not_scanned"
+        or asset.get("preflight_status") != "passed"
+        or str(asset.get("official_file_id") or "") != str(file_meta.get("id") or "")
+        or str(asset.get("file_object_id") or "") != str(file_object.get("id") or "")
+        or str(file_object.get("purpose") or "") != "official-editor"
+        or str(file_object.get("version_label") or "") != "editor-asset-source_pdf"
+        or str(asset.get("storage_bucket") or "") != str(file_object.get("bucket") or "")
+        or str(file_meta.get("file_storage_key") or "") != str(file_object.get("storage_key") or "")
+    ):
+        return False
+    expected_hash = str(file_meta.get("file_hash") or "").strip().lower()
+    asset_hash = str(asset.get("sha256") or "").strip().lower()
+    object_hash = str(file_object.get("sha256") or "").strip().lower()
+    try:
+        expected_size = int(file_meta.get("file_size"))
+        asset_size = int(asset.get("size_bytes"))
+        object_size = int(file_object.get("size_bytes"))
+    except (TypeError, ValueError):
+        return False
+    return bool(expected_hash and expected_hash == asset_hash == object_hash and expected_size == asset_size == object_size)
+
+
+def _sqlite_editor_source_preflight_for_official_file(
+    conn: sqlite3.Connection,
+    document_id: str,
+    file_meta: Dict[str, Any],
+    file_object: Dict[str, Any],
+) -> bool:
+    if (
+        file_meta.get("file_type") != "original_pdf"
+        or str(file_object.get("scan_status") or "").strip().lower() != "not_scanned"
+    ):
+        return False
+    row = conn.execute(
+        """
+        SELECT * FROM official_document_editor_assets
+        WHERE document_id = ? AND official_file_id = ? AND file_object_id = ?
+          AND asset_kind = 'source_pdf' AND upload_status = 'finalized'
+          AND scan_status = 'not_scanned' AND preflight_status = 'passed'
+        ORDER BY created_at DESC, id DESC LIMIT 1
+        """,
+        (document_id, file_meta.get("id"), file_object.get("id")),
+    ).fetchone()
+    return _editor_source_file_matches_unscanned_preflight(
+        row_to_dict(row) if row else None, file_meta, file_object
+    )
+
+
+def _supabase_editor_source_preflight_for_official_file(
+    document_id: str,
+    file_meta: Dict[str, Any],
+    file_object: Dict[str, Any],
+) -> bool:
+    if (
+        file_meta.get("file_type") != "original_pdf"
+        or str(file_object.get("scan_status") or "").strip().lower() != "not_scanned"
+    ):
+        return False
+    rows = supabase_filter_rows(
+        "official_document_editor_assets",
+        {
+            "document_id": document_id,
+            "official_file_id": file_meta.get("id"),
+            "file_object_id": file_object.get("id"),
+            "asset_kind": "source_pdf",
+            "upload_status": "finalized",
+            "scan_status": "not_scanned",
+            "preflight_status": "passed",
+        },
+        limit=1,
+    )
+    return bool(rows and _editor_source_file_matches_unscanned_preflight(rows[0], file_meta, file_object))
+
+
+def _require_official_file_ready_with_editor_preflight(
+    file_meta: Dict[str, Any],
+    file_object: Dict[str, Any] | sqlite3.Row | None,
+    *,
+    editor_preflight_verified: bool = False,
+) -> Dict[str, Any]:
+    item = row_to_dict(file_object) if isinstance(file_object, sqlite3.Row) else dict(file_object or {})
+    if (editor_preflight_verified
+            and file_meta.get("file_type") == "original_pdf"
+            and str(item.get("scan_status") or "").strip().lower() == "not_scanned"):
+        # The caller has already verified the linked finalized editor asset.
+        return item
+    return require_official_file_av_clean(file_meta, item)
+
+
+def _sqlite_require_official_file_ready(
+    conn: sqlite3.Connection,
+    document_id: str,
+    file_meta: Dict[str, Any] | sqlite3.Row,
+    file_object: Dict[str, Any] | sqlite3.Row | None,
+) -> Dict[str, Any]:
+    meta = row_to_dict(file_meta) if isinstance(file_meta, sqlite3.Row) else dict(file_meta)
+    item = row_to_dict(file_object) if isinstance(file_object, sqlite3.Row) else dict(file_object or {})
+    verified = _sqlite_editor_source_preflight_for_official_file(conn, document_id, meta, item)
+    return _require_official_file_ready_with_editor_preflight(meta, item, editor_preflight_verified=verified)
+
+
+def _supabase_require_official_file_ready(
+    document_id: str,
+    file_meta: Dict[str, Any],
+    file_object: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    item = dict(file_object or {})
+    verified = _supabase_editor_source_preflight_for_official_file(document_id, file_meta, item)
+    return _require_official_file_ready_with_editor_preflight(file_meta, item, editor_preflight_verified=verified)
+
+
 def _local_editor_upload_path(asset: Dict[str, Any]) -> Path:
     root = STORAGE_DIR.resolve()
     target = (STORAGE_DIR / str(asset.get("storage_path") or "")).resolve()
@@ -26968,6 +27107,7 @@ def _local_editor_asset_failure(
     target = _local_editor_upload_path(asset)
     if target.exists():
         target.unlink()
+    failed_scan_status = "not_scanned" if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending"
     conn.execute(
         """
         UPDATE official_document_editor_assets
@@ -26976,7 +27116,7 @@ def _local_editor_asset_failure(
         """,
         (
             "quarantined" if quarantine else "failed",
-            "failed" if quarantine else "pending",
+            failed_scan_status,
             "blocked" if quarantine else "failed",
             json.dumps(metadata, ensure_ascii=False),
             now(),
@@ -27160,7 +27300,7 @@ def _validate_editor_a4_source_lineage(state: Dict[str, Any], assets: List[Dict[
         if not conversion:
             source.pop("a4Conversion", None)
             continue
-        if asset.get("upload_status") != "finalized" or asset.get("scan_status") != "passed" or asset.get("preflight_status") != "passed":
+        if not editor_asset_preflight_is_ready(asset):
             raise ValueError("editor_asset_not_ready")
         if str(source.get("sha256") or "").upper() != str(asset.get("sha256") or "").upper():
             raise ValueError("editor_asset_hash_mismatch")
@@ -27350,23 +27490,33 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
     if not latest or int(metadata.get("base_revision_no") or 0) != int(latest.get("revision_no") or 0):
         _local_editor_asset_failure(conn, asset, "editor_revision_conflict")
         raise ValueError("editor_revision_conflict")
-    scan_status, signature = editor_scan_bytes_for_threats(data, asset["file_name"])
-    if scan_status != "已通過":
-        _local_editor_asset_failure(conn, asset, "editor_asset_quarantined", quarantine=True)
-        raise ValueError("editor_asset_quarantined")
+    if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS:
+        scan_status, signature = "not_scanned", ""
+    else:
+        scan_status, signature = editor_scan_bytes_for_threats(data, asset["file_name"])
+        if scan_status != "已通過":
+            _local_editor_asset_failure(conn, asset, "editor_asset_quarantined", quarantine=True)
+            raise ValueError("editor_asset_quarantined")
     try:
         inspection = inspect_editor_pdf(data, allow_non_a4=payload.get("allowA4Conversion") is True) if asset["asset_kind"] in {"source_pdf", "import_pdf"} else inspect_editor_image(data, asset["mime_type"])
     except Exception:
         _local_editor_asset_failure(conn, asset, "editor_asset_preflight_failed", quarantine=True)
         raise
     file_row = store_file_object(conn, document_id, asset["file_name"], data, "official-editor", f"editor-asset-{asset['asset_kind']}", official_actor_name(user), asset["mime_type"])
-    file_row = persist_file_object_scan_result(
-        conn,
-        file_row["id"],
-        scan_status,
-        signature,
-        official_actor_name(user),
-    )
+    if scan_status == "not_scanned":
+        conn.execute(
+            "UPDATE file_objects SET scan_status = 'not_scanned', scan_engine = '', quarantine_reason = '', last_scan_at = '' WHERE id = ?",
+            (file_row["id"],),
+        )
+        file_row = row_to_dict(conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_row["id"],)).fetchone())
+    else:
+        file_row = persist_file_object_scan_result(
+            conn,
+            file_row["id"],
+            scan_status,
+            signature,
+            official_actor_name(user),
+        )
     official_file = None
     if asset["asset_kind"] == "source_pdf":
         official_file = insert_official_document_file(conn, document_id, "original_pdf", file_row, official_actor_name(user))
@@ -27375,7 +27525,7 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
         "official_file_id": official_file.get("id") if official_file else None,
         "sha256": digest,
         "upload_status": "finalized",
-        "scan_status": "passed",
+        "scan_status": "not_scanned" if scan_status == "not_scanned" else "passed",
         "preflight_status": "passed",
         "page_count": int((inspection or {}).get("pageCount") or 0),
         "metadata_json": json.dumps(_editor_inspection_metadata(metadata, inspection, asset, digest), ensure_ascii=False),
@@ -27395,7 +27545,8 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
     )
     if target.exists():
         target.unlink()
-    insert_official_log(conn, document_id, "finalize_editor_upload", user, f"asset_id={upload_id};sha256={digest};pages={asset['page_count']};scan=passed")
+    scan_audit_status = "not_scanned;preflight=passed" if scan_status == "not_scanned" else "passed;preflight=passed"
+    insert_official_log(conn, document_id, "finalize_editor_upload", user, f"asset_id={upload_id};sha256={digest};pages={asset['page_count']};scan={scan_audit_status}")
     public_revision = _editor_revision_public(revision)
     return {"asset": _editor_asset_public(asset), "pages": [] if inspection.get("requiresA4Conversion") else inspection.get("pages") or [], "editor_state": public_revision["state"], "editor_revision": public_revision, "a4Conversion": _editor_asset_a4_conversion(asset)}
 
@@ -27408,7 +27559,7 @@ def _validate_editor_a4_conversion_request(asset: Dict[str, Any], payload: Dict[
     conversion = _editor_asset_a4_conversion(asset) or {}
     if asset.get("asset_kind") not in {"source_pdf", "import_pdf"} or not conversion.get("required"):
         raise ValueError("editor_a4_conversion_not_required")
-    if asset.get("upload_status") != "finalized" or asset.get("scan_status") != "passed" or asset.get("preflight_status") != "passed":
+    if not editor_asset_preflight_is_ready(asset):
         raise ValueError("editor_asset_not_ready")
     state = parse_json_any(latest.get("editor_state_json"), {}) or {}
     if not any(str(item.get("assetId")) == str(asset["id"]) for item in state.get("sourceFiles") or []):
@@ -27538,7 +27689,7 @@ def _editor_local_asset_bytes(conn: sqlite3.Connection, document_id: str, state:
         if not row:
             raise ValueError("editor_source_asset_missing")
         asset = row_to_dict(row)
-        if asset.get("upload_status") != "finalized" or asset.get("scan_status") != "passed" or asset.get("preflight_status") != "passed":
+        if not editor_asset_preflight_is_ready(asset):
             raise ValueError("editor_asset_not_ready")
         if not asset.get("file_object_id"):
             raise ValueError("editor_asset_file_missing")
@@ -35690,7 +35841,7 @@ def supabase_assert_official_document_uploads_av_clean(document: Dict[str, Any])
     checked: List[Dict[str, Any]] = []
     for row in rows:
         file_object = supabase_get("file_objects", row.get("file_object_id") or "") if row.get("file_object_id") else None
-        checked.append(require_official_file_av_clean(row, file_object))
+        checked.append(_supabase_require_official_file_ready(str(document["id"]), row, file_object))
     return checked
 
 
@@ -37253,7 +37404,7 @@ def _supabase_editor_asset_failure(
         "upload_status": current_status,
     }, {
         "upload_status": "quarantined" if quarantine else "failed",
-        "scan_status": "failed" if quarantine else "pending",
+        "scan_status": "not_scanned" if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending",
         "preflight_status": "blocked" if quarantine else "failed",
         "metadata_json": json.dumps(metadata, ensure_ascii=False),
         "finalized_at": now(),
@@ -37753,24 +37904,27 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         if failed_asset.get("upload_status") == "finalized":
             return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_revision_conflict")
-    try:
-        scan_status, signature = editor_scan_bytes_for_threats(
-            data,
-            asset["file_name"],
-            storage_key=asset.get("storage_path") or "",
-            storage_bucket=asset.get("storage_bucket") or EDOC_STORAGE_BUCKET,
-            expected_sha256=digest,
-        )
-    except ValueError as exc:
-        failed_asset = _supabase_editor_asset_failure(asset, str(exc), quarantine=True)
-        if failed_asset.get("upload_status") == "finalized":
-            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
-        raise
-    if scan_status != "已通過":
-        failed_asset = _supabase_editor_asset_failure(asset, "editor_asset_quarantined", quarantine=True)
-        if failed_asset.get("upload_status") == "finalized":
-            return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
-        raise ValueError("editor_asset_quarantined")
+    if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS:
+        scan_status, signature = "not_scanned", ""
+    else:
+        try:
+            scan_status, signature = editor_scan_bytes_for_threats(
+                data,
+                asset["file_name"],
+                storage_key=asset.get("storage_path") or "",
+                storage_bucket=asset.get("storage_bucket") or EDOC_STORAGE_BUCKET,
+                expected_sha256=digest,
+            )
+        except ValueError as exc:
+            failed_asset = _supabase_editor_asset_failure(asset, str(exc), quarantine=True)
+            if failed_asset.get("upload_status") == "finalized":
+                return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
+            raise
+        if scan_status != "已通過":
+            failed_asset = _supabase_editor_asset_failure(asset, "editor_asset_quarantined", quarantine=True)
+            if failed_asset.get("upload_status") == "finalized":
+                return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
+            raise ValueError("editor_asset_quarantined")
     try:
         inspection = inspect_editor_pdf(data, allow_non_a4=payload.get("allowA4Conversion") is True) if asset["asset_kind"] in {"source_pdf", "import_pdf"} else inspect_editor_image(data, asset["mime_type"])
     except Exception:
@@ -37828,11 +37982,11 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         "encryption_status": "由物件儲存服務控管",
         "encryption_alg": "",
         "encryption_key_id": "",
-        "scan_status": "已通過",
-        "scan_engine": EDOC_SCAN_ENGINE,
+        "scan_status": "not_scanned" if scan_status == "not_scanned" else "已通過",
+        "scan_engine": "" if scan_status == "not_scanned" else EDOC_SCAN_ENGINE,
         "quarantine_reason": "",
         "signed_url_expires_at": None,
-        "last_scan_at": now(),
+        "last_scan_at": None if scan_status == "not_scanned" else now(),
         "last_download_at": None,
         "version_label": f"editor-asset-{asset['asset_kind']}",
         "purpose": "official-editor",
@@ -37861,7 +38015,7 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         "official_file_id": official_file_id or None,
         "sha256": digest,
         "upload_status": "finalized",
-        "scan_status": "passed",
+        "scan_status": "not_scanned" if scan_status == "not_scanned" else "passed",
         "preflight_status": "passed",
         "page_count": int((inspection or {}).get("pageCount") or 0),
         "storage_bucket": storage_bucket,
@@ -37883,7 +38037,8 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         revision_id=revision_id,
     )
     update["editor_revision_id"] = revision_id
-    comment = f"asset_id={upload_id};sha256={digest};pages={update['page_count']};scan=passed"
+    scan_audit_status = "not_scanned;preflight=passed" if scan_status == "not_scanned" else "passed;preflight=passed"
+    comment = f"asset_id={upload_id};sha256={digest};pages={update['page_count']};scan={scan_audit_status}"
     approval_log = {
         "id": operation_id,
         "document_id": document_id,
@@ -38176,7 +38331,7 @@ def _supabase_editor_asset_bytes(document_id: str, state: Dict[str, Any]) -> Tup
         if not rows:
             raise ValueError("editor_source_asset_missing")
         asset = rows[0]
-        if asset.get("upload_status") != "finalized" or asset.get("scan_status") != "passed" or asset.get("preflight_status") != "passed":
+        if not editor_asset_preflight_is_ready(asset):
             raise ValueError("editor_asset_not_ready")
         file_object_id = str(asset.get("file_object_id") or "")
         file_object = supabase_get("file_objects", file_object_id) if file_object_id else None
@@ -38358,17 +38513,23 @@ def supabase_editor_asset_download(document_id: str, asset_id: str, expires: int
     _validate_editor_asset_access_token(document_id, asset_id, expires, token)
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=False)
-    rows = supabase_filter_rows("official_document_editor_assets", {"id": asset_id, "document_id": document_id, "upload_status": "finalized", "scan_status": "passed"}, limit=1)
+    rows = supabase_filter_rows("official_document_editor_assets", {"id": asset_id, "document_id": document_id, "upload_status": "finalized"}, limit=1)
     if not rows:
         raise ValueError("editor_asset_not_found")
     asset = rows[0]
+    if not editor_asset_preflight_is_ready(asset):
+        raise ValueError("editor_asset_not_ready")
     if asset.get("asset_kind") == "prepared_pdf":
         raise PermissionError("editor_asset_download_forbidden")
     file_object_id = str(asset.get("file_object_id") or "")
     file_object = supabase_get("file_objects", file_object_id) if file_object_id else None
     if not file_object:
         raise ValueError("editor_asset_file_object_missing")
-    if not file_object_av_is_clean(file_object):
+    if not file_object_av_is_clean(file_object) and not (
+        asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS
+        and str(asset.get("scan_status") or "").strip().lower() == "not_scanned"
+        and str(file_object.get("scan_status") or "").strip().lower() == "not_scanned"
+    ):
         raise ValueError("editor_asset_antivirus_required")
     try:
         verify_private_storage_file_metadata(
@@ -39781,7 +39942,7 @@ def _supabase_verify_decision_file(document_id: str, file_row: Dict[str, Any]) -
     file_object = supabase_get("file_objects", str(file_row["file_object_id"]))
     if not file_object:
         raise ValueError("official_document_file_object_missing")
-    require_official_file_av_clean(file_row, file_object)
+    _supabase_require_official_file_ready(document_id, file_row, file_object)
     data = supabase_storage_download(
         file_object["storage_key"],
         file_object.get("bucket") or EDOC_STORAGE_BUCKET,
@@ -40578,7 +40739,7 @@ def supabase_official_document_download_file(document_id: str, file_id: str, ses
     file_object = supabase_get("file_objects", file_meta.get("file_object_id") or "") if file_meta.get("file_object_id") else None
     if not file_object:
         raise ValueError("official_document_file_object_missing")
-    file_object = require_official_file_av_clean(file_meta, file_object)
+    file_object = _supabase_require_official_file_ready(document_id, file_meta, file_object)
     try:
         verify_private_storage_file_metadata(file_meta, file_object, expected_document_id=document_id)
     except ValueError as exc:

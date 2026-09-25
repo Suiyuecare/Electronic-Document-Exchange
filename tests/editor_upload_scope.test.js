@@ -22,7 +22,8 @@ const scopedFunctions = [
   'loadPdfJsAsset', 'loadUploadedPdfIntoEditor', 'refreshUploadedEditorManifest',
   'hydrateUploadedEditorAuthorizedAssets', 'handleUploadedSealPdfChange',
   'uploadedEditorDraftPrerequisiteIssue', 'uploadedPdfUploadBlockingMessage',
-  'handleUploadedEditorImportPdf', 'handleUploadedEditorImage',
+  'handleUploadedEditorImportPdf', 'handleUploadedEditorImage', 'finishPendingEditorPdfFinalization',
+  'runUploadedEditorPageAction',
 ];
 const deferred = () => {
   let resolve, reject;
@@ -42,6 +43,7 @@ function harness() {
   };
   const context = {
     console, File, Blob, TextEncoder, Uint8Array, Map, Set, crypto: require('node:crypto').webcrypto,
+    performance: { now: () => 100 }, navigator: { onLine: true }, window: { clearTimeout() {} },
     session: 'USER-A:COMPANY-A', uploadedSealApplicationRuntime: { epoch: 0 },
     uploadedSealEditorRuntime: runtime, uploadedSealEditorState: emptyState(),
     uploadedSealPdf: null, uploadedSealObjectUrl: '', uploadedSealPageCount: 0,
@@ -86,8 +88,11 @@ function harness() {
     pdfA4UiErrorMessage: error => error.message,
     ensureUploadedEditorPagesA4: () => events.push(['a4Check']),
     addSealAudit: () => events.push(['audit']),
+    rememberUploadedEditorSavedSealBindings: () => {},
+    discardUploadedPdfPreparation: () => {},
     openUploadedPdfPicker() {},
     currentUploadedEditorPage: () => context.uploadedSealEditorState.pages[0],
+    currentUploadedEditorPageIndex: () => context.uploadedSealEditorState.pages.findIndex(page => page.pageId === runtime.currentPageId),
     commitUploadedEditorMutation: mutate => mutate(context.uploadedSealEditorState),
     editorDefaultElement: () => ({ id: 'IMAGE', kind: 'image' }),
   };
@@ -137,6 +142,43 @@ test('new draft creation may set its own document ID without invalidating the up
   const intent = await h.context.requestEditorUpload(h.file);
   assert.equal(intent.documentId, 'CREATED');
   assert.equal(intent.scope.documentId, 'CREATED');
+});
+test('A4 PDF becomes editable before background finalize completes', async () => {
+  const h = harness(); const finalized = deferred(); const uploadCompleted = deferred();
+  const preparation = { file: h.file, sha256: 'HASH', report: { valid: true } };
+  h.context.confirmUploadedPdfConversion = async () => preparation;
+  h.context.requestEditorUpload = async () => h.intent();
+  h.context.finalizeEditorUpload = () => finalized.promise;
+  h.context.performTusUpload = async () => {};
+  h.context.loadUploadedPdfIntoEditor = async () => {
+    h.context.uploadedSealEditorState.pages = [
+      { pageId: 'PAGE-1', order: 1 }, { pageId: 'PAGE-2', order: 2 },
+    ];
+    h.runtime.currentPageId = 'PAGE-1';
+    h.runtime.dirtyGeneration = 1;
+    uploadCompleted.resolve();
+  };
+  h.context.saveUploadedEditorState = async () => {
+    h.runtime.savedGeneration = h.runtime.dirtyGeneration;
+    h.events.push(['save']);
+  };
+  const pending = h.context.handleUploadedSealPdfChange(h.file);
+  await uploadCompleted.promise;
+  for (let i = 0; i < 10 && h.runtime.uploading; i++) await settle();
+
+  assert.equal(h.runtime.uploading, false, 'PDF upload gate releases as soon as local editor is ready');
+  assert.equal(h.runtime.finalizingAsset, true, 'private-storage finalization continues in background');
+  assert.ok(h.runtime.lastEditorReadyMs <= 2000, 'ready-time metric is measured from TUS completion');
+
+  // A real editor action remains available while the server catches up.
+  h.context.runUploadedEditorPageAction('move-down');
+  assert.deepEqual(Array.from(h.context.uploadedSealEditorState.pages, page => page.pageId), ['PAGE-2', 'PAGE-1']);
+
+  finalized.resolve({ asset: { id: 'ASSET-A' }, editor_revision: { revisionNo: 3 } });
+  await pending;
+  assert.equal(h.runtime.finalizingAsset, false);
+  assert.equal(h.runtime.pendingEditorSave, false);
+  assert.equal(h.runtime.savedGeneration, h.runtime.dirtyGeneration);
 });
 for (const phase of ['hash', 'intent', 'finalize']) {
   test(`${phase} awaited response cannot survive account/draft switch`, async () => {
@@ -220,7 +262,7 @@ for (const handler of ['main', 'import']) {
     test(`${handler} ${phase} completion after logout cannot update UI or clear new busy flag`, async () => {
       const h = harness(); const gate = deferred(); let reached = false;
       h.runtime.dirtyGeneration = 1;
-      h.context.confirmUploadedPdfConversion = async () => true;
+      h.context.confirmUploadedPdfConversion = async () => ({ sha256: 'HASH', report: { valid: false } });
       h.context.requestEditorUpload = async () => h.intent();
       h.context.finalizeEditorUpload = async () => ({ asset: { id: 'ASSET-A' } });
       h.context.loadUploadedPdfIntoEditor = async () => {};

@@ -1372,6 +1372,12 @@ function clearUploadedEditorSensitivePreviews() {
   void uploadedSealEditorRuntime?.preparedPdfDocument?.destroy?.();
   if (typeof uploadedSealEditorRuntime === "object") {
     uploadedSealEditorRuntime.preparedPdfDocument = null;
+    void uploadedSealEditorRuntime.pendingPdfPreparation?.pdfDocument?.destroy?.();
+    uploadedSealEditorRuntime.pendingPdfPreparation = null;
+    uploadedSealEditorRuntime.pendingFinalization = null;
+    uploadedSealEditorRuntime.pendingEditorSave = false;
+    uploadedSealEditorRuntime.finalizingAsset = false;
+    uploadedSealEditorRuntime.finalizationError = false;
     uploadedSealEditorRuntime.preparedUrl = "";
     uploadedSealEditorRuntime.changeSummary = null;
     uploadedSealEditorRuntime.documentId = "";
@@ -1430,6 +1436,11 @@ const uploadedSealEditorRuntime = {
   fitPage: true,
   locked: false,
   uploading: false,
+  finalizingAsset: false,
+  finalizationError: false,
+  pendingFinalization: null,
+  pendingEditorSave: false,
+  pendingPdfPreparation: null,
   companyChanging: false,
   directoryLoading: false,
   sealOptionsLoading: false,
@@ -25956,7 +25967,7 @@ function renderUploadedSealCompanyOptions() {
 
 function uploadedSealApplicantSelectionBusy() {
   return uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading
-    || uploadedSealEditorRuntime.companyChanging || Boolean(uploadedSealEditorRuntime.draftCreatePromise)
+    || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.companyChanging || Boolean(uploadedSealEditorRuntime.draftCreatePromise)
     || uploadedSealApplicationRuntime.submissionBusy;
 }
 
@@ -26709,6 +26720,39 @@ function showUploadedEditorUploadError(error, retry, actionLabel = "重新上傳
 
 async function retryUploadedEditorUpload() {
   if (uploadedSealEditorRuntime.uploading) return;
+  if (uploadedSealEditorRuntime.pendingFinalization) {
+    const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
+    if (retryButton) {
+      retryButton.disabled = true;
+      retryButton.textContent = "重新同步中…";
+    }
+    await finishPendingEditorPdfFinalization(uploadedSealEditorRuntime.pendingFinalization);
+    return;
+  }
+  if (uploadedSealEditorRuntime.pendingEditorSave) {
+    const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
+    if (retryButton) {
+      retryButton.disabled = true;
+      retryButton.textContent = "重新同步中…";
+    }
+    try {
+      await saveUploadedEditorState({ immediate: true });
+      if (uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration || uploadedSealEditorRuntime.conflict) {
+        throw new Error("編輯內容尚未同步完成，請先處理版本衝突。");
+      }
+      uploadedSealEditorRuntime.pendingEditorSave = false;
+      clearUploadedEditorUploadError();
+      setUploadedEditorSaveStatus("saved", "編輯內容已同步");
+    } catch (error) {
+      setUploadedEditorSaveStatus("error", "同步失敗，請確認網路後重試");
+      const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
+      if (retryButton) {
+        retryButton.disabled = false;
+        retryButton.textContent = "重試同步";
+      }
+    }
+    return;
+  }
   const retry = uploadedSealEditorRuntime.uploadRetry;
   if (typeof retry !== "function") return openUploadedPdfPicker();
   const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
@@ -26989,12 +27033,15 @@ async function ensureUploadedEditorDraft() {
   return operation;
 }
 
-async function requestEditorUpload(file, assetKind = "source_pdf") {
+async function requestEditorUpload(file, assetKind = "source_pdf", preparedSha256 = "") {
   const requestScope = uploadedSealApplicationScopeSnapshot();
   // Both are required before authorization, but reading this local file does
   // not depend on creating the private draft. Attach handlers to both tasks
   // immediately so either failure is handled, without a second mutation.
-  const [draftResult, hashResult] = await Promise.allSettled([ensureUploadedEditorDraft(), hashBlob(file)]);
+  const [draftResult, hashResult] = await Promise.allSettled([
+    ensureUploadedEditorDraft(),
+    preparedSha256 ? Promise.resolve(preparedSha256) : hashBlob(file)
+  ]);
   // Let a started draft creation settle before reporting failure. Otherwise a
   // late successful creation can overwrite the upload error with "saved".
   if (draftResult.status === "rejected") throw draftResult.reason;
@@ -27356,10 +27403,12 @@ async function validateUploadedPdfDocument(pdfDocument, { allowNonA4 = false } =
   if (Array.isArray(javaScript) && javaScript.some(Boolean)) throw new Error("PDF 含 JavaScript，已依安全規則阻擋。");
   const attachments = typeof pdfDocument.getAttachments === "function" ? await pdfDocument.getAttachments() : null;
   if (attachments && Object.keys(attachments).length) throw new Error("PDF 含內嵌附件，已依安全規則阻擋。");
+  const pageProxies = new Map();
   for (let start = 1; start <= pdfDocument.numPages; start += 8) {
     const pageNumbers = Array.from({ length: Math.min(8, pdfDocument.numPages - start + 1) }, (_, index) => start + index);
     const annotationGroups = await Promise.all(pageNumbers.map(async (pageNumber) => {
       const page = await pdfDocument.getPage(pageNumber);
+      pageProxies.set(pageNumber, page);
       return page.getAnnotations({ intent: "display" });
     }));
     const annotations = annotationGroups.flat();
@@ -27368,15 +27417,72 @@ async function validateUploadedPdfDocument(pdfDocument, { allowNonA4 = false } =
     }
   }
   if (!allowNonA4) requirePdfPagesA4(pageGeometry);
-  return { a4Report };
+  return { a4Report, pageProxies };
+}
+
+async function prepareUploadedPdfForEditor(file) {
+  const existing = uploadedSealEditorRuntime.pendingPdfPreparation;
+  if (existing?.file === file) return existing;
+  if (existing?.pdfDocument) void existing.pdfDocument.destroy?.();
+  uploadedSealEditorRuntime.pendingPdfPreparation = null;
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const bytes = await file.arrayBuffer();
+  const sha256Promise = crypto.subtle.digest("SHA-256", bytes).then((digest) => (
+    [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")
+  ));
+  const pdfjsLib = await ensurePdfJsLibrary();
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，請重新選擇 PDF。");
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(bytes.slice(0)),
+    enableXfa: false,
+    isEvalSupported: false,
+    useSystemFonts: true
+  });
+  let passwordProtected = false;
+  loadingTask.onPassword = () => {
+    passwordProtected = true;
+    void loadingTask.destroy();
+  };
+  let pdfDocument;
+  try {
+    pdfDocument = await loadingTask.promise;
+    const [validation, sha256] = await Promise.all([
+      validateUploadedPdfDocument(pdfDocument, { allowNonA4: true }),
+      sha256Promise
+    ]);
+    if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，請重新選擇 PDF。");
+    const prepared = {
+      file,
+      sha256,
+      pdfDocument,
+      pageProxies: validation.pageProxies,
+      report: validation.a4Report
+    };
+    uploadedSealEditorRuntime.pendingPdfPreparation = prepared;
+    pdfDocument = null;
+    return prepared;
+  } catch (error) {
+    if (passwordProtected || error?.name === "PasswordException") throw new Error("密碼加密 PDF 不接受上傳，請提供未加密版本。");
+    throw error;
+  } finally {
+    void pdfDocument?.destroy?.();
+  }
+}
+
+function discardUploadedPdfPreparation(preparation = uploadedSealEditorRuntime.pendingPdfPreparation) {
+  if (!preparation) return;
+  if (uploadedSealEditorRuntime.pendingPdfPreparation === preparation) uploadedSealEditorRuntime.pendingPdfPreparation = null;
+  void preparation.pdfDocument?.destroy?.();
 }
 
 async function confirmUploadedPdfConversion(file) {
   const scope = uploadedSealApplicationScopeSnapshot();
-  const report = await inspectPdfFileA4(file, { allowNonA4: true });
+  const preparation = await prepareUploadedPdfForEditor(file);
   if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，請重新上傳。");
-  if (report.valid) return true;
-  return showEditorA4Dialog({ report, isCurrent: () => uploadedSealApplicationScopeIsCurrent(scope) });
+  if (preparation.report.valid) return preparation;
+  const accepted = await showEditorA4Dialog({ report: preparation.report, isCurrent: () => uploadedSealApplicationScopeIsCurrent(scope) });
+  if (!accepted) discardUploadedPdfPreparation(preparation);
+  return accepted ? preparation : false;
 }
 
 async function resolveUploadedPdfConversion(file, intent, finalized) {
@@ -27418,35 +27524,43 @@ async function resolveUploadedPdfConversion(file, intent, finalized) {
   return { file: convertedFile, intent: { ...intent, asset_id: asset.id, assetKind: source.kind || "import_pdf", sha256: asset.sha256 }, finalized: converted };
 }
 
-async function loadPdfJsAsset(file, assetId, serverPages = []) {
+async function loadPdfJsAsset(file, assetId, serverPages = [], preparation = null) {
   const loadScope = uploadedSealApplicationScopeSnapshot();
   const pdfjsLib = await ensurePdfJsLibrary();
   if (!uploadedSealApplicationScopeIsCurrent(loadScope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
   if (!pdfjsLib?.getDocument) throw new Error("PDF.js 尚未載入，請重新整理頁面。");
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  if (!uploadedSealApplicationScopeIsCurrent(loadScope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
-  const loadingTask = pdfjsLib.getDocument({
-    data: bytes,
-    enableXfa: false,
-    isEvalSupported: false,
-    useSystemFonts: true
-  });
+  const prepared = preparation?.file === file ? preparation : null;
+  let loadingTask = null;
   let passwordProtected = false;
-  loadingTask.onPassword = () => {
-    passwordProtected = true;
-    void loadingTask.destroy();
-  };
-  let pdfDocument;
+  let pdfDocument = prepared?.pdfDocument || null;
+  if (prepared && uploadedSealEditorRuntime.pendingPdfPreparation === prepared) {
+    uploadedSealEditorRuntime.pendingPdfPreparation = null;
+  }
   let committed = false;
   try {
-    pdfDocument = await loadingTask.promise;
+    if (!pdfDocument) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (!uploadedSealApplicationScopeIsCurrent(loadScope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
+      loadingTask = pdfjsLib.getDocument({
+        data: bytes,
+        enableXfa: false,
+        isEvalSupported: false,
+        useSystemFonts: true
+      });
+      loadingTask.onPassword = () => {
+        passwordProtected = true;
+        void loadingTask.destroy();
+      };
+      pdfDocument = await loadingTask.promise;
+    }
+    if (!prepared) await validateUploadedPdfDocument(pdfDocument);
   } catch (error) {
-    void loadingTask.destroy?.();
+    void loadingTask?.destroy?.();
+    if (!uploadedSealApplicationScopeIsCurrent(loadScope)) throw error;
     if (passwordProtected || error?.name === "PasswordException") throw new Error("密碼加密 PDF 不接受編輯，請提供未加密版本。");
     throw new Error("PDF 無法解析或已損毀，請重新輸出後再上傳。");
   }
   try {
-    await validateUploadedPdfDocument(pdfDocument);
     const pages = [];
     const stagedPageProxies = new Map();
     // A saved revision may retain only some source pages, in a different order.
@@ -27456,10 +27570,10 @@ async function loadPdfJsAsset(file, assetId, serverPages = []) {
     for (const [position, serverPage] of descriptors.entries()) {
       const index = Number(serverPage.sourcePageIndex ?? serverPage.source_page_index ?? position);
       if (!Number.isInteger(index) || index < 0 || index >= pdfDocument.numPages) throw new Error("PDF 頁面對應資料無效，請重新開啟案件。");
-      const proxy = await pdfDocument.getPage(index + 1);
+      const proxy = prepared?.pageProxies?.get(index + 1) || await pdfDocument.getPage(index + 1);
       const unit = Number(proxy.userUnit || 1);
       const view = proxy.view.map((value) => roundEditorPoint(Number(value) * unit));
-      const pageId = serverPage.pageId || serverPage.page_id || `page-${assetId}-${index + 1}`;
+      const pageId = serverPage.pageId || serverPage.page_id || `PAGE-${assetId}-${index + 1}`;
       if (stagedPageProxies.has(pageId)) throw new Error("PDF 頁面識別重複，請重新開啟案件。");
       pages.push({
         pageId,
@@ -27533,7 +27647,7 @@ function applyUploadedEditorCanonicalSaveResponse(result, savingGeneration) {
   return true;
 }
 
-async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = false } = {}) {
+async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = false, preparation = null } = {}) {
   assertEditorUploadCurrent(intent);
   const loadingScope = uploadedSealApplicationScopeSnapshot();
   const previousState = append ? cloneUploadedEditorValue(uploadedSealEditorState) : null;
@@ -27543,7 +27657,18 @@ async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = fal
   const canonicalPages = (finalizedState.pages || [])
     .filter((page) => (page.sourceAssetId || page.source_asset_id) === assetId)
     .sort((left, right) => Number(left.sourcePageIndex ?? left.source_page_index ?? 0) - Number(right.sourcePageIndex ?? right.source_page_index ?? 0));
-  const incomingPages = await loadPdfJsAsset(file, assetId, canonicalPages.length ? canonicalPages : finalized?.pages || []);
+  const localPages = preparation && !finalized
+    ? Array.from({ length: preparation.pdfDocument.numPages }, (_, sourcePageIndex) => ({
+      sourcePageIndex,
+      pageId: `PAGE-${assetId}-${sourcePageIndex + 1}`
+    }))
+    : [];
+  const incomingPages = await loadPdfJsAsset(
+    file,
+    assetId,
+    canonicalPages.length ? canonicalPages : localPages.length ? localPages : finalized?.pages || [],
+    preparation
+  );
   assertEditorUploadCurrent(intent);
   const combinedCount = (append ? uploadedSealEditorState.pages.length : 0) + incomingPages.length;
   if (combinedCount > PDF_EDITOR_MAX_PAGES) {
@@ -27574,7 +27699,7 @@ async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = fal
     uploadedSealEditorRuntime.imageUrls.forEach((url) => { if (String(url).startsWith("blob:")) URL.revokeObjectURL(url); });
     uploadedSealEditorRuntime.imageUrls.clear();
   }
-  applyEditorRevisionFromResponse(finalized);
+  if (finalized) applyEditorRevisionFromResponse(finalized);
   const sourceEntry = {
     assetId,
     kind: intent.assetKind,
@@ -27613,6 +27738,75 @@ async function loadUploadedPdfIntoEditor(file, intent, finalized, { append = fal
   markUploadedEditorDirty();
   renderUploadedSealWorkbench();
   return { assetId, pages: incomingPages };
+}
+
+async function finishPendingEditorPdfFinalization(pending = uploadedSealEditorRuntime.pendingFinalization) {
+  if (!pending || !uploadedSealEditorRuntime.documentId) return false;
+  const { file, intent, append = false, preparation = null } = pending;
+  try {
+    assertEditorUploadCurrent(intent);
+    if (!pending.editorLoaded) {
+      await loadUploadedPdfIntoEditor(file, intent, null, { append, preparation });
+      pending.editorLoaded = true;
+      if (!append) {
+        uploadedSealEditorRuntime.lastEditorReadyMs = Math.round(performance.now() - Number(pending.uploadCompleteAt || performance.now()));
+      }
+      renderUploadedSealWorkbench();
+    }
+    if (!append) {
+      uploadedSealPdf = { file, name: file.name, size: file.size, hash: intent.sha256, assetId: intent.asset_id };
+      uploadedSealObjectUrl = uploadedSealEditorRuntime.assetUrls.get(intent.asset_id) || "";
+      const title = document.querySelector("#uploadedSealTitle");
+      if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
+      ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
+    }
+    const finalized = pending.finalizePromise
+      ? await pending.finalizePromise
+      : await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+    assertEditorUploadCurrent(intent);
+    if (finalized?.a4Conversion?.required) {
+      throw Object.assign(new Error("PDF 頁面需要先轉成 A4，請重新上傳並確認轉換後再編輯。"), { code: "editor_a4_preflight_mismatch" });
+    }
+    applyEditorRevisionFromResponse(finalized);
+    uploadedSealEditorRuntime.pendingFinalization = null;
+    uploadedSealEditorRuntime.finalizingAsset = false;
+    uploadedSealEditorRuntime.finalizationError = false;
+    uploadedSealEditorRuntime.pendingEditorSave = true;
+    setUploadedEditorSaveStatus("saving", "文件已確認，正在同步編輯內容");
+    renderUploadedSealWorkbench();
+    await saveUploadedEditorState({ immediate: true });
+    if (uploadedSealEditorRuntime.conflict) throw new Error("文件已載入，但草稿版本衝突；請先處理版本衝突後再繼續。");
+    if (uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration) {
+      throw new Error("文件已載入，編輯內容尚未同步完成；請按重試同步。");
+    }
+    uploadedSealEditorRuntime.pendingEditorSave = false;
+    clearUploadedEditorUploadError();
+    setUploadedEditorSaveStatus("saved", append ? "PDF 已加入並保存，可繼續編輯" : "PDF 已載入並保存，可開始編輯");
+    return finalized;
+  } catch (error) {
+    if (!uploadedSealApplicationScopeIsCurrent(intent?.scope || uploadedSealApplicationScopeSnapshot(), false)) return false;
+    if (uploadedSealEditorRuntime.pendingFinalization) {
+      uploadedSealEditorRuntime.pendingFinalization.finalizePromise = null;
+      uploadedSealEditorRuntime.finalizingAsset = true;
+      uploadedSealEditorRuntime.finalizationError = true;
+    } else {
+      uploadedSealEditorRuntime.pendingEditorSave = true;
+    }
+    setUploadedEditorSaveStatus("error", "PDF 已載入，但同步未完成；請重試同步");
+    const panel = document.querySelector("#uploadedEditorUploadError");
+    const message = document.querySelector("#uploadedEditorUploadErrorMessage");
+    const retryButton = document.querySelector("#uploadedEditorRetryUploadBtn");
+    uploadedSealEditorRuntime.uploadRetry = () => retryUploadedEditorUpload();
+    if (message) message.textContent = "PDF 已載入，編輯內容暫留此頁；請重試同步後再離開。";
+    if (retryButton) {
+      retryButton.hidden = false;
+      retryButton.disabled = false;
+      retryButton.textContent = "重試同步";
+    }
+    if (panel) panel.hidden = false;
+    renderUploadedSealWorkbench();
+    return false;
+  }
 }
 
 function editorElementById(elementId) {
@@ -29178,7 +29372,7 @@ function runUploadedEditorPageAction(action) {
 
 async function handleUploadedEditorImportPdf(files) {
   if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再匯入 PDF。");
-  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.locked) return showToast("目前無法匯入，請等待上傳完成或開啟可編輯草稿。");
+  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.locked) return showToast("目前無法匯入，請等待文件同步完成或開啟可編輯草稿。");
   const importScope = uploadedSealApplicationScopeSnapshot();
   uploadedSealEditorRuntime.uploading = true;
   renderUploadedSealWorkbench();
@@ -29187,28 +29381,52 @@ async function handleUploadedEditorImportPdf(files) {
     if (!file || (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf"))) return showToast("匯入只接受 PDF。");
     if (file.size > PDF_EDITOR_MAX_FILE_BYTES) return showToast("單一 PDF 不得超過 50 MB。");
     let intent = null;
+    let preparation = null;
     try {
       clearUploadedEditorUploadError();
       setUploadedPdfA4Status("checking", `正在檢查 ${file.name} 的每一頁是否為 A4…`);
-      const confirmed = await confirmUploadedPdfConversion(file);
+      preparation = await confirmUploadedPdfConversion(file);
       if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
-      if (!confirmed) { setUploadedEditorSaveStatus("saved", "已取消匯入，目前內容保持不變"); return; }
+      if (!preparation) { setUploadedEditorSaveStatus("saved", "已取消匯入，目前內容保持不變"); return; }
       await saveUploadedEditorState({ immediate: true });
       if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
       if (uploadedSealEditorRuntime.conflict) throw new Error("請先處理版本衝突，再匯入 PDF。");
       setUploadedEditorSaveStatus("uploading", "合併 PDF 直傳中 0%");
-      intent = await requestEditorUpload(file, "import_pdf");
+      intent = await requestEditorUpload(file, "import_pdf", preparation.sha256);
       await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(importScope, false)) setUploadedEditorSaveStatus("uploading", `合併 PDF 直傳中 ${Math.round(progress * 100)}%`); });
       assertEditorUploadCurrent(intent);
-      setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
-      const finalized = await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
-      const resolved = await resolveUploadedPdfConversion(file, intent, finalized);
-      if (!resolved) return;
-      await loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: true });
-      assertEditorUploadCurrent(intent);
+      if (preparation.report.valid) {
+        const uploadCompleteAt = performance.now();
+        const finalizePromise = finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+        void finalizePromise.catch(() => {});
+        const pending = { intent, file, preparation, finalizePromise, append: true, uploadCompleteAt, editorLoaded: false };
+        uploadedSealEditorRuntime.pendingFinalization = pending;
+        uploadedSealEditorRuntime.finalizingAsset = true;
+        setUploadedEditorSaveStatus("checking", "PDF 已上傳，可繼續編輯；正在同步文件");
+        await loadUploadedPdfIntoEditor(file, intent, null, { append: true, preparation });
+        pending.editorLoaded = true;
+        preparation = null;
+        uploadedSealEditorRuntime.uploading = false;
+        renderUploadedSealWorkbench();
+        const finalized = await finishPendingEditorPdfFinalization(pending);
+        if (!finalized) throw new Error("PDF 已載入，請先重試同步再繼續。");
+      } else {
+        setUploadedEditorSaveStatus("checking", "正在確認 PDF 頁面格式");
+        const finalized = await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+        const resolved = await resolveUploadedPdfConversion(file, intent, finalized);
+        if (!resolved) return;
+        await loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: true });
+        assertEditorUploadCurrent(intent);
+      }
     } catch (error) {
       if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
-      await reportEditorUploadFailure(intent, error);
+      if (preparation && uploadedSealEditorRuntime.pendingFinalization?.preparation !== preparation) {
+        discardUploadedPdfPreparation(preparation);
+        preparation = null;
+      }
+      if (!uploadedSealEditorRuntime.pendingFinalization && !uploadedSealEditorRuntime.pendingEditorSave) {
+        await reportEditorUploadFailure(intent, error);
+      }
       if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
       const retrySameFile = error?.detail === "editor_runtime_maintenance"
         || error?.retryable === true
@@ -29293,6 +29511,10 @@ async function handleUploadedEditorImage(file) {
 async function saveUploadedEditorState({ immediate = false } = {}) {
   window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
   if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.conflict) return null;
+  if (uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.finalizationError) {
+    setUploadedEditorSaveStatus("checking", "可繼續編輯；文件同步完成前暫不保存或送簽");
+    return null;
+  }
   const saveScope = uploadedSealApplicationScopeSnapshot();
   if (!navigator.onLine) {
     uploadedSealEditorRuntime.offlineDirty = true;
@@ -29773,7 +29995,8 @@ function uploadedPdfUploadBlockingMessage() {
   if (uploadedSealEditorRuntime.companyChanging) return "公司切換中，請稍候再上傳。";
   if (uploadedSealEditorRuntime.locked || uploadedSealApplicationRuntime.editable === false) return "此案件已送簽鎖定，不能更換 PDF。";
   if (uploadedSealApplicationRuntime.submissionBusy) return "案件正在送簽，請稍候。";
-  if (uploadedSealEditorRuntime.uploading) return "PDF 正在上傳與檢查，請稍候。";
+  if (uploadedSealEditorRuntime.uploading) return "PDF 正在上傳，請稍候。";
+  if (uploadedSealEditorRuntime.finalizingAsset) return "PDF 已載入，正在完成同步；請稍候再更換文件。";
   if (uploadedSealEditorRuntime.reviewMode !== "edited") return "請先切回編輯版再更換 PDF。";
   if (uploadedSealEditorRuntime.directoryLoading) return "正在載入公司與印章權限，請稍候。";
   return "";
@@ -29818,17 +30041,20 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     input.value = "";
     return showToast("PDF 不得超過 50 MB。");
   }
-  if (uploadedSealEditorRuntime.uploading) {
+  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave) {
     input.value = "";
-    return showToast("已有 PDF 正在上傳，請等待完成。");
+    return showToast("已有 PDF 正在處理，請等待同步完成。");
   }
   const uploadScope = uploadedSealApplicationScopeSnapshot();
   uploadedSealEditorRuntime.uploading = true;
+  uploadedSealEditorRuntime.finalizingAsset = false;
+  uploadedSealEditorRuntime.finalizationError = false;
   clearUploadedEditorUploadError();
   const fileName = document.querySelector("#uploadedPdfFileName");
   if (fileName) fileName.textContent = `正在檢查 ${file.name}`;
   renderUploadedSealWorkbench();
   let intent = null;
+  let preparation = null;
   try {
     if (
       uploadedSealEditorRuntime.documentId
@@ -29840,39 +30066,65 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
       if (uploadedSealEditorRuntime.conflict) throw new Error("目前草稿有版本衝突，請先重新載入或保留本機版本。");
     }
     setUploadedPdfA4Status("checking", "正在檢查每一頁是否為 A4…");
-    const confirmed = await confirmUploadedPdfConversion(file);
+    preparation = await confirmUploadedPdfConversion(file);
     if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
-    if (!confirmed) {
+    if (!preparation) {
       setUploadedEditorSaveStatus("saved", "已取消上傳，目前內容保持不變");
       return;
     }
-    setUploadedEditorSaveStatus("checking", "正在準備私密草稿與檔案驗證");
-    intent = await requestEditorUpload(file, "source_pdf");
+    setUploadedEditorSaveStatus("checking", "正在準備 PDF 編輯器");
+    intent = await requestEditorUpload(file, "source_pdf", preparation.sha256);
     setUploadedEditorSaveStatus("uploading", "正在上傳 PDF…");
     await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) setUploadedEditorSaveStatus("uploading", `PDF 已上傳 ${Math.round(progress * 100)}%`); });
     assertEditorUploadCurrent(intent);
-    setUploadedEditorSaveStatus("checking", "掃毒與 PDF 預檢中");
-    const finalized = await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
-    const resolved = await resolveUploadedPdfConversion(file, intent, finalized);
-    if (!resolved) return;
-    setUploadedEditorSaveStatus("checking", "安全檢查完成，正在載入 PDF 編輯頁面");
-    await loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: false });
-    assertEditorUploadCurrent(intent);
-    uploadedSealPdf = { file: resolved.file, name: resolved.file.name, size: resolved.file.size, hash: resolved.intent.sha256, assetId: resolved.finalized.asset?.id || resolved.finalized.asset?.asset_id || resolved.intent.asset_id };
-    uploadedSealObjectUrl = uploadedSealEditorRuntime.assetUrls.get(uploadedSealPdf.assetId) || "";
-    const title = document.querySelector("#uploadedSealTitle");
-    if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
-    ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
-    addSealAudit("PDF 編輯來源已通過預檢", `asset ${uploadedSealPdf.assetId || "-"} · ${uploadedSealPageCount} 頁 · hash ${intent.sha256.slice(0, 16)}…`);
-    clearUploadedEditorUploadError();
-    showToast(`PDF 已安全載入，共 ${uploadedSealPageCount} 頁。`);
+    const uploadCompleteAt = performance.now();
+    if (preparation.report.valid) {
+      const finalizePromise = finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+      void finalizePromise.catch(() => {});
+      uploadedSealEditorRuntime.pendingFinalization = {
+        intent, file, finalizePromise, append: false, preparation, uploadCompleteAt, editorLoaded: false
+      };
+      uploadedSealEditorRuntime.finalizingAsset = true;
+      setUploadedEditorSaveStatus("checking", "PDF 已上傳，正在完成同步");
+      await loadUploadedPdfIntoEditor(file, intent, null, { append: false, preparation });
+      uploadedSealEditorRuntime.pendingFinalization.editorLoaded = true;
+      preparation = null;
+      uploadedSealPdf = { file, name: file.name, size: file.size, hash: intent.sha256, assetId: intent.asset_id };
+      uploadedSealObjectUrl = uploadedSealEditorRuntime.assetUrls.get(intent.asset_id) || "";
+      const title = document.querySelector("#uploadedSealTitle");
+      if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
+      ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
+      uploadedSealEditorRuntime.lastEditorReadyMs = Math.round(performance.now() - uploadCompleteAt);
+      uploadedSealEditorRuntime.uploading = false;
+      setUploadedEditorSaveStatus("checking", "PDF 已載入，可開始編輯；正在同步文件");
+      renderUploadedSealWorkbench();
+      addSealAudit("PDF 編輯來源已載入", `asset ${intent.asset_id || "-"} · ${uploadedSealPageCount} 頁 · hash ${intent.sha256.slice(0, 16)}…`);
+      const finalized = await finishPendingEditorPdfFinalization(uploadedSealEditorRuntime.pendingFinalization);
+      if (finalized) showToast(`PDF 已載入，可開始編輯（${uploadedSealEditorRuntime.lastEditorReadyMs} 毫秒）。`);
+    } else {
+      // Non-A4 documents still require the existing explicit conversion flow.
+      const finalized = await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+      const resolved = await resolveUploadedPdfConversion(file, intent, finalized);
+      if (!resolved) return;
+      setUploadedEditorSaveStatus("checking", "正在載入 PDF 編輯頁面");
+      await loadUploadedPdfIntoEditor(resolved.file, resolved.intent, resolved.finalized, { append: false });
+      assertEditorUploadCurrent(intent);
+      uploadedSealPdf = { file: resolved.file, name: resolved.file.name, size: resolved.file.size, hash: resolved.intent.sha256, assetId: resolved.finalized.asset?.id || resolved.finalized.asset?.asset_id || resolved.intent.asset_id };
+      uploadedSealObjectUrl = uploadedSealEditorRuntime.assetUrls.get(uploadedSealPdf.assetId) || "";
+      const title = document.querySelector("#uploadedSealTitle");
+      if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
+      ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
+      addSealAudit("PDF 編輯來源已載入", `asset ${uploadedSealPdf.assetId || "-"} · ${uploadedSealPageCount} 頁 · hash ${intent.sha256.slice(0, 16)}…`);
+      clearUploadedEditorUploadError();
+      showToast(`PDF 已載入，共 ${uploadedSealPageCount} 頁。`);
+    }
   } catch (error) {
     if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
     if (error?.code === "editor_application_incomplete" && error.applicationIssue) {
       showUploadedEditorDraftPrerequisite(error.applicationIssue);
       return;
     }
-    await reportEditorUploadFailure(intent, error);
+    if (!uploadedSealEditorRuntime.pendingFinalization) await reportEditorUploadFailure(intent, error);
     if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
     setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
     setUploadedEditorSaveStatus("error", "PDF 未通過上傳或預檢");
@@ -29888,6 +30140,9 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
   } finally {
     if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) {
       uploadedSealEditorRuntime.uploading = false;
+      if (preparation && uploadedSealEditorRuntime.pendingFinalization?.preparation !== preparation) {
+        discardUploadedPdfPreparation(preparation);
+      }
       input.value = "";
       renderUploadedSealWorkbench();
     }
@@ -30046,20 +30301,23 @@ function renderUploadedSealWorkbench() {
     editor.dataset.editorLocked = String(uploadedSealEditorRuntime.locked);
     editor.dataset.featureEnabled = String(featureEnabled);
     editor.dataset.uploading = String(uploadedSealEditorRuntime.uploading);
+    editor.dataset.finalizing = String(uploadedSealEditorRuntime.finalizingAsset);
     editor.dataset.reviewMode = uploadedSealEditorRuntime.reviewMode;
     editor.dataset.hasDocument = String(uploadedSealEditorState.pages.length > 0);
     editor.dataset.activeTool = uploadedSealEditorRuntime.tool;
   }
   const sourceInput = document.querySelector("#uploadedSealPdfInput");
-  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
-  const uploadActionDisabled = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
+  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
+  const uploadActionDisabled = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
   const emptyUploadButton = document.querySelector("#uploadedPdfEmptyUploadBtn");
   if (emptyUploadButton) emptyUploadButton.disabled = uploadActionDisabled;
   const replaceButton = document.querySelector("#uploadedPdfReplaceBtn");
   if (replaceButton) {
     replaceButton.disabled = uploadActionDisabled;
     replaceButton.textContent = uploadedSealEditorRuntime.uploading
-      ? "PDF 處理中…"
+      ? "PDF 上傳中…"
+      : uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave
+        ? "PDF 同步中…"
       : uploadedSealEditorState.pages.length
         ? "更換 PDF"
         : featureEnabled
@@ -30123,6 +30381,10 @@ function renderUploadedSealWorkbench() {
     const control = document.querySelector(selector);
     if (control) control.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
   });
+  const importPdfButton = document.querySelector("#uploadedEditorImportPdfBtn");
+  if (importPdfButton && (uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave)) {
+    importPdfButton.disabled = true;
+  }
   const addStampButton = document.querySelector("#addSelectedStampBtn");
   if (addStampButton) addStampButton.disabled = sealPickerReadOnly || !hasSelectedSeal || !uploadedSealEditorState.pages.length;
   const placementSelect = document.querySelector("#uploadedSealStampType");
@@ -30279,6 +30541,8 @@ function renderUploadedEditorSubmissionActions() {
   button.textContent = uploadedSealApplicationRuntime.submissionBusy ? "處理中…" : current ? "確認內容並送簽" : "預覽送簽確認版";
   button.disabled = uploadedSealApplicationRuntime.submissionBusy
     || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading
+    || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.finalizationError || uploadedSealEditorRuntime.pendingEditorSave
+    || uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration
     || !hasSeal || !uploadedSealEditorState.pages.length || !workflowReady
     || (!current && uploadedSealEditorRuntime.reviewMode !== "edited");
   button.title = !hasSeal ? "請由執行長或行政部門主任啟用印章版本後再送簽。"
@@ -30463,7 +30727,7 @@ async function syncUploadedSealApplicationDraft() {
 async function flushUploadedSealDraftBeforeSwitch() {
   if (!finishUploadedEditorTextEdit()) throw new Error("請先完成文字編輯。");
   const scope = uploadedSealApplicationScopeSnapshot();
-  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.draftCreatePromise) {
+  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.draftCreatePromise) {
     throw new Error("PDF 正在上傳或建立草稿，請完成後再切換案件。");
   }
   if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
@@ -30582,7 +30846,7 @@ async function submitUploadedSealApplication() {
   const contractMode = uploadedSealMode === "contract";
   const approvalSelection = approvalSelectionForSelect("#uploadedSealApprovalCategorySelect");
   if (!approvalSelection.documentCategory || !approvalSelection.approvalRouteCode) return showToast("請先選擇用印文件類型。");
-  if (!uploadedSealEditorState.pages.length || !uploadedSealEditorRuntime.documentId) return showToast("請先完成 PDF 上傳、掃毒與預檢。");
+  if (!uploadedSealEditorState.pages.length || !uploadedSealEditorRuntime.documentId) return showToast("請先載入 PDF，再開始編輯。");
   const seals = uploadedSealEditorState.elements.filter((element) => element.kind === "seal");
   if (!seals.length) return showToast("請先加入至少一個用印處。");
   const submissionScope = uploadedSealApplicationScopeSnapshot();
@@ -32439,6 +32703,7 @@ window.addEventListener("online", () => {
 });
 window.addEventListener("beforeunload", (event) => {
   if (uploadedSealEditorRuntime.textEdit || uploadedSealApplicationHasUnsavedChanges() || uploadedSealApplicationRuntime.promise
+    || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.finalizationError || uploadedSealEditorRuntime.pendingEditorSave
     || (uploadedSealEditorRuntime.documentId && !uploadedSealEditorRuntime.locked
       && (uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration))) {
     event.preventDefault();

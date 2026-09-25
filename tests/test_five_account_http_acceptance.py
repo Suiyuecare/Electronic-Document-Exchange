@@ -147,7 +147,7 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         cls.case_definitions = cls._build_case_definitions()
         cls.snapshots_by_email, cls.identity_by_email = cls._build_finance_snapshots()
         cls.av_scan_count = 0
-        cls.av_quarantine_count = 0
+        cls.pdf_preflight_rejection_count = 0
         cls.tus_replay_isolations = 0
         cls.private_storage_denials = 0
         cls.finalize_replay_idempotent_count = 0
@@ -1473,7 +1473,7 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
                 "sealFiles": "synthetic-not-real-seals",
                 "formalExchange": "mock-disabled",
                 "financeBridge": "deterministic-snapshot-double",
-                "antivirus": "deterministic-eicar-fixture-double",
+                "pdfAntivirus": "disabled-for-editor-source-and-import",
                 "localDirectProductionGuard": (
                     "not-used"
                     if using_tus
@@ -1509,7 +1509,7 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
                     cls.private_storage_denials >= 5 if using_tus else False
                 ),
                 "antivirusScans": cls.av_scan_count,
-                "malwareFixtureRejected": cls.av_quarantine_count > 0 if using_tus else False,
+                "malformedPdfRejectedByPreflight": cls.pdf_preflight_rejection_count > 0 if using_tus else False,
             },
             "limitations": ([
                 "The signed Storage token is path-scoped and expiring rather than cryptographically single-use; the suite replays different bytes and proves the finalized file remains isolated from the staging path.",
@@ -1570,7 +1570,7 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         ):
             suite_tree.write(junit_path, encoding="utf-8", xml_declaration=True)
 
-    def test_00_local_supabase_tus_rejects_eicar_before_pdf_preflight(self) -> None:
+    def test_00_local_supabase_tus_rejects_malformed_pdf_by_preflight_without_antivirus(self) -> None:
         if self.upload_protocol != "local_supabase_tus":
             self.skipTest("isolated local Supabase TUS stack not requested")
         case = min(self.case_definitions, key=lambda item: item["ordinal"])
@@ -1582,23 +1582,16 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
             token=applicant_token,
             json_body={
                 "company_id": case["company_id"],
-                "title": "隔離惡意檔案閘門驗收",
-                "subject": "隔離惡意檔案閘門驗收",
-                "request_reason": "EICAR 標準測試字串，不含真實資料",
+                "title": "隔離 PDF 結構預檢驗收",
+                "subject": "隔離 PDF 結構預檢驗收",
+                "request_reason": "合成格式錯誤 PDF，不含真實資料",
                 "document_category": case["category"],
                 "dispatch_method": "no_dispatch_required",
             },
         )
         document_id = draft["document_id"]
-        eicar_fixture = base64.b64decode(
-            "WDVPIVAlQEFQWzRcUFpYNTQoUF4pN0NDKTd9JEVJQ0FSLVNUQU5EQVJELUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo="
-        )
-        eicar_pdf = (
-            b"%PDF-1.4\n% isolated antivirus fixture\n"
-            + eicar_fixture
-            + b"\n%%EOF\n"
-        )
-        digest = backend.sha256_bytes(eicar_pdf)
+        malformed_pdf = b"%PDF-1.4\nnot a valid structural PDF\n%%EOF\n"
+        digest = backend.sha256_bytes(malformed_pdf)
         intent = self._expect_json(
             "POST",
             f"/api/official-documents/{urllib.parse.quote(document_id)}/editor-uploads",
@@ -1606,13 +1599,13 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
             token=applicant_token,
             json_body={
                 "asset_kind": "source_pdf",
-                "file_name": "isolated-eicar-fixture.pdf",
+                "file_name": "isolated-malformed-fixture.pdf",
                 "mime_type": "application/pdf",
-                "size_bytes": len(eicar_pdf),
+                "size_bytes": len(malformed_pdf),
                 "sha256": digest,
             },
         )
-        self._perform_tus_upload(intent, eicar_pdf)
+        self._perform_tus_upload(intent, malformed_pdf)
         finalized = self._request(
             "POST",
             f"/api/official-documents/{urllib.parse.quote(document_id)}/editor-uploads/"
@@ -1626,10 +1619,10 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         if not (
             finalized.status == 422
             and finalized_error == "request_rejected"
-            and finalized_detail == "editor_asset_quarantined"
+            and finalized_detail == "editor_pdf_corrupt:PdfReadError"
         ):
             raise AssertionError(
-                f"local_supabase_eicar_not_rejected:{finalized.status}:"
+                f"local_supabase_malformed_pdf_not_rejected:{finalized.status}:"
                 f"{_machine_error(RuntimeError(str(finalized_detail or finalized_error)))}"
             )
         with backend.connect() as conn:
@@ -1638,8 +1631,8 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
                 "FROM official_document_editor_assets WHERE id = ?",
                 (intent["upload_id"],),
             ).fetchone()
-        if not asset or tuple(asset) != ("quarantined", "failed", "blocked"):
-            raise AssertionError("local_supabase_eicar_quarantine_state_invalid")
+        if not asset or tuple(asset) != ("quarantined", "not_scanned", "blocked"):
+            raise AssertionError("local_supabase_malformed_pdf_preflight_state_invalid")
         replay = self._request(
             "POST",
             f"/api/official-documents/{urllib.parse.quote(document_id)}/editor-uploads/"
@@ -1664,9 +1657,9 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         # These counters feed the class-level acceptance artifact written by
         # the following full-journey test.  Updating the individual test
         # instance would make the passing security checks appear false in CI.
-        type(self).av_quarantine_count += 1
+        type(self).pdf_preflight_rejection_count += 1
         type(self).failed_intent_replay_rejections += 1
-        self.assertGreaterEqual(type(self).av_quarantine_count, 1)
+        self.assertGreaterEqual(type(self).pdf_preflight_rejection_count, 1)
         self.assertGreaterEqual(type(self).failed_intent_replay_rejections, 1)
 
     def test_five_replayable_finance_accounts_complete_isolated_http_journeys(self) -> None:

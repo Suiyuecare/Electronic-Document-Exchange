@@ -147,6 +147,7 @@ jobs:
           EDOC_TEST_PG_USER=postgres \
           EDOC_COMPOSE_TEST_PG_PORT=54322 \
             python -m unittest -v \
+              tests.test_editor_pdf_upload_shared_forward \
               tests.test_editor_applicant_selection_postgres \
               tests.test_editor_cross_company_workflow_postgres \
               tests.test_configurable_workflow_postgres \
