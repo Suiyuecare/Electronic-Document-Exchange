@@ -4,9 +4,10 @@
 Every application row, trigger, RPC and Storage operation is real on the
 disposable loopback Supabase stack. The only transport adaptation is the exact
 loopback Storage origin (the frontend runner maps its cloud-shaped origin).
-An in-process synthetic own-company session replaces external Google SSO;
-the unchanged non-production EICAR scanner is used, not production ClamAV.
-No uploaded user document, hosted credential, seal or exchange call is used.
+An in-process synthetic own-company session replaces external Google SSO.
+An EICAR-like marker verifies source PDFs bypass AV; image assets still use
+the isolated scanner. No user document, hosted credential, seal or exchange
+call is used.
 """
 from __future__ import annotations
 
@@ -159,8 +160,8 @@ def main():
         ("jpeg_image", "驗收 圖片.jpeg", "image/jpeg", "image", image_bytes("JPEG"), ""),
         ("source_resume", "驗收 續傳.pdf", "application/pdf", "source_pdf", pdf_bytes(large=True), ""),
         ("hash_mismatch", "synthetic-mismatch.pdf", "application/pdf", "source_pdf", small_pdf, "editor_upload_hash_mismatch"),
-        ("scanner_quarantine", "synthetic-eicar.pdf", "application/pdf", "source_pdf",
-         small_pdf + b"\n%EICAR-STANDARD-ANTIVIRUS-TEST-FILE\n", "editor_asset_quarantined"),
+        ("pdf_no_av_scan", "synthetic-eicar.pdf", "application/pdf", "source_pdf",
+         small_pdf + b"\n%EICAR-STANDARD-ANTIVIRUS-TEST-FILE\n", ""),
     ]
     document_ids = [f"CI-UPIPE-DOC-{index}-{suffix}" for index in range(len(cases))]
     cleanup = set()
@@ -211,7 +212,7 @@ def main():
                 expect_rejected(lambda: backend.supabase_finalize_official_editor_upload(
                     document_id, asset_id, {"sha256": committed_digest}, session), rejection)
                 failed = backend.supabase_get("official_document_editor_assets", asset_id)
-                require(failed["upload_status"] == ("quarantined" if label == "scanner_quarantine" else "failed")
+                require(failed["upload_status"] == "failed"
                         and not failed["file_object_id"]
                         and backend._supabase_editor_latest_revision(document_id)["revision_no"] == 1,
                         "pipeline_gate_failure_not_atomic")
@@ -224,8 +225,9 @@ def main():
             STAGE = f"verify_committed:{label}"
             committed = backend.supabase_get("official_document_editor_assets", asset_id)
             committed_job = backend.supabase_get("official_document_editor_storage_jobs", job["id"])
+            expected_scan_status = "not_scanned" if kind in {"source_pdf", "import_pdf"} else "passed"
             require(committed["upload_status"] == "finalized" and committed["preflight_status"] == "passed"
-                    and committed["scan_status"] == "passed" and committed["sha256"] == digest
+                    and committed["scan_status"] == expected_scan_status and committed["sha256"] == digest
                     and committed["storage_path"] == job["final_path"] and committed_job["status"] == "committed"
                     and committed["file_object_id"] == committed_job["final_file_object_id"],
                     "pipeline_gate_finalize_not_committed")
@@ -249,7 +251,8 @@ def main():
             results.append({"case": label, "passed": True, "real_intent_rows": True,
                             "real_finalize_rpc": True, "source_and_final_hash_match": True,
                             "editor_revision_loaded": True, "idempotent_finalize": True,
-                            "resumed": uploaded["interrupted"], "foreign_actor_denied": True})
+                            "resumed": uploaded["interrupted"], "foreign_actor_denied": True,
+                            "scan_status": committed["scan_status"]})
     finally:
         original_error = sys.exc_info()[1]
         for path in cleanup:
