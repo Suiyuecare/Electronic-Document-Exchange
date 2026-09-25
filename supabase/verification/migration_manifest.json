@@ -67,6 +67,7 @@
     "20260922074613_configurable_official_workflows.sql",
     "20260924154226_atomic_official_receipt_confirmation.sql",
     "20260924154315_scoped_official_document_listing.sql",
-    "20260924155456_latest_generation_dispatch_owner.sql"
+    "20260924155456_latest_generation_dispatch_owner.sql",
+    "20260925044708_editor_pdf_uploads_skip_antivirus_preflight_required.sql"
   ]
 }

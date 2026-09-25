@@ -61,6 +61,14 @@ class LocalSupabaseUploadPipelineGateTests(unittest.TestCase):
         self.assertEqual(assignments, {"_supabase_storage_endpoint_issue"})
         self.assertNotIn("unittest.mock", PATH.read_text(encoding="utf-8"))
 
+    def test_pdf_skips_av_but_image_uploads_remain_scanned_in_real_pipeline_gate(self):
+        source = PATH.read_text(encoding="utf-8")
+        self.assertIn('("pdf_no_av_scan", "synthetic-eicar.pdf"', source)
+        self.assertIn('"not_scanned" if kind in {"source_pdf", "import_pdf"} else "passed"', source)
+        self.assertIn('("png_image", "驗收 圖片.png", "image/png", "image"', source)
+        self.assertIn('("jpeg_image", "驗收 圖片.jpeg", "image/jpeg", "image"', source)
+        self.assertNotIn('("scanner_quarantine"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

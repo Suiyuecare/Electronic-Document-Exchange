@@ -291,10 +291,49 @@ class EditorA4LocalFlowTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             backend.convert_official_editor_upload_a4(self.conn, self.draft["id"], asset_id, base, other)
 
-    def test_malware_remains_quarantined_even_with_conversion_opt_in(self):
-        with mock.patch.object(backend, "editor_scan_bytes_for_threats", return_value=("未通過", "test-only")), self.assertRaisesRegex(ValueError, "quarantined"):
-            self.stage()
-        self.assertEqual(backend.get_official_editor_state(self.conn, self.draft["id"], self.session)["state"]["sourceFiles"], [])
+    def test_editor_pdf_skips_antivirus_but_keeps_structural_preflight_and_hash_binding(self):
+        with mock.patch.object(backend, "editor_scan_bytes_for_threats", side_effect=AssertionError("PDF antivirus must not run")) as scanner:
+            staged = self.stage()
+        scanner.assert_not_called()
+        asset = self.conn.execute(
+            "SELECT * FROM official_document_editor_assets WHERE id = ?", (staged["asset"]["id"],)
+        ).fetchone()
+        file_object = self.conn.execute(
+            "SELECT * FROM file_objects WHERE id = ?", (asset["file_object_id"],)
+        ).fetchone()
+        self.assertEqual(asset["scan_status"], "not_scanned")
+        self.assertEqual(asset["preflight_status"], "passed")
+        self.assertEqual(file_object["scan_status"], "not_scanned")
+        self.assertTrue(backend.editor_asset_preflight_is_ready(dict(asset)))
+        original = self.conn.execute(
+            "SELECT * FROM official_document_files WHERE id = ?", (asset["official_file_id"],)
+        ).fetchone()
+        self.assertEqual(
+            backend._sqlite_require_official_file_ready(self.conn, self.draft["id"], dict(original), dict(file_object))["id"],
+            file_object["id"],
+        )
+        with self.assertRaisesRegex(ValueError, "official_file_antivirus_required"):
+            backend._sqlite_require_official_file_ready(
+                self.conn, self.draft["id"], dict(original), {**dict(file_object), "scan_status": "pending"}
+            )
+
+    def test_editor_image_still_requires_antivirus(self):
+        from PIL import Image
+        output = io.BytesIO()
+        Image.new("RGB", (24, 16), "orange").save(output, format="PNG")
+        data = output.getvalue()
+        digest = backend.sha256_bytes(data)
+        intent = backend.create_official_editor_upload_intent(self.conn, self.draft["id"], {
+            "file_name": "synthetic-stamp.png", "asset_kind": "image", "mime_type": "image/png",
+            "size_bytes": len(data), "sha256": digest,
+        }, self.session)
+        backend.store_official_editor_local_upload(self.conn, self.draft["id"], intent["upload_id"], data, self.session, "image/png")
+        with mock.patch.object(backend, "editor_scan_bytes_for_threats", return_value=("已通過", "synthetic-clean")) as scanner:
+            finalized = backend.finalize_official_editor_upload(
+                self.conn, self.draft["id"], intent["upload_id"], {"sha256": digest}, self.session
+            )
+        scanner.assert_called_once()
+        self.assertEqual(finalized["asset"]["scanStatus"], "passed")
 
 
 class EditorA4SupabaseContractTests(unittest.TestCase):
@@ -329,21 +368,26 @@ class EditorA4SupabaseContractTests(unittest.TestCase):
                       "_supabase_editor_assert_document_access": {"id": "USER-TEST", "name": "Isolated"},
                       "_supabase_editor_latest_revision": latest,
                       "supabase_storage_download": source,
-                      "editor_scan_bytes_for_threats": ("已通過", "test-clean"),
                       "_supabase_promote_editor_asset_to_immutable_storage": (final_path, "JOB-TEST", "LEASE-TEST"),
                       "supabase_official_raw_document_files": [],
                       "_supabase_assert_finalized_editor_asset_immutable": {},
                       "supabase_storage_delete": None}
             for name, value in values.items():
                 stack.enter_context(mock.patch.object(backend, name, return_value=value))
+            scanner = stack.enter_context(mock.patch.object(
+                backend, "editor_scan_bytes_for_threats", side_effect=AssertionError("PDF antivirus must not run")
+            ))
             stack.enter_context(mock.patch.object(backend, "supabase_filter_rows", side_effect=filter_rows))
             stack.enter_context(mock.patch.object(backend, "supabase_request", side_effect=rpc))
             result = backend.supabase_finalize_official_editor_upload("DOC-A4-TEST", asset["id"], {"allowA4Conversion": True, "sha256": digest}, {"user": {"id": "USER-TEST"}})
+        scanner.assert_not_called()
         self.assertTrue(result["a4Conversion"]["required"])
         self.assertEqual(result["editor_state"]["pages"], [])
         self.assertEqual(captured["official_file"]["file_hash"], digest)
         self.assertEqual(captured["file_object"]["size_bytes"], len(source))
         self.assertEqual(captured["asset_patch"]["page_count"], 1)
+        self.assertEqual(captured["file_object"]["scan_status"], "not_scanned")
+        self.assertEqual(captured["asset_patch"]["scan_status"], "not_scanned")
         self.assertEqual(captured["expected_base_revision_no"], 1)
 
     def test_supabase_conversion_never_mints_capability_and_reuses_scan_finalize(self):

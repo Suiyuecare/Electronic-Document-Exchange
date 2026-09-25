@@ -221,7 +221,7 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 67
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 68
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133144_compose_resilience_drafts_revision.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133603_editor_conflict_copy_atomic.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913055452_editor_applicant_selection_scope.sql')
@@ -230,8 +230,47 @@ checks(check_name, passed, observed) as (
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260922074613_configurable_official_workflows.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924154226_atomic_official_receipt_confirmation.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924154315_scoped_official_document_listing.sql')
-      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924155456_latest_generation_dispatch_owner.sql'),
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924155456_latest_generation_dispatch_owner.sql')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260925044708_editor_pdf_uploads_skip_antivirus_preflight_required.sql'),
       (select count(*)::text from edoc_private.shared_project_migration_ledger)
+    ),
+    (
+      'editor_pdf_preflight_status_guard',
+      exists (
+        select 1 from pg_catalog.pg_constraint constraint_row
+        where constraint_row.conrelid = pg_catalog.to_regclass('edoc.official_document_editor_assets')
+          and constraint_row.conname = 'official_editor_asset_scan_status_check'
+          and pg_catalog.pg_get_constraintdef(constraint_row.oid) like '%not_scanned%'
+      )
+      and not exists (
+        select 1
+        from edoc.official_document_editor_assets asset
+        left join edoc.file_objects file_object on file_object.id = asset.file_object_id
+        left join edoc.official_document_files official_file on official_file.id = asset.official_file_id
+        where asset.scan_status = 'not_scanned'
+          and (
+            asset.asset_kind not in ('source_pdf', 'import_pdf')
+            or asset.upload_status <> 'finalized'
+            or asset.preflight_status <> 'passed'
+            or file_object.id is null
+            or file_object.scan_status <> 'not_scanned'
+            or file_object.document_id <> asset.document_id
+            or file_object.purpose <> 'official-editor'
+            or file_object.version_label <> 'editor-asset-' || asset.asset_kind
+            or file_object.sha256 <> asset.sha256
+            or file_object.size_bytes <> asset.size_bytes
+            or file_object.bucket <> asset.storage_bucket
+            or (asset.asset_kind = 'source_pdf' and (
+              official_file.id is null
+              or official_file.document_id <> asset.document_id
+              or official_file.file_type <> 'original_pdf'
+              or official_file.file_object_id <> file_object.id
+              or official_file.file_hash <> asset.sha256
+              or official_file.file_size <> asset.size_bytes
+            ))
+          )
+      ),
+      (select count(*)::text from edoc.official_document_editor_assets where scan_status='not_scanned')
     ),
     (
       'finance_user_company_cache_ready',

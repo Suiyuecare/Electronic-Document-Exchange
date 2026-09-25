@@ -93,7 +93,7 @@ EDOC_CRL_DISTRIBUTION_URL=https://<crl-url>
 
 正式環境必須同時配置可用的 ClamAV 掃毒端點與明確的 Finance 公司來源模式才可開啟。推薦的私人 Cloud Run gateway 位於 [`services/clamav-scanner`](services/clamav-scanner/README.md)，eDoc 與 gateway 以 HTTPS HMAC v1 雙向驗證；大檔由 gateway 讀取 60 秒 Supabase signed URL，避免經過 Vercel／Cloud Run HTTP/1 body 上限。V2 preflight 目前採同步、失敗即阻擋送簽；在具備原子 claim／lease／重送上限的 durable worker 前，不得宣稱為非同步處理或把既有週期任務表當作工作佇列。
 
-編輯器使用自架、鎖版 PDF.js canvas＋SVG 編輯層。來源 PDF、匯入 PDF 與圖片走 private Storage 直傳、雜湊、掃毒及 preflight；送簽時鎖定 EditorState revision、manifest、prepared PDF 與每一枚印章版本。正式電子公文交換仍維持 Mock／停用，取得機關 jAgent／API／SDK／封包規格並完成測試與人工核准前不得切換正式 provider。
+編輯器使用自架、鎖版 PDF.js canvas＋SVG 編輯層。來源 PDF 與匯入 PDF 保留 private Storage 直傳、雜湊及結構預檢（檔案解析、加密、JavaScript、內嵌附件與頁面尺寸），不執行病毒特徵掃描；圖片仍須完成掃描。未掃描 PDF 會明確記錄為 `not_scanned`，不可描述為已掃毒或無病毒。送簽時鎖定 EditorState revision、manifest、prepared PDF 與每一枚印章版本。正式電子公文交換仍維持 Mock／停用，取得機關 jAgent／API／SDK／封包規格並完成測試與人工核准前不得切換正式 provider。
 
 正式部署手冊：[`docs/deployment-production.md`](docs/deployment-production.md)。
 正式環境檢查端點：
