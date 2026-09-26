@@ -142,7 +142,7 @@ APP_SECRET=<server-only>
 
 `EDOC_STORAGE_PUBLISHABLE_KEY` 只用於 Storage 的公開 client identification；上傳授權仍須由後端核發。共享模式的 `EDOC_STORAGE_SERVICE_ROLE_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 是同一把 `edoc_backend` custom secret，且只存在 server-side environment；獨立 project 模式仍必須使用各 project 自己的 server key 並分開輪替。
 
-PDF Editor 的 signed TUS 只可寫入 `editor/` 暫存路徑。Finalize 完成大小、SHA-256、掃毒與 PDF／圖片解析後，後端必須把已驗證 bytes 以 service role 建立在 `editor-final/<document>/<asset>/` 不可變路徑；migration `20260827194500_promote_editor_tus_staging_to_immutable.sql` 會在同一筆資料庫交易中將 asset 與 file object 綁到正式路徑，成功後才清除暫存。正式驗收不得把短效 Storage token 宣稱為密碼學上的一次性 token，而要用不同內容重播，確認正式檔案的路徑、hash 與下載內容完全不變。
+PDF Editor 的 signed TUS 只可寫入 `editor/` 暫存路徑。Finalize 完成大小、SHA-256 與 PDF／圖片解析後，後端必須把已驗證 bytes 以 service role 建立在 `editor-final/<document>/<asset>/` 不可變路徑；圖片另須通過掃毒，來源 PDF／匯入 PDF 則須通過結構預檢並明確記錄為 `not_scanned`。migration `20260827194500_promote_editor_tus_staging_to_immutable.sql` 會在同一筆資料庫交易中將 asset 與 file object 綁到正式路徑，成功後才清除暫存。正式驗收不得把短效 Storage token 宣稱為密碼學上的一次性 token，而要用不同內容重播，確認正式檔案的路徑、hash 與下載內容完全不變。
 
 正式通知的最低可上線基準是站內通知。Email 與 LINE 為選配，未提供並驗證下列環境變數時必須保持 disabled/pending，不可放假值或把「待驗證」視為成功：
 
@@ -160,28 +160,39 @@ LINE_TARGET_ID=<server-only>
 
 簽章、HSM、TSA、OCSP、CRL 與正式交換 provider 的環境變數，只能在該功能另行完成規格驗收與人工核准後加入。本次內部上線不可填入模擬值冒充可用。
 
-使用 Vercel CLI 時，每個命令會再提示輸入實際值；命令尾端的 `production` 是環境名稱，不是變數值：
+使用已核對版本的官方 Vercel CLI（本次驗證為 `60.1.3`）前，先確認登入身分、核准的 team、project 與 GitHub `main` 連結。`VERCEL_SCOPE` 是已核准的 team slug，不是 token；下列占位值必須先替換，不可建立同名的新專案來繞過權限錯誤：
 
 ```bash
-vercel link --yes --project Electronic-Document-Exchange
-vercel env add EDOC_DEPLOYMENT_ENV production
-vercel env add EDOC_DB_MODE production
-vercel env add EDOC_PUBLIC_BASE_URL production
-vercel env add SUPABASE_URL production
-vercel env add SUPABASE_SERVICE_ROLE_KEY production --sensitive
-vercel env add EDOC_SUPABASE_SCHEMA production
-vercel env add EDOC_SUPABASE_BACKEND_ROLE production
-vercel env add EDOC_STORAGE_SUPABASE_MODE production
-vercel env add EDOC_STORAGE_SUPABASE_URL production
-vercel env add EDOC_STORAGE_SERVICE_ROLE_KEY production --sensitive
-vercel env add EDOC_STORAGE_PUBLISHABLE_KEY production
-vercel env add EDOC_STORAGE_BUCKET production
-vercel env add EDOC_FILE_ENCRYPTION_KEY production --sensitive
-vercel env add EDOC_AV_PROVIDER production
-vercel env add EDOC_AV_SANDBOX_SNAPSHOT_ID production --sensitive
-vercel env add EDOC_AV_SMOKE_SECRET production --sensitive
-vercel env add CRON_SECRET production --sensitive
-vercel env add APP_SECRET production --sensitive
+VERCEL_SCOPE="<approved-team-slug>"
+vercel whoami
+vercel teams ls
+vercel project inspect electronic-document-exchange --scope "$VERCEL_SCOPE"
+vercel link --yes --project electronic-document-exchange --scope "$VERCEL_SCOPE"
+```
+
+若連接器回報 scope／403，但以上 CLI 檢查成功，可使用這條已授權的管理路徑；這不代表連接器本身的 OAuth 已修復。兩者均失敗時停止發布，再完成正確帳號的登入／重新授權；不得停用 deployment protection、加入假環境值或將使用者貼在對話中的 token 寫入設定檔。
+
+環境設定命令會再提示輸入實際值；命令中的 `production` 是環境名稱，不是變數值。只在已核對專案的 checkout 執行，現有變數不可無理由覆寫；檢查只輸出名稱與適用環境，不輸出值：
+
+```bash
+vercel env add EDOC_DEPLOYMENT_ENV production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_DB_MODE production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_PUBLIC_BASE_URL production --scope "$VERCEL_SCOPE"
+vercel env add SUPABASE_URL production --scope "$VERCEL_SCOPE"
+vercel env add SUPABASE_SERVICE_ROLE_KEY production --sensitive --scope "$VERCEL_SCOPE"
+vercel env add EDOC_SUPABASE_SCHEMA production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_SUPABASE_BACKEND_ROLE production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_STORAGE_SUPABASE_MODE production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_STORAGE_SUPABASE_URL production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_STORAGE_SERVICE_ROLE_KEY production --sensitive --scope "$VERCEL_SCOPE"
+vercel env add EDOC_STORAGE_PUBLISHABLE_KEY production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_STORAGE_BUCKET production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_FILE_ENCRYPTION_KEY production --sensitive --scope "$VERCEL_SCOPE"
+vercel env add EDOC_AV_PROVIDER production --scope "$VERCEL_SCOPE"
+vercel env add EDOC_AV_SANDBOX_SNAPSHOT_ID production --sensitive --scope "$VERCEL_SCOPE"
+vercel env add EDOC_AV_SMOKE_SECRET production --sensitive --scope "$VERCEL_SCOPE"
+vercel env add CRON_SECRET production --sensitive --scope "$VERCEL_SCOPE"
+vercel env add APP_SECRET production --sensitive --scope "$VERCEL_SCOPE"
 ```
 
 ## 3. 發布前資料與安全閘門
@@ -222,10 +233,12 @@ vercel env add APP_SECRET production --sensitive
 ```bash
 python3 -m py_compile backend.py api/index.py
 node --check app.js
-vercel pull --yes --environment=production
-vercel build --prod
-vercel deploy --prebuilt --prod
+vercel pull --yes --environment=production --scope "$VERCEL_SCOPE"
+vercel build --prod --scope "$VERCEL_SCOPE"
+vercel deploy --prebuilt --prod --scope "$VERCEL_SCOPE"
 ```
+
+只從已通過 CI 的核准 `main` commit 發布，不可把仍停在歷史分支的 checkout 直接推到正式站。`vercel pull` 取得的環境檔必須保留在已忽略的 `.vercel/`，不可加入 Git、證據檔或輸出內容。網站已 READY 且正式檔案與核准版本相符時，不需要為了修復管理連接器而重複部署。
 
 部署後：
 
@@ -256,8 +269,8 @@ readiness 才維持公開，供 Vercel 與負載平衡器探測。
 ## 6. 回復與事故處理
 
 ```bash
-vercel ls
-vercel rollback <deployment-url-or-id>
+vercel ls --scope "$VERCEL_SCOPE"
+vercel rollback <deployment-url-or-id> --scope "$VERCEL_SCOPE"
 ```
 
 Vercel rollback 只能回復應用部署。已套用的資料庫 migration 要用經審查的 forward-fix migration；正式發布前必須先有資料庫備份、回復點與負責人。若回退的應用版本不會建立 storage lifecycle job，必須同步關閉 PDF Editor 上傳／finalize，不能讓舊版後端寫入新 schema。正式值班、告警分級與處理步驟見 `docs/production-monitoring-runbook.md`。

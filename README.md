@@ -60,11 +60,11 @@ python3 backend.py --host 127.0.0.1 --port 5174
 
 本專案已初始化 Git，並補齊三平台部署檔：
 
-- GitHub：本地 Git repo 已建立，Codex GitHub connector 已授權到 `Suiyuecare/Electronic-Document-Exchange`；本機 Git HTTPS credential 仍需更新後才能直接 push。
-- Vercel：`vercel.json` 與 `api/index.py` 已建立，可部署靜態前端與 Python API。
+- GitHub：正式來源為 `Suiyuecare/Electronic-Document-Exchange` 的 `main` 分支；變更先通過 CI 與審查，再合併發布。每次發布前重新確認本機 Git 授權，不沿用歷史授權狀態。
+- Vercel：`vercel.json` 與 `api/index.py` 已建立，可部署靜態前端與 Python API；已連結的專案名稱為 `electronic-document-exchange`。管理工具的 OAuth scope 與網站部署是兩件事；連接器無權限時，可使用經 `whoami`、team 與 project 檢查通過的官方 CLI，不可停用網站保護或把 token 寫入 repo。
 - Supabase：`supabase/migrations/202605220001_edoc_core.sql`、`supabase/migrations/202605230001_auth_rbac.sql` 與 `supabase/seed.sql` 已建立；後端在 `SUPABASE_URL` 與 `SUPABASE_SERVICE_ROLE_KEY` 存在時會自動改走 Supabase REST API。正式環境可採獨立 eDoc project，或採已核准的共享專案隔離模式：HR 保留在 `public`，eDoc 僅位於 `edoc`／`edoc_private`，runtime 使用 `edoc_backend` custom secret，且 Storage policy 只允許兩個 eDoc bucket。
 
-Vercel 需要設定的環境變數：
+以下是內部模組的基本環境設定；完整資料庫、Storage、Finance、加密與管理設定依正式部署手冊，不以此簡表取代發布閘門：
 
 ```text
 EDOC_DEPLOYMENT_ENV=production
@@ -74,24 +74,13 @@ EDOC_PDF_EDITOR_V2_COMPANY_MODE=finance_active
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<server-only-service-role-key>
 CRON_SECRET=<random-secret>
-RESEND_API_KEY=<server-only-resend-key>
-MAIL_FROM=公文收發電子用印系統 <notifications@suiyuecare.com>
-LINE_WEBHOOK_URL=<line-webhook-url>
-EDOC_SIGNATURE_PROVIDER=<formal-provider-name>
-EDOC_SIGNATURE_API_URL=https://<signature-provider>/api
-EDOC_SIGNATURE_API_KEY=<server-only-signature-api-key>
-EDOC_SIGNATURE_KEY_ID=<hsm-or-kms-key-id>
-EDOC_HSM_PROVIDER=<hsm-or-kms-provider>
-EDOC_CERT_TRUST_STORE=<trusted-root-ca-bundle-or-secret-ref>
-EDOC_TSA_URL=https://<tsa-provider>/timestamp
-EDOC_TSA_API_KEY=<server-only-tsa-api-key>
-EDOC_OCSP_RESPONDER_URL=https://<ocsp-responder>
-EDOC_CRL_DISTRIBUTION_URL=https://<crl-url>
 ```
+
+Email／LINE 為選配，未設定或未驗證時保持 disabled/pending；站內通知才是內部上線的最低基準。正式交換、法定簽章、HSM、TSA、OCSP 與 CRL 另待規格驗收與人工核准，不是目前內部模組的部署前提，且不得填入模擬值冒充就緒。
 
 公司與人員皆以 Finance 為唯一主檔。`EDOC_LAUNCH_COMPANY_MODE=finance_active` 會自動開放並同步 Finance 啟用公司；`EDOC_PDF_EDITOR_V2_COMPANY_MODE=finance_active` 讓同一批公司使用 V2，不必在新增公司後重改 Vercel。若發生資安事件或需要分批停用，可暫時切為 `manual_allowlist`，再以對應的 `*_COMPANY_IDS` 限制範圍。
 
-正式環境必須同時配置可用的 ClamAV 掃毒端點與明確的 Finance 公司來源模式才可開啟。推薦的私人 Cloud Run gateway 位於 [`services/clamav-scanner`](services/clamav-scanner/README.md)，eDoc 與 gateway 以 HTTPS HMAC v1 雙向驗證；大檔由 gateway 讀取 60 秒 Supabase signed URL，避免經過 Vercel／Cloud Run HTTP/1 body 上限。V2 preflight 目前採同步、失敗即阻擋送簽；在具備原子 claim／lease／重送上限的 durable worker 前，不得宣稱為非同步處理或把既有週期任務表當作工作佇列。
+正式環境必須配置明確的 Finance 公司來源模式。圖片仍需可用且已核准的掃描 provider；來源 PDF／匯入 PDF 採下述結構預檢政策，不以病毒特徵掃描作為開啟 PDF 編輯畫布的前提。瀏覽器預檢與直傳完成後可先編輯，後端 finalize 與草稿保存於背景完成；同步完成前仍禁止送簽與切換案件，失敗時保留內容並提供重試。此背景同步不代表正式交換 provider 或一般週期任務已具備 durable queue。
 
 編輯器使用自架、鎖版 PDF.js canvas＋SVG 編輯層。來源 PDF 與匯入 PDF 保留 private Storage 直傳、雜湊及結構預檢（檔案解析、加密、JavaScript、內嵌附件與頁面尺寸），不執行病毒特徵掃描；圖片仍須完成掃描。未掃描 PDF 會明確記錄為 `not_scanned`，不可描述為已掃毒或無病毒。送簽時鎖定 EditorState revision、manifest、prepared PDF 與每一枚印章版本。正式電子公文交換仍維持 Mock／停用，取得機關 jAgent／API／SDK／封包規格並完成測試與人工核准前不得切換正式 provider。
 
