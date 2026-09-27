@@ -57,6 +57,56 @@ test('PDF module retries are bounded and offer a page refresh after three failur
   assert.equal(new Set(urls).size, 3);
 });
 
+test('an externally preloaded rejected promise is released and its failed URL is not reused', async () => {
+  const urls = [];
+  const library = { getDocument() {}, GlobalWorkerOptions: {} };
+  const context = libraryHarness(url => { urls.push(url); return Promise.resolve(library); });
+  context.window.pdfjsLibPromise = Promise.reject(new Error('synthetic rejected bootstrap'));
+  await assert.rejects(context.ensurePdfJsLibrary(), /載入失敗/);
+  assert.equal(context.window.pdfjsLibPromise, null);
+  assert.equal(context.window.pdfjsLibLoadAttempts, 1);
+  assert.equal(await context.ensurePdfJsLibrary(), library);
+  assert.deepEqual(urls, ['./vendor/pdfjs/pdf.min.mjs?v=4.2.67&retry=1']);
+});
+
+test('the actual bootstrap consumes preload failure and shares the bounded retry budget', async () => {
+  const urls = [];
+  const library = { getDocument() {}, GlobalWorkerOptions: {} };
+  const context = libraryHarness(url => {
+    urls.push(url);
+    return urls.length < 3 ? Promise.reject(new Error('synthetic offline')) : Promise.resolve(library);
+  });
+  const bootstrap = fs.readFileSync(path.join(__dirname, '..', 'pdfjs-bootstrap.mjs'), 'utf8');
+  vm.runInContext(bootstrap.replace(/import\((`[^`]*`)\)/, 'testImport($1)'), context);
+  const preload = context.window.pdfjsLibPromise;
+  await assert.rejects(preload, /synthetic offline/);
+  assert.equal(context.window.pdfjsLibPromise, null);
+  assert.equal(context.window.pdfjsLibLoadAttempts, 1);
+  await assert.rejects(context.ensurePdfJsLibrary(), /載入失敗/);
+  assert.equal(await context.ensurePdfJsLibrary(), library);
+  assert.deepEqual(urls, [
+    './vendor/pdfjs/pdf.min.mjs?v=4.2.67',
+    './vendor/pdfjs/pdf.min.mjs?v=4.2.67&retry=1',
+    './vendor/pdfjs/pdf.min.mjs?v=4.2.67&retry=2',
+  ]);
+  assert.equal(context.window.pdfjsLibLoadAttempts, 3);
+  assert.equal(library.GlobalWorkerOptions.workerSrc, 'vendor/pdfjs/pdf.worker.min.mjs?v=4.2.67');
+  vm.runInContext(bootstrap.replace(/import\((`[^`]*`)\)/, 'testImport($1)'), context);
+  assert.equal(urls.length, 3, 'loaded bootstrap does not import twice');
+});
+
+test('failed bootstrap plus two editor failures exhaust three total loads', async () => {
+  const urls = [];
+  const context = libraryHarness(url => { urls.push(url); return Promise.reject(new Error('synthetic offline')); });
+  const bootstrap = fs.readFileSync(path.join(__dirname, '..', 'pdfjs-bootstrap.mjs'), 'utf8');
+  vm.runInContext(bootstrap.replace(/import\((`[^`]*`)\)/, 'testImport($1)'), context);
+  await assert.rejects(context.window.pdfjsLibPromise, /synthetic offline/);
+  for (let i = 0; i < 2; i += 1) await assert.rejects(context.ensurePdfJsLibrary(), /載入失敗/);
+  await assert.rejects(context.ensurePdfJsLibrary(), /重新整理/);
+  vm.runInContext(bootstrap.replace(/import\((`[^`]*`)\)/, 'testImport($1)'), context);
+  assert.equal(urls.length, 3);
+});
+
 const fallbackFixture = {
   item: { id: 'TEST-DOC', source_type: 'uploaded_pdf', current_status: 'stamped', stamped_file_id: 'TEST-FINAL', can_download: true },
   files: [{ id: 'TEST-FINAL', document_id: 'TEST-DOC', file_type: 'stamped_pdf' }]

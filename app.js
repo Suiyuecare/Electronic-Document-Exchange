@@ -1502,6 +1502,9 @@ const uploadedSealEditorRuntime = {
 
 async function ensurePdfJsLibrary() {
   if (window.pdfjsLib?.getDocument) return window.pdfjsLib;
+  // Account for an existing preload from an older bootstrap as one attempt.
+  // Its rejection must be handled here too, not only promises created below.
+  if (window.pdfjsLibPromise && !window.pdfjsLibLoadAttempts) window.pdfjsLibLoadAttempts = 1;
   if (!window.pdfjsLibPromise) {
     const attempts = Number(window.pdfjsLibLoadAttempts || 0);
     if (attempts >= 3) throw new Error("PDF 編輯元件仍無法載入，請重新整理頁面後再試。");
@@ -1509,17 +1512,18 @@ async function ensurePdfJsLibrary() {
     // Browsers cache failed module imports by URL. A bounded retry must use a
     // fresh URL, not only clear the rejected promise.
     const retrySuffix = attempts ? `&retry=${attempts}` : "";
-    const promise = import(`./vendor/pdfjs/pdf.min.mjs?v=4.2.67${retrySuffix}`).then((library) => {
+    window.pdfjsLibPromise = import(`./vendor/pdfjs/pdf.min.mjs?v=4.2.67${retrySuffix}`).then((library) => {
       library.GlobalWorkerOptions.workerSrc = "vendor/pdfjs/pdf.worker.min.mjs?v=4.2.67";
       window.pdfjsLib = library;
       return library;
-    }).catch(() => {
-      if (window.pdfjsLibPromise === promise) window.pdfjsLibPromise = null;
-      throw new Error("PDF 編輯元件載入失敗，請確認連線後再試一次。");
     });
-    window.pdfjsLibPromise = promise;
   }
-  return window.pdfjsLibPromise;
+  const promise = window.pdfjsLibPromise;
+  try { return await promise; }
+  catch (_error) {
+    if (window.pdfjsLibPromise === promise) window.pdfjsLibPromise = null;
+    throw new Error("PDF 編輯元件載入失敗，請確認連線後再試一次。");
+  }
 }
 
 function pdfA4PageReport(pages = []) {

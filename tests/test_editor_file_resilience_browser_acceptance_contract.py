@@ -25,6 +25,15 @@ class EditorFileResilienceBrowserAcceptanceContractTest(unittest.TestCase):
         self.assertIn('"physicalMobileVerified": False', source)
         self.assertIn('"scope": "isolated_local_real_ui_http_no_production_mutation"', source)
 
+    def test_preload_failure_is_real_http_and_retry_uses_shipping_user_input(self):
+        source = acceptance.Path(acceptance.__file__).read_text()
+        self.assertIn('handler.send_response(503)', source)
+        self.assertIn('return original_head(handler)', source)
+        self.assertIn('self.upload(browser, "failed-preload-recovery")', source)
+        self.assertIn('"samePageWithoutReload"', source)
+        self.assertNotIn('window.pdfjsLib =', source)
+        self.assertNotIn('window.pdfjsLibPromise =', source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,12 +25,15 @@
 - 桌機／手機的延遲傳輸與取消重試、雙來源唯讀預覽與取消重開共 4 情境通過。
   使用實際 localhost HTTP 回應，延遲包裝不偽造成功。取消後的文字仍可同步回讀。
 - 暫時預覽在既有右側編輯欄內，不增加左右 grid 第三個子項；原編輯欄位置與寬度不變。
+- PDF 元件首次預載實際回應 HTTP 503 後，正常上傳可取得真正的 retry=1 模組；
+  不重新整理、不無限重試，且文字修改確實保存。啟動預載與編輯器共用最多三次載入額度。
 - 已檢視手機編輯、桌機暫時預覽截圖，無 JavaScript 錯誤或水平溢出。
 
 證據刻意不提交，避免合成操作記錄變成產品資料：
 `/tmp/edoc-file-ux-six-role-20260928/report.json`、
 `/tmp/edoc-file-ux-race-browser-20260928/report.json`、
-`tests/.artifacts/editor-file-resilience-20260928/report.json`。
+`tests/.artifacts/editor-file-resilience-20260928/report.json`、
+`tests/.artifacts/editor-file-preload-recovery-20260928/report.json`。
 
 ## 其他檢查與邊界
 

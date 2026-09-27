@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 import time
 from unittest import mock
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -57,6 +57,30 @@ class ResilienceJourney(Journey):
         writer.showPage(); writer.save()
         return path
 
+    def failed_preload_recovery(self, browser, transport):
+        transport.update(armed=True, failed=False, requests=[])
+        self.login(browser)
+        browser.until("window.pdfjsLibLoadAttempts>=1&&!window.pdfjsLibPromise&&!window.pdfjsLib")
+        before = browser.evaluate("({timeOrigin:performance.timeOrigin,errors:[...window.__fixtureErrors],attempts:window.pdfjsLibLoadAttempts})")
+        # This input invokes the actual shipping retry, never an injected import
+        # or a manually assigned successful library/promise.
+        document_id = self.upload(browser, "failed-preload-recovery")
+        browser.add_pdf_text("合成元件失敗後恢復編輯")
+        self.saved(browser)
+        state = self.state(document_id)
+        time.sleep(0.5)
+        checks = {
+            "bootstrapActuallyReceivedHttp503": any(row["status"] == 503 and row["retry"] == "" for row in transport["requests"]),
+            "userUploadFetchedRealRetry1Module": any(row["status"] == 200 and row["retry"] == "1" for row in transport["requests"]),
+            "noAutomaticRetryLoop": len(transport["requests"]) == 2,
+            "handledPreloadRejection": not before["errors"],
+            "samePageWithoutReload": browser.evaluate("performance.timeOrigin===" + json.dumps(before["timeOrigin"])),
+            "recoveredEditorVisibleAndUsable": browser.evaluate("uploadedSealEditorState.pages.length===1&&window.pdfjsLib?.getDocument&&document.querySelector('#uploadedPdfCanvas').width>0"),
+            "editedTextReallyPersisted": any((element.get("properties") or {}).get("text") == "合成元件失敗後恢復編輯" for element in state["elements"]),
+        }
+        transport["armed"] = False
+        return self.finish("failed-preload-recovery", browser, checks, {"moduleHttpAttempts": transport["requests"], "bootstrapLoadAttempts": before["attempts"]})
+
     def delayed_upload(self, label, width, height):
         browser = self.a
         self.login(browser, width=width, height=height)
@@ -85,7 +109,7 @@ class ResilienceJourney(Journey):
         document_id = browser.evaluate("uploadedSealEditorRuntime.documentId")
         state = self.state(document_id)
         checks["retryPersistedLocalText"] = any((element.get("properties") or {}).get("text") == text for element in state["elements"])
-        checks["retryUsedRealSuccessfulUpload"] = browser.evaluate("window.__raceRequests.some(r=>r.method==='PUT'&&/editor-uploads\/[^/]+\/content$/.test(r.path)&&r.status>=200&&r.status<300)")
+        checks["retryUsedRealSuccessfulUpload"] = browser.evaluate(r"window.__raceRequests.some(r=>r.method==='PUT'&&/editor-uploads\/[^/]+\/content$/.test(r.path)&&r.status>=200&&r.status<300)")
         return self.finish(label, browser, checks, {"readyMs": first["readyMs"], "uploadProtocol": "local_direct", "pendingDurationIsControlled": True})
 
     def multi_source_cancel(self, label, width, height):
@@ -133,13 +157,27 @@ class ResilienceJourney(Journey):
         return self.finish(label, self.a, checks, {"sourceStartGapMs": abs(partial["requests"][0]["started"] - partial["requests"][1]["started"]), "viewport": [width, height]})
 
 
-def run(output):
+def run(output, *, cases=None):
     output = output.resolve(); output.mkdir(parents=True, exist_ok=True)
     fixture = FiveAccountHttpAcceptanceTest
     original_head = QuietAcceptanceHandler.send_head
     instrumented = (ROOT / "index.html").read_bytes().replace(b"<head>", b"<head>" + TELEMETRY.encode(), 1)
+    preload = {"armed": False, "failed": False, "requests": []}
     def head(handler):
-        if urlparse(handler.path).path not in {"/", "/index.html"}:
+        parsed = urlparse(handler.path)
+        if parsed.path == "/vendor/pdfjs/pdf.min.mjs" and preload["armed"]:
+            retry = parse_qs(parsed.query).get("retry", [""])[0]
+            if not preload["failed"] and not retry:
+                preload["failed"] = True
+                preload["requests"].append({"retry": retry, "status": 503})
+                data = b"Synthetic localhost module unavailable on the first request only."
+                handler.send_response(503); handler.send_header("Content-Type", "text/plain")
+                handler.send_header("Cache-Control", "no-store")
+                handler.send_header("Content-Length", str(len(data))); handler.end_headers()
+                return io.BytesIO(data)
+            preload["requests"].append({"retry": retry, "status": 200})
+            return original_head(handler)
+        if parsed.path not in {"/", "/index.html"}:
             return original_head(handler)
         handler.send_response(200); handler.send_header("Content-Type", "text/html; charset=utf-8")
         handler.send_header("Content-Length", str(len(instrumented))); handler.end_headers()
@@ -150,24 +188,27 @@ def run(output):
         config = Path(fixture.tmp.name) / "file-resilience-browser.json"
         config.write_text(json.dumps({"headed": False}))
         suffix = f"{time.monotonic_ns():x}"[-9:]
-        browsers = [Browser(config, session=f"ef-{name}-{suffix}", namespace="edoc-file-qa") for name in ("a", "b")]
+        browsers = [Browser(config, session=f"ef-{name}-{suffix}", namespace="edoc-file-qa") for name in ("a", "b", "c")]
         try:
-            journey = ResilienceJourney(fixture, browsers, output)
-            for label, width, height in (("desktop", 1440, 1000), ("mobile", 390, 844)):
-                for kind, method in (("pending-upload", journey.delayed_upload), ("reopen-cancel", journey.multi_source_cancel)):
-                    name = f"{label}-{kind}"
+            journey = ResilienceJourney(fixture, browsers[:2], output)
+            methods = {f"{label}-{kind}": lambda name=f"{label}-{kind}", width=width, height=height, method=method: method(name, width, height)
+                       for label, width, height in (("desktop", 1440, 1000), ("mobile", 390, 844))
+                       for kind, method in (("pending-upload", journey.delayed_upload), ("reopen-cancel", journey.multi_source_cancel))}
+            methods["failed-preload-recovery"] = lambda: journey.failed_preload_recovery(browsers[2], preload)
+            for name in cases or methods:
+                try:
+                    result = methods[name]()
+                except Exception as error:
+                    result = {"name": name, "passed": False, "errorCode": str(error) if str(error).startswith(("browser_", "invalid_")) else type(error).__name__}
                     try:
-                        result = method(name, width, height)
-                    except Exception as error:
-                        result = {"name": name, "passed": False, "errorCode": str(error) if str(error).startswith(("browser_", "invalid_")) else type(error).__name__}
-                        try:
-                            result["failureState"] = journey.a.evaluate("({pageCount:uploadedSealEditorState.pages.length,save:document.querySelector('#uploadedEditorSaveStatus')?.textContent,toast:document.querySelector('#toast')?.textContent,preview:document.querySelector('#uploadedEditorOpeningPreview')?.textContent,errors:window.__fixtureErrors,requests:window.__raceRequests})")
-                            journey.a.run("screenshot", str(output / f"{name}-failed.png"), "--full")
-                        except Exception:
-                            pass
-                    report["journeys"].append(result)
-                    (output / "report.partial.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
-                    print(json.dumps({"case": name, "passed": result["passed"], "checks": result.get("checks", {}), "errorCode": result.get("errorCode")}), flush=True)
+                        failed_browser = browsers[2] if name == "failed-preload-recovery" else journey.a
+                        result["failureState"] = failed_browser.evaluate("({pageCount:uploadedSealEditorState.pages.length,save:document.querySelector('#uploadedEditorSaveStatus')?.textContent,toast:document.querySelector('#toast')?.textContent,preview:document.querySelector('#uploadedEditorOpeningPreview')?.textContent,errors:window.__fixtureErrors,requests:window.__raceRequests})")
+                        failed_browser.run("screenshot", str(output / f"{name}-failed.png"), "--full")
+                    except Exception:
+                        pass
+                report["journeys"].append(result)
+                (output / "report.partial.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
+                print(json.dumps({"case": name, "passed": result["passed"], "checks": result.get("checks", {}), "errorCode": result.get("errorCode")}), flush=True)
             report["passed"] = all(row["passed"] for row in report["journeys"])
         finally:
             for browser in browsers:
@@ -181,5 +222,6 @@ def run(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cases", nargs="+", choices=("desktop-pending-upload", "desktop-reopen-cancel", "mobile-pending-upload", "mobile-reopen-cancel", "failed-preload-recovery"))
     arguments = parser.parse_args()
-    raise SystemExit(0 if run(arguments.output)["passed"] else 1)
+    raise SystemExit(0 if run(arguments.output, cases=arguments.cases)["passed"] else 1)
