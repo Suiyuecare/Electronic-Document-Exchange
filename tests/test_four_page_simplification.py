@@ -117,6 +117,7 @@ const node=()=>({innerHTML:'',textContent:'',hidden:false,dataset:{},classList:{
 const list=node(),detail=node(),full=node(),panel=node(),page=node(),layout=node(),back=node();full.parentElement=node();
 const nodes={'#approvalLogList':list,'#approvalLogDetail':detail,'#approvalLogOpenWorkflowBtn':full,'#approvalLogCount':node(),'#approvalLogScope':node(),'#approvalLogDetailPanel':panel,'.approval-log-layout':layout,'#approvalLogBackBtn':back,'#approvalLog':page};
 const document={querySelector:s=>nodes[s]||null,querySelectorAll:()=>[]};
+const renderStableWorkflowMarkup=(host,html)=>{host.innerHTML=html},bindWorkflowActionOnce=()=>{};
 let selectedWorkflowTaskId='case1',approvalLogFilter='my_pending';
 const officialWorkflowPage={loading:false,error:false,hasMore:false};const hasAuthenticatedBackendSession=()=>true;
 const official={id:'case1',current_status:'pending',current_step:'manager',can_act:true,approval_steps:[{id:'step1',step_key:'manager',status:'pending'}]};

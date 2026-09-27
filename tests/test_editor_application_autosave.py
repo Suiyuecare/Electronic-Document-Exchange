@@ -22,6 +22,7 @@ class EditorApplicationAutosaveTest(unittest.TestCase):
         names = [
             'uploadedSealApplicationPatch', 'uploadedSealApplicationKey',
             'uploadedSealApplicationHasUnsavedChanges', 'scheduleUploadedSealApplicationSave',
+            'startUploadedSealApplicationComposition', 'finishUploadedSealApplicationComposition',
             'syncUploadedSealApplicationDraft', 'flushUploadedSealDraftBeforeSwitch',
             'invalidateUploadedEditorSubmissionPreview', 'uploadedEditorSubmissionFingerprint',
             'uploadedEditorSubmissionPreviewIsCurrent',
@@ -251,6 +252,43 @@ uploadedSealEditorRuntime.preparedPdfDocument=null;assert.equal(uploadedEditorSu
         self.run_javascript('''
 uploadedSealApplicationRuntime.submissionPreview='previous-confirmation';draft.title='New';
 scheduleUploadedSealApplicationSave();assert.equal(uploadedSealApplicationRuntime.submissionPreview,null);
+''')
+
+    def test_paused_application_ime_cancels_debounce_and_never_patches(self):
+        self.run_javascript('''
+draft.title='Initial edit';scheduleUploadedSealApplicationSave();
+startUploadedSealApplicationComposition();draft.title='Partial composition';scheduleUploadedSealApplicationSave({isComposing:true});
+assert.equal(timers.size,0);assert.equal(calls.length,0);
+await assert.rejects(syncUploadedSealApplicationDraft(),/文字輸入/);
+await assert.rejects(flushUploadedSealDraftBeforeSwitch(),/文字輸入/);
+assert.equal(calls.length,0);assert.equal(draft.title,'Partial composition');
+''')
+
+    def test_application_compositionend_and_final_input_patch_once_with_latest_text(self):
+        self.run_javascript('''
+startUploadedSealApplicationComposition();draft.title='Partial';scheduleUploadedSealApplicationSave({isComposing:true});
+draft.title='Committed latest';finishUploadedSealApplicationComposition();scheduleUploadedSealApplicationSave({isComposing:false});
+assert.equal(timers.size,1);const timer=[...timers.values()][0];timers.clear();timer();
+for(let n=0;n<8;n++)await Promise.resolve();
+assert.equal(calls.length,1);assert.equal(calls[0].body.title,'Committed latest');assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
+''')
+
+    def test_application_composition_during_save_never_recursively_patches_partial_text(self):
+        self.run_javascript('''
+let release;backendRequest=(path,options)=>{calls.push(JSON.parse(options.body));return new Promise(resolve=>release=resolve);};
+draft.title='Committed old';const saving=syncUploadedSealApplicationDraft();
+startUploadedSealApplicationComposition();draft.title='Partial new';scheduleUploadedSealApplicationSave({isComposing:true});
+release({content_revision:1});await assert.rejects(saving,/文字輸入/);
+assert.equal(calls.length,1);assert.equal(timers.size,0);assert.equal(uploadedSealApplicationHasUnsavedChanges(),true);
+draft.title='Committed new';finishUploadedSealApplicationComposition();assert.equal(timers.size,1);
+''')
+
+    def test_stale_application_compositionend_does_not_save_new_session(self):
+        self.run_javascript('''
+startUploadedSealApplicationComposition();draft.title='Old partial';
+resetUploadedSealApplicationSaving();sessionScope='user-two:company-two';
+uploadedSealApplicationRuntime.documentId='OD-TEST';draft.title='New draft';finishUploadedSealApplicationComposition();
+assert.equal(timers.size,0);assert.equal(calls.length,0);assert.equal(uploadedSealApplicationRuntime.composing,false);
 ''')
 
     def test_first_submit_action_previews_and_returns_before_mutation(self):

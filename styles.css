@@ -13,6 +13,8 @@
   --rose: #b42318;
   --cream: #fff9f2;
   --shadow: 0 22px 70px rgba(180, 83, 9, 0.1);
+  --z-workspace-dialog: 800;
+  --z-workspace-toast: 900;
   font-family: "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
 }
 
@@ -7862,7 +7864,7 @@ body.demo-login-disabled #roleSelect:disabled {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: var(--z-workspace-dialog);
   display: grid;
   place-items: center;
   padding: 28px;
@@ -9610,7 +9612,7 @@ textarea {
   position: fixed;
   right: 22px;
   bottom: 22px;
-  z-index: 50;
+  z-index: var(--z-workspace-toast);
   max-width: 360px;
   padding: 14px 16px;
   border-radius: 18px;
@@ -9626,6 +9628,18 @@ textarea {
 .toast.show {
   opacity: 1;
   transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* Motion is supplemental; route changes and document operations never wait for
+   animation. Honor reduced-motion without disabling visible progress status. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important; /* Overrides smooth scrolling requested by legacy sections. */
+    transition-duration: 0.01ms !important; /* User accessibility preference takes precedence. */
+    animation-duration: 0.01ms !important; /* Keep semantic loading states, remove visual travel. */
+    animation-iteration-count: 1 !important; /* Stop continuous decorative/loading travel. */
+  }
 }
 
 @media (max-width: 1120px) {
@@ -11802,7 +11816,7 @@ body[data-session-state="revalidating"] .workspace::after {
     right: 12px;
     left: 12px;
     bottom: calc(var(--mobile-nav-height) + var(--mobile-safe-bottom) + 14px);
-    z-index: 130;
+    z-index: var(--z-workspace-toast);
     max-width: none;
   }
 
@@ -12351,7 +12365,7 @@ body[data-session-state="revalidating"] .workspace::after {
 }
 
 .modal-backdrop {
-  z-index: 800;
+  z-index: var(--z-workspace-dialog);
 }
 
 .official-decision-form > .form-actions {

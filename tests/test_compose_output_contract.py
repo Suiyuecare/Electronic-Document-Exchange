@@ -221,6 +221,7 @@ class ComposeOutputContractTest(unittest.TestCase):
 
     def test_confirmation_waits_for_persisted_number_before_showing_final_preview(self):
         result = self.evaluate(["advanceComposeStep"], '''
+          const composeInputIsComposing=()=>false;
           const composeStepKeys=()=>["fill","confirm"], composeStepIndex=()=>0;
           const validateComposeStep=()=>true;
           let draftPreviewExpanded=false;

@@ -73,7 +73,9 @@ class FourRoleUiContractTest(unittest.TestCase):
 
     def test_modal_sits_above_mobile_navigation_and_has_keyboard_focus_style(self) -> None:
         normalized = re.sub(r"\s+", " ", self.css)
-        self.assertIn(".modal-backdrop { z-index: 800;", normalized)
+        self.assertIn("--z-workspace-dialog: 800;", normalized)
+        self.assertIn(".modal-backdrop { z-index: var(--z-workspace-dialog);", normalized)
+        self.assertIn("--z-workspace-toast: 900;", normalized)
         self.assertIn(":focus-visible", self.css)
         self.assertIn(".official-decision-form > .form-actions { position: sticky;", normalized)
         self.assertIn(".decision-check, .official-missing-items label { min-height: 44px;", normalized)

@@ -89,6 +89,7 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
         self.assertEqual(value, {"subject": "原主旨", "suggestion": None, "review": None})
 
     CLOUD_SETUP = '''
+      const flushComposeInputUpdates=()=>true,composeInputIsComposing=()=>false;
       let composeCloudTimer=null,composeCloudOperation=null,composeCloudDraftId="OD-00000000-0000-4000-8000-000000000001",composeCloudConflict=false,composeSaveState={},authState={token:"fixture"},scope="A",nextSnapshot={values:{"#subject":"草稿"}};
       const composeCloudRevisions=new Map(),composeCloudSavedSnapshots=new Map();
       const composeRequestScope=()=>scope,composeRawSnapshot=()=>nextSnapshot,composeSnapshotHasMeaningfulContent=()=>true,renderComposeSaveStatus=()=>{};
