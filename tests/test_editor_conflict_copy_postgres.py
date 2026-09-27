@@ -22,7 +22,11 @@ class EditorConflictCopyPostgresTest(unittest.TestCase):
         pg_fixture.ComposeOutputPostgresTest.setUpClass.__func__(cls)
         root = Path(__file__).resolve().parents[1]
         cls.pg.execute("CREATE UNIQUE INDEX fixture_editor_job_asset ON official_document_editor_storage_jobs(asset_id)")
-        for name in ("20260827194500_promote_editor_tus_staging_to_immutable.sql", "20260911133603_editor_conflict_copy_atomic.sql"):
+        for name in (
+            "20260827194500_promote_editor_tus_staging_to_immutable.sql",
+            "20260911133603_editor_conflict_copy_atomic.sql",
+            "20260925044708_editor_pdf_uploads_skip_antivirus_preflight_required.sql",
+        ):
             cls.pg.execute((root / "supabase/migrations" / name).read_text())
         cls.pg.execute("GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA public TO service_role")
 
@@ -48,6 +52,13 @@ class EditorConflictCopyPostgresTest(unittest.TestCase):
             self.pg.execute(f"INSERT INTO public.{table} SELECT * FROM jsonb_populate_record(NULL::public.{table}, %s::jsonb)", (json.dumps(clean),))
         for item in bundle["file_objects"]:
             item["storage_provider"] = "supabase"
+            # SQLite represents an absent optional scan time as ""; PostgreSQL
+            # timestamp columns use NULL. Keep the fixture's semantic absence.
+            for key, value in item.items():
+                if value == "" and types.get(("file_objects", key)) in {
+                    "timestamp with time zone", "timestamp without time zone", "timestamptz", "date",
+                }:
+                    item[key] = None
         for role in ("anon", "authenticated"):
             with self.pg.transaction():
                 self.pg.execute(f"SET LOCAL ROLE {role}")

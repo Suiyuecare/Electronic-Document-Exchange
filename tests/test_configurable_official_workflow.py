@@ -134,7 +134,7 @@ class ConfigurableOfficialWorkflowTest(unittest.TestCase):
         self.assertEqual(backend.get_official_editor_state(self.conn, detail["id"], self.session)["status"], "draft")
         self.assertEqual(json.loads(self.conn.execute("SELECT editor_state_json FROM official_document_editor_revisions WHERE id=?", (original["id"],)).fetchone()[0]), original["state"])
         preflight = backend.preflight_official_editor(self.conn, detail["id"], {"editorRevisionId": revision["id"], "manifestSha256": revision["manifestSha256"]}, self.session)
-        resubmitted = backend.submit_official_document(self.conn, detail["id"], {**{key: preflight[key] for key in ("editorRevisionId", "manifestSha256", "preparedFileId", "preparedSha256")}, "content_revision": result["content_revision"]}, self.session)
+        resubmitted = backend.submit_official_document(self.conn, detail["id"], {**{key: preflight[key] for key in ("editorRevisionId", "manifestSha256", "preparedFileId", "preparedSha256")}, "expected_content_revision": result["content_revision"]}, self.session)
         self.assertEqual(resubmitted["current_step"], submitted["current_step"])
         self.assertTrue(all(row["status"] == "pending" for row in resubmitted["approval_steps"]))
         self.assertEqual(self.fixture.fixture._approve_and_stamp(resubmitted)["current_status"], "stamped")
@@ -400,11 +400,11 @@ class ConfigurableOfficialWorkflowTest(unittest.TestCase):
         document = {**backend.official_document_row(self.conn, document_id), "source_type": "blank_editor"}
         with mock.patch.object(backend, "official_document_row", return_value=document), mock.patch.object(backend, "lock_official_editor_submission") as lock:
             with self.assertRaisesRegex(ValueError, "designated_company_forbidden"):
-                backend.submit_official_document(self.conn, document_id, {}, self.session)
+                backend.submit_official_document(self.conn, document_id, {"expected_content_revision": document["content_revision"]}, self.session)
             lock.assert_not_called()
         with self.fixture._supabase_adapter(), mock.patch.object(backend, "supabase_official_document_row", return_value=document), mock.patch.object(backend, "supabase_lock_official_editor_submission") as lock, mock.patch.object(backend, "supabase_request") as rpc:
             with self.assertRaisesRegex(ValueError, "designated_company_forbidden"):
-                backend.supabase_submit_official_document(document_id, {}, self.session)
+                backend.supabase_submit_official_document(document_id, {"expected_content_revision": document["content_revision"]}, self.session)
             lock.assert_not_called()
             rpc.assert_not_called()
 

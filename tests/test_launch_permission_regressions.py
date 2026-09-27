@@ -214,8 +214,10 @@ class DelegatedReviewHttpRegressionTest(unittest.TestCase):
         prepared = self.api("POST", f"/api/official-documents/{document_id}/editor-preflight", owner, {
             "editorRevisionId": saved["id"], "manifestSha256": saved["manifestSha256"],
         }, 201)
+        application_snapshot = self.api("GET", f"/api/official-documents/{document_id}", owner)
         return self.api("POST", f"/api/official-documents/{document_id}/submit", owner, {
-            key: prepared[key] for key in ("editorRevisionId", "manifestSha256", "preparedFileId", "preparedSha256")
+            **{key: prepared[key] for key in ("editorRevisionId", "manifestSha256", "preparedFileId", "preparedSha256")},
+            "expected_content_revision": application_snapshot["content_revision"],
         })
 
     def delegated_document(self, *, editor=False):

@@ -1258,6 +1258,12 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         )
         attachment_file_id = attachment_upload["file"]["id"]
 
+        application_snapshot = cls._expect_json(
+            "GET",
+            f"/api/official-documents/{urllib.parse.quote(document_id)}",
+            200,
+            token=applicant_token,
+        )
         preflight = cls._expect_json(
             "POST",
             f"/api/official-documents/{urllib.parse.quote(document_id)}/editor-preflight",
@@ -1278,6 +1284,7 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
                 "manifestSha256": preflight["manifestSha256"],
                 "preparedFileId": preflight["preparedFileId"],
                 "preparedSha256": preflight["preparedSha256"],
+                "expected_content_revision": application_snapshot["content_revision"],
                 "comment": "隔離驗收送簽",
             },
         )

@@ -79,13 +79,17 @@ def attachment_id(document_id, upload_id):
     return "ODATT-" + hashlib.sha256((document_id + "\n" + upload_id).encode()).hexdigest()[:40].upper()
 
 def require_content_revision(document, payload):
-    """New compose UI is guarded; legacy non-compose API workflows stay compatible."""
+    """Require client CAS for current editors; keep legacy API compatibility."""
     metadata = document.get("metadata_json") or {}
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
-    guarded = document.get("source_type") == "blank_editor" and (metadata.get("source") == "compose_form" or (metadata.get("extra") or {}).get("source") == "compose_form")
+    guarded = bool(metadata.get("pdf_editor_v2")) or (
+        document.get("source_type") == "blank_editor"
+        and (metadata.get("source") == "compose_form" or (metadata.get("extra") or {}).get("source") == "compose_form")
+    )
     expected = payload.get("expected_content_revision")
     if guarded and (type(expected) is not int or expected < 0):
         raise ValueError("compose_content_revision_required")
     if expected is not None and (type(expected) is not int or expected != int(document.get("content_revision") or 0)):
         raise ValueError("compose_content_revision_conflict")
+    return int(document.get("content_revision") or 0) if expected is None else expected

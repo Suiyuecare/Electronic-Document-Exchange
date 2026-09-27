@@ -49,19 +49,21 @@ const draft={title:'Original',description:'Reason',request_reason:'Reason',handl
 const document={querySelector:()=>({value:draft.title})};
 const uploadedSealEditorRuntime={documentId:'OD-TEST',locked:false,saving:false,dirtyGeneration:0,savedGeneration:0,conflict:null};
 const uploadedSealEditorState={revisionNo:1,manifestSha256:'manifest-one'};
-const uploadedSealApplicationRuntime={documentId:'OD-TEST',savedKey:'',timer:0,promise:null,error:'',editable:true,retryCount:0,epoch:0};
+const uploadedSealApplicationRuntime={documentId:'OD-TEST',savedKey:'',timer:0,promise:null,error:'',editable:true,retryCount:0,epoch:0,contentRevision:0,conflict:false};
 const officialWorkflowItems=[{id:'OD-TEST'}];
 const editorDraftPayload=()=>({...draft});
 function renderUploadedSealApplicationSaveStatus(){statusRenders++;}
 function renderUploadedEditorSubmissionActions(){}
 function finishUploadedEditorTextEdit(){return true;} // Inline lifecycle has its own behavioral tests.
+function finishUploadedEditorPointerAction(){}
+function handleUploadedEditorConflict(error){uploadedSealEditorRuntime.conflict={};}
 function renderElectronicSealWorkQueue(){}
 async function saveUploadedEditorState(){savePdfCalls++;}
 const uploadedEditorV2FeatureEnabled=()=>true;
 const approvalSelectionForSelect=()=>({documentCategory:'test',approvalRouteCode:'A'});
 function rememberUploadedEditorSavedSealBindings(){}
 function setUploadedEditorSaveStatus(){}
-let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(options.body)});return {id:'OD-TEST',...JSON.parse(options.body)}};
+let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(options.body)});return {id:'OD-TEST',...JSON.parse(options.body),content_revision:uploadedSealApplicationRuntime.contentRevision+1}};
 '''
         script = harness + functions + "\nuploadedSealApplicationRuntime.savedKey=uploadedSealApplicationKey();\n(async()=>{\n" + case + "\n})().catch(error=>{console.error(error);process.exitCode=1});"
         result = subprocess.run([node, '-e', script], capture_output=True, text=True, timeout=20)
@@ -71,18 +73,31 @@ let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(option
         self.run_javascript('''
 draft.title='Edited';await syncUploadedSealApplicationDraft();
 assert.equal(calls.length,1);assert.equal(calls[0].path,'/official-documents/OD-TEST');
-assert.deepEqual(Object.keys(calls[0].body),['title','subject','description','request_reason','handler_name','dispatch_unit','applicant_department_id','applicant_department_name']);
+assert.deepEqual(Object.keys(calls[0].body),['title','subject','description','request_reason','handler_name','dispatch_unit','applicant_department_id','applicant_department_name','expected_content_revision']);
+assert.equal(calls[0].body.expected_content_revision,0);assert.equal(uploadedSealApplicationRuntime.contentRevision,1);
 assert.equal(calls[0].body.title,'Edited');assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
 assert.equal(savePdfCalls,0);
 ''')
 
     def test_edit_during_inflight_save_is_flushed_as_a_second_patch(self):
         self.run_javascript('''
-let release;backendRequest=async(path,options)=>{calls.push(JSON.parse(options.body));if(calls.length===1)await new Promise(resolve=>release=resolve);return {id:'OD-TEST'}};
+let release;backendRequest=async(path,options)=>{calls.push(JSON.parse(options.body));if(calls.length===1)await new Promise(resolve=>release=resolve);return {id:'OD-TEST',content_revision:uploadedSealApplicationRuntime.contentRevision+1}};
 draft.title='First change';const saving=syncUploadedSealApplicationDraft();
 draft.title='Latest change';release();await saving;
 assert.equal(calls.length,2);assert.equal(calls[0].title,'First change');assert.equal(calls[1].title,'Latest change');
+assert.equal(calls[0].expected_content_revision,0);assert.equal(calls[1].expected_content_revision,1);
 assert.equal(draft.title,'Latest change');assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
+''')
+
+    def test_metadata_conflict_keeps_local_input_and_never_replays_stale_patch(self):
+        self.run_javascript('''
+draft.title='Local unsaved title';const previousKey=uploadedSealApplicationRuntime.savedKey;
+backendRequest=async(path,options)=>{calls.push(JSON.parse(options.body));throw Object.assign(new Error('compose_content_revision_conflict'),{status:409})};
+await assert.rejects(syncUploadedSealApplicationDraft());
+assert.equal(draft.title,'Local unsaved title');assert.equal(uploadedSealApplicationRuntime.savedKey,previousKey);
+assert.equal(uploadedSealApplicationRuntime.contentRevision,0);assert.equal(uploadedSealApplicationRuntime.conflict,true);
+assert.equal(timers.size,0);scheduleUploadedSealApplicationSave();assert.equal(timers.size,0);
+await assert.rejects(syncUploadedSealApplicationDraft(),/其他裝置|版本/);assert.equal(calls.length,1);
 ''')
 
     def test_failed_save_does_not_claim_saved_and_explicit_retry_succeeds(self):
