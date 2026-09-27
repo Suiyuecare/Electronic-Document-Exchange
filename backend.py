@@ -23037,7 +23037,7 @@ def update_official_document_correction(
         raise PermissionError("only_applicant_can_correct")
     if document.get("current_status") not in {"draft", "rejected"}:
         raise ValueError("official_document_correction_locked")
-    require_content_revision(document, payload)
+    expected_content_revision = require_content_revision(document, payload)
     require_official_document_application_company(user, document, conn)
     applicant_department = _editor_correction_department(user, document, payload, conn)
     stamp_request = official_document_stamp_request(conn, document_id)
@@ -23100,7 +23100,7 @@ def update_official_document_correction(
         assignments = ", ".join(f"{key} = ?" for key in plan["updates"])
         changed = conn.execute(
             f"UPDATE official_documents SET {assignments}, content_revision = content_revision + 1, updated_at = ? WHERE id = ? AND content_revision = ? AND current_status IN ('draft', 'rejected')",
-            [*plan["updates"].values(), now(), document_id, int(document.get("content_revision") or 0)],
+            [*plan["updates"].values(), now(), document_id, expected_content_revision],
         ).rowcount
         if changed != 1:
             raise ValueError("compose_content_revision_conflict")
@@ -23305,7 +23305,7 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
         raise PermissionError("only_applicant_can_submit")
     if document["current_status"] not in {"draft", "rejected"}:
         raise ValueError("official_document_not_submittable")
-    require_content_revision(document, payload)
+    expected_content_revision = require_content_revision(document, payload)
     # SQLite rejection cloning is synchronous and shares the rejection
     # transaction.  The durable rejection job gate below is Supabase-only;
     # consulting it here would incorrectly couple local/offline operation to a
@@ -23357,7 +23357,7 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
     claimed = conn.execute(
         "UPDATE official_documents SET content_revision = content_revision "
         "WHERE id = ? AND content_revision = ? AND current_status = ?",
-        (document_id, int(document.get("content_revision") or 0), document["current_status"]),
+        (document_id, expected_content_revision, document["current_status"]),
     )
     if claimed.rowcount != 1:
         raise ValueError("compose_content_revision_conflict")
@@ -27615,23 +27615,61 @@ def convert_official_editor_upload_a4(conn: sqlite3.Connection, document_id: str
     return finalize_official_editor_upload(conn, document_id, intent["upload_id"], {"sha256": sha256_bytes(converted)}, session)
 
 
+def locked_editor_prepared_access_fields(document_id: str, revision_id: str, stamp_request: Dict[str, Any], prepared_file: Dict[str, Any] | None, prepared_asset: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Resolve only the exact submission witness, never a newer preflight."""
+    file_id = str(stamp_request.get("prepared_file_id") or "")
+    digest = str(stamp_request.get("prepared_sha256") or "")
+    if not file_id or not re.fullmatch(r"[0-9a-fA-F]{64}", digest) or stamp_request.get("locked_editor_revision_id") != revision_id:
+        raise ValueError("editor_locked_prepared_file_incomplete")
+    if not prepared_file:
+        raise ValueError("editor_prepared_file_not_found")
+    if (prepared_file.get("id") != file_id or prepared_file.get("document_id") != document_id
+            or prepared_file.get("file_type") != "prepared_pdf" or not prepared_file.get("file_object_id")
+            or str(prepared_file.get("file_hash") or "").upper() != digest.upper()):
+        raise ValueError("editor_prepared_hash_mismatch")
+    if (not prepared_asset or prepared_asset.get("document_id") != document_id
+            or prepared_asset.get("editor_revision_id") != revision_id
+            or prepared_asset.get("official_file_id") != file_id
+            or prepared_asset.get("file_object_id") != prepared_file.get("file_object_id")
+            or str(prepared_asset.get("sha256") or "").upper() != digest.upper()
+            or prepared_asset.get("upload_status") != "finalized"
+            or prepared_asset.get("preflight_status") != "passed"):
+        raise ValueError("editor_locked_prepared_asset_missing")
+    url = official_editor_file_authorized_url(document_id, file_id)
+    return {"preparedFileId": file_id, "preparedSha256": digest, "preparedUrl": url, "authorizedUrl": url}
+
+
 def get_official_editor_state(conn: sqlite3.Connection, document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
     document = official_document_row(conn, document_id)
     _editor_assert_document_access(conn, document, session, write=False)
-    latest = _editor_latest_revision_row(conn, document_id)
+    stamp_request = official_document_stamp_request(conn, document_id)
+    if document.get("current_status") in {"draft", "rejected"}:
+        latest = _editor_latest_revision_row(conn, document_id)
+    else:
+        locked_id = str((stamp_request or {}).get("locked_editor_revision_id") or "")
+        if not locked_id:
+            raise ValueError("editor_locked_prepared_file_incomplete")
+        locked_row = conn.execute("SELECT * FROM official_document_editor_revisions WHERE id = ? AND document_id = ?", (locked_id, document_id)).fetchone()
+        if not locked_row:
+            raise ValueError("editor_locked_revision_missing")
+        latest = row_to_dict(locked_row)
     if not latest:
         raise ValueError("editor_revision_not_found")
-    stamp_request = official_document_stamp_request(conn, document_id)
     public = _editor_revision_public(latest, str((stamp_request or {}).get("locked_editor_revision_id") or ""))
     if stamp_request and stamp_request.get("locked_editor_revision_id") == latest["id"]:
-        public["preparedFileId"] = stamp_request.get("prepared_file_id") or ""
-        public["preparedSha256"] = stamp_request.get("prepared_sha256") or ""
+        prepared_row = conn.execute("SELECT * FROM official_document_files WHERE id = ? AND document_id = ? AND file_type = 'prepared_pdf'", (stamp_request.get("prepared_file_id") or "", document_id)).fetchone()
+        locked_asset = conn.execute("SELECT * FROM official_document_editor_assets WHERE document_id = ? AND editor_revision_id = ? AND asset_kind = 'prepared_pdf' AND official_file_id = ? AND upload_status = 'finalized' AND preflight_status = 'passed'", (document_id, latest["id"], stamp_request.get("prepared_file_id") or "")).fetchone()
+        public.update(locked_editor_prepared_access_fields(document_id, latest["id"], stamp_request, row_to_dict(prepared_row) if prepared_row else None, row_to_dict(locked_asset) if locked_asset else None))
+        public["assets"] = editor_asset_access_manifest(document_id, public["state"], supabase_mode=False)
+        return public
+    if document.get("current_status") not in {"draft", "rejected"}:
+        raise ValueError("editor_locked_prepared_file_incomplete")
     prepared_asset = conn.execute(
         """
         SELECT official_file_id, sha256 FROM official_document_editor_assets
         WHERE document_id = ? AND editor_revision_id = ? AND asset_kind = 'prepared_pdf'
           AND upload_status = 'finalized' AND preflight_status = 'passed'
-        ORDER BY created_at DESC LIMIT 1
+        ORDER BY created_at DESC, id DESC LIMIT 1
         """,
         (document_id, latest["id"]),
     ).fetchone()
@@ -38253,18 +38291,32 @@ def supabase_copy_official_editor_conflict(document_id: str, payload: Dict[str, 
 def supabase_get_official_editor_state(document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
     document = supabase_official_document_row(document_id)
     _supabase_editor_assert_document_access(document, session, write=False)
-    latest = _supabase_editor_latest_revision(document_id)
+    stamp_request = supabase_official_document_stamp_request(document_id)
+    if document.get("current_status") in {"draft", "rejected"}:
+        latest = _supabase_editor_latest_revision(document_id)
+    else:
+        locked_id = str((stamp_request or {}).get("locked_editor_revision_id") or "")
+        if not locked_id:
+            raise ValueError("editor_locked_prepared_file_incomplete")
+        locked_rows = supabase_filter_rows("official_document_editor_revisions", {"id": locked_id, "document_id": document_id}, limit=1)
+        if not locked_rows:
+            raise ValueError("editor_locked_revision_missing")
+        latest = locked_rows[0]
     if not latest:
         raise ValueError("editor_revision_not_found")
-    stamp_request = supabase_official_document_stamp_request(document_id)
     public = _editor_revision_public(latest, str((stamp_request or {}).get("locked_editor_revision_id") or ""))
     if stamp_request and stamp_request.get("locked_editor_revision_id") == latest["id"]:
-        public["preparedFileId"] = stamp_request.get("prepared_file_id") or ""
-        public["preparedSha256"] = stamp_request.get("prepared_sha256") or ""
+        prepared_files = supabase_filter_rows("official_document_files", {"id": stamp_request.get("prepared_file_id") or "", "document_id": document_id, "file_type": "prepared_pdf"}, limit=1)
+        locked_assets = supabase_filter_rows("official_document_editor_assets", {"document_id": document_id, "editor_revision_id": latest["id"], "asset_kind": "prepared_pdf", "official_file_id": stamp_request.get("prepared_file_id") or "", "upload_status": "finalized", "preflight_status": "passed"}, limit=1)
+        public.update(locked_editor_prepared_access_fields(document_id, latest["id"], stamp_request, prepared_files[0] if prepared_files else None, locked_assets[0] if locked_assets else None))
+        public["assets"] = editor_asset_access_manifest(document_id, public["state"], supabase_mode=True)
+        return public
+    if document.get("current_status") not in {"draft", "rejected"}:
+        raise ValueError("editor_locked_prepared_file_incomplete")
     prepared_assets = supabase_filter_rows(
         "official_document_editor_assets",
         {"document_id": document_id, "editor_revision_id": latest["id"], "asset_kind": "prepared_pdf", "upload_status": "finalized", "preflight_status": "passed"},
-        order="created_at.desc",
+        order="created_at.desc,id.desc",
         limit=1,
     )
     if prepared_assets and prepared_assets[0].get("official_file_id"):
@@ -39142,7 +39194,7 @@ def supabase_update_official_document_correction(
         raise PermissionError("only_applicant_can_correct")
     if document.get("current_status") not in {"draft", "rejected"}:
         raise ValueError("official_document_correction_locked")
-    require_content_revision(document, payload)
+    expected_content_revision = require_content_revision(document, payload)
     require_official_document_application_company(user, document)
     applicant_department = _editor_correction_department(user, document, payload)
     stamp_request = supabase_official_document_stamp_request(document_id)
@@ -39305,7 +39357,7 @@ def supabase_update_official_document_correction(
             "p_document_id": document_id,
             "p_applicant_id": user["id"],
             "p_company_id": document["company_id"],
-            "p_patch": {**plan["updates"], "_expected_content_revision": int(document.get("content_revision") or 0)},
+            "p_patch": {**plan["updates"], "_expected_content_revision": expected_content_revision},
             "p_seal_id": plan["seal_id"],
             "p_stamp_positions": plan["positions"],
             "p_text_overlays": plan["text_overlays"],
@@ -39632,7 +39684,7 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
             return supabase_official_document_detail(document_id, session)
         raise ValueError("official_document_not_submittable")
     electronic_output = official_compose_electronic_output(document)
-    require_content_revision(document, payload)
+    expected_content_revision = require_content_revision(document, payload)
     if not bool(document.get("requires_stamp", True)) and not electronic_output:
         raise PermissionError("official_document_stamp_required")
     expected_status = str(document["current_status"])
@@ -39832,7 +39884,7 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
         "company_id": document["company_id"],
         "expected_status": expected_status,
         "expected_updated_at": expected_updated_at,
-        "expected_content_revision": int(document.get("content_revision") or 0),
+        "expected_content_revision": expected_content_revision,
         "submitted_at": submitted_at,
         "document_patch": document_patch,
         "stamp_request": stamp_request_row,

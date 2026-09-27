@@ -15,6 +15,188 @@ function implementation(name) {
   const next = /^\n(?:async )?function \w+\(/m.exec(remainder);
   return source.slice(match.index, match.index + match[0].length + next.index);
 }
+
+function pointerRaceHarness() {
+  const h = harness();
+  Object.assign(h.runtime, { tool: 'select', zoom: 1, touchPointers: new Map(), dirtyGeneration: 0, savedGeneration: 0, undoStack: [], guides: [] });
+  h.state.elements = [{ id: 'seal', kind: 'seal', pageId: 'p1', x: 100, y: 100, width: 80, height: 80, properties: {} }];
+  h.runtime.selectedIds.add('seal');
+  Object.assign(h.c, {
+    performance, PDF_EDITOR_SCHEMA_VERSION: 2,
+    editorElementById: id => h.c.uploadedSealEditorState.elements.find(element => element.id === id),
+    uploadedEditorClientPoint: (x, y) => ({ x, y }),
+    snapUploadedEditorPosition: (element, x, y) => ({ x, y, guides: [] }),
+    setUploadedEditorZoom: value => { h.runtime.zoom = value; },
+    emptyUploadedSealEditorState: () => ({}), rememberUploadedEditorSavedSealBindings() {},
+    pushUploadedEditorHistory: state => h.runtime.undoStack.push(structuredClone(state)),
+    markUploadedEditorDirty: () => { h.runtime.dirtyGeneration += 1; },
+    renderUploadedEditorSvgLayer() {}, renderUploadedEditorProperties() {},
+    selectUploadedEditorElement: id => { h.runtime.selectedIds = new Set(id ? [id] : []); },
+  });
+  const names = ['beginUploadedEditorPointer', 'moveUploadedEditorPointer', 'endUploadedEditorPointer', 'applyUploadedEditorCanonicalSaveResponse'];
+  if (source.includes('function finishUploadedEditorPointerAction(')) names.push('finishUploadedEditorPointerAction');
+  vm.runInContext(names.map(implementation).join('\n'), h.c);
+  h.pointer = (id, x, y, onElement = true, type = 'pointermove') => ({
+    type, pointerType: 'touch', pointerId: id, clientX: x, clientY: y,
+    preventDefault() {}, currentTarget: { setPointerCapture() {} },
+    target: { closest: selector => onElement && selector === '[data-editor-element-id]' ? { dataset: { editorElementId: 'seal' } } : null },
+  });
+  return h;
+}
+
+test('joining a pinch commits an already moved seal exactly once', () => {
+  const h = pointerRaceHarness();
+  h.c.beginUploadedEditorPointer(h.pointer(1, 110, 110));
+  h.c.moveUploadedEditorPointer(h.pointer(1, 140, 110));
+  h.c.beginUploadedEditorPointer(h.pointer(2, 220, 110, false));
+  h.c.endUploadedEditorPointer(h.pointer(2, 220, 110, false, 'pointerup'));
+  h.c.endUploadedEditorPointer(h.pointer(1, 140, 110, true, 'pointerup'));
+  assert.equal(h.c.uploadedSealEditorState.elements[0].x, 130);
+  assert.equal(h.runtime.dirtyGeneration, 1);
+  assert.equal(h.runtime.undoStack.length, 1);
+});
+
+test('canonical autosave response cannot overwrite a drag before pointerup', () => {
+  const h = pointerRaceHarness();
+  h.runtime.dirtyGeneration = 1;
+  const savedState = structuredClone(h.state);
+  h.c.beginUploadedEditorPointer(h.pointer(1, 110, 110));
+  h.c.moveUploadedEditorPointer(h.pointer(1, 140, 110));
+  assert.equal(h.c.applyUploadedEditorCanonicalSaveResponse({ state: savedState, revisionNo: 2, manifestSha256: 'saved' }, 1), false);
+  h.c.endUploadedEditorPointer(h.pointer(1, 140, 110, true, 'pointerup'));
+  assert.equal(h.c.uploadedSealEditorState.elements[0].x, 130);
+  assert.equal(h.runtime.dirtyGeneration, 2);
+});
+
+test('the real autosave snapshot and delayed response preserve a later live drag', async () => {
+  const h = pointerRaceHarness();
+  let release, sentState;
+  Object.assign(h.runtime, { documentId: 'fixture-document', dirtyGeneration: 1, savedGeneration: 0, baseManifestSha256: 'initial', saving: false });
+  Object.assign(h.c, {
+    navigator: { onLine: true }, window: { clearTimeout() {}, setTimeout: () => 1 },
+    calculateUploadedEditorManifest: async () => 'saved-hash',
+    backendRequest: (url, options) => { sentState = JSON.parse(options.body).state; return new Promise(resolve => { release = resolve; }); },
+    applyEditorRevisionFromResponse: result => { h.c.uploadedSealEditorState.revisionNo = result.revisionNo; },
+  });
+  vm.runInContext(implementation('saveUploadedEditorState'), h.c);
+  const saving = h.c.saveUploadedEditorState();
+  await new Promise(setImmediate);
+  assert.equal(sentState.elements[0].x, 100);
+  h.c.beginUploadedEditorPointer(h.pointer(1, 110, 110));
+  h.c.moveUploadedEditorPointer(h.pointer(1, 140, 110));
+  release({ state: sentState, revisionNo: 2, manifestSha256: 'saved-hash' });
+  await saving;
+  assert.equal(h.c.uploadedSealEditorState.elements[0].x, 130);
+  assert.equal(h.runtime.savedGeneration, 1);
+  h.c.endUploadedEditorPointer(h.pointer(1, 140, 110, true, 'pointerup'));
+  assert.equal(h.runtime.dirtyGeneration, 2);
+  assert.equal(h.runtime.undoStack.length, 1);
+});
+
+test('only the owning pointer moves and completes a gesture; pointercancel preserves visible work', () => {
+  const h = pointerRaceHarness();
+  h.c.beginUploadedEditorPointer(h.pointer(1, 110, 110));
+  h.c.moveUploadedEditorPointer(h.pointer(99, 190, 110));
+  assert.equal(h.state.elements[0].x, 100);
+  h.c.endUploadedEditorPointer(h.pointer(99, 190, 110, true, 'pointerup'));
+  assert.ok(h.runtime.pointerAction);
+  h.c.moveUploadedEditorPointer(h.pointer(1, 140, 110));
+  h.c.endUploadedEditorPointer(h.pointer(1, 140, 110, true, 'pointercancel'));
+  assert.equal(h.state.elements[0].x, 130);
+  assert.equal(h.runtime.dirtyGeneration, 1);
+  assert.equal(h.runtime.undoStack.length, 1);
+});
+
+test('a third touch cannot take over the original pinch pair or create a drag', () => {
+  const h = pointerRaceHarness();
+  h.c.beginUploadedEditorPointer(h.pointer(1, 110, 110, false));
+  h.c.beginUploadedEditorPointer(h.pointer(2, 210, 110, false));
+  h.c.beginUploadedEditorPointer(h.pointer(3, 410, 110));
+  h.c.moveUploadedEditorPointer(h.pointer(3, 610, 110));
+  assert.equal(h.runtime.zoom, 1);
+  assert.equal(h.runtime.pointerAction, null);
+  h.c.moveUploadedEditorPointer(h.pointer(2, 310, 110, false));
+  assert.equal(h.runtime.zoom, 2);
+  h.c.endUploadedEditorPointer(h.pointer(2, 310, 110, false, 'pointercancel'));
+  h.c.moveUploadedEditorPointer(h.pointer(3, 810, 110));
+  assert.equal(h.runtime.zoom, 2);
+  assert.equal(h.state.elements[0].x, 100);
+});
+
+test('a nonmoving press does not become an edit when autosave advances the revision cursor', () => {
+  const h = pointerRaceHarness();
+  h.c.beginUploadedEditorPointer(h.pointer(1, 110, 110));
+  h.state.revisionNo = 2;
+  h.state.manifestSha256 = 'confirmed-new-cursor';
+  h.c.endUploadedEditorPointer(h.pointer(1, 110, 110, true, 'pointerup'));
+  assert.equal(h.runtime.dirtyGeneration, 0);
+  assert.equal(h.runtime.undoStack.length, 0);
+});
+
+test('approval evidence uses the submitted prepared file, never a newer historical preflight', () => {
+  const c = { officialApplicationFiles: item => item.files };
+  vm.createContext(c);
+  vm.runInContext(implementation('officialDecisionEvidenceFiles'), c);
+  const files = [{ id: 'newer', file_type: 'prepared_pdf' }, { id: 'locked', file_type: 'prepared_pdf' }, { id: 'original', file_type: 'original_pdf' }];
+  const item = { files, stamp_request: { prepared_file_id: 'locked', prepared_sha256: 'locked-hash', locked_editor_revision_id: 'revision' } };
+  assert.equal(c.officialDecisionEvidenceFiles(item).edited.id, 'locked');
+  assert.equal(c.officialDecisionEvidenceFiles({ ...item, files: files.filter(file => file.id !== 'locked') }).edited, null);
+  assert.equal(c.officialDecisionEvidenceFiles({ ...item, stamp_request: { locked_editor_revision_id: 'revision' } }).edited, null);
+});
+
+function openingRaceHarness() {
+  const h = harness();
+  let release;
+  h.state.elements = [{ id: 'seal', kind: 'seal', pageId: 'p1', x: 100, properties: {} }];
+  Object.assign(h.runtime, { documentId: 'old-draft', dirtyGeneration: 0, savedGeneration: 0 });
+  const application = { epoch: 0 };
+  Object.assign(h.c, {
+    uploadedSealApplicationRuntime: application, PDF_EDITOR_SCHEMA_VERSION: 2,
+    uploadedSealApplicationKey: () => 'application-key',
+    uploadedSealApplicationScopeSnapshot: () => ({ epoch: application.epoch, documentId: h.runtime.documentId }),
+    uploadedSealApplicationScopeIsCurrent: scope => scope.epoch === application.epoch && scope.documentId === h.runtime.documentId,
+    flushUploadedSealDraftBeforeSwitch: async () => {},
+    backendRequest: path => path.endsWith('/editor-state')
+      ? Promise.resolve({ state: { schemaVersion: 2, revisionNo: 1, sourceFiles: [], pages: [], elements: [] }, status: 'draft' })
+      : new Promise(resolve => { release = resolve; }),
+    clearUploadedEditorSensitivePreviews: () => { h.events.push('cleared'); h.runtime.documentId = ''; },
+    stageUploadedEditorAuthorizedAssets: async () => [],
+    discardUploadedEditorStagedAssets() {}, emptyUploadedSealEditorState: () => ({}),
+    editorPreparedAuthorizedUrl: () => '', officialDocumentIsApplicant: () => true,
+    restoreUploadedSealApplication() {}, rememberUploadedEditorSavedSealBindings() {},
+    hydrateUploadedEditorAuthorizedAssets: async () => {},
+    loadUploadedSealOptions: async () => {}, refreshWorkflowReadinessForContext: async () => {},
+    markUploadedEditorDirty: () => { h.runtime.dirtyGeneration++; },
+  });
+  vm.runInContext(implementation('loadUploadedEditorState'), h.c);
+  h.release = () => release({ current_status: 'draft', company_id: 'fixture-company' });
+  return h;
+}
+
+test('a new edit while opening another case preserves the active case and aborts the switch', async () => {
+  const h = openingRaceHarness();
+  const opening = h.c.loadUploadedEditorState('new-draft');
+  await new Promise(setImmediate);
+  assert.equal(h.c.commitUploadedEditorMutation(state => { state.elements[0].x = 130; }), true);
+  h.release();
+  await assert.rejects(opening, /修改.*保留|內容.*變更/);
+  assert.equal(h.runtime.documentId, 'old-draft');
+  assert.equal(h.c.uploadedSealEditorState.elements[0].x, 130);
+  assert.equal(h.events.includes('cleared'), false);
+});
+
+test('asset staging failure leaves the previous case editable and intact', async () => {
+  const h = openingRaceHarness();
+  h.c.stageUploadedEditorAuthorizedAssets = async () => { throw new Error('synthetic asset access failure'); };
+  const opening = h.c.loadUploadedEditorState('new-draft');
+  await new Promise(setImmediate);
+  h.release();
+  await assert.rejects(opening, /synthetic asset access failure/);
+  assert.equal(h.runtime.documentId, 'old-draft');
+  assert.equal(h.runtime.locked, false);
+  assert.equal(h.c.uploadedSealEditorState.elements[0].x, 100);
+  assert.equal(h.events.includes('cleared'), false);
+});
 function harness() {
   const events = [];
   const page = { pageId: 'p1', sourceAssetId: 'pdf', sourcePageIndex: 0, widthPt: 595.2756, heightPt: 841.8898, rotation: 0 };
@@ -144,4 +326,26 @@ test('real pinned PDF.js reopens deleted/reordered pages by stable source index,
   } finally {
     for (const pdf of h.runtime.pdfDocuments.values()) await pdf.destroy();
   }
+});
+
+test('staging parses real synthetic PDFs before installation and cleans up rejected mappings', async () => {
+  const h = harness();
+  const pdfjs = await import(pathToFileURL(path.join(root, 'vendor/pdfjs/pdf.min.mjs')).href);
+  pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(path.join(root, 'vendor/pdfjs/pdf.worker.min.mjs')).href;
+  Object.assign(h.c, {
+    PDF_EDITOR_MAX_PAGES: 300, PDF_A4_WIDTH_PT: 595.2756, PDF_A4_HEIGHT_PT: 841.8898, PDF_A4_TOLERANCE_PT: 1, PDF_A4_INVALID_MESSAGE: 'A4 required',
+    ensurePdfJsLibrary: async () => pdfjs, editorAuthorizedAssetUrl: () => 'fixture-only',
+    fetchEditorAuthorizedBlob: async () => new Blob([syntheticThreePagePdf()], { type: 'application/pdf' }),
+  });
+  vm.runInContext(['stageUploadedEditorAuthorizedAssets', 'discardUploadedEditorStagedAssets', 'validateUploadedPdfDocument', 'readPdfA4Pages', 'pdfA4PageReport', 'requirePdfPagesA4'].map(implementation).join('\n'), h.c);
+  const staged = await h.c.stageUploadedEditorAuthorizedAssets(h.state, {}, {});
+  assert.equal(staged.length, 1);
+  assert.equal(staged[0].preparation.pdfDocument.numPages, 3);
+  assert.equal(h.runtime.pdfDocuments.size, 0, 'staging must not replace the active PDF');
+  await h.c.hydrateUploadedEditorAuthorizedAssets({}, staged);
+  assert.equal(h.runtime.pdfDocuments.get('pdf'), staged[0].preparation.pdfDocument);
+  h.c.discardUploadedEditorStagedAssets(staged);
+  assert.equal((await h.runtime.pdfDocuments.get('pdf').getPage(1)).pageNumber, 1, 'installed proxy must not be destroyed');
+  await assert.rejects(h.c.stageUploadedEditorAuthorizedAssets({ ...h.state, pages: [{ ...h.page, sourcePageIndex: 99 }] }, {}, {}), /頁面對應/);
+  await h.runtime.pdfDocuments.get('pdf').destroy();
 });

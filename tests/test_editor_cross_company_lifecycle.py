@@ -46,7 +46,8 @@ class EditorCrossCompanyLifecycleTest(unittest.TestCase):
             "editorRevisionId": saved["id"], "manifestSha256": saved["manifestSha256"],
         }, self.applicant)
         detail = backend.submit_official_document(self.conn, doc_id, {
-            key: prepared[key] for key in ("editorRevisionId", "manifestSha256", "preparedFileId", "preparedSha256")
+            **{key: prepared[key] for key in ("editorRevisionId", "manifestSha256", "preparedFileId", "preparedSha256")},
+            "expected_content_revision": backend.official_document_row(self.conn, doc_id)["content_revision"],
         }, self.applicant)
         self.assertEqual(detail["company_id"], "CO-001")
         self.assertEqual(detail["applicant_department_id"], "DEP-001")

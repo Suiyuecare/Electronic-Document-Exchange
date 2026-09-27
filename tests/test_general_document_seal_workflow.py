@@ -120,7 +120,8 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
             "editorRevisionId": saved["id"], "manifestSha256": saved["manifestSha256"],
         }, self.session)
         detail = backend.submit_official_document(self.conn, document_id, {
-            key: preflight[key] for key in ("editorRevisionId", "manifestSha256", "preparedFileId", "preparedSha256")
+            **{key: preflight[key] for key in ("editorRevisionId", "manifestSha256", "preparedFileId", "preparedSha256")},
+            "expected_content_revision": backend.official_document_row(self.conn, document_id)["content_revision"],
         }, self.session)
         return detail, preflight, saved, source
 

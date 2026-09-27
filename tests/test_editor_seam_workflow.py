@@ -125,6 +125,7 @@ class EditorSeamWorkflowTest(unittest.TestCase):
         detail = backend.submit_official_document(self.conn, document_id, {
             "editorRevisionId": preflight["editorRevisionId"], "manifestSha256": preflight["manifestSha256"],
             "preparedFileId": preflight["preparedFileId"], "preparedSha256": preflight["preparedSha256"],
+            "expected_content_revision": backend.official_document_row(self.conn, document_id)["content_revision"],
             "comment": "隔離騎縫章流程送簽",
         }, applicant)
         self.assertEqual(detail["metadata"]["official_seal"]["approval_route_code"], "C")

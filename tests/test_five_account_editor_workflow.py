@@ -337,6 +337,7 @@ class FiveAccountEditorWorkflowTestCase(unittest.TestCase):
                     "manifestSha256": preflight["manifestSha256"],
                     "preparedFileId": preflight["preparedFileId"],
                     "preparedSha256": preflight["preparedSha256"],
+                    "expected_content_revision": backend.official_document_row(self.conn, document_id)["content_revision"],
                     "comment": "五帳號隔離流程送簽",
                 },
                 applicant,

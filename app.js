@@ -1401,6 +1401,10 @@ function clearUploadedEditorSensitivePreviews() {
     uploadedSealEditorRuntime.currentViewport = null;
     uploadedSealEditorRuntime.currentPageProxy = null;
     uploadedSealEditorRuntime.selectedIds?.clear?.();
+    uploadedSealEditorRuntime.pointerAction = null;
+    uploadedSealEditorRuntime.touchPointers?.clear?.();
+    uploadedSealEditorRuntime.pinchStartDistance = 0;
+    uploadedSealEditorRuntime.pinchPointerIds = [];
     uploadedSealEditorRuntime.undoStack = [];
     uploadedSealEditorRuntime.redoStack = [];
     uploadedSealEditorRuntime.dirtyGeneration = 0;
@@ -1478,6 +1482,7 @@ const uploadedSealEditorRuntime = {
   touchPointers: new Map(),
   pinchStartDistance: 0,
   pinchStartZoom: 1,
+  pinchPointerIds: [],
   guides: [],
   clipboard: [],
   conflict: null,
@@ -11631,9 +11636,9 @@ async function createOfficialWorkflow(submit = true) {
 }
 
 function officialDecisionIntegrity(item = {}) {
-  const request = item.stamp_request || {};
+  const request = item.stamp_request || item.application_package?.stamp_request || {};
   const revision = item.editor_revision || {};
-  const preparedFile = officialApplicationFiles(item).find((file) => file.file_type === "prepared_pdf");
+  const preparedFile = officialDecisionEvidenceFiles(item).edited;
   return {
     preparedSha256: request.prepared_sha256 || item.prepared_sha256 || revision.preparedSha256 || preparedFile?.file_hash || "",
     manifestSha256: request.editor_manifest_sha256 || item.editor_manifest_sha256 || revision.manifestSha256 || item.editor_state?.manifestSha256 || ""
@@ -11646,8 +11651,15 @@ function officialDecisionEvidenceFiles(item = {}) {
     .map((type) => files.find((file) => file.file_type === type))
     .find(Boolean) || null;
   const attachments = files.filter((file) => file.file_type === "attachment");
-  const edited = files.find((file) => file.file_type === "prepared_pdf") || null;
-  return { source, attachments, edited };
+  const request = item.stamp_request || item.application_package?.stamp_request || {};
+  const preparedFileId = request.prepared_file_id || item.prepared_file_id || "";
+  const requiresLockedPrepared = Boolean(preparedFileId || request.locked_editor_revision_id || request.prepared_sha256 || item.locked_editor_revision_id);
+  // A later preflight is historical evidence, not the PDF submitted for review.
+  // Missing locked evidence must fail closed rather than choose another file.
+  const edited = requiresLockedPrepared
+    ? files.find((file) => file.id === preparedFileId && file.file_type === "prepared_pdf") || null
+    : files.find((file) => file.file_type === "prepared_pdf") || null;
+  return { source, attachments, edited, requiresLockedPrepared };
 }
 
 function officialDecisionEvidenceReady(kind) {
@@ -11724,12 +11736,12 @@ function renderOfficialDecisionEvidence(item) {
   const scope = frontendSessionScope();
   evidence.dataset.applicationReviewed = "false";
   evidence.querySelector("#officialDecisionApplicationDetails")?.remove();
-  const { source, attachments, edited } = officialDecisionEvidenceFiles(item);
+  const { source, attachments, edited, requiresLockedPrepared } = officialDecisionEvidenceFiles(item);
   const actionDefinitions = [
     ["application", "展開申請資料", false],
     ["source", source ? "下載原稿／送簽版" : "找不到原稿或送簽版", !source],
     ["attachments", attachments.length ? `下載全部附件（${attachments.length}）` : "本案沒有附件", false],
-    ["editor", edited ? "下載編輯 PDF" : "本案沒有編輯 PDF", false]
+    ["editor", edited ? "下載編輯 PDF" : requiresLockedPrepared ? "鎖定確認版無法讀取，請重新開啟案件" : "本案沒有編輯 PDF", requiresLockedPrepared && !edited]
   ];
   actions.innerHTML = actionDefinitions.map(([kind, label, disabled]) => `
     <button class="secondary-button" type="button" data-decision-evidence="${kind}" data-default-label="${escapeHtml(label)}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>
@@ -11764,7 +11776,7 @@ function renderOfficialDecisionEvidence(item) {
           reviewed = results.every(Boolean);
         }
       } else if (kind === "editor") {
-        reviewed = !edited || await downloadOfficialWorkflowFile(item.id, edited.id);
+        reviewed = edited ? await downloadOfficialWorkflowFile(item.id, edited.id) : !requiresLockedPrepared;
       }
       if (scope !== frontendSessionScope() || officialDecisionState.operationId !== operationId || officialDecisionState.documentId !== item.id) return;
       if (reviewed) {
@@ -27164,6 +27176,8 @@ async function ensureUploadedEditorDraft() {
     rememberUploadedEditorSavedSealBindings(result.editor_state || result.editor_revision?.state || null);
     uploadedSealApplicationRuntime.documentId = uploadedSealEditorRuntime.documentId;
     uploadedSealApplicationRuntime.savedKey = uploadedSealApplicationKey(applicationPayload);
+    uploadedSealApplicationRuntime.contentRevision = Number(result.content_revision ?? result.application?.content_revision ?? 0);
+    uploadedSealApplicationRuntime.conflict = false;
     uploadedSealApplicationRuntime.editable = true;
     scheduleUploadedSealApplicationSave();
     setUploadedEditorSaveStatus(
@@ -27773,6 +27787,9 @@ function applyUploadedEditorCanonicalSaveResponse(result, savingGeneration) {
   // A save may take long enough for another pointer or keyboard edit to land.
   // Never replace those newer local edits with the older request response.
   if (uploadedSealEditorRuntime.dirtyGeneration !== savingGeneration) return false;
+  // Pointer moves are live previews until the owning pointer finishes. Keep
+  // their coordinates while a previous autosave advances only the lock cursor.
+  if (uploadedSealEditorRuntime.pointerAction && uploadedSealEditorRuntime.pointerAction.type !== "swipe") return false;
   const revision = result?.editor_revision || result?.revision || result || {};
   const state = result?.state || result?.editor_state || revision?.state || revision?.editor_state;
   if (!state || Number(state.schemaVersion || state.schema_version) !== PDF_EDITOR_SCHEMA_VERSION) return false;
@@ -29175,14 +29192,19 @@ function beginUploadedEditorPointer(event) {
   if (uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.reviewMode !== "edited") return;
   if (event.pointerType === "touch") {
     uploadedSealEditorRuntime.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    event.currentTarget.setPointerCapture?.(event.pointerId);
     if (uploadedSealEditorRuntime.touchPointers.size === 2) {
+      finishUploadedEditorPointerAction();
+      uploadedSealEditorRuntime.pinchPointerIds = [...uploadedSealEditorRuntime.touchPointers.keys()];
       const points = [...uploadedSealEditorRuntime.touchPointers.values()];
       uploadedSealEditorRuntime.pinchStartDistance = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
       uploadedSealEditorRuntime.pinchStartZoom = uploadedSealEditorRuntime.zoom;
       uploadedSealEditorRuntime.pointerAction = null;
       return;
     }
+    if (uploadedSealEditorRuntime.touchPointers.size > 2) return;
   }
+  if (uploadedSealEditorRuntime.pointerAction && uploadedSealEditorRuntime.pointerAction.pointerId !== event.pointerId) return;
   const handle = event.target.closest("[data-editor-handle]");
   const group = event.target.closest("[data-editor-element-id]");
   const elementId = handle?.dataset.editorElementId || group?.dataset.editorElementId || "";
@@ -29205,6 +29227,7 @@ function beginUploadedEditorPointer(event) {
       .reduce((items, item) => ({ ...items, [item.id]: cloneUploadedEditorValue(item) }), {});
     uploadedSealEditorRuntime.pointerAction = {
       type: requestedAction,
+      pointerId: event.pointerId,
       elementId,
       startPoint,
       startClient: { x: event.clientX, y: event.clientY },
@@ -29217,7 +29240,7 @@ function beginUploadedEditorPointer(event) {
   }
   if (uploadedSealEditorRuntime.tool === "select") {
     selectUploadedEditorElement("", false);
-    uploadedSealEditorRuntime.pointerAction = { type: "swipe", startClient: { x: event.clientX, y: event.clientY } };
+    uploadedSealEditorRuntime.pointerAction = { type: "swipe", pointerId: event.pointerId, startClient: { x: event.clientX, y: event.clientY } };
     return;
   }
   if (uploadedSealEditorRuntime.tool === "image") return document.querySelector("#uploadedEditorImageInput")?.click();
@@ -29233,15 +29256,16 @@ function beginUploadedEditorPointer(event) {
 function moveUploadedEditorPointer(event) {
   if (event.pointerType === "touch" && uploadedSealEditorRuntime.touchPointers.has(event.pointerId)) {
     uploadedSealEditorRuntime.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    if (uploadedSealEditorRuntime.touchPointers.size === 2 && uploadedSealEditorRuntime.pinchStartDistance) {
-      const points = [...uploadedSealEditorRuntime.touchPointers.values()];
+    const pinchIds = uploadedSealEditorRuntime.pinchPointerIds || [];
+    if (pinchIds.length === 2 && pinchIds.every((id) => uploadedSealEditorRuntime.touchPointers.has(id)) && uploadedSealEditorRuntime.pinchStartDistance) {
+      const points = pinchIds.map((id) => uploadedSealEditorRuntime.touchPointers.get(id));
       const distance = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
       setUploadedEditorZoom(uploadedSealEditorRuntime.pinchStartZoom * distance / uploadedSealEditorRuntime.pinchStartDistance);
       return;
     }
   }
   const action = uploadedSealEditorRuntime.pointerAction;
-  if (!action || action.type === "swipe") return;
+  if (!action || action.pointerId !== event.pointerId || action.type === "swipe") return;
   const element = editorElementById(action.elementId);
   const point = uploadedEditorClientPoint(event.clientX, event.clientY);
   const page = element ? uploadedSealEditorState.pages.find((item) => item.pageId === element.pageId) : null;
@@ -29280,17 +29304,23 @@ function moveUploadedEditorPointer(event) {
 
 function endUploadedEditorPointer(event) {
   if (event.pointerType === "touch") uploadedSealEditorRuntime.touchPointers.delete(event.pointerId);
+  if (uploadedSealEditorRuntime.touchPointers.size < 2 || uploadedSealEditorRuntime.pinchPointerIds?.includes(event.pointerId)) {
+    uploadedSealEditorRuntime.pinchStartDistance = 0;
+    uploadedSealEditorRuntime.pinchPointerIds = [];
+  }
   const action = uploadedSealEditorRuntime.pointerAction;
+  if (action && action.pointerId !== event.pointerId) return;
   uploadedSealEditorRuntime.pointerAction = null;
   uploadedSealEditorRuntime.guides = [];
   if (!action) return renderUploadedEditorSvgLayer();
   if (action.type === "swipe") {
     const dx = event.clientX - action.startClient.x;
     const dy = event.clientY - action.startClient.y;
-    if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) setUploadedSealPage(uploadedSealCurrentPage + (dx < 0 ? 1 : -1));
+    if (event.type !== "pointercancel" && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) setUploadedSealPage(uploadedSealCurrentPage + (dx < 0 ? 1 : -1));
     return;
   }
-  if (canonicalEditorJson(action.previousState) === canonicalEditorJson(uploadedSealEditorState)) {
+  const previousContent = { ...action.previousState, revisionNo: uploadedSealEditorState.revisionNo, manifestSha256: uploadedSealEditorState.manifestSha256 };
+  if (canonicalEditorJson(previousContent) === canonicalEditorJson(uploadedSealEditorState)) {
     // SVG children are rebuilt after selection. Detect repeated taps on the
     // stable pointer layer rather than relying on a replaced DOM dblclick target.
     const now = performance.now();
@@ -29309,6 +29339,14 @@ function endUploadedEditorPointer(event) {
   syncLegacyUploadedEditorCollections();
   markUploadedEditorDirty();
   renderUploadedSealWorkbench();
+}
+
+function finishUploadedEditorPointerAction() {
+  const action = uploadedSealEditorRuntime.pointerAction;
+  if (!action) return;
+  // Starting a pinch (or navigating) commits the last visible drag position.
+  // The same owning-pointer completion path records history and schedules save.
+  endUploadedEditorPointer({ pointerType: "gesture", pointerId: action.pointerId, clientX: action.startClient.x, clientY: action.startClient.y, type: "pointercancel" });
 }
 
 function setUploadedEditorPropertyValue(input, value, selectionKey) {
@@ -29966,7 +30004,54 @@ async function fetchEditorAuthorizedBlob(url) {
   return response.blob();
 }
 
-async function hydrateUploadedEditorAuthorizedAssets(result = {}) {
+function discardUploadedEditorStagedAssets(assets = []) {
+  for (const asset of assets) {
+    const pdfDocument = asset.preparation?.pdfDocument;
+    if (pdfDocument && uploadedSealEditorRuntime.pdfDocuments.get(asset.assetId) !== pdfDocument) void pdfDocument.destroy?.();
+  }
+}
+
+async function stageUploadedEditorAuthorizedAssets(state, result, scope) {
+  const assets = [];
+  try {
+    for (const source of state.sourceFiles || []) {
+      if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
+      const assetId = source.assetId || source.asset_id || source.id || "";
+      const pages = (state.pages || []).filter((page) => page.sourceAssetId === assetId).sort((a, b) => a.sourcePageIndex - b.sourcePageIndex);
+      if (source.kind !== "image" && !pages.length) continue;
+      const blob = await fetchEditorAuthorizedBlob(editorAuthorizedAssetUrl(source, result));
+      const file = new File([blob], source.fileName || source.file_name || `asset-${assetId}`, { type: source.mimeType || source.mime_type || blob.type || "application/octet-stream" });
+      const staged = { assetId, file, preparation: null };
+      assets.push(staged);
+      if (String(source.kind || "").includes("image") || file.type.startsWith("image/")) continue;
+      const library = await ensurePdfJsLibrary();
+      const task = library.getDocument({ data: new Uint8Array(await file.arrayBuffer()), enableXfa: false, isEvalSupported: false, useSystemFonts: true });
+      task.onPassword = () => { void task.destroy(); };
+      try {
+        const pdfDocument = await task.promise;
+        staged.preparation = { file, pdfDocument, pageProxies: new Map() };
+        const validation = await validateUploadedPdfDocument(pdfDocument);
+        staged.preparation.pageProxies = validation.pageProxies;
+        const pageIds = new Set();
+        for (const [position, page] of pages.entries()) {
+          const index = Number(page.sourcePageIndex ?? page.source_page_index ?? position);
+          if (!Number.isInteger(index) || index < 0 || index >= pdfDocument.numPages || pageIds.has(page.pageId)) throw new Error("PDF 頁面對應資料無效，請重新開啟案件。");
+          pageIds.add(page.pageId);
+        }
+      } catch (error) {
+        if (!staged.preparation) void task.destroy?.();
+        throw error;
+      }
+    }
+    if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
+    return assets;
+  } catch (error) {
+    discardUploadedEditorStagedAssets(assets);
+    throw error;
+  }
+}
+
+async function hydrateUploadedEditorAuthorizedAssets(result = {}, readyAssets = null) {
   const scope = uploadedSealApplicationScopeSnapshot();
   const state = uploadedSealEditorState;
   const assertHydrationCurrent = () => {
@@ -29978,17 +30063,21 @@ async function hydrateUploadedEditorAuthorizedAssets(result = {}) {
     if (!assetId || uploadedSealEditorRuntime.assetFiles.has(assetId) || uploadedSealEditorRuntime.imageUrls.has(assetId)) continue;
     // A preserved non-A4 original is for audit/download, never editor geometry.
     if (source.kind !== "image" && !uploadedSealEditorState.pages.some((page) => page.sourceAssetId === assetId)) continue;
-    const authorizedUrl = editorAuthorizedAssetUrl(source, result);
-    if (!authorizedUrl) continue;
-    const blob = await fetchEditorAuthorizedBlob(authorizedUrl);
-    assertHydrationCurrent();
-    const file = new File([blob], source.fileName || source.file_name || `asset-${assetId}`, { type: source.mimeType || source.mime_type || blob.type || "application/octet-stream" });
+    const staged = readyAssets?.find((asset) => asset.assetId === assetId);
+    let file = staged?.file;
+    if (!file) {
+      const authorizedUrl = editorAuthorizedAssetUrl(source, result);
+      if (!authorizedUrl) continue;
+      const blob = await fetchEditorAuthorizedBlob(authorizedUrl);
+      assertHydrationCurrent();
+      file = new File([blob], source.fileName || source.file_name || `asset-${assetId}`, { type: source.mimeType || source.mime_type || blob.type || "application/octet-stream" });
+    }
     if (String(source.kind || "").includes("image") || file.type.startsWith("image/")) {
       uploadedSealEditorRuntime.imageUrls.set(assetId, URL.createObjectURL(file));
       continue;
     }
     const serverPages = uploadedSealEditorState.pages.filter((page) => page.sourceAssetId === assetId).sort((a, b) => a.sourcePageIndex - b.sourcePageIndex);
-    await loadPdfJsAsset(file, assetId, serverPages);
+    await loadPdfJsAsset(file, assetId, serverPages, staged?.preparation || null);
     assertHydrationCurrent();
   }
 }
@@ -29999,6 +30088,10 @@ async function loadUploadedEditorState(documentId) {
   if (!uploadedSealApplicationScopeIsCurrent(previousScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   uploadedSealApplicationRuntime.epoch += 1;
   const openingScope = uploadedSealApplicationScopeSnapshot();
+  const openingGeneration = uploadedSealEditorRuntime.dirtyGeneration;
+  const openingApplicationKey = uploadedSealApplicationKey();
+  let readyAssets = [];
+  try {
   // Get the authorized application snapshot before changing the active draft.
   // PDF revisions do not contain the six application fields.
   const application = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
@@ -30007,6 +30100,14 @@ async function loadUploadedEditorState(documentId) {
   if (!uploadedSealApplicationScopeIsCurrent(openingScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   const state = result.state || result.editor_state;
   if (!state || Number(state.schemaVersion || state.schema_version) !== PDF_EDITOR_SCHEMA_VERSION) throw new Error("找不到相容的 PDF Editor V2 草稿。");
+  readyAssets = await stageUploadedEditorAuthorizedAssets(state, result, openingScope);
+  if (!uploadedSealApplicationScopeIsCurrent(openingScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
+  // Leave the old case usable while reads are pending. Do not discard typing
+  // or a live gesture that arrived after the initial navigation flush.
+  if (openingGeneration !== uploadedSealEditorRuntime.dirtyGeneration || openingApplicationKey !== uploadedSealApplicationKey()
+    || uploadedSealEditorRuntime.pointerAction || uploadedSealEditorRuntime.textEdit) {
+    throw new Error("你剛才的修改仍保留在原案件，已停止切換；保存完成後請再開啟案件。");
+  }
   clearUploadedEditorSensitivePreviews();
   uploadedSealEditorRuntime.documentId = documentId;
   const loadedScope = uploadedSealApplicationScopeSnapshot();
@@ -30031,7 +30132,7 @@ async function loadUploadedEditorState(documentId) {
   uploadedSealEditorRuntime.saveQueued = false;
   uploadedSealEditorRuntime.currentPageId = uploadedSealEditorState.pages[0]?.pageId || "";
   renderUploadedSealWorkbench();
-  await hydrateUploadedEditorAuthorizedAssets(result);
+  await hydrateUploadedEditorAuthorizedAssets(result, readyAssets);
   if (!uploadedSealApplicationScopeIsCurrent(loadedScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   uploadedSealEditorRuntime.locked = applicationLocked;
   uploadedSealApplicationRuntime.editable = !applicationLocked;
@@ -30050,6 +30151,9 @@ async function loadUploadedEditorState(documentId) {
   if (!uploadedSealApplicationScopeIsCurrent(loadedScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   renderUploadedSealWorkbench();
   return result;
+  } finally {
+    discardUploadedEditorStagedAssets(readyAssets);
+  }
 }
 
 function officialDocumentHasEditorV2(item = {}) {
@@ -30647,6 +30751,7 @@ async function initializeUploadedSealWorkspace() {
 const uploadedSealApplicationRuntime = {
   documentId: "", savedKey: "", timer: 0, promise: null, error: "",
   editable: true, retryCount: 0, openPromise: null, epoch: 0,
+  contentRevision: 0, conflict: false,
   submissionPreview: null, submissionBusy: false, submissionOperation: null
 };
 
@@ -30671,6 +30776,7 @@ function uploadedEditorSubmissionFingerprint() {
     manifestSha256: uploadedSealEditorState.manifestSha256,
     preparedFileId: uploadedSealEditorRuntime.preparedFileId,
     preparedSha256: uploadedSealEditorRuntime.preparedSha256,
+    contentRevision: uploadedSealApplicationRuntime.contentRevision,
     applicationKey: uploadedSealApplicationKey()
   });
 }
@@ -30681,6 +30787,7 @@ function uploadedEditorSubmissionPreviewIsCurrent() {
     && uploadedSealEditorRuntime.reviewMode === "prepared"
     && uploadedSealEditorRuntime.preparedPdfDocument
     && !uploadedSealApplicationHasUnsavedChanges()
+    && !uploadedSealApplicationRuntime.conflict
     && !uploadedSealApplicationRuntime.promise
     && uploadedSealEditorRuntime.savedGeneration >= uploadedSealEditorRuntime.dirtyGeneration
     && !uploadedSealEditorRuntime.saving && !uploadedSealEditorRuntime.conflict);
@@ -30755,6 +30862,8 @@ function resetUploadedSealApplicationSaving() {
   uploadedSealEditorRuntime.draftCreatePromise = null;
   uploadedSealApplicationRuntime.documentId = "";
   uploadedSealApplicationRuntime.savedKey = "";
+  uploadedSealApplicationRuntime.contentRevision = 0;
+  uploadedSealApplicationRuntime.conflict = false;
   uploadedSealApplicationRuntime.error = "";
   uploadedSealApplicationRuntime.promise = null;
   uploadedSealApplicationRuntime.editable = true;
@@ -30781,6 +30890,10 @@ function renderUploadedSealApplicationSaveStatus() {
     retry.type = "button";
     retry.textContent = "重試保存申請資訊";
     retry.addEventListener("click", () => {
+      if (uploadedSealApplicationRuntime.conflict) {
+        void copyUploadedEditorConflictVersion();
+        return;
+      }
       uploadedSealApplicationRuntime.retryCount = 0;
       void syncUploadedSealApplicationDraft().catch(() => {});
     });
@@ -30802,6 +30915,7 @@ function renderUploadedSealApplicationSaveStatus() {
   if (retry) {
     retry.hidden = !uploadedSealApplicationRuntime.error || uploadedSealEditorRuntime.locked;
     retry.disabled = Boolean(uploadedSealApplicationRuntime.promise);
+    retry.textContent = uploadedSealApplicationRuntime.conflict ? "保留我的內容為新草稿" : "重試保存申請資訊";
   }
 }
 
@@ -30809,6 +30923,10 @@ function scheduleUploadedSealApplicationSave() {
   invalidateUploadedEditorSubmissionPreview();
   renderUploadedEditorSubmissionActions();
   window.clearTimeout(uploadedSealApplicationRuntime.timer);
+  if (uploadedSealApplicationRuntime.conflict) {
+    renderUploadedSealApplicationSaveStatus();
+    return;
+  }
   uploadedSealApplicationRuntime.error = "";
   uploadedSealApplicationRuntime.retryCount = 0;
   renderUploadedSealApplicationSaveStatus();
@@ -30823,6 +30941,7 @@ async function syncUploadedSealApplicationDraft() {
   const scope = uploadedSealApplicationScopeSnapshot();
   window.clearTimeout(uploadedSealApplicationRuntime.timer);
   if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
+  if (uploadedSealApplicationRuntime.conflict) throw new Error("申請資訊已由其他裝置更新；你的輸入仍保留，請保留為新草稿或重新檢閱最新版。");
   if (uploadedSealApplicationRuntime.promise) {
     try { await uploadedSealApplicationRuntime.promise; }
     catch (error) {
@@ -30853,8 +30972,10 @@ async function syncUploadedSealApplicationDraft() {
   }
   const patch = uploadedSealApplicationPatch();
   const savedKey = JSON.stringify(patch);
+  const contentRevision = Number(uploadedSealApplicationRuntime.contentRevision ?? 0);
+  if (!Number.isInteger(contentRevision) || contentRevision < 0) throw new Error("申請資訊版本無效，請保留內容並重新開啟案件。");
   const operation = backendRequest(`/official-documents/${encodeURIComponent(documentId)}`, {
-    method: "PATCH", body: JSON.stringify(patch)
+    method: "PATCH", body: JSON.stringify({ ...patch, expected_content_revision: contentRevision })
   });
   uploadedSealApplicationRuntime.promise = operation;
   uploadedSealApplicationRuntime.error = "";
@@ -30862,6 +30983,9 @@ async function syncUploadedSealApplicationDraft() {
   try {
     const result = await operation;
     if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
+    const confirmedRevision = Number(result.content_revision);
+    if (!Number.isInteger(confirmedRevision) || confirmedRevision < contentRevision) throw new Error("伺服器未回傳完整申請版本，請保留內容並重新開啟案件確認。");
+    uploadedSealApplicationRuntime.contentRevision = confirmedRevision;
     uploadedSealApplicationRuntime.savedKey = savedKey;
     uploadedSealApplicationRuntime.retryCount = 0;
     const itemIndex = officialWorkflowItems.findIndex((item) => item.id === documentId);
@@ -30869,8 +30993,16 @@ async function syncUploadedSealApplicationDraft() {
     renderElectronicSealWorkQueue();
   } catch (error) {
     if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
-    uploadedSealApplicationRuntime.error = error.message || "保存失敗，請重試；請勿關閉此頁";
-    if (uploadedSealApplicationRuntime.retryCount < 3 && ![401, 403, 409].includes(error.status)) {
+    const conflict = error.status === 409 || error.detail === "compose_content_revision_conflict";
+    if (conflict) {
+      uploadedSealApplicationRuntime.conflict = true;
+      invalidateUploadedEditorSubmissionPreview();
+      handleUploadedEditorConflict(error);
+    }
+    uploadedSealApplicationRuntime.error = conflict
+      ? "其他裝置已更新申請資訊；你的輸入仍保留，請保留為新草稿或使用最新版"
+      : error.message || "保存失敗，請重試；請勿關閉此頁";
+    if (!conflict && uploadedSealApplicationRuntime.retryCount < 3 && ![401, 403, 409].includes(error.status)) {
       uploadedSealApplicationRuntime.retryCount += 1;
       uploadedSealApplicationRuntime.timer = window.setTimeout(() => {
         if (uploadedSealApplicationScopeIsCurrent(scope)) void syncUploadedSealApplicationDraft().catch(() => {});
@@ -30888,6 +31020,7 @@ async function syncUploadedSealApplicationDraft() {
 }
 
 async function flushUploadedSealDraftBeforeSwitch() {
+  finishUploadedEditorPointerAction();
   if (!finishUploadedEditorTextEdit()) throw new Error("請先完成文字編輯。");
   const scope = uploadedSealApplicationScopeSnapshot();
   if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.draftCreatePromise) {
@@ -30944,6 +31077,8 @@ function restoreUploadedSealApplication(application) {
   uploadedSealMode = application.document_type === "contract_pdf_for_stamp" ? "contract" : "official_document";
   setValue("#uploadedSealType", uploadedSealMode);
   uploadedSealApplicationRuntime.documentId = application.id;
+  uploadedSealApplicationRuntime.contentRevision = Number(application.content_revision ?? 0);
+  uploadedSealApplicationRuntime.conflict = false;
   uploadedSealApplicationRuntime.editable = !uploadedSealEditorRuntime.locked;
   uploadedSealApplicationRuntime.savedKey = uploadedSealApplicationKey();
   uploadedSealApplicationRuntime.error = "";
@@ -31055,6 +31190,7 @@ async function submitUploadedSealApplication() {
       method: "POST",
       body: JSON.stringify({
         comment: contractMode ? "合約 PDF V2 編輯確認後送出簽核" : "電子用印 PDF V2 編輯確認後送出簽核",
+        expected_content_revision: uploadedSealApplicationRuntime.contentRevision,
         editorRevisionId: uploadedSealEditorRuntime.revisionId,
         manifestSha256: uploadedSealEditorState.manifestSha256,
         preparedFileId: uploadedSealEditorRuntime.preparedFileId,
@@ -31077,6 +31213,13 @@ async function submitUploadedSealApplication() {
     renderUploadedSealWorkbench();
   } catch (error) {
     if (!isCurrent()) return;
+    if (!uploadedSealApplicationRuntime.conflict && (error.status === 409 || error.detail === "compose_content_revision_conflict")) {
+      uploadedSealApplicationRuntime.conflict = true;
+      uploadedSealApplicationRuntime.error = "其他裝置已更新申請資訊；尚未送簽，你的輸入仍保留，請保留為新草稿或使用最新版";
+      invalidateUploadedEditorSubmissionPreview();
+      handleUploadedEditorConflict(error);
+      renderUploadedSealApplicationSaveStatus();
+    }
     addSealAudit("PDF V2 送簽失敗", error.message);
     showToast(`送簽失敗：${error.message}`);
   } finally {

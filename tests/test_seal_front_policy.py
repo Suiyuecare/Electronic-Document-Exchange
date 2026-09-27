@@ -247,6 +247,7 @@ class SealFrontPreflightVersionTest(unittest.TestCase):
 
     def test_old_preflight_cannot_submit_then_repreview_creates_new_immutable_revision(self):
         doc_id, old_prepared = self.old_preflight()
+        old_prepared["expected_content_revision"] = backend.official_document_row(self.conn, doc_id)["content_revision"]
         original_row = backend._editor_latest_revision_row(self.conn, doc_id)
         original_file = dict(self.conn.execute("SELECT * FROM official_document_files WHERE id=?", (old_prepared["preparedFileId"],)).fetchone())
         original_bytes = backend.read_file_object_bytes(self.conn, original_file["file_object_id"])[1]
@@ -254,6 +255,7 @@ class SealFrontPreflightVersionTest(unittest.TestCase):
             backend.submit_official_document(self.conn, doc_id, old_prepared, self.session)
         self.assertEqual(backend.official_document_row(self.conn, doc_id)["current_status"], "draft")
         new_prepared = backend.preflight_official_editor(self.conn, doc_id, {}, self.session)
+        new_prepared["expected_content_revision"] = backend.official_document_row(self.conn, doc_id)["content_revision"]
         self.assertNotEqual(new_prepared["editorRevisionId"], original_row["id"])
         self.assertEqual(new_prepared["revision"]["rendererVersion"], backend.EDOC_EDITOR_RENDERER_VERSION)
         self.assertEqual(new_prepared["rendererVersion"], backend.EDOC_EDITOR_RENDERER_VERSION)
