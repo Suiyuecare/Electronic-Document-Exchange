@@ -76,7 +76,12 @@ class FrontendAuthoritativeWorkflowsContractTest(unittest.TestCase):
         self.assertIn("officialDecisionEvidenceComplete()", submit)
         self.assertIn("review_acknowledgements", submit)
         trap = javascript_function(self.js, "trapOfficialDecisionFocus")
-        self.assertIn('event.key !== "Tab"', trap)
+        self.assertIn('trapWorkspaceModalFocus(event, modal)', trap)
+        shared_trap = javascript_function(self.js, "trapWorkspaceModalFocus")
+        self.assertIn('event.key !== "Tab"', shared_trap)
+        self.assertIn('workspaceModalFocusableItems(modal)', shared_trap)
+        self.assertIn('event.preventDefault()', shared_trap)
+        self.assertIn('focus({ preventScroll: true })', shared_trap)
         self.assertIn("officialDecisionPreviousFocus", javascript_function(self.js, "closeOfficialDecisionDialog"))
 
     def test_authorized_ui_audit_calls_existing_navigation_function(self) -> None:

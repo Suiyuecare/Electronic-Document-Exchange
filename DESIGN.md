@@ -94,13 +94,22 @@ acts on the same upload intent or reloads the authoritative case version.
 
 ### Navigation and data display
 
-No sidebar or header changes in this release. Keep the electronic-seal queue
-and its pagination; slim rows obtain exact final-file authority on demand.
+Keep the Finance-aligned sidebar/header frame and colors. Route selection is
+immediate, returns retain in-session reading position, and unchanged Header
+status is not rewritten. Keep the electronic-seal queue and its pagination;
+slim rows obtain exact final-file authority on demand. Background updates must
+not destroy the user's current action focus or rebuild unchanged controls.
 
 ### Forms and overlays
 
 Preserve application prerequisites, file size/page limits, A4 conversion
 consent and the existing conflict/review workflow. Do not add duplicate forms.
+Compose and application autosave waits for committed IME text. The existing
+detail dialogs share focus/isolation behavior; visible overlays isolate only
+workspace children, never clear the authentication gate's outer inert state.
+Runtime `--z-workspace-dialog` and `--z-workspace-toast` own dialog/toast layers
+for all widths. The supplemental toast stays above dialogs, lasts four seconds
+from its latest result, and pauses while hovered.
 
 ### Iconography
 
@@ -110,6 +119,8 @@ Reuse existing icons and labelled buttons; no new icon family is introduced.
 
 Motion communicates real work. Use the existing progress/reduced-motion rules;
 do not animate fake percentages or declare completion before server response.
+Reduced-motion removes continuous travel and smooth scrolling across existing
+components. Navigation, save and upload logic never wait for an animation.
 
 ### Content and data visualization
 

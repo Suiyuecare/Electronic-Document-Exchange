@@ -933,6 +933,7 @@ let composeAutosaveRestoredForIdentity = "";
 let composeCloudTimer = null;
 let composeCloudOperation = null;
 let composeCloudEpoch = 0;
+const composeInputRuntime = { composing: false, compositionScope: "", pending: false };
 let composeCloudDraftId = "";
 let composeCloudConflict = false;
 let composeCloudRows = [];
@@ -2561,14 +2562,107 @@ function badgeClass(status) {
   return "info";
 }
 
+let toastDismissTimer = null;
+let toastDismissAt = 0;
+let toastRemainingMs = 0;
+
+function dismissToast() {
+  window.clearTimeout(toastDismissTimer);
+  toastDismissTimer = null;
+  toastRemainingMs = 0;
+  document.querySelector("#toast")?.classList.remove("show");
+}
+
+function resumeToastDismissal() {
+  window.clearTimeout(toastDismissTimer);
+  if (toastRemainingMs <= 0) return;
+  toastDismissAt = Date.now() + toastRemainingMs;
+  toastDismissTimer = window.setTimeout(dismissToast, toastRemainingMs);
+}
+
+function pauseToastDismissal() {
+  if (!toastDismissTimer) return;
+  window.clearTimeout(toastDismissTimer);
+  toastDismissTimer = null;
+  toastRemainingMs = Math.max(0, toastDismissAt - Date.now());
+}
+
 function showToast(message) {
   const toast = document.querySelector("#toast");
-  toast.textContent = message;
+  if (!toast) return;
+  // One supplemental notice owns one timer. A previous notice must never hide
+  // a newer result; errors/recovery stay in their existing persistent panels.
+  const text = String(message || "");
+  if (toast.textContent !== text) toast.textContent = text;
   toast.classList.add("show");
-  window.setTimeout(() => toast.classList.remove("show"), 2400);
+  toastRemainingMs = 4000;
+  resumeToastDismissal();
+}
+
+const workspaceModalReturnFocus = new Map();
+const workspaceOverlayInertRecords = new Map();
+
+function visibleWorkspaceModals() {
+  return [...document.querySelectorAll(".modal-backdrop:not(.hidden)")];
+}
+
+function syncWorkspaceOverlayIsolation() {
+  const app = document.querySelector("#appShell");
+  if (!app) return;
+  const modalOpen = visibleWorkspaceModals().length > 0;
+  const drawerOpen = document.body.classList.contains("mobile-navigation-open");
+  const isolated = new Set([...app.children].filter((child) => modalOpen || (drawerOpen && !["primarySidebar", "mobileDrawerBackdrop"].includes(child.id))));
+  // Own only children: never unset the authentication gate's appShell.inert.
+  for (const [child, wasInert] of workspaceOverlayInertRecords) {
+    if (isolated.has(child)) continue;
+    child.inert = wasInert;
+    workspaceOverlayInertRecords.delete(child);
+  }
+  for (const child of isolated) {
+    if (!workspaceOverlayInertRecords.has(child)) workspaceOverlayInertRecords.set(child, child.inert);
+    child.inert = true;
+  }
+  document.body.classList.toggle("modal-open", modalOpen);
+}
+
+function workspaceModalFocusableItems(modal) {
+  return [...modal.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter((node) => !node.closest("[hidden], .hidden, [inert]") && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== "hidden");
+}
+
+function trapWorkspaceModalFocus(event, modal) {
+  if (event.key !== "Tab" || !modal || modal.classList.contains("hidden")) return;
+  const focusable = workspaceModalFocusableItems(modal);
+  const first = focusable[0] || modal;
+  const last = focusable[focusable.length - 1] || modal;
+  if (!focusable.length || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last) || !modal.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus({ preventScroll: true });
+  }
+}
+
+function showWorkspaceModal(modal) {
+  const newlyOpened = modal.classList.contains("hidden");
+  if (newlyOpened) workspaceModalReturnFocus.set(modal, document.activeElement);
+  modal.classList.remove("hidden");
+  syncWorkspaceOverlayIsolation();
+  if (newlyOpened || !modal.contains(document.activeElement)) {
+    modal.setAttribute("tabindex", "-1");
+    (workspaceModalFocusableItems(modal)[0] || modal).focus({ preventScroll: true });
+  }
+}
+
+function hideWorkspaceModal(modal) {
+  if (!modal) return;
+  modal.classList.add("hidden");
+  syncWorkspaceOverlayIsolation();
+  const target = workspaceModalReturnFocus.get(modal);
+  workspaceModalReturnFocus.delete(modal);
+  if (target?.isConnected && !target.closest("[inert], .hidden")) target.focus({ preventScroll: true });
 }
 
 let mobileNavigationReturnFocus = null;
+let mobileNavigationGeneration = 0;
 
 function mobileNavigationIsCompact() {
   return window.matchMedia("(max-width: 760px)").matches;
@@ -2587,6 +2681,7 @@ function setMobileNavigationOpen(open, { restoreFocus = true } = {}) {
   const menuButton = document.querySelector("#mobileMenuButton");
   if (!sidebar || !backdrop || !menuButton) return;
   const shouldOpen = Boolean(open && mobileNavigationIsCompact());
+  const generation = ++mobileNavigationGeneration;
   if (shouldOpen) mobileNavigationReturnFocus = document.activeElement || menuButton;
   sidebar.classList.toggle("mobile-open", shouldOpen);
   if (shouldOpen) {
@@ -2600,12 +2695,17 @@ function setMobileNavigationOpen(open, { restoreFocus = true } = {}) {
   backdrop.hidden = !shouldOpen;
   menuButton.setAttribute("aria-expanded", String(shouldOpen));
   document.body.classList.toggle("mobile-navigation-open", shouldOpen);
+  syncWorkspaceOverlayIsolation();
   if (shouldOpen) {
-    window.requestAnimationFrame(() => mobileNavigationFocusableItems()[0]?.focus());
+    window.requestAnimationFrame(() => {
+      if (generation === mobileNavigationGeneration && sidebar.classList.contains("mobile-open") && mobileNavigationIsCompact()) {
+        mobileNavigationFocusableItems()[0]?.focus({ preventScroll: true });
+      }
+    });
   } else if (restoreFocus && mobileNavigationReturnFocus instanceof HTMLElement) {
     mobileNavigationReturnFocus.focus();
-    mobileNavigationReturnFocus = null;
   }
+  if (!shouldOpen) mobileNavigationReturnFocus = null;
 }
 
 function openMobileNavigation() {
@@ -2783,14 +2883,29 @@ async function loadUiUsageSummary(silent = true) {
   }
 }
 
+const routeScrollPositions = new Map();
+let routeScrollScope = "";
+
 function setView(target) {
   if (!isRouteAllowed(target)) target = "dashboard";
+  const scope = frontendSessionScope();
+  const sameScope = routeScrollScope === scope;
+  if (!sameScope) {
+    routeScrollPositions.clear();
+    routeScrollScope = scope;
+  }
+  const previousRoute = activeRouteTarget;
+  const previousMajorRoute = majorRouteForRoute(previousRoute);
+  const previousView = document.getElementById(previousMajorRoute);
+  const activeMajorRoute = majorRouteForRoute(target);
+  const routeChanged = previousMajorRoute !== activeMajorRoute;
+  if (sameScope && routeChanged && previousView?.classList.contains("active")) {
+    routeScrollPositions.set(previousMajorRoute, { top: previousView.scrollTop, left: previousView.scrollLeft });
+  }
   activeRouteTarget = target;
   document.body.dataset.activeRoute = target;
-  const activeMajorRoute = majorRouteForRoute(target);
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === activeMajorRoute));
   const activeView = document.getElementById(activeMajorRoute);
-  if (activeView && target === activeMajorRoute) activeView.scrollTo({ top: 0, left: 0, behavior: "auto" });
   document.querySelectorAll(".nav-item").forEach((item) => {
     const active = item.dataset.target === activeMajorRoute;
     item.classList.toggle("active", active);
@@ -2827,6 +2942,17 @@ function setView(target) {
   if (target === "compose") void refreshWorkflowReadinessForContext("compose", { silent: true });
   if (hasAuthenticatedBackendSession()) void refreshFinanceDirectory({ silent: true });
   openIntegratedPageSection(target);
+  if (routeChanged && activeView && target === activeMajorRoute) {
+    const position = routeScrollPositions.get(activeMajorRoute) || { top: 0, left: 0 };
+    activeView.scrollTo({ ...position, behavior: "auto" });
+  }
+  if (routeChanged) {
+    const shell = document.querySelector("#appShell");
+    const heading = document.querySelector("#pageTitle");
+    if (heading && shell && !shell.inert && !shell.classList.contains("hidden") && !visibleWorkspaceModals().length) {
+      heading.focus({ preventScroll: true });
+    }
+  }
   void loadRouteBackendData(target, true);
   trackUiUsage("route_view", { route: target });
   if (location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
@@ -2873,7 +2999,8 @@ function updateHeaderStatus() {
       : headerBackendSyncState.syncedAt
         ? `資料更新 ${headerClockTimeFor(headerBackendSyncState.syncedAt)}`
         : "尚未更新資料";
-  if (topInfo) topInfo.textContent = `${displayName} · ${title} · ${syncLabel}`;
+  const text = `${displayName} · ${title} · ${syncLabel}`;
+  if (topInfo && topInfo.textContent !== text) topInfo.textContent = text;
 
   const todoCount = headerTodoCount();
   const notificationBadge = document.querySelector("#headerNotificationBadge");
@@ -2881,7 +3008,8 @@ function updateHeaderStatus() {
 
   const moduleBadge = document.querySelector("#moduleTodoBadge");
   if (moduleBadge) {
-    moduleBadge.textContent = todoCount > 99 ? "99+" : String(todoCount);
+    const countText = todoCount > 99 ? "99+" : String(todoCount);
+    if (moduleBadge.textContent !== countText) moduleBadge.textContent = countText;
     moduleBadge.toggleAttribute("hidden", todoCount <= 0);
   }
 }
@@ -2896,10 +3024,13 @@ let workspaceRefreshRequest = null;
 async function refreshCurrentWorkspace() {
   if (!hasAuthenticatedBackendSession()) return false;
   const scope = frontendSessionScope();
-  if (workspaceRefreshRequest?.scope === scope) return workspaceRefreshRequest.promise;
+  const token = String(authState?.token || "");
+  if (workspaceRefreshRequest?.scope === scope && workspaceRefreshRequest.token === token) return workspaceRefreshRequest.promise;
   const target = activeRouteTarget;
-  const entry = { scope, promise: null };
+  const entry = { scope, token, promise: null };
   workspaceRefreshRequest = entry;
+  const current = () => workspaceRefreshRequest === entry && scope === frontendSessionScope()
+    && token === String(authState?.token || "") && hasAuthenticatedBackendSession();
   headerBackendSyncState = { ...headerBackendSyncState, status: "syncing" };
   updateHeaderStatus();
   const buttons = ["#headerRefreshBtn", "#mobileDrawerRefreshBtn"].map((selector) => document.querySelector(selector)).filter(Boolean);
@@ -2920,7 +3051,7 @@ async function refreshCurrentWorkspace() {
       if (target === "dashboard") reads.push(syncDashboardFromBackend(true, { throwOnError: true }), loadInternalDispatches(true, { includeDirectory: false, throwOnError: true }));
       if (target === "archive") reads.push(loadArchiveRecordsFromBackend());
       const results = await Promise.allSettled(reads);
-      if (scope !== frontendSessionScope() || !hasAuthenticatedBackendSession()) return false;
+      if (!current()) return false;
       if (results.some((result) => result.status === "rejected" || result.value === false)) {
         headerBackendSyncState = { ...headerBackendSyncState, status: "error" };
         updateHeaderStatus();
@@ -2935,7 +3066,7 @@ async function refreshCurrentWorkspace() {
       showToast("已取得最新資料，未儲存的內容已保留。");
       return true;
     } finally {
-      if (headerBackendSyncState.status === "syncing") {
+      if (current() && headerBackendSyncState.status === "syncing") {
         headerBackendSyncState = { ...headerBackendSyncState, status: "error" };
         updateHeaderStatus();
       }
@@ -5910,6 +6041,36 @@ function applyFinanceDirectoryPayload(payload = {}) {
   const rawDepartments = Array.isArray(payload.departments) ? payload.departments : [];
   const companies = rawCompanies.map(normalizeFinanceDirectoryCompany).filter((item) => item.id && item.name);
   const departments = rawDepartments.map(normalizeFinanceDirectoryDepartment).filter((item) => item.id && item.name);
+  const metadata = {
+    source: payload.source || "finance",
+    schemaVersion: Number(payload.schemaVersion ?? payload.schema_version ?? 2),
+    directoryVersion: String(payload.directoryVersion || payload.directory_version || ""),
+    currentCompanyId: String(payload.currentCompanyId || payload.current_company_id || ""),
+    currentApplicantDepartment: Object.hasOwn(payload, "currentApplicantDepartment")
+      ? (payload.currentApplicantDepartment ? normalizeFinanceDirectoryDepartment(payload.currentApplicantDepartment) : null)
+      : undefined,
+    editorApplicantCompanies: Array.isArray(payload.editorApplicantCompanies)
+      ? payload.editorApplicantCompanies.map(normalizeFinanceDirectoryCompany).filter((item) => item.id && item.name)
+      : undefined,
+    editorApplicantDepartments: Array.isArray(payload.editorApplicantDepartments)
+      ? payload.editorApplicantDepartments.map(normalizeFinanceDirectoryDepartment).filter((item) => item.id && item.name && item.code)
+      : undefined,
+    organization: payload.organization || null
+  };
+  const contentScope = frontendSessionScope();
+  const contentKey = financeDirectoryContentKey({ companies, departments, ...metadata });
+  const unchanged = financeDirectoryState.contentScope === contentScope && financeDirectoryState.contentKey === contentKey;
+  financeDirectoryState = {
+    ...financeDirectoryState, ...metadata, contentScope, contentKey,
+    syncedAt: String(payload.syncedAt || payload.synced_at || new Date().toISOString()),
+    lastSuccessAt: Date.now(), status: "synced", error: ""
+  };
+  if (unchanged) {
+    // A periodic confirmation must not replace an open select, move focus, or
+    // invalidate an unchanged approval relationship. Sync time still advances.
+    renderFinanceDirectorySyncStatus();
+    return;
+  }
   companySealCompanies = companies;
   companyRegistry = companies.map((item) => ({
     id: item.id,
@@ -5926,27 +6087,6 @@ function applyFinanceDirectoryPayload(payload = {}) {
     manager: String(item.manager || item.managerRole || item.manager_role || "Finance 組織主檔"),
     status: item.status === "active" ? "啟用" : "停用"
   })));
-  financeDirectoryState = {
-    ...financeDirectoryState,
-    source: payload.source || "finance",
-    schemaVersion: Number(payload.schemaVersion ?? payload.schema_version ?? 2),
-    directoryVersion: String(payload.directoryVersion || payload.directory_version || ""),
-    currentCompanyId: String(payload.currentCompanyId || payload.current_company_id || ""),
-    currentApplicantDepartment: Object.hasOwn(payload, "currentApplicantDepartment")
-      ? (payload.currentApplicantDepartment ? normalizeFinanceDirectoryDepartment(payload.currentApplicantDepartment) : null)
-      : undefined,
-    editorApplicantCompanies: Array.isArray(payload.editorApplicantCompanies)
-      ? payload.editorApplicantCompanies.map(normalizeFinanceDirectoryCompany).filter((item) => item.id && item.name)
-      : undefined,
-    editorApplicantDepartments: Array.isArray(payload.editorApplicantDepartments)
-      ? payload.editorApplicantDepartments.map(normalizeFinanceDirectoryDepartment).filter((item) => item.id && item.name && item.code)
-      : undefined,
-    syncedAt: String(payload.syncedAt || payload.synced_at || new Date().toISOString()),
-    lastSuccessAt: Date.now(),
-    status: "synced",
-    error: "",
-    organization: payload.organization || null
-  };
   if (!companySealCompanies.some((company) => company.id === selectedCompanySealCompanyId)) {
     setCompanySealCompanySelection(financeDirectoryCurrentCompany()?.id || "");
   }
@@ -5954,6 +6094,15 @@ function applyFinanceDirectoryPayload(payload = {}) {
   renderFinanceDirectoryConsumers();
   if (activeRouteTarget === "compose") void refreshWorkflowReadinessForContext("compose", { silent: true, force: true });
   if (["electronicSeal", "contractSeal"].includes(activeRouteTarget)) void refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true });
+}
+
+function financeDirectoryContentKey(value) {
+  const canonical = (item) => Array.isArray(item) ? item.map(canonical)
+    : item && typeof item === "object" ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, canonical(item[key])]))
+      : item;
+  // Compare complete content rather than a short hash or version alone: an
+  // actual organization/permission change must always refresh its consumers.
+  return JSON.stringify(canonical(value));
 }
 
 async function refreshFinanceDirectory({ silent = true } = {}) {
@@ -6114,6 +6263,23 @@ function enterAuthenticatedAppSafely(message) {
 function clearAppSessionUi(leavingSession, { removeStoredSession = false } = {}) {
   clearCurrentFrontendSessionState(leavingSession);
   authState = null;
+  workspaceRefreshRequest = null;
+  refreshFinanceAccountProjection.operation = null;
+  const accountRefreshButton = document.querySelector("#accountRefreshBtn");
+  if (accountRefreshButton) {
+    accountRefreshButton.disabled = false;
+    delete accountRefreshButton._financeAccountRefreshOperation;
+  }
+  headerBackendSyncState = { status: "idle", syncedAt: "" };
+  ["#headerRefreshBtn", "#mobileDrawerRefreshBtn"].forEach((selector) => {
+    const button = document.querySelector(selector);
+    if (button) { button.disabled = false; button.removeAttribute("aria-busy"); button.textContent = "重新整理"; }
+  });
+  routeScrollPositions.clear();
+  routeScrollScope = "";
+  dismissToast();
+  closeInboundModal();
+  closeContractModal();
   stopFinanceDirectoryAutoRefresh();
   clearFinanceDirectoryCache();
   clearUploadedEditorSensitivePreviews();
@@ -6834,13 +7000,11 @@ function openInboundModal(docId = selectedInboundId) {
   document.querySelector("#inboundModalTitle").textContent = doc.receiveNo;
   body.innerHTML = inboundDetailMarkup(doc);
   bindInboundDetailActions(body, doc);
-  modal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+  showWorkspaceModal(modal);
 }
 
 function closeInboundModal() {
-  document.querySelector("#inboundModal")?.classList.add("hidden");
-  document.body.classList.remove("modal-open");
+  hideWorkspaceModal(document.querySelector("#inboundModal"));
 }
 
 function renderInboundAuditLog() {
@@ -7833,7 +7997,45 @@ function formatComposeSaveTime(isoText) {
   return date.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
+function composeInputScope() {
+  return `${frontendSessionScope()}|${authState?.token || ""}|${composeCloudEpoch}|${document.querySelector("#composeCompanySelect")?.value || ""}`;
+}
+
+function composeInputIsComposing() {
+  return composeInputRuntime.composing;
+}
+
+function startComposeComposition() {
+  composeInputRuntime.composing = true;
+  composeInputRuntime.compositionScope = composeInputScope();
+  window.clearTimeout(draftPreviewRenderTimer);
+  draftPreviewRenderTimer = null;
+  clearTimeout(composeCloudTimer);
+}
+
+function finishComposeComposition() {
+  const current = composeInputRuntime.composing && composeInputRuntime.compositionScope === composeInputScope();
+  composeInputRuntime.composing = false;
+  composeInputRuntime.compositionScope = "";
+  if (current) markDraftDirty();
+}
+
+function flushComposeInputUpdates({ preview = true } = {}) {
+  if (composeInputIsComposing()) return false;
+  if (preview) {
+    window.clearTimeout(draftPreviewRenderTimer);
+    draftPreviewRenderTimer = null;
+  }
+  if (composeInputRuntime.pending) {
+    composeInputRuntime.pending = false;
+    writeComposeAutosave();
+  }
+  if (preview) renderDraftPreview({ force: true });
+  return true;
+}
+
 function writeComposeAutosave() {
+  if (composeInputIsComposing()) { composeInputRuntime.pending = true; return; }
   const snapshot = composeRawSnapshot();
   if (!composeSnapshotHasMeaningfulContent(snapshot)) return;
   if (!snapshot.userId || !snapshot.companyId) {
@@ -7873,6 +8075,11 @@ function composeRequestScope() {
 
 function resetComposeAsyncScope() {
   composeCloudEpoch += 1;
+  window.clearTimeout(draftPreviewRenderTimer);
+  draftPreviewRenderTimer = null;
+  composeInputRuntime.composing = false;
+  composeInputRuntime.compositionScope = "";
+  composeInputRuntime.pending = false;
   clearTimeout(composeCloudTimer);
   composeCloudOperation = null;
   composeCloudDraftId = "";
@@ -7890,12 +8097,16 @@ function resetComposeAsyncScope() {
 
 function scheduleComposeCloudSave() {
   clearTimeout(composeCloudTimer);
-  if (!authState?.token || composeCloudConflict) return;
-  composeCloudTimer = setTimeout(() => { void saveComposeCloudDraft(); }, 1800);
+  if (!authState?.token || composeCloudConflict || composeInputIsComposing()) return;
+  const scope = composeInputScope();
+  composeCloudTimer = setTimeout(() => {
+    if (scope === composeInputScope() && !composeInputIsComposing()) void saveComposeCloudDraft();
+  }, 1800);
 }
 
 async function saveComposeCloudDraft({ archived = false } = {}) {
   clearTimeout(composeCloudTimer);
+  if (!flushComposeInputUpdates({ preview: false })) return null;
   if (!authState?.token || composeCloudConflict || !composeSnapshotHasMeaningfulContent(composeRawSnapshot())) return null;
   if (composeCloudOperation) return composeCloudOperation;
   if (!composeCloudDraftId) composeCloudDraftId = `OD-${crypto.randomUUID()}`;
@@ -7918,7 +8129,7 @@ async function saveComposeCloudDraft({ archived = false } = {}) {
       // Keep the local recovery token in sync without triggering another
       // autosave. It must never be inferred from a newer cloud/dashboard row.
       try {
-        localStorage.setItem(composeAutosaveStorageKey, JSON.stringify({
+        if (!composeInputIsComposing()) localStorage.setItem(composeAutosaveStorageKey, JSON.stringify({
           updatedAt: new Date().toISOString(), snapshot: composeRawSnapshot(), cloudRevision: result.revision
         }));
       } catch (_) { /* Cloud is saved even when local storage is unavailable. */ }
@@ -8204,13 +8415,18 @@ function renderComposeCompanyOptions(preferAccount = false) {
   const company = financeDirectoryCurrentCompany();
   const selectionLocked = financeIdentitySelectionLocked();
   const companies = selectionLocked ? (company ? [company] : []) : allCompanies;
+  const optionsHtml = companies.length
+    ? companies.map((item) => `<option value="${escapeDraftHtml(item.name)}">${escapeDraftHtml(item.name)}</option>`).join("")
+    : `<option value="">登入帳號尚未連動 Finance 公司，請聯絡人資或系統管理員</option>`;
+  if (select.dataset.financeOptionsSignature !== optionsHtml) {
+    select.innerHTML = optionsHtml;
+    select.dataset.financeOptionsSignature = optionsHtml;
+  }
   if (!companies.length) {
-    select.innerHTML = `<option value="">登入帳號尚未連動 Finance 公司，請聯絡人資或系統管理員</option>`;
     select.disabled = true;
     return;
   }
   select.disabled = selectionLocked;
-  select.innerHTML = companies.map((item) => `<option value="${escapeDraftHtml(item.name)}">${escapeDraftHtml(item.name)}</option>`).join("");
   if (!preferAccount && companies.some((item) => item.name === previous)) select.value = previous;
   else if (company) select.value = company.name;
   else if (!selectionLocked && companies[0]) select.value = companies[0].name;
@@ -8581,12 +8797,11 @@ function setDraftPreviewExpanded(value, options = {}) {
 
 function scheduleDraftPreviewRender(delay = 220) {
   if (draftPreviewRenderTimer) window.clearTimeout(draftPreviewRenderTimer);
-  renderComposeCompanyOptions();
-  syncDraftPreviewChrome();
-  renderComposeStepper();
+  if (composeInputIsComposing()) { draftPreviewRenderTimer = null; return; }
+  const scope = composeInputScope();
   draftPreviewRenderTimer = window.setTimeout(() => {
     draftPreviewRenderTimer = null;
-    renderDraftPreview({ force: true });
+    if (scope === composeInputScope()) flushComposeInputUpdates();
   }, delay);
 }
 
@@ -9028,7 +9243,17 @@ function clearOfficialDraftPrintHost() {
 }
 
 async function printOfficialDraft(sourceSelector = "#draftReviewPreview") {
+  if (composeInputIsComposing()) {
+    showToast("請先完成文字輸入，再列印公文。");
+    return;
+  }
+  const inputScope = composeInputScope();
   const fontLoaded = await ensureOfficialDraftFontReady();
+  if (inputScope !== composeInputScope()) return;
+  if (composeInputIsComposing()) {
+    showToast("請先完成文字輸入，再列印公文。");
+    return;
+  }
   if (!fontLoaded) {
     showToast("教育部標準楷書載入失敗，已停止列印，請重新整理後再試。");
     return;
@@ -9064,6 +9289,10 @@ async function printOfficialDraft(sourceSelector = "#draftReviewPreview") {
   };
   window.addEventListener("afterprint", cleanup, { once: true });
   window.requestAnimationFrame(() => {
+    if (inputScope !== composeInputScope() || composeInputIsComposing()) {
+      cleanup();
+      return;
+    }
     try {
       window.print();
     } finally {
@@ -9073,6 +9302,11 @@ async function printOfficialDraft(sourceSelector = "#draftReviewPreview") {
 }
 
 function renderDraftPreview(options = {}) {
+  if (composeInputIsComposing()) return;
+  if (composeInputRuntime.pending) {
+    composeInputRuntime.pending = false;
+    writeComposeAutosave();
+  }
   if (draftPreviewRenderTimer) {
     window.clearTimeout(draftPreviewRenderTimer);
     draftPreviewRenderTimer = null;
@@ -9093,6 +9327,7 @@ function renderDraftPreview(options = {}) {
 }
 
 function setDraftConfirmed(value) {
+  if (value && !flushComposeInputUpdates({ preview: false })) return showToast("請先完成文字輸入。");
   draftConfirmed = value;
   if (!value) draftSigned = false;
   if (value) {
@@ -9106,7 +9341,13 @@ function markDraftDirty(options = {}) {
   draftConfirmed = false;
   draftSigned = false;
   if (!options.keepStep) activeComposeStep = "fill";
-  writeComposeAutosave();
+  composeInputRuntime.pending = true;
+  clearTimeout(composeCloudTimer);
+  if (options.isComposing && !composeInputIsComposing()) startComposeComposition();
+  // Confirmation becomes invalid immediately; expensive pagination and local
+  // serialization wait for the latest committed input, not each keystroke.
+  const submit = document.querySelector("#submitDispatchBtn");
+  if (submit) submit.disabled = true;
   scheduleDraftPreviewRender();
 }
 
@@ -9446,6 +9687,7 @@ function validateComposeStep(step = activeComposeStep) {
 }
 
 function setComposeStep(key, options = {}) {
+  if (composeInputIsComposing()) return showToast("請先完成文字輸入。");
   if (key === "preview") key = "fill";
   if (key === "confirm" && activeComposeStep === "fill" && !options.force) {
     void advanceComposeStep();
@@ -9462,6 +9704,7 @@ function setComposeStep(key, options = {}) {
 }
 
 async function advanceComposeStep() {
+  if (composeInputIsComposing()) return showToast("請先完成文字輸入。");
   const steps = composeStepKeys();
   const currentIndex = composeStepIndex();
   const current = steps[currentIndex];
@@ -9507,10 +9750,11 @@ function renderComposeStepper() {
   renderComposeContactSummary();
   const steps = composeStepState();
   const activeIndex = composeStepIndex();
-  stepper.innerHTML = `
+  if (!stepper.dataset.tabsInitialized) {
+    stepper.innerHTML = `
     <div class="compose-page-tabs">
       ${steps.map((item, index) => `
-        <button class="compose-progress-step ${item.done ? "done" : ""} ${index === activeIndex ? "active" : ""}" type="button" data-compose-step="${item.key}">
+        <button class="compose-progress-step" type="button" data-compose-step="${item.key}">
           <span>${index + 1}</span>
           <strong>${item.label}</strong>
           <small class="sr-only">${item.body}</small>
@@ -9518,6 +9762,17 @@ function renderComposeStepper() {
       `).join("")}
     </div>
   `;
+    stepper.dataset.tabsInitialized = "true";
+    stepper.querySelectorAll("[data-compose-step]").forEach((button) => {
+      button.addEventListener("click", () => setComposeStep(button.dataset.composeStep));
+    });
+  }
+  stepper.querySelectorAll("[data-compose-step]").forEach((button, index) => {
+    button.classList.toggle("done", Boolean(steps[index]?.done));
+    button.classList.toggle("active", index === activeIndex);
+    if (index === activeIndex) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+  });
   const nextControl = composeNextControlState();
   if (action) action.innerHTML = "";
   const stepStatus = document.querySelector("#composeStepStatus");
@@ -9550,9 +9805,6 @@ function renderComposeStepper() {
   }
   applyWorkflowReadinessSubmitGuards();
   renderComposeSaveStatus();
-  document.querySelectorAll("[data-compose-step]").forEach((button) => {
-    button.addEventListener("click", () => setComposeStep(button.dataset.composeStep));
-  });
 }
 
 function assignNextDispatchNo(_force = false) {
@@ -10063,12 +10315,15 @@ async function loadDashboardOfficialWorkflow({ throwOnError = false } = {}) {
 
 async function loadOfficialWorkflow(scope = officialWorkflowScope, { isCurrent = () => true, throwOnError = false, append = false, search = officialWorkflowSearchTerm, view = "", source = "workflow", status = officialWorkflowStatusFilter } = {}) {
   const sessionScope = frontendSessionScope();
+  const sessionToken = typeof authState === "object" ? authState?.token || "" : "";
   if (!isCurrent()) return;
   const query = { scope, search: String(search || "").trim(), view, source, status: source === "workflow" ? status : "" };
   const sameQuery = officialWorkflowPage.scope === sessionScope && JSON.stringify(officialWorkflowPage.query) === JSON.stringify(query);
   if (append && (!sameQuery || officialWorkflowPage.loading || !officialWorkflowPage.hasMore)) return;
   const generation = ++officialWorkflowPage.generation;
-  const current = () => sessionScope === frontendSessionScope() && generation === officialWorkflowPage.generation && isCurrent();
+  const current = () => sessionScope === frontendSessionScope()
+    && sessionToken === (typeof authState === "object" ? authState?.token || "" : "")
+    && generation === officialWorkflowPage.generation && isCurrent();
   officialWorkflowScope = scope;
   if (scope === "new") {
     renderOfficialWorkflow();
@@ -10084,7 +10339,18 @@ async function loadOfficialWorkflow(scope = officialWorkflowScope, { isCurrent =
   if (query.view) params.set("view", query.view);
   if (cursor) params.set("cursor", cursor);
   try {
-    const response = await backendRequest(`${officialWorkflowEndpoint(scope)}?${params}`);
+    const readKey = JSON.stringify({ sessionScope, sessionToken, query, append, cursor });
+    const reads = loadOfficialWorkflow.pendingReads || (loadOfficialWorkflow.pendingReads = new Map());
+    let read = reads.get(readKey);
+    if (!read) {
+      read = { promise: null };
+      reads.set(readKey, read);
+      read.promise = (async () => backendRequest(`${officialWorkflowEndpoint(scope)}?${params}`))()
+        .finally(() => { if (reads.get(readKey) === read) reads.delete(readKey); });
+    }
+    // Share only the transport. Each caller retains its own generation,
+    // isCurrent, append merge and throwOnError behavior below.
+    const response = await read.promise;
     if (!current()) return;
     const items = Array.isArray(response) ? response : response?.items;
     if (!Array.isArray(items) || (!Array.isArray(response) && typeof response.has_more !== "boolean")) throw new Error("official_list_response_invalid");
@@ -10113,15 +10379,71 @@ async function loadOfficialWorkflow(scope = officialWorkflowScope, { isCurrent =
   }
 }
 
+function renderStableWorkflowMarkup(host, markup) {
+  if (host._workflowMarkup === markup) return false;
+  const focused = host.contains(document.activeElement) ? document.activeElement : null;
+  const scrollPositions = [];
+  for (let node = host; node; node = node.parentElement) {
+    if (node.scrollTop || node.scrollLeft) scrollPositions.push([node, node.scrollTop, node.scrollLeft]);
+  }
+  const template = document.createElement("template");
+  template.innerHTML = markup;
+  const key = (node) => {
+    if (node.nodeType !== 1) return "";
+    const fields = [...node.attributes].filter((attribute) => attribute.name === "id" || attribute.name === "data-workflow-row" || /^data-(?:electronic-seal-|approval-log-|official-download|progress-official-|open-editor-review|correct-official-id|official-load-more)/.test(attribute.name));
+    return fields.length ? `${node.tagName}:${fields.map((attribute) => `${attribute.name}=${attribute.value}`).join(";")}` : "";
+  };
+  const reconcile = (parent, desired) => {
+    const original = [...parent.childNodes];
+    const keyed = new Map(original.map((node) => [key(node), node]).filter(([value]) => value));
+    const retained = new Set();
+    [...desired.childNodes].forEach((fresh, index) => {
+      const freshKey = key(fresh);
+      let current = freshKey ? keyed.get(freshKey) : original[index];
+      if (retained.has(current) || !current || current.nodeType !== fresh.nodeType || (fresh.nodeType === 1 && (current.tagName !== fresh.tagName || key(current) !== freshKey))) current = fresh.cloneNode(true);
+      if (fresh.nodeType === 1 && current !== fresh && original.includes(current)) {
+        const busy = current.matches("button") && current.dataset.workflowBusy === "true";
+        for (const attribute of [...current.attributes]) {
+          if (attribute.name === "data-workflow-busy" || (busy && attribute.name === "disabled") || (current.tagName === "DETAILS" && attribute.name === "open")) continue;
+          if (!fresh.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+        }
+        for (const attribute of [...fresh.attributes]) {
+          if (busy && attribute.name === "disabled") continue;
+          if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+        }
+        if (!busy) reconcile(current, fresh);
+      } else if (fresh.nodeType !== 1 && current.nodeValue !== fresh.nodeValue) current.nodeValue = fresh.nodeValue;
+      retained.add(current);
+      if (parent.childNodes[index] !== current) parent.insertBefore(current, parent.childNodes[index] || null);
+    });
+    for (const node of original) if (!retained.has(node)) node.remove();
+  };
+  // Reuse unchanged rows and action nodes: background reads must not destroy
+  // keyboard focus, expanded evidence, or an in-flight download's busy state.
+  reconcile(host, template.content);
+  host._workflowMarkup = markup;
+  if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+  for (const [node, top, left] of scrollPositions) { node.scrollTop = top; node.scrollLeft = left; }
+  return true;
+}
+
+function bindWorkflowActionOnce(button, handler) {
+  if (button._workflowActionBound) return;
+  button._workflowActionBound = true;
+  button.addEventListener("click", handler);
+}
+
 function renderOfficialWorkflowPagination() {
   const state = officialWorkflowPage;
   for (const selector of ["#officialWorkflowPagination", "#approvalLogPagination", "#electronicSealPagination", "#dashboardOfficialPagination"]) {
     const host = document.querySelector(selector);
     if (!host) continue;
     const text = state.loading ? "正在載入案件…" : state.error ? "更新失敗，已保留上次資料。" : `已載入 ${officialWorkflowItems.length} 件${state.hasMore ? "，尚有更多案件" : ""}`;
-    host.innerHTML = `<span role="status">${text}</span>${state.error || state.hasMore ? `<button class="secondary-button" type="button" data-official-load-more ${state.loading ? "disabled" : ""}>${state.error ? "重新載入" : "載入更多"}</button>` : ""}`;
+    renderStableWorkflowMarkup(host, `<span role="status">${text}</span>${state.error || state.hasMore ? `<button class="secondary-button" type="button" data-official-load-more ${state.loading ? "disabled" : ""}>${state.error ? "重新載入" : "載入更多"}</button>` : ""}`);
     host.setAttribute("aria-busy", String(state.loading));
-    host.querySelector("[data-official-load-more]")?.addEventListener("click", () => {
+    const button = host.querySelector("[data-official-load-more]");
+    if (button) bindWorkflowActionOnce(button, () => {
+      if (state.loading) return;
       const query = state.query;
       if (query) void loadOfficialWorkflow(query.scope, { ...query, append: !state.error });
     });
@@ -11817,35 +12139,19 @@ function renderOfficialDecisionEvidence(item) {
 function closeOfficialDecisionDialog() {
   const modal = document.querySelector("#officialDecisionModal");
   if (modal) modal.classList.add("hidden");
+  syncWorkspaceOverlayIsolation();
   officialDecisionState = { documentId: "", action: "", source: "workflow" };
   if (!document.querySelector(".modal-backdrop:not(.hidden)")) document.body.classList.remove("modal-open");
   const restoreTarget = officialDecisionPreviousFocus;
   officialDecisionPreviousFocus = null;
-  if (restoreTarget?.isConnected && typeof restoreTarget.focus === "function") {
-    window.setTimeout(() => restoreTarget.focus({ preventScroll: true }), 0);
+  if (restoreTarget?.isConnected && !restoreTarget.closest("[inert], .hidden") && typeof restoreTarget.focus === "function") {
+    restoreTarget.focus({ preventScroll: true });
   }
 }
 
 function trapOfficialDecisionFocus(event) {
-  if (event.key !== "Tab") return;
   const modal = document.querySelector("#officialDecisionModal");
-  if (!modal || modal.classList.contains("hidden")) return;
-  const focusable = [...modal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
-    .filter((node) => !node.closest("[hidden]") && node.getAttribute("aria-hidden") !== "true");
-  if (!focusable.length) {
-    event.preventDefault();
-    modal.focus?.();
-    return;
-  }
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
-  }
+  trapWorkspaceModalFocus(event, modal);
 }
 
 async function openOfficialDecisionDialog(item, action, source = "workflow") {
@@ -11921,9 +12227,11 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   officialDecisionPreviousFocus = document.activeElement;
   modal.classList.remove("hidden");
   document.body.classList.add("modal-open");
+  syncWorkspaceOverlayIsolation();
   updateOfficialDecisionSubmitAvailability();
   if (action === "add-sign") void loadOfficialAddSignCandidates(item.id, officialDecisionState.operationId);
-  window.setTimeout(() => document.querySelector(action === "withdraw" ? "#officialWithdrawComment" : "[data-decision-evidence]:not([disabled])")?.focus(), 0);
+  const initialFocus = document.querySelector(action === "withdraw" ? "#officialWithdrawComment" : "[data-decision-evidence]:not([disabled])");
+  (initialFocus || workspaceModalFocusableItems(modal)[0] || modal).focus({ preventScroll: true });
 }
 
 async function loadOfficialAddSignCandidates(documentId, operationId) {
@@ -13311,6 +13619,7 @@ async function performCreateDispatchFromForm(status = "草稿") {
 }
 
 async function saveComposeDraft() {
+  if (!flushComposeInputUpdates()) { showToast("請先完成文字輸入。"); return null; }
   // This scope excludes IDs assigned by this save, but changes whenever the
   // user/account/company/draft is explicitly switched.
   const scope = () => `${frontendSessionScope()}|${authState?.token || ""}|${composeCloudEpoch}|${document.querySelector("#composeCompanySelect")?.value || ""}`;
@@ -14410,13 +14719,11 @@ function openContractModal(contractId = selectedContractId) {
   document.querySelector("#contractModalTitle").textContent = contract.contractNo;
   body.innerHTML = contractModalMarkup(contract);
   bindContractModalActions(body);
-  modal.classList.remove("hidden");
-  document.body.classList.add("modal-open");
+  showWorkspaceModal(modal);
 }
 
 function closeContractModal() {
-  document.querySelector("#contractModal")?.classList.add("hidden");
-  document.body.classList.remove("modal-open");
+  hideWorkspaceModal(document.querySelector("#contractModal"));
 }
 
 async function openContractInElectronicSeal(contract = currentContract()) {
@@ -16333,24 +16640,53 @@ function renderAccounts() {
 
 async function refreshFinanceAccountProjection() {
   if (!authState?.token) return showToast("請先由會計系統入口登入。");
+  let session = authState;
+  let scope = frontendSessionScope(session);
+  const token = String(session.token);
+  const existing = refreshFinanceAccountProjection.operation;
+  if (existing?.session === session && existing.scope === scope && existing.token === token) return existing.promise;
+  const entry = { session, scope, token, promise: null };
+  refreshFinanceAccountProjection.operation = entry;
+  const isCurrent = () => refreshFinanceAccountProjection.operation === entry && authState === session
+    && scope === frontendSessionScope() && token === String(authState?.token || "");
   const button = document.querySelector("#accountRefreshBtn");
-  if (button) button.disabled = true;
-  try {
-    const current = await backendRequest("/auth/me");
-    authState = { ...current, token: authState.token, bridge: current.bridge || authState.bridge };
-    persistAuthenticatedSession(authState);
-    syncUserAccountFromSession(authState, "Finance Google SSO");
-    applyAuthUser();
-    await Promise.all([loadFinanceCompanyDirectory(), ensureAccountLaunchAudit()]);
-    renderAccounts();
-    addAccountAudit("重新載入 Finance 同步資料", "已重新驗證目前帳號、公司、部門、職級、主管與權限快照。");
-    showToast("已重新載入會計系統同步資料。");
-  } catch (error) {
-    addAccountAudit("Finance 同步資料載入失敗", error.message || "finance_sync_refresh_failed");
-    showToast("暫時無法重新載入；系統會在下次操作時再次自動同步。");
-  } finally {
-    if (button) button.disabled = false;
-  }
+  if (button) { button.disabled = true; button._financeAccountRefreshOperation = entry; }
+  entry.promise = (async () => {
+    try {
+      const current = await backendRequest("/auth/me");
+      // The old account's projection must never be paired with a newer login's
+      // credential, even if both logins use the same employee/company identity.
+      if (!isCurrent()) return false;
+      authState = { ...current, token, bridge: current.bridge || session.bridge };
+      session = authState;
+      scope = frontendSessionScope(session);
+      entry.session = session;
+      entry.scope = scope;
+      persistAuthenticatedSession(authState);
+      syncUserAccountFromSession(authState, "Finance Google SSO");
+      applyAuthUser();
+      await Promise.all([loadFinanceCompanyDirectory(), ensureAccountLaunchAudit()]);
+      if (!isCurrent()) return false;
+      renderAccounts();
+      addAccountAudit("重新載入 Finance 同步資料", "已重新驗證目前帳號、公司、部門、職級、主管與權限快照。");
+      showToast("已重新載入會計系統同步資料。");
+      return true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      addAccountAudit("Finance 同步資料載入失敗", error.message || "finance_sync_refresh_failed");
+      showToast("暫時無法重新載入；系統會在下次操作時再次自動同步。");
+      return false;
+    } finally {
+      if (refreshFinanceAccountProjection.operation === entry) refreshFinanceAccountProjection.operation = null;
+      // Cleanup belongs to the operation that disabled this control, not to
+      // an older response arriving during another account's active refresh.
+      if (button?._financeAccountRefreshOperation === entry) {
+        button.disabled = false;
+        delete button._financeAccountRefreshOperation;
+      }
+    }
+  })();
+  return entry.promise;
 }
 
 function runAccountAction(action, ids = selectedAccountIds()) {
@@ -23503,8 +23839,8 @@ function renderApprovalLog() {
   document.querySelector("#approvalLogCount").textContent = `${officialWorkflowPage.loading ? "載入中 · " : "已載入 "}${records.length} 件${officialWorkflowPage.hasMore ? "+" : ""}`;
   document.querySelector("#approvalLogScope").textContent = canSeeCompanyWideDocs() ? "全公司" : "依部門/角色";
   if (records.length && !records.some(({ task }) => task.id === selectedWorkflowTaskId)) selectedWorkflowTaskId = records[0].task.id;
-  list.innerHTML = records.length ? records.map(({ task, doc, currentStep, doneCount, totalSteps, submittedAt, officialDocument }) => `
-    <article class="address-card approval-case-card ${task.id === selectedWorkflowTaskId ? "selected-card" : ""}">
+  renderStableWorkflowMarkup(list, records.length ? records.map(({ task, doc, currentStep, doneCount, totalSteps, submittedAt, officialDocument }) => `
+    <article class="address-card approval-case-card ${task.id === selectedWorkflowTaskId ? "selected-card" : ""}" data-workflow-row="${escapeHtml(task.id)}">
       <strong>${escapeHtml(doc?.no || task.id)}</strong>
       <span>${escapeHtml(doc?.subject || task.title)}</span>
       <p>${escapeHtml(currentStep?.title || task.step)} · ${escapeHtml(task.role)} · ${escapeHtml(task.status)}</p>
@@ -23513,7 +23849,7 @@ function renderApprovalLog() {
         <button class="segment" type="button" data-approval-log-select="${escapeHtml(task.id)}">檢視</button>
       </div>
     </article>
-  `).join("") : `<div class="ux-empty-state"><strong>${officialWorkflowPage.loading ? "正在載入案件…" : officialWorkflowPage.error ? "案件尚未更新，請重試" : officialWorkflowPage.hasMore ? "這一頁沒有符合案件，請載入更多" : "目前沒有這一類簽核紀錄"}</strong><p>可調整搜尋條件，或重新整理查看最新案件。</p></div>`;
+  `).join("") : `<div class="ux-empty-state"><strong>${officialWorkflowPage.loading ? "正在載入案件…" : officialWorkflowPage.error ? "案件尚未更新，請重試" : officialWorkflowPage.hasMore ? "這一頁沒有符合案件，請載入更多" : "目前沒有這一類簽核紀錄"}</strong><p>可調整搜尋條件，或重新整理查看最新案件。</p></div>`);
 
   const selected = records.find(({ task }) => task.id === selectedWorkflowTaskId) || records[0];
   if (fullCaseButton) fullCaseButton.disabled = !selected;
@@ -23523,7 +23859,7 @@ function renderApprovalLog() {
   const backButton = document.querySelector("#approvalLogBackBtn");
   if (backButton) backButton.onclick = closeApprovalLogMobileDetail;
   if (!selected) {
-    detail.innerHTML = "";
+    renderStableWorkflowMarkup(detail, "");
     document.querySelector("#approvalLog")?.removeAttribute("data-mobile-detail");
   } else {
     const { task, doc, currentStep, doneCount, totalSteps, steps, submittedAt, requester, officialDocument } = selected;
@@ -23542,7 +23878,7 @@ function renderApprovalLog() {
       && officialDocumentIsApplicant(officialDocument)
       && ["draft", "rejected"].includes(officialDocument.current_status)
     );
-    detail.innerHTML = `
+    renderStableWorkflowMarkup(detail, `
       <article class="approval-log-summary">
         <div class="approval-log-summary-head">
           <span>${escapeHtml(task.id)} · ${escapeHtml(doc?.no || "尚未建立文號")}</span>
@@ -23582,7 +23918,7 @@ function renderApprovalLog() {
       ${officialDocument && officialDetailReady ? `<div class="official-action-bar approval-review-decisions">${renderOfficialWorkflowActionButtons(officialDocument, "approvalLog")}</div>` : ""}
       ${officialDocument && officialDetailReady && officialDocumentCanConfirm(officialDocument) ? `<div class="official-action-bar"><button class="primary-button" type="button" data-approval-log-confirm="${escapeHtml(officialDocument.id)}">確認收件並結案</button></div>` : ""}
       ${canCorrectOfficial ? `<div class="official-action-bar approval-review-decisions"><button class="primary-button" type="button" data-correct-official-id="${escapeHtml(officialDocument.id)}">${officialDocument.current_status === "rejected" ? "補正並重新送簽" : "繼續編輯草稿"}</button></div>` : ""}
-    `;
+    `);
     if (officialDocument && !officialDetailReady && !officialDocumentDetailRequests.has(officialDocument.id)) {
       void ensureOfficialDocumentDetail(officialDocument.id)
         .then(() => renderApprovalLog())
@@ -23590,7 +23926,7 @@ function renderApprovalLog() {
     }
   }
   document.querySelectorAll("[data-approval-log-select]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    bindWorkflowActionOnce(button, async () => {
       selectedWorkflowTaskId = button.dataset.approvalLogSelect;
       const selectedRecord = approvalLogRecords().find(({ task, officialDocument }) => task.id === selectedWorkflowTaskId && officialDocument);
       if (selectedRecord?.officialDocument) {
@@ -23606,23 +23942,25 @@ function renderApprovalLog() {
   });
   list.querySelector("[data-empty-action-target]")?.addEventListener("click", (event) => setView(event.currentTarget.dataset.emptyActionTarget));
   detail.querySelectorAll("[data-official-download]").forEach((button) => {
-    button.addEventListener("click", () => downloadOfficialWorkflowFile(button.dataset.documentId, button.dataset.officialDownload));
+    bindWorkflowActionOnce(button, () => downloadOfficialWorkflowFile(button.dataset.documentId, button.dataset.officialDownload));
   });
   detail.querySelectorAll("[data-progress-official-action]").forEach((button) => {
-    button.addEventListener("click", () => actOnOfficialDocumentFromProgress(button.dataset.progressOfficialId, button.dataset.progressOfficialAction));
+    bindWorkflowActionOnce(button, () => actOnOfficialDocumentFromProgress(button.dataset.progressOfficialId, button.dataset.progressOfficialAction));
   });
   detail.querySelectorAll("[data-approval-log-confirm]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    bindWorkflowActionOnce(button, async () => {
+      if (button.disabled) return;
       button.disabled = true;
+      button.dataset.workflowBusy = "true";
       try { await confirmOfficialDocument(button.dataset.approvalLogConfirm); }
-      finally { if (button.isConnected) button.disabled = false; }
+      finally { delete button.dataset.workflowBusy; if (button.isConnected) button.disabled = false; }
     });
   });
   detail.querySelectorAll("[data-open-editor-review]").forEach((button) => {
-    button.addEventListener("click", () => void openOfficialDocumentEditorReview(button.dataset.openEditorReview));
+    bindWorkflowActionOnce(button, () => void openOfficialDocumentEditorReview(button.dataset.openEditorReview));
   });
   detail.querySelectorAll("[data-correct-official-id]").forEach((button) => {
-    button.addEventListener("click", () => {
+    bindWorkflowActionOnce(button, () => {
       const item = officialWorkflowItems.find((entry) => entry.id === button.dataset.correctOfficialId);
       if (item) void beginOfficialCorrection(item);
     });
@@ -30834,12 +31172,12 @@ function renderElectronicSealWorkQueue() {
   count.textContent = `已載入 ${items.length} 件${officialWorkflowPage.hasMore ? "+" : ""}`;
   const query = String(document.querySelector("#electronicSealWorkQueueSearch")?.value || "").trim().toLocaleLowerCase();
   const visibleItems = items.filter((item) => !query || [item.id, item.title, item.subject, item.applicant_name, item.company_name, officialStatusLabel(item.current_status)].join(" ").toLocaleLowerCase().includes(query));
-  list.innerHTML = visibleItems.length ? visibleItems.map((item) => {
+  renderStableWorkflowMarkup(list, visibleItems.length ? visibleItems.map((item) => {
     // Paginated rows intentionally omit file collections. Offer the committed
     // final-file entry, then revalidate its exact ID and type from fresh detail.
     const finalFileId = item.can_download === true ? String(item.stamped_file_id || item.stampedFileId || "") : "";
     return `
-      <article class="address-card">
+      <article class="address-card" data-workflow-row="${escapeHtml(item.id)}">
         <strong>${escapeHtml(item.title || item.subject || item.id)}</strong>
         <span>${escapeHtml(officialStatusLabel(item.current_status))} · ${escapeHtml(item.current_step_name || item.current_step || "未送出")}</span>
         <p>${escapeHtml(item.applicant_name || "申請人")} · ${escapeHtml(item.company_name || "公司未提供")}</p>
@@ -30851,33 +31189,42 @@ function renderElectronicSealWorkQueue() {
         </div>
       </article>
     `;
-  }).join("") : `<p class="empty-text">${query ? "沒有符合搜尋條件的案件；請調整關鍵字。" : "目前沒有電子用印案件；可在下方先填申請資料或直接上傳 A4 PDF。"}</p>`;
+  }).join("") : `<p class="empty-text">${query ? "沒有符合搜尋條件的案件；請調整關鍵字。" : "目前沒有電子用印案件；可在下方先填申請資料或直接上傳 A4 PDF。"}</p>`);
   list.querySelectorAll("[data-electronic-seal-open]").forEach((button) => {
-    button.addEventListener("click", () => void openOfficialDocumentEditorReview(button.dataset.electronicSealOpen, "edited"));
+    bindWorkflowActionOnce(button, () => void openOfficialDocumentEditorReview(button.dataset.electronicSealOpen, "edited"));
   });
   list.querySelectorAll("[data-electronic-seal-retry]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      selectedOfficialDocumentId = button.dataset.electronicSealRetry;
-      await ensureOfficialDocumentDetail(selectedOfficialDocumentId);
-      await retryOfficialStamp();
-      renderElectronicSealWorkQueue();
+    bindWorkflowActionOnce(button, async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      button.dataset.workflowBusy = "true";
+      try {
+        selectedOfficialDocumentId = button.dataset.electronicSealRetry;
+        await ensureOfficialDocumentDetail(selectedOfficialDocumentId);
+        await retryOfficialStamp();
+        renderElectronicSealWorkQueue();
+      } finally { delete button.dataset.workflowBusy; if (button.isConnected) button.disabled = false; }
     });
   });
   list.querySelectorAll("[data-electronic-seal-confirm]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    bindWorkflowActionOnce(button, async () => {
+      if (button.disabled) return;
       button.disabled = true;
+      button.dataset.workflowBusy = "true";
       try { await confirmOfficialDocument(button.dataset.electronicSealConfirm); }
-      finally { if (button.isConnected) button.disabled = false; }
+      finally { delete button.dataset.workflowBusy; if (button.isConnected) button.disabled = false; }
     });
   });
   list.querySelectorAll("[data-electronic-seal-download]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    bindWorkflowActionOnce(button, async () => {
       if (button.disabled) return;
       button.disabled = true;
+      button.dataset.workflowBusy = "true";
       const label = button.textContent;
       button.textContent = "準備下載…";
       try { await downloadElectronicSealFinalFile(button.dataset.documentId, button.dataset.electronicSealDownload); }
       finally {
+        delete button.dataset.workflowBusy;
         if (button.isConnected) { button.disabled = false; button.textContent = label; }
       }
     });
@@ -31165,7 +31512,8 @@ const uploadedSealApplicationRuntime = {
   documentId: "", savedKey: "", timer: 0, promise: null, error: "",
   editable: true, retryCount: 0, openPromise: null, epoch: 0,
   contentRevision: 0, conflict: false,
-  submissionPreview: null, submissionBusy: false, submissionOperation: null
+  submissionPreview: null, submissionBusy: false, submissionOperation: null,
+  composing: false, compositionScope: null
 };
 
 function uploadedSealApplicationScopeSnapshot() {
@@ -31272,6 +31620,8 @@ function resetUploadedSealApplicationSaving() {
   window.clearTimeout(uploadedSealApplicationRuntime.timer);
   uploadedSealApplicationRuntime.epoch += 1;
   uploadedSealApplicationRuntime.timer = 0;
+  uploadedSealApplicationRuntime.composing = false;
+  uploadedSealApplicationRuntime.compositionScope = null;
   uploadedSealEditorRuntime.draftCreatePromise = null;
   uploadedSealApplicationRuntime.documentId = "";
   uploadedSealApplicationRuntime.savedKey = "";
@@ -31332,10 +31682,29 @@ function renderUploadedSealApplicationSaveStatus() {
   }
 }
 
-function scheduleUploadedSealApplicationSave() {
+function startUploadedSealApplicationComposition() {
+  uploadedSealApplicationRuntime.composing = true;
+  uploadedSealApplicationRuntime.compositionScope = uploadedSealApplicationScopeSnapshot();
+  window.clearTimeout(uploadedSealApplicationRuntime.timer);
+  uploadedSealApplicationRuntime.timer = 0;
+  invalidateUploadedEditorSubmissionPreview();
+  renderUploadedEditorSubmissionActions();
+}
+
+function finishUploadedSealApplicationComposition() {
+  const scope = uploadedSealApplicationRuntime.compositionScope;
+  const current = uploadedSealApplicationRuntime.composing && scope && uploadedSealApplicationScopeIsCurrent(scope);
+  uploadedSealApplicationRuntime.composing = false;
+  uploadedSealApplicationRuntime.compositionScope = null;
+  if (current) scheduleUploadedSealApplicationSave();
+}
+
+function scheduleUploadedSealApplicationSave(event) {
   invalidateUploadedEditorSubmissionPreview();
   renderUploadedEditorSubmissionActions();
   window.clearTimeout(uploadedSealApplicationRuntime.timer);
+  if (event?.isComposing && !uploadedSealApplicationRuntime.composing) startUploadedSealApplicationComposition();
+  if (uploadedSealApplicationRuntime.composing) return;
   if (uploadedSealApplicationRuntime.conflict) {
     renderUploadedSealApplicationSaveStatus();
     return;
@@ -31351,6 +31720,7 @@ function scheduleUploadedSealApplicationSave() {
 }
 
 async function syncUploadedSealApplicationDraft() {
+  if (uploadedSealApplicationRuntime.composing) throw new Error("請先完成申請資訊的文字輸入。");
   const scope = uploadedSealApplicationScopeSnapshot();
   window.clearTimeout(uploadedSealApplicationRuntime.timer);
   if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
@@ -31362,7 +31732,8 @@ async function syncUploadedSealApplicationDraft() {
       throw error;
     }
     if (!uploadedSealApplicationScopeIsCurrent(scope)) return;
-    if (uploadedSealApplicationHasUnsavedChanges()) return syncUploadedSealApplicationDraft();
+    if (uploadedSealApplicationRuntime.composing) throw new Error("請先完成申請資訊的文字輸入。");
+    if (!uploadedSealApplicationRuntime.composing && uploadedSealApplicationHasUnsavedChanges()) return syncUploadedSealApplicationDraft();
     return;
   }
   if (!uploadedSealApplicationHasUnsavedChanges()) return;
@@ -31418,7 +31789,7 @@ async function syncUploadedSealApplicationDraft() {
     if (!conflict && uploadedSealApplicationRuntime.retryCount < 3 && ![401, 403, 409].includes(error.status)) {
       uploadedSealApplicationRuntime.retryCount += 1;
       uploadedSealApplicationRuntime.timer = window.setTimeout(() => {
-        if (uploadedSealApplicationScopeIsCurrent(scope)) void syncUploadedSealApplicationDraft().catch(() => {});
+        if (uploadedSealApplicationScopeIsCurrent(scope) && !uploadedSealApplicationRuntime.composing) void syncUploadedSealApplicationDraft().catch(() => {});
       }, 5000);
     }
     throw error;
@@ -31429,7 +31800,8 @@ async function syncUploadedSealApplicationDraft() {
     }
   }
   // A keystroke during the request belongs to a newer save, never overwrite it.
-  if (uploadedSealApplicationScopeIsCurrent(scope) && uploadedSealApplicationHasUnsavedChanges()) return syncUploadedSealApplicationDraft();
+  if (uploadedSealApplicationScopeIsCurrent(scope) && uploadedSealApplicationRuntime.composing) throw new Error("請先完成申請資訊的文字輸入。");
+  if (uploadedSealApplicationScopeIsCurrent(scope) && !uploadedSealApplicationRuntime.composing && uploadedSealApplicationHasUnsavedChanges()) return syncUploadedSealApplicationDraft();
 }
 
 async function flushUploadedSealDraftBeforeSwitch() {
@@ -31552,6 +31924,7 @@ async function handleUploadedSealCompanyChange(event) {
 
 async function submitUploadedSealApplication() {
   if (uploadedSealApplicationRuntime.submissionBusy || uploadedSealEditorRuntime.locked) return;
+  if (uploadedSealApplicationRuntime.composing) return showToast("請先完成申請資訊的文字輸入。");
   const form = document.querySelector("#uploadedSealForm");
   if (form && !form.reportValidity()) return;
   const contractMode = uploadedSealMode === "contract";
@@ -32772,6 +33145,7 @@ document.querySelector("#roleSelect").addEventListener("change", (event) => {
 
 document.querySelector("#composeForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!flushComposeInputUpdates()) return showToast("請先完成文字輸入。");
   if (!validateComposeStep("fill")) return;
   if (!draftConfirmed) {
     setComposeStep("confirm", { force: true });
@@ -33006,6 +33380,12 @@ document.querySelector("#contractSealApplyBtn").addEventListener("click", confir
 document.querySelector("#contractSealReturnBtn").addEventListener("click", returnCurrentContractSeal);
 document.querySelector("#contractSealOpenBtn").addEventListener("click", () => void openContractInElectronicSeal(currentContractSealRequest() || currentContract()));
 document.querySelector("#contractModalCloseBtn").addEventListener("click", closeContractModal);
+document.querySelector("#toast")?.addEventListener("mouseenter", pauseToastDismissal);
+document.querySelector("#toast")?.addEventListener("mouseleave", resumeToastDismissal);
+["#inboundModal", "#contractModal"].forEach((selector) => {
+  const modal = document.querySelector(selector);
+  modal?.addEventListener("keydown", (event) => trapWorkspaceModalFocus(event, modal));
+});
 document.querySelector("#contractModal").addEventListener("click", (event) => {
   if (event.target.id === "contractModal") closeContractModal();
 });
@@ -33051,7 +33431,8 @@ document.querySelector("#composeAiDiscardBtn")?.addEventListener("click", discar
 document.querySelector("#composeAiUndoBtn")?.addEventListener("click", undoComposeAiSuggestion);
 window.addEventListener("online", () => { scheduleComposeCloudSave(); });
 window.addEventListener("beforeunload", (event) => {
-  if (composeCloudOperation || (composeCloudDraftId && composeCloudSavedSnapshots.get(composeCloudDraftId) !== JSON.stringify(composeRawSnapshot()))) {
+  if (!composeInputIsComposing()) flushComposeInputUpdates({ preview: false });
+  if (composeInputIsComposing() || composeInputRuntime.pending || composeCloudOperation || (composeCloudDraftId && composeCloudSavedSnapshots.get(composeCloudDraftId) !== JSON.stringify(composeRawSnapshot()))) {
     event.preventDefault();
     event.returnValue = "";
   }
@@ -33071,6 +33452,7 @@ document.querySelectorAll("[data-print-official-draft]").forEach((button) => {
   button.addEventListener("click", () => void printOfficialDraft(button.dataset.printOfficialDraft));
 });
 document.querySelector("#confirmDraftBtn").addEventListener("click", () => {
+  if (!flushComposeInputUpdates({ preview: false })) return showToast("請先完成文字輸入。");
   if (!validateComposeStep("fill")) {
     setComposeStep("fill", { force: true });
     return;
@@ -33117,6 +33499,8 @@ document.querySelector("#attachmentDetails")?.addEventListener("input", (event) 
 ["#composeCompanySelect", "#docType", "#priority", "#composeApprovalCategorySelect", "#recipient", "#copyRecipients", "#documentPurpose", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);
+  element?.addEventListener("compositionstart", startComposeComposition);
+  element?.addEventListener("compositionend", finishComposeComposition);
   if (!["INPUT", "TEXTAREA"].includes(element?.tagName) || element?.type === "file") {
     element?.addEventListener("change", markDraftDirty);
   }
@@ -33424,6 +33808,8 @@ document.querySelector("#uploadedSealDepartment")?.addEventListener("change", ()
 document.querySelectorAll("#uploadedSealApplicant, #uploadedSealTitle, #uploadedSealReason").forEach((input) => {
   input.addEventListener("input", scheduleUploadedSealApplicationSave);
   input.addEventListener("change", scheduleUploadedSealApplicationSave);
+  input.addEventListener("compositionstart", startUploadedSealApplicationComposition);
+  input.addEventListener("compositionend", finishUploadedSealApplicationComposition);
 });
 window.addEventListener("online", () => {
   if (uploadedSealApplicationHasUnsavedChanges()) scheduleUploadedSealApplicationSave();
@@ -34400,90 +34786,140 @@ renderApprovalCategorySelect("#officialApprovalCategorySelect", "", { requireSel
 renderApprovalCategorySelect("#uploadedSealApprovalCategorySelect", "", { requireSelection: true });
 let deferredWorkspaceInitialized = false;
 let deferredWorkspaceScheduled = false;
+let deferredWorkspaceInitializedScope = "";
+let deferredWorkspaceInitializedToken = "";
+let deferredWorkspaceOperation = null;
 
 function initializeDeferredWorkspace() {
-  if (deferredWorkspaceInitialized || !hasAuthenticatedBackendSession()) return;
-  deferredWorkspaceInitialized = true;
-  renderComposeApprovalRoute();
-  renderOfficialApplicationApprovalRoute();
-  renderUploadedSealApprovalRoute();
-  assignNextDispatchNo(true);
-  const dateInput = document.querySelector("#dispatchDate");
-  if (dateInput && !dateInput.value) dateInput.value = composeTodayDate();
-  syncComposeElectronicExchangeMode();
-  applyComposeContactDefaults();
-  prepareComposeDraftRecovery();
-  renderDraftPreview();
-  renderQueueRows();
-  renderInboundRows();
-  renderInboundDetail();
-  renderInboundAuditLog();
-  setInboundSection("records");
-  renderDispatchBoard();
-  renderDispatchDetail();
-  renderDispatchAuditLog();
-  renderInternalDispatchModule();
-  renderPrechecks();
-  renderJagentStatus();
-  renderAddressResults();
-  renderFormatAttachments();
-  renderFormatChecks();
-  renderFormatAgencyResults();
-  renderFormatAuditLog();
-  renderWorkflowRole();
-  renderOfficialWorkflowConfig();
-  renderWorkflowTasks();
-  renderUnifiedFlows();
-  renderWorkflowSteps();
-  renderApprovalProgress();
-  renderApprovalLog();
-  renderWorkflowAuditLog();
-  renderApprovalCategorySelect("#workflowDocumentCategorySelect", "服務委託合約");
-  renderWorkflowTemplateSteps();
-  renderWorkflowConditions();
-  renderWorkflowProxies();
-  renderWorkflowProofLog();
-  renderContracts();
-  renderContractSeal();
-  fillContractForm();
-  renderSeals();
-  renderTrackingSummary();
-  renderTrackingRows();
-  renderTrackingDetail();
-  renderTrackingAuditLog();
-  renderTimeline("#exchangeTimeline", exchangeEvents);
-  renderTimeline("#auditTimeline", auditEvents);
-  renderArchiveSummary();
-  renderArchiveRows();
-  renderArchiveDetail();
-  renderArchiveGrid();
-  renderArchiveAuditLog();
-  renderSecurityStatus();
-  renderSecurityPermissionGrid();
-  renderSecurityDeviceList();
-  renderSecurityAuditLog();
-  renderFileSecurity();
-  renderAccounts();
-  renderReports();
-  renderReportsAuditLog();
-  renderNotifications();
-  renderNotificationAuditLog();
-  renderJobs();
-  renderDatabase();
-  renderOps();
-  renderComplianceOps();
-  renderSettings();
-  renderSearch();
-  applyFormalExchangeUiState();
-  applyProductionLoginSafetyState();
+  if (!hasAuthenticatedBackendSession()) return Promise.resolve(false);
+  const scope = frontendSessionScope();
+  const token = typeof authState === "object" ? authState?.token || "" : "";
+  if (deferredWorkspaceInitialized && deferredWorkspaceInitializedScope === scope && deferredWorkspaceInitializedToken === token) return Promise.resolve(true);
+  if (deferredWorkspaceOperation?.scope === scope && deferredWorkspaceOperation.token === token) return deferredWorkspaceOperation.promise;
+  const contractInputSnapshot = () => JSON.stringify(
+    [...(document.querySelector("#contractForm")?.querySelectorAll?.("input, select, textarea") || [])]
+      .map((control) => [control.id || control.name || "", control.value, Boolean(control.checked)])
+  );
+  const initialContractInputs = contractInputSnapshot();
+  const steps = [
+    () => renderComposeApprovalRoute(),
+    () => renderOfficialApplicationApprovalRoute(),
+    () => renderUploadedSealApprovalRoute(),
+    () => assignNextDispatchNo(true),
+    () => { const dateInput = document.querySelector("#dispatchDate"); if (dateInput && !dateInput.value) dateInput.value = composeTodayDate(); },
+    () => syncComposeElectronicExchangeMode(),
+    () => applyComposeContactDefaults(),
+    () => prepareComposeDraftRecovery(),
+    () => renderDraftPreview(),
+    () => renderQueueRows(),
+    () => renderInboundRows(),
+    () => renderInboundDetail(),
+    () => renderInboundAuditLog(),
+    () => setInboundSection("records"),
+    () => renderDispatchBoard(),
+    () => renderDispatchDetail(),
+    () => renderDispatchAuditLog(),
+    () => renderInternalDispatchModule(),
+    () => renderPrechecks(),
+    () => renderJagentStatus(),
+    () => renderAddressResults(),
+    () => renderFormatAttachments(),
+    () => renderFormatChecks(),
+    () => renderFormatAgencyResults(),
+    () => renderFormatAuditLog(),
+    () => renderWorkflowRole(),
+    () => renderOfficialWorkflowConfig(),
+    () => renderWorkflowTasks(),
+    () => renderUnifiedFlows(),
+    () => renderWorkflowSteps(),
+    () => renderApprovalProgress(),
+    () => renderApprovalLog(),
+    () => renderWorkflowAuditLog(),
+    () => renderApprovalCategorySelect("#workflowDocumentCategorySelect", "服務委託合約"),
+    () => renderWorkflowTemplateSteps(),
+    () => renderWorkflowConditions(),
+    () => renderWorkflowProxies(),
+    () => renderWorkflowProofLog(),
+    () => renderContracts(),
+    () => renderContractSeal(),
+    () => { if (contractInputSnapshot() === initialContractInputs) fillContractForm(); },
+    () => renderSeals(),
+    () => renderTrackingSummary(),
+    () => renderTrackingRows(),
+    () => renderTrackingDetail(),
+    () => renderTrackingAuditLog(),
+    () => renderTimeline("#exchangeTimeline", exchangeEvents),
+    () => renderTimeline("#auditTimeline", auditEvents),
+    () => renderArchiveSummary(),
+    () => renderArchiveRows(),
+    () => renderArchiveDetail(),
+    () => renderArchiveGrid(),
+    () => renderArchiveAuditLog(),
+    () => renderSecurityStatus(),
+    () => renderSecurityPermissionGrid(),
+    () => renderSecurityDeviceList(),
+    () => renderSecurityAuditLog(),
+    () => renderFileSecurity(),
+    () => renderAccounts(),
+    () => renderReports(),
+    () => renderReportsAuditLog(),
+    () => renderNotifications(),
+    () => renderNotificationAuditLog(),
+    () => renderJobs(),
+    () => renderDatabase(),
+    () => renderOps(),
+    () => renderComplianceOps(),
+    () => renderSettings(),
+    () => renderSearch(),
+    () => applyFormalExchangeUiState(),
+    () => applyProductionLoginSafetyState()
+  ];
+  const operation = { scope, token, index: 0, promise: null, resolve: null, reject: null };
+  operation.promise = new Promise((resolve, reject) => { operation.resolve = resolve; operation.reject = reject; });
+  deferredWorkspaceOperation = operation;
+  deferredWorkspaceInitialized = false;
+  const current = () => deferredWorkspaceOperation === operation && hasAuthenticatedBackendSession() && scope === frontendSessionScope()
+    && token === (typeof authState === "object" ? authState?.token || "" : "");
+  const finish = (completed, error = null) => {
+    if (deferredWorkspaceOperation === operation) {
+      deferredWorkspaceOperation = null;
+      deferredWorkspaceInitialized = completed;
+      deferredWorkspaceInitializedScope = completed ? scope : "";
+      deferredWorkspaceInitializedToken = completed ? token : "";
+    }
+    if (error) operation.reject(error);
+    else operation.resolve(completed);
+  };
+  const batch = () => {
+    if (!current()) return finish(false);
+    const startedAt = performance.now();
+    let count = 0;
+    try {
+      while (operation.index < steps.length && current()) {
+        steps[operation.index++]();
+        // A timer boundary lets pending input/paint run. An idle callback alone
+        // does not limit a large synchronous initialization task.
+        if (++count >= 6 || performance.now() - startedAt >= 6) break;
+      }
+      if (!current()) return finish(false);
+      if (operation.index >= steps.length) return finish(true);
+      window.setTimeout(batch, 0);
+    } catch (error) {
+      finish(false, error);
+    }
+  };
+  batch();
+  return operation.promise;
 }
 
 function scheduleDeferredWorkspaceInitialization() {
-  if (deferredWorkspaceInitialized || deferredWorkspaceScheduled) return;
+  const token = typeof authState === "object" ? authState?.token || "" : "";
+  if (deferredWorkspaceScheduled || (deferredWorkspaceInitialized && deferredWorkspaceInitializedScope === frontendSessionScope() && deferredWorkspaceInitializedToken === token)
+    || (deferredWorkspaceOperation?.scope === frontendSessionScope() && deferredWorkspaceOperation.token === token)) return;
   deferredWorkspaceScheduled = true;
   const run = () => {
     deferredWorkspaceScheduled = false;
-    initializeDeferredWorkspace();
+    void initializeDeferredWorkspace().catch(() => console.warn("[edoc-entry:deferred-workspace] initialization failed"));
   };
   if (typeof window.requestIdleCallback === "function") {
     window.requestIdleCallback(run, { timeout: 900 });

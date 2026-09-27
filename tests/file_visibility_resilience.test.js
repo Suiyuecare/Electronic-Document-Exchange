@@ -115,17 +115,21 @@ const fixture = process.env.EDOC_FILE_VISIBILITY_FIXTURE ? JSON.parse(process.en
 
 function queueHarness(item = fixture.item) {
   const buttons = [];
-  const list = { innerHTML: '', querySelectorAll: selector => selector === '[data-electronic-seal-download]' ? buttons : [] };
+  // This suite checks file authorization markup, not layout. Its synthetic
+  // template has one text node; the shipping reconciler still runs unchanged.
+  const textNode = value => ({ nodeType: 3, nodeValue: value, cloneNode() { return textNode(this.nodeValue); }, remove() { list.childNodes.splice(list.childNodes.indexOf(this), 1); } });
+  const list = { childNodes: [], contains: () => false, querySelectorAll: selector => selector === '[data-electronic-seal-download]' ? buttons : [], insertBefore(node, before) { const old = this.childNodes.indexOf(node); if (old >= 0) this.childNodes.splice(old, 1); const index = before ? this.childNodes.indexOf(before) : this.childNodes.length; this.childNodes.splice(index, 0, node); } };
+  Object.defineProperty(list, 'innerHTML', { get: () => list.childNodes.map(node => node.nodeValue).join('') });
   const count = { textContent: '' };
   const context = {
     officialWorkflowItems: [structuredClone(item)], officialWorkflowPage: { hasMore: false },
-    document: { querySelector: selector => selector === '#electronicSealWorkQueueList' ? list : selector === '#electronicSealWorkQueueCount' ? count : null },
+    document: { activeElement: null, createElement() { const template = { content: { childNodes: [] } }; Object.defineProperty(template, 'innerHTML', { set: value => { template.content.childNodes = [textNode(value)]; } }); return template; }, querySelector: selector => selector === '#electronicSealWorkQueueList' ? list : selector === '#electronicSealWorkQueueCount' ? count : null },
     ensureElectronicSealWorkQueue() {}, officialDocumentPriority: () => 0, officialDocumentHasEditorV2: () => false,
     escapeHtml: String, officialStatusLabel: String, officialDocumentCanConfirm: () => false,
     officialDocumentIsApplicant: () => false,
   };
   vm.createContext(context);
-  vm.runInContext(['electronicSealWorkflowItems', 'renderElectronicSealWorkQueue'].map(implementation).join('\n'), context);
+  vm.runInContext(['renderStableWorkflowMarkup', 'bindWorkflowActionOnce', 'electronicSealWorkflowItems', 'renderElectronicSealWorkQueue'].map(implementation).join('\n'), context);
   return { context, list, buttons };
 }
 

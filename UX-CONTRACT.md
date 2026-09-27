@@ -1,7 +1,9 @@
-# File workflow contract
+# Workspace interaction and file workflow contract
 
-This is a focused contract for the 2026-09-28 file-resilience changes. Existing
-Finance-aligned UI and approval/security contracts remain in force.
+This contract covers the 2026-09-28 file-resilience and fluid-interaction changes.
+Existing Finance-aligned visual identity and approval/security contracts remain
+in force. "Apple-like" means continuous, responsive interaction, not Apple
+branding or a promise of zero network latency.
 
 ## Canonical UI Map
 
@@ -14,6 +16,37 @@ Finance-aligned UI and approval/security contracts remain in force.
 | Select/Listbox | Existing native select fields | Server-provided companies, categories and seals | No replacement or new popup in this change | Six-role selection/upload journeys |
 | Date | Existing native compose date input | User-entered date with existing today default | Unchanged and outside the file-resilience release | Existing compose regressions |
 | Table Selection | Electronic-seal queue uses row actions, not bulk selection | Authorized paginated cases | No selectable table introduced | Slim-row download fixture |
+
+## Shared interaction owners
+
+| Capability | Canonical owner | Contract |
+| --- | --- | --- |
+| Navigation | `setView` and six existing major routes | Immediate selected view; same-route operations preserve scroll/focus; returning restores route scroll only within the current in-memory session; a changed route focuses its title. Integrated sub-sections retain their intentional section navigation. |
+| Background reads | Scoped route loaders and official list transport | Share identical in-flight reads, not mutations; differing query/cursor/session remain separate. Preserve generation, permission and revision guards. Failure can be explicitly retried. |
+| Initialization | `initializeDeferredWorkspace` | Ordered cooperative batches yield to interaction. Do not remove initialization or reorder dependency steps. Old-session work must stop. |
+| Form input | Existing compose/application lifecycle | During IME composition, hold preview/local/cloud autosave. Commit the final composition before saving; manual transitions cannot submit uncommitted input. Avoid rebuilding unchanged controls. |
+| Lists | Existing authorized queue/log renderers | Preserve focused row action, scroll and stable nodes when content is unchanged. Do not restore focus into a different case, hidden control or new actor. |
+| Notices | `showToast` | One notice, one owned 4s timer; identical messages do not rewrite the live region. Hover pauses its remaining duration. Persistent inline errors/retry controls remain authoritative. |
+| Modal/drawer | Existing modal markup with shared isolation/focus helpers | Inert workspace children, never unset authentication's outer inert gate. Tab containment, Escape/cancel and trigger restoration. Reopening an already visible detail does not steal focus. |
+| Motion/layers | `styles.css` | Finance colors/frame unchanged. Shared dialog/toast layer tokens; toast above dialog on all widths. Reduced motion disables travel; no operation waits for animation. |
+
+## Fluid interaction acceptance
+
+- Same-fixture before/after desktop and mobile screenshots for all six pages;
+  tablet checks in the six-role suite. No overflow or inaccessible primary action.
+- Route selection is synchronous; measure click-to-visible view locally, not
+  authenticated production network/SSO timing. Navigation must not wait for reads.
+- Concurrent identical list loads make one read; different session/query loads
+  do not share. Unchanged organization data does not rebuild selectors, but an
+  actual organization change with the same version still updates.
+- Synthetic paused IME does not send partial local/cloud autosave; composition
+  end commits the latest text. Physical OS IME remains a separate device check.
+- Background refresh preserves focused case buttons and inputs; identical
+  header state causes no repeated live-region text writes.
+- Keyboard/mobile drawer and detail dialogs pass Tab/Escape/return focus and
+  isolation checks; toast replacement has a full independent duration.
+- Existing upload, locked version, cross-company denial, approval, final-output
+  and receipt tests must remain passing before production publication.
 
 ## File lifecycle owners
 

@@ -59,8 +59,8 @@ class OfficialFontScopeContractTest(unittest.TestCase):
         self.assertIn("official_pdf_font_missing_glyphs", javascript)
         self.assertIn("內容含教育部標準楷書不支援的罕見字元", javascript)
         self.assertIn("entry-bootstrap.js?v=20260925-handoff-recovery-r2", html)
-        self.assertIn("styles.css?v=20260925-role-ux-r1", html)
-        self.assertIn("app.js?v=20260928-file-resilience-r1", html)
+        self.assertIn("styles.css?v=20260928-fluid-experience-r1", html)
+        self.assertIn("app.js?v=20260928-fluid-experience-r1", html)
 
         editor_rule = css[css.index("#uploadedSealTextInput") : css.index(".draft-preview-heading-actions")]
         self.assertIn("EDoc LXGW WenKai TC", editor_rule)
