@@ -42,8 +42,8 @@ def javascript_function(source: str, name: str) -> str:
     depth = 0
     quote = ""
     escaped = False
-    index = match.end() - 1
-    for position in range(index, len(source)):
+    position = match.end() - 1
+    while position < len(source):
         char = source[position]
         if quote:
             if escaped:
@@ -52,6 +52,20 @@ def javascript_function(source: str, name: str) -> str:
                 escaped = True
             elif char == quote:
                 quote = ""
+            position += 1
+            continue
+        # Apostrophes and braces inside comments are not JavaScript tokens.
+        # In particular, prose such as "the user's wait" must not open a
+        # string and swallow the real closing brace of a shipping function.
+        if source.startswith("//", position):
+            newline = source.find("\n", position + 2)
+            position = len(source) if newline == -1 else newline + 1
+            continue
+        if source.startswith("/*", position):
+            end = source.find("*/", position + 2)
+            if end == -1:
+                raise AssertionError(f"JavaScript comment is not balanced: {name}")
+            position = end + 2
             continue
         if char in {'"', "'", "`"}:
             quote = char
@@ -61,6 +75,7 @@ def javascript_function(source: str, name: str) -> str:
             depth -= 1
             if depth == 0:
                 return source[match.start():position + 1]
+        position += 1
     raise AssertionError(f"JavaScript function is not balanced: {name}")
 
 
@@ -87,6 +102,17 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         cls.js = (ROOT / "app.js").read_text(encoding="utf-8")
         cls.css = (ROOT / "styles.css").read_text(encoding="utf-8")
         cls.page = html_element(cls.html, "electronicSeal")
+
+    def test_function_extractor_ignores_comment_quotes_and_string_braces(self) -> None:
+        function = r'''function fixture() {
+  const first = "} escaped \\\" {";
+  const second = '}';
+  const template = `quoted } {`;
+  // The user's comment contains } ' " ` and should not close this body.
+  /* Another } { ' " ` comment. */
+  return { first, second, template };
+}'''
+        self.assertEqual(javascript_function(function + "\nfunction next() {}", "fixture"), function)
 
     def test_page_keeps_application_first_and_uses_responsive_35_65_split(self) -> None:
         application = html_element(self.page, "uploadedSealApplicationPanel")
@@ -251,14 +277,18 @@ class ElectronicSealPageContractTest(unittest.TestCase):
             "requestEditorUpload(file, \"source_pdf\", preparation.sha256)",
             "performTusUpload(file, intent",
             "confirmUploadedPdfConversion(file)",
-            "const finalizePromise = finalizeEditorUpload(intent, file, { allowA4Conversion: true })",
+            "pending.finalizePromise = transferPendingEditorPdf(pending)",
             "loadUploadedPdfIntoEditor(file, intent, null, { append: false, preparation })",
-            "finishPendingEditorPdfFinalization(uploadedSealEditorRuntime.pendingFinalization)",
+            "finishPendingEditorPdfFinalization(pending)",
             "ensureUploadedEditorPagesA4(uploadedSealEditorState.pages)",
         ):
             self.assertIn(operation, handler)
         self.assertNotIn("掃毒與 PDF 預檢中", handler)
         self.assertLess(handler.index("await loadUploadedPdfIntoEditor(file, intent, null"), handler.index("finishPendingEditorPdfFinalization("))
+        self.assertLess(handler.index("await loadUploadedPdfIntoEditor(file, intent, null"), handler.index("transferPendingEditorPdf(pending)"))
+        transfer = javascript_function(self.js, "transferPendingEditorPdf")
+        self.assertIn("await performTusUpload(file, intent", transfer)
+        self.assertIn("await finalizeEditorUpload(intent, file, { allowA4Conversion: true })", transfer)
 
         finish = javascript_function(self.js, "finishPendingEditorPdfFinalization")
         self.assertIn("applyEditorRevisionFromResponse(finalized)", finish)
@@ -401,7 +431,7 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         self.assertIn("const chunkSize = 6 * 1024 * 1024", upload)
         self.assertIn("uploadLocation.origin !== endpointUrl.origin", upload)
         self.assertIn('uploadLocation.pathname.startsWith("/storage/v1/upload/resumable/sign/")', upload)
-        self.assertIn("editorTusRemoteOffset(uploadUrl, baseHeaders)", upload)
+        self.assertIn("editorTusRemoteOffset(uploadUrl, baseHeaders, { signal })", upload)
         self.assertIn('onProgress(Math.min(1, offset / Math.max(1, file.size)), "confirmed")', upload)
         self.assertGreaterEqual(upload.count('redirect: "error"'), 3)
         self.assertIn('redirect: "error"', offset_probe)

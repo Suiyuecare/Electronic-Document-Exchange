@@ -21,7 +21,7 @@ class SixRoleBrowserFixtureContractTests(unittest.TestCase):
         self.assertNotRegex(html, r'id="interfaceFontStylesheet"[^>]*onload=')
         self.assertIn("entry-bootstrap.js?v=20260925-handoff-recovery-r2", html)
         self.assertIn("styles.css?v=20260925-role-ux-r1", html)
-        self.assertIn("app.js?v=20260927-editor-race-r1", html)
+        self.assertIn("app.js?v=20260928-file-resilience-r1", html)
         self.assertIn("edukai", js.lower())
 
     def test_mobile_header_touch_targets_are_at_least_44px(self):
