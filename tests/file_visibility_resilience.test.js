@@ -100,6 +100,7 @@ function downloadHarness(detail) {
   let scope = 'synthetic-session';
   const calls = [], notices = [];
   const context = {
+    authState: { token: 'synthetic-session-token' },
     frontendSessionScope: () => scope, backendRequest: async url => { calls.push(['detail', url]); return detail; },
     downloadOfficialWorkflowFile: async (...args) => { calls.push(['download', ...args]); return true; },
     showToast: message => notices.push(message),
@@ -136,6 +137,18 @@ test('revoked access, different cases and missing exact final files fail closed'
 test('a session change while fresh detail is pending does not download old-session evidence', async () => {
   const h = downloadHarness(detailedItem());
   h.context.backendRequest = async () => { h.changeSession(); return detailedItem(); };
+  assert.equal(await h.context.downloadElectronicSealFinalFile('TEST-DOC', 'TEST-FINAL'), false);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.notices.length, 0);
+});
+
+test('same-account re-login during fresh detail blocks the prior session download', async () => {
+  const h = downloadHarness(detailedItem());
+  h.context.backendRequest = async () => {
+    h.context.authState = null;
+    h.context.authState = { token: 'new-synthetic-session-token' };
+    return detailedItem();
+  };
   assert.equal(await h.context.downloadElectronicSealFinalFile('TEST-DOC', 'TEST-FINAL'), false);
   assert.equal(h.calls.length, 0);
   assert.equal(h.notices.length, 0);
@@ -221,6 +234,19 @@ test('logout while a download body is pending suppresses the old-session file an
   assert.deepEqual(h.events, []);
   assert.equal(h.notices.length, 0);
   assert.equal(h.timers.size, 0);
+});
+
+test('same-account re-login during body read cannot download the earlier session response', async () => {
+  let release;
+  const h = workflowDownloadHarness(async () => downloadResponse('', { blob: () => new Promise(resolve => { release = resolve; }) }));
+  const pending = h.c.downloadOfficialWorkflowFile('TEST-DOC', 'TEST-FINAL');
+  await settle();
+  h.c.authState = null;
+  h.c.authState = { token: 'new-synthetic-session-token' };
+  release({ syntheticPdf: true });
+  assert.equal(await pending, false);
+  assert.deepEqual(h.events, []);
+  assert.equal(h.notices.length, 0);
 });
 
 test('session changes before headers or before anchor click fail closed with cleanup', async () => {

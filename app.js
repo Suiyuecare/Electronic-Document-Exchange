@@ -12219,18 +12219,20 @@ async function completeOfficialDispatch(documentId) {
 
 async function downloadOfficialWorkflowFile(documentId, fileId) {
   const scope = frontendSessionScope();
+  const sessionToken = authState?.token || "";
+  const isCurrent = () => scope === frontendSessionScope() && sessionToken === (authState?.token || "");
   let url = "";
   let anchor = null;
   try {
     const { response, blob } = await fetchWithDeadline(`${backendApiBase}/official-documents/${encodeURIComponent(documentId)}/files/${encodeURIComponent(fileId)}/download`, {
-      headers: isHeaderSafeToken(authState?.token) ? { Authorization: `Bearer ${authState.token}` } : {},
+      headers: isHeaderSafeToken(sessionToken) ? { Authorization: `Bearer ${sessionToken}` } : {},
       cache: "no-store"
     }, { timeoutMs: 45000, label: "檔案下載", read: async (response) => {
-      if (scope !== frontendSessionScope()) return { response, blob: null };
+      if (!isCurrent()) return { response, blob: null };
       if (!response.ok) throw new Error((await response.text()).slice(0, 160) || `HTTP ${response.status}`);
       return { response, blob: await response.blob() };
     } });
-    if (scope !== frontendSessionScope() || !blob) return false;
+    if (!isCurrent() || !blob) return false;
     const disposition = response.headers.get("Content-Disposition") || "";
     const extendedName = disposition.match(/filename\*\s*=\s*UTF-8'[^']*'([^;]+)/i)?.[1];
     const plainName = disposition.match(/filename\s*=\s*(?:"([^"]*)"|([^;]*))/i);
@@ -12242,11 +12244,11 @@ async function downloadOfficialWorkflowFile(documentId, fileId) {
     anchor.href = url;
     anchor.download = fileName;
     document.body.append(anchor);
-    if (scope !== frontendSessionScope()) return false;
+    if (!isCurrent()) return false;
     anchor.click();
     return true;
   } catch (error) {
-    if (scope === frontendSessionScope()) showToast(`下載失敗：${error.message}`);
+    if (isCurrent()) showToast(`下載失敗：${error.message}`);
     return false;
   } finally {
     anchor?.remove();
@@ -30881,9 +30883,11 @@ function renderElectronicSealWorkQueue() {
 async function downloadElectronicSealFinalFile(documentId, expectedFileId) {
   if (!documentId || !expectedFileId) return false;
   const scope = frontendSessionScope();
+  const sessionToken = authState?.token || "";
+  const isCurrent = () => scope === frontendSessionScope() && sessionToken === (authState?.token || "");
   try {
     const detail = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
-    if (scope !== frontendSessionScope()) return false;
+    if (!isCurrent()) return false;
     if (String(detail.id || "") !== String(documentId) || detail.can_download !== true) {
       throw new Error("目前帳號無法下載這份文件。");
     }
@@ -30893,7 +30897,7 @@ async function downloadElectronicSealFinalFile(documentId, expectedFileId) {
     }
     return await downloadOfficialWorkflowFile(documentId, finalFile.id);
   } catch (error) {
-    if (scope === frontendSessionScope()) showToast(`下載失敗：${error.message}`);
+    if (isCurrent()) showToast(`下載失敗：${error.message}`);
     return false;
   }
 }
