@@ -24,6 +24,7 @@ const scopedFunctions = [
   'uploadedEditorDraftPrerequisiteIssue', 'uploadedPdfUploadBlockingMessage',
   'handleUploadedEditorImportPdf', 'handleUploadedEditorImage', 'finishPendingEditorPdfFinalization',
   'runUploadedEditorPageAction',
+  'transferPendingEditorPdf', 'cancelUploadedPdfTransfer',
 ];
 const deferred = () => {
   let resolve, reject;
@@ -42,7 +43,7 @@ function harness() {
     pageProxies: new Map(), assetUrls: new Map(), imageUrls: new Map(),
   };
   const context = {
-    console, File, Blob, TextEncoder, Uint8Array, Map, Set, crypto: require('node:crypto').webcrypto,
+    console, File, Blob, TextEncoder, Uint8Array, Map, Set, AbortController, crypto: require('node:crypto').webcrypto,
     performance: { now: () => 100 }, navigator: { onLine: true }, window: { clearTimeout() {} },
     session: 'USER-A:COMPANY-A', uploadedSealApplicationRuntime: { epoch: 0 },
     uploadedSealEditorRuntime: runtime, uploadedSealEditorState: emptyState(),
@@ -51,7 +52,7 @@ function harness() {
     PDF_EDITOR_MAX_IMAGE_BYTES: 10 * 1024 * 1024,
     frontendSessionScope: () => context.session,
     document: { querySelector: key => {
-      if (!nodes.has(key)) nodes.set(key, { value: '', textContent: '', click() {} });
+      if (!nodes.has(key)) nodes.set(key, { value: '', textContent: '', click() {}, setAttribute() {}, removeAttribute() {} });
       return nodes.get(key);
     } },
     URL: {
@@ -169,7 +170,7 @@ test('A4 PDF becomes editable before background finalize completes', async () =>
 
   assert.equal(h.runtime.uploading, false, 'PDF upload gate releases as soon as local editor is ready');
   assert.equal(h.runtime.finalizingAsset, true, 'private-storage finalization continues in background');
-  assert.ok(h.runtime.lastEditorReadyMs <= 2000, 'ready-time metric is measured from TUS completion');
+  assert.ok(h.runtime.lastEditorReadyMs <= 2000, 'ready-time metric starts at file selection');
 
   // A real editor action remains available while the server catches up.
   h.context.runUploadedEditorPageAction('move-down');
@@ -180,6 +181,61 @@ test('A4 PDF becomes editable before background finalize completes', async () =>
   assert.equal(h.runtime.finalizingAsset, false);
   assert.equal(h.runtime.pendingEditorSave, false);
   assert.equal(h.runtime.savedGeneration, h.runtime.dirtyGeneration);
+});
+test('A4 editor is usable before transfer completes; cancellation and retry preserve edits', async () => {
+  const h = harness(); const started = deferred(); let attempts = 0;
+  const preparation = { file: h.file, sha256: 'HASH', report: { valid: true } };
+  h.context.confirmUploadedPdfConversion = async () => preparation;
+  h.context.requestEditorUpload = async () => h.intent();
+  h.context.finalizeEditorUpload = async () => ({ asset: { id: 'ASSET-A' }, editor_revision: { revisionNo: 3 } });
+  h.context.performTusUpload = async (_file, _intent, _progress, options) => {
+    attempts++;
+    if (attempts === 1) {
+      started.resolve();
+      await new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { name: 'AbortError' })), { once: true }));
+    }
+  };
+  h.context.loadUploadedPdfIntoEditor = async () => {
+    h.context.uploadedSealEditorState.pages = [{ pageId: 'P', order: 1 }];
+    h.runtime.currentPageId = 'P'; h.runtime.dirtyGeneration = 1;
+  };
+  h.context.saveUploadedEditorState = async () => { h.runtime.savedGeneration = h.runtime.dirtyGeneration; };
+  const operation = h.context.handleUploadedSealPdfChange(h.file);
+  await started.promise;
+  assert.equal(h.runtime.uploading, false);
+  assert.equal(h.runtime.finalizingAsset, true);
+  h.context.uploadedSealEditorState.elements.push({ id: 'USER-TEXT', kind: 'text', text: 'retained' });
+  h.runtime.dirtyGeneration++;
+  h.context.cancelUploadedPdfTransfer();
+  await operation;
+  assert.equal(h.runtime.finalizationError, true);
+  assert.equal(h.runtime.pendingFinalization.transferComplete, false);
+  assert.equal(h.context.uploadedSealEditorState.elements[0].id, 'USER-TEXT');
+  assert.equal(h.runtime.savedGeneration, 0, 'not falsely saved before private storage is finalized');
+  const retry = await h.context.finishPendingEditorPdfFinalization(h.runtime.pendingFinalization);
+  assert.ok(retry);
+  assert.equal(attempts, 2);
+  assert.equal(h.context.uploadedSealEditorState.elements[0].id, 'USER-TEXT');
+  assert.equal(h.runtime.savedGeneration, 2);
+  assert.equal(h.runtime.finalizingAsset, false);
+});
+test('an old cancelled transfer cannot hide or clear a newer transfer controller', async () => {
+  const h = harness(); const gate = deferred();
+  h.context.performTusUpload = () => gate.promise;
+  const pending = { intent: h.intent(), file: h.file, transferComplete: false };
+  const operation = h.context.transferPendingEditorPdf(pending);
+  const oldController = h.runtime.uploadAbortController;
+  await settle();
+  h.switchScope('account');
+  const newerController = new AbortController();
+  h.runtime.uploadAbortController = newerController;
+  const button = h.context.document.querySelector('#uploadedPdfCancelTransferBtn');
+  button.hidden = false;
+  oldController.abort();
+  gate.reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+  await assert.rejects(operation, { name: 'AbortError' });
+  assert.equal(h.runtime.uploadAbortController, newerController);
+  assert.equal(button.hidden, false, 'new transfer cancel action must remain available');
 });
 for (const phase of ['hash', 'intent', 'finalize']) {
   test(`${phase} awaited response cannot survive account/draft switch`, async () => {

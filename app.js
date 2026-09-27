@@ -1355,7 +1355,14 @@ function emptyUploadedSealEditorState() {
   };
 }
 
-function clearUploadedEditorSensitivePreviews() {
+function clearUploadedEditorSensitivePreviews({ preserveOpeningPreview = false } = {}) {
+  if (!preserveOpeningPreview) {
+    uploadedSealApplicationRuntime?.openAbortController?.abort?.();
+    if (typeof uploadedSealApplicationRuntime === "object") uploadedSealApplicationRuntime.openAbortController = null;
+    document.querySelector("#uploadedEditorOpeningPreview")?.remove();
+  }
+  uploadedSealEditorRuntime?.uploadAbortController?.abort?.();
+  if (typeof uploadedSealEditorRuntime === "object") uploadedSealEditorRuntime.uploadAbortController = null;
   uploadedSealOptionsRequestNo += 1;
   finishUploadedEditorTextEdit({ cancel: true });
   window.clearTimeout(uploadedSealEditorRuntime?.saveTimer || 0);
@@ -1445,6 +1452,7 @@ const uploadedSealEditorRuntime = {
   fitPage: true,
   locked: false,
   uploading: false,
+  uploadAbortController: null,
   finalizingAsset: false,
   finalizationError: false,
   pendingFinalization: null,
@@ -1494,11 +1502,23 @@ const uploadedSealEditorRuntime = {
 
 async function ensurePdfJsLibrary() {
   if (window.pdfjsLib?.getDocument) return window.pdfjsLib;
-  window.pdfjsLibPromise ||= import("./vendor/pdfjs/pdf.min.mjs?v=4.2.67").then((library) => {
-    window.pdfjsLib = library;
-    library.GlobalWorkerOptions.workerSrc = "vendor/pdfjs/pdf.worker.min.mjs?v=4.2.67";
-    return library;
-  });
+  if (!window.pdfjsLibPromise) {
+    const attempts = Number(window.pdfjsLibLoadAttempts || 0);
+    if (attempts >= 3) throw new Error("PDF 編輯元件仍無法載入，請重新整理頁面後再試。");
+    window.pdfjsLibLoadAttempts = attempts + 1;
+    // Browsers cache failed module imports by URL. A bounded retry must use a
+    // fresh URL, not only clear the rejected promise.
+    const retrySuffix = attempts ? `&retry=${attempts}` : "";
+    const promise = import(`./vendor/pdfjs/pdf.min.mjs?v=4.2.67${retrySuffix}`).then((library) => {
+      library.GlobalWorkerOptions.workerSrc = "vendor/pdfjs/pdf.worker.min.mjs?v=4.2.67";
+      window.pdfjsLib = library;
+      return library;
+    }).catch(() => {
+      if (window.pdfjsLibPromise === promise) window.pdfjsLibPromise = null;
+      throw new Error("PDF 編輯元件載入失敗，請確認連線後再試一次。");
+    });
+    window.pdfjsLibPromise = promise;
+  }
   return window.pdfjsLibPromise;
 }
 
@@ -12198,25 +12218,40 @@ async function completeOfficialDispatch(documentId) {
 }
 
 async function downloadOfficialWorkflowFile(documentId, fileId) {
+  const scope = frontendSessionScope();
+  let url = "";
+  let anchor = null;
   try {
-    const response = await fetch(`${backendApiBase}/official-documents/${encodeURIComponent(documentId)}/files/${encodeURIComponent(fileId)}/download`, {
+    const { response, blob } = await fetchWithDeadline(`${backendApiBase}/official-documents/${encodeURIComponent(documentId)}/files/${encodeURIComponent(fileId)}/download`, {
       headers: isHeaderSafeToken(authState?.token) ? { Authorization: `Bearer ${authState.token}` } : {},
       cache: "no-store"
-    });
-    if (!response.ok) throw new Error((await response.text()).slice(0, 160) || `HTTP ${response.status}`);
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
+    }, { timeoutMs: 45000, label: "檔案下載", read: async (response) => {
+      if (scope !== frontendSessionScope()) return { response, blob: null };
+      if (!response.ok) throw new Error((await response.text()).slice(0, 160) || `HTTP ${response.status}`);
+      return { response, blob: await response.blob() };
+    } });
+    if (scope !== frontendSessionScope() || !blob) return false;
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const extendedName = disposition.match(/filename\*\s*=\s*UTF-8'[^']*'([^;]+)/i)?.[1];
+    const plainName = disposition.match(/filename\s*=\s*(?:"([^"]*)"|([^;]*))/i);
+    let fileName = extendedName?.trim().replace(/^"|"$/g, "") || plainName?.[1] || plainName?.[2]?.trim() || "official-document.pdf";
+    try { fileName = decodeURIComponent(fileName); } catch (_error) { /* Legacy names need not be percent encoded. */ }
+    fileName = fileName.replace(/[\x00-\x1f\x7f]/g, "").split(/[\\/]/).pop() || "official-document.pdf";
+    url = URL.createObjectURL(blob);
+    anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = response.headers.get("Content-Disposition")?.match(/filename=\"?([^\";]+)/)?.[1] || "official-document.pdf";
+    anchor.download = fileName;
     document.body.append(anchor);
+    if (scope !== frontendSessionScope()) return false;
     anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
     return true;
   } catch (error) {
-    showToast(`下載失敗：${error.message}`);
+    if (scope === frontendSessionScope()) showToast(`下載失敗：${error.message}`);
     return false;
+  } finally {
+    anchor?.remove();
+    // Let the browser consume the download target before releasing its blob.
+    if (url) window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 }
 
@@ -21170,15 +21205,65 @@ async function syncDashboardFromBackend(silent = false, { throwOnError = false }
   }
 }
 
+async function fetchWithDeadline(url, options = {}, { timeoutMs = 20000, label = "操作", read = null, responsePromise = null, outcomeUnknown = false } = {}) {
+  const externalSignal = options.signal;
+  const controller = new AbortController();
+  let timer = null;
+  let rejectInterrupted;
+  const interrupted = new Promise((_resolve, reject) => { rejectInterrupted = reject; });
+  const cancel = () => {
+    const error = new Error(outcomeUnknown
+      ? "已取消等待；伺服器可能仍在處理，請重新載入確認結果。"
+      : "操作已取消，原有內容保持不變。");
+    error.name = "AbortError";
+    error.code = "request_cancelled";
+    error.retryable = false;
+    error.outcomeUnknown = outcomeUnknown;
+    rejectInterrupted(error);
+    controller.abort();
+  };
+  try {
+    if (externalSignal?.aborted) cancel();
+    else externalSignal?.addEventListener("abort", cancel, { once: true });
+    const requestedDuration = Number(timeoutMs);
+    const duration = Number.isFinite(requestedDuration) && requestedDuration > 0 ? requestedDuration : 20000;
+    timer = setTimeout(() => {
+      const error = new Error(outcomeUnknown
+        ? `${label}等待過久，伺服器可能仍在處理；請重新載入確認結果後再操作，避免重複送出。`
+        : `${label}等待過久，請確認網路後重試；已填內容不會清除。`);
+      error.name = "TimeoutError";
+      error.code = "request_timeout";
+      error.retryable = true;
+      error.outcomeUnknown = outcomeUnknown;
+      rejectInterrupted(error);
+      controller.abort();
+    }, duration);
+    const operation = Promise.resolve().then(async () => {
+      if (externalSignal?.aborted) return interrupted;
+      const response = await (responsePromise || fetch(url, { ...options, signal: controller.signal }));
+      return typeof read === "function" ? read(response) : response;
+    });
+    // The explicit race also bounds mocks or transports which ignore abort.
+    // Body reads belong to this operation, not a fresh unbounded fetch phase.
+    return await Promise.race([operation, interrupted]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", cancel);
+  }
+}
+
 async function backendRequest(path, options = {}, prefetchedResponse = null) {
-  const { headers: optionHeaders = {}, ...fetchOptions } = options;
+  const { headers: optionHeaders = {}, timeoutMs: requestedTimeoutMs, ...fetchOptions } = options;
+  const heavyRequest = /\/(?:editor-preflight|convert-a4|finalize|generate|submit|stamp|sign|export)(?:[/?]|$)/.test(path);
+  const timeoutMs = requestedTimeoutMs ?? (heavyRequest ? 120000 : 20000);
+  const outcomeUnknown = !["GET", "HEAD"].includes(String(fetchOptions.method || "GET").toUpperCase());
   const headers = { "Content-Type": "application/json", ...optionHeaders };
   if (isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
-  const response = await (prefetchedResponse || fetch(`${backendApiBase}${path}`, {
+  const { response, raw } = await fetchWithDeadline(`${backendApiBase}${path}`, {
     ...fetchOptions,
     headers
-  }));
-  const raw = await response.text();
+  }, { timeoutMs, label: "資料同步", responsePromise: prefetchedResponse, outcomeUnknown,
+    read: async (response) => ({ response, raw: await response.text() }) });
   let data = {};
   try {
     data = raw ? JSON.parse(raw) : {};
@@ -26862,6 +26947,50 @@ function clearUploadedEditorUploadError() {
   uploadedSealEditorRuntime.uploadRetry = null;
 }
 
+function cancelUploadedPdfTransfer() {
+  const controller = uploadedSealEditorRuntime.uploadAbortController;
+  if (!controller) return;
+  controller.abort();
+  setUploadedEditorSaveStatus("error", "已取消傳輸；此頁編輯仍保留，請重試同步");
+  setUploadedPdfUploadProgress("hidden");
+  document.querySelector("#uploadedPdfCancelTransferBtn")?.setAttribute("hidden", "");
+}
+
+async function transferPendingEditorPdf(pending) {
+  const { file, intent } = pending;
+  assertEditorUploadCurrent(intent);
+  const controller = new AbortController();
+  uploadedSealEditorRuntime.uploadAbortController = controller;
+  const cancelButton = document.querySelector("#uploadedPdfCancelTransferBtn");
+  if (cancelButton) cancelButton.hidden = false;
+  try {
+    if (!pending.transferComplete) {
+      setUploadedPdfUploadProgress("uploading", 0, "可先編輯 · 檔案背景傳輸中");
+      await performTusUpload(file, intent, (progress, phase) => {
+        if (!uploadedSealApplicationScopeIsCurrent(intent.scope, false)) return;
+        const percent = Math.round(progress * 100);
+        setUploadedPdfUploadProgress(phase === "sending" ? "uploading-pending" : "uploading", percent,
+          phase === "sending" ? `可先編輯 · 傳輸中 ${percent}%` : `可先編輯 · 已傳輸 ${percent}%`);
+      }, { signal: controller.signal });
+      assertEditorUploadCurrent(intent);
+      if (controller.signal.aborted) throw Object.assign(new Error("已取消檔案傳輸。"), { name: "AbortError" });
+      pending.transferComplete = true;
+    }
+    // The server may have committed after an interrupted response. Do not
+    // cancel finalization or report a failed upload; retry the same intent.
+    if (uploadedSealEditorRuntime.uploadAbortController === controller) uploadedSealEditorRuntime.uploadAbortController = null;
+    if (cancelButton) cancelButton.hidden = true;
+    setUploadedPdfUploadProgress("finalizing", null, "可先編輯 · 正在完成同步");
+    return await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+  } finally {
+    const ownsController = uploadedSealEditorRuntime.uploadAbortController === controller;
+    if (ownsController) uploadedSealEditorRuntime.uploadAbortController = null;
+    if (uploadedSealApplicationScopeIsCurrent(intent.scope, false)
+      && (ownsController || !uploadedSealEditorRuntime.uploadAbortController)
+      && cancelButton) cancelButton.hidden = true;
+  }
+}
+
 function showUploadedEditorUploadError(error, retry, actionLabel = "重新上傳") {
   const panel = document.querySelector("#uploadedEditorUploadError");
   const message = document.querySelector("#uploadedEditorUploadErrorMessage");
@@ -27363,27 +27492,51 @@ async function editorTusResponseError(response, phase) {
   return error;
 }
 
-function waitForTusRetry(delayMs) {
-  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+function waitForTusRetry(delayMs, { signal } = {}) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const cancel = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+      const error = new Error("操作已取消，原有內容保持不變。");
+      error.name = "AbortError";
+      error.code = "request_cancelled";
+      error.retryable = false;
+      reject(error);
+    };
+    if (signal?.aborted) return cancel();
+    signal?.addEventListener("abort", cancel, { once: true });
+    timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", cancel);
+      resolve();
+    }, delayMs);
+  });
 }
 
-async function editorTusRemoteOffset(uploadUrl, baseHeaders) {
+async function editorTusRemoteOffset(uploadUrl, baseHeaders, { signal } = {}) {
   let response;
   try {
-    response = await fetch(uploadUrl, {
+    response = await fetchWithDeadline(uploadUrl, {
       method: "HEAD",
       headers: { ...baseHeaders, "Tus-Resumable": "1.0.0" },
       cache: "no-store",
-      redirect: "error"
-    });
+      redirect: "error",
+      signal
+    }, { timeoutMs: 120000, label: "確認上傳進度", read: async (response) => {
+      if (!response.ok) throw await editorTusResponseError(response, "查詢續傳位置");
+      return response;
+    } });
   } catch (_error) {
+    if (["AbortError", "TimeoutError"].includes(_error?.name)) throw _error;
+    if (_error?.code?.startsWith("editor_tus_")) throw _error;
     const error = new Error("網路中斷，暫時無法確認上傳進度。");
     error.code = "editor_tus_network_error";
     error.retryable = true;
     throw error;
   }
   if (!response.ok) throw await editorTusResponseError(response, "查詢續傳位置");
-  const offset = Number(response.headers.get("Upload-Offset"));
+  const rawOffset = response.headers.get("Upload-Offset");
+  const offset = rawOffset === null || String(rawOffset).trim() === "" ? NaN : Number(rawOffset);
   if (!Number.isFinite(offset) || offset < 0) {
     const error = new Error("Storage 回傳的續傳位置無效，請重新上傳。");
     error.code = "editor_tus_offset_invalid";
@@ -27393,7 +27546,7 @@ async function editorTusRemoteOffset(uploadUrl, baseHeaders) {
   return offset;
 }
 
-async function performTusUpload(file, intent, onProgress = () => {}) {
+async function performTusUpload(file, intent, onProgress = () => {}, { signal } = {}) {
   assertEditorUploadCurrent(intent);
   if (!intent?.upload_url || !["tus", "local_direct"].includes(intent.protocol)) throw new Error("後端未提供有效的 TUS 直傳資格。");
   if (intent.protocol === "local_direct") {
@@ -27401,13 +27554,17 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
     const uploadIsSameOrigin = new URL(intent.upload_url, window.location.href).origin === window.location.origin;
     if (uploadIsSameOrigin && isHeaderSafeToken(authState?.token)) baseHeaders.Authorization = `Bearer ${authState.token}`;
     onProgress(0, "sending");
-    const response = await fetch(intent.upload_url, {
+    const response = await fetchWithDeadline(intent.upload_url, {
       method: intent.method || "PUT",
       headers: { ...baseHeaders, "Content-Type": file.type || "application/octet-stream" },
       body: file,
       cache: "no-store",
-      redirect: "error"
-    });
+      redirect: "error",
+      signal
+    }, { timeoutMs: 120000, label: "檔案傳輸", read: async (response) => {
+      if (!response.ok) throw await editorTusResponseError(response, "本機直傳驗收");
+      return response;
+    } });
     if (!response.ok) throw await editorTusResponseError(response, "本機直傳驗收");
     onProgress(1, "confirmed");
     return { uploadUrl: intent.upload_url, offset: file.size };
@@ -27436,22 +27593,30 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
     "Upload-Length": String(file.size),
     "Upload-Metadata": metadata
   };
+  const resuming = Boolean(intent.tusUploadUrl);
   let createResponse;
-  try {
-    createResponse = await fetch(endpoint, {
-      method: "POST",
-      headers: createHeaders,
-      cache: "no-store",
-      redirect: "error"
-    });
-  } catch (_error) {
-    const error = new Error("網路中斷，尚未建立上傳；請重新上傳。");
-    error.code = "editor_tus_network_error";
-    error.retryable = true;
-    throw error;
+  if (!resuming) {
+    try {
+      createResponse = await fetchWithDeadline(endpoint, {
+        method: "POST",
+        headers: createHeaders,
+        cache: "no-store",
+        redirect: "error",
+        signal
+      }, { timeoutMs: 120000, label: "建立上傳", read: async (response) => {
+        if (!response.ok) throw await editorTusResponseError(response, "建立上傳");
+        return response;
+      } });
+    } catch (_error) {
+      if (["AbortError", "TimeoutError"].includes(_error?.name)) throw _error;
+      if (_error?.code?.startsWith("editor_tus_")) throw _error;
+      const error = new Error("網路中斷，尚未建立上傳；請重新上傳。");
+      error.code = "editor_tus_network_error";
+      error.retryable = true;
+      throw error;
+    }
   }
-  if (!createResponse.ok) throw await editorTusResponseError(createResponse, "建立上傳");
-  const location = createResponse.headers.get("Location");
+  const location = intent.tusUploadUrl || createResponse.headers.get("Location");
   if (!location) {
     const error = new Error("Storage 未回傳續傳位置，請重新上傳。");
     error.code = "editor_tus_location_missing";
@@ -27470,14 +27635,27 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
     throw error;
   }
   const uploadUrl = uploadLocation.toString();
-  let offset = 0;
-  const createOffset = Number(createResponse.headers.get("Upload-Offset") || 0);
-  if (Number.isFinite(createOffset) && createOffset >= 0) offset = createOffset;
+  // A cancelled/expired response does not undo a Storage commit. Retain the
+  // validated resource immediately, so retry HEADs this same TUS session and
+  // never creates a second upload against an already-written immutable path.
+  intent.tusUploadUrl = uploadUrl;
+  let offset = resuming
+    ? await editorTusRemoteOffset(uploadUrl, baseHeaders, { signal })
+    : Number(createResponse.headers.get("Upload-Offset") || 0);
+  if (!Number.isFinite(offset) || offset < 0 || offset > file.size) {
+    const error = new Error("Storage 回傳的續傳位置無效，請重新取得上傳授權。");
+    error.code = "editor_tus_offset_invalid";
+    error.retryable = false;
+    throw error;
+  }
   onProgress(Math.min(1, offset / Math.max(1, file.size)), "confirmed");
   const chunkSize = 6 * 1024 * 1024;
   let attempts = 0;
   const retryDelays = [0, 1000, 3000, 5000];
   while (offset < file.size) {
+    if (signal?.aborted) {
+      await fetchWithDeadline(uploadUrl, { signal }, { timeoutMs: 120000 });
+    }
     const end = Math.min(file.size, offset + chunkSize);
     const chunk = file.slice(offset, end);
     let response = null;
@@ -27486,7 +27664,7 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
       // Fetch does not expose upload-body events. Keep the bar indeterminate
       // while each chunk is in flight, then report only server-confirmed bytes.
       onProgress(Math.min(1, offset / Math.max(1, file.size)), "sending");
-      response = await fetch(uploadUrl, {
+      response = await fetchWithDeadline(uploadUrl, {
         method: "PATCH",
         headers: {
           ...baseHeaders,
@@ -27496,13 +27674,21 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
         },
         body: chunk,
         cache: "no-store",
-        redirect: "error"
-      });
+        redirect: "error",
+        signal
+      }, { timeoutMs: 120000, label: "檔案傳輸", read: async (response) => {
+        if (!response.ok) throw await editorTusResponseError(response, "續傳");
+        return response;
+      } });
       if (!response.ok) failure = await editorTusResponseError(response, "續傳");
     } catch (_error) {
-      failure = new Error("網路中斷，系統會從已完成的進度續傳。");
-      failure.code = "editor_tus_network_error";
-      failure.retryable = true;
+      if (_error?.name === "AbortError") throw _error;
+      if (_error?.name === "TimeoutError" || _error?.code?.startsWith("editor_tus_")) failure = _error;
+      else {
+        failure = new Error("網路中斷，系統會從已完成的進度續傳。");
+        failure.code = "editor_tus_network_error";
+        failure.retryable = true;
+      }
     }
     if (response?.ok) {
       offset = Number(response.headers.get("Upload-Offset") || end);
@@ -27512,9 +27698,9 @@ async function performTusUpload(file, intent, onProgress = () => {}) {
     }
     if (!failure?.retryable || attempts >= retryDelays.length - 1) throw failure;
     attempts += 1;
-    await waitForTusRetry(retryDelays[attempts]);
+    await waitForTusRetry(retryDelays[attempts], { signal });
     try {
-      offset = await editorTusRemoteOffset(uploadUrl, baseHeaders);
+      offset = await editorTusRemoteOffset(uploadUrl, baseHeaders, { signal });
       onProgress(Math.min(1, offset / Math.max(1, file.size)), "confirmed");
     } catch (headError) {
       if (attempts >= retryDelays.length - 1 || !headError.retryable) throw headError;
@@ -27534,6 +27720,9 @@ function editorUploadFailureCode(error) {
 async function reportEditorUploadFailure(intent, error) {
   if (!intent?.documentId || !intent?.upload_id) return;
   if (intent.scope && !uploadedSealApplicationScopeIsCurrent(intent.scope)) return;
+  // A lost mutation response is not proof that the server rejected the file.
+  // Keep its durable state for reconciliation instead of quarantining success.
+  if (error?.outcomeUnknown === true) return;
   // A production cutover/outage is not an asset validation failure. Preserve
   // the durable pending lifecycle job so the server can expire or resume it;
   // do not incorrectly quarantine this upload because readiness closed.
@@ -27916,7 +28105,7 @@ async function finishPendingEditorPdfFinalization(pending = uploadedSealEditorRu
       await loadUploadedPdfIntoEditor(file, intent, null, { append, preparation });
       pending.editorLoaded = true;
       if (!append) {
-        uploadedSealEditorRuntime.lastEditorReadyMs = Math.round(performance.now() - Number(pending.uploadCompleteAt || performance.now()));
+        uploadedSealEditorRuntime.lastEditorReadyMs = Math.round(performance.now() - Number(pending.selectionStartedAt ?? pending.uploadCompleteAt ?? performance.now()));
       }
       renderUploadedSealWorkbench();
     }
@@ -27929,7 +28118,9 @@ async function finishPendingEditorPdfFinalization(pending = uploadedSealEditorRu
     }
     const finalized = pending.finalizePromise
       ? await pending.finalizePromise
-      : await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
+      : pending.transferComplete === false
+        ? await transferPendingEditorPdf(pending)
+        : await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
     assertEditorUploadCurrent(intent);
     if (finalized?.a4Conversion?.required) {
       throw Object.assign(new Error("PDF 頁面需要先轉成 A4，請重新上傳並確認轉換後再編輯。"), { code: "editor_a4_preflight_mismatch" });
@@ -29616,6 +29807,10 @@ async function handleUploadedEditorImportPdf(files) {
         await reportEditorUploadFailure(intent, error);
       }
       if (!uploadedSealApplicationScopeIsCurrent(importScope, false)) return;
+      if (error?.outcomeUnknown === true && !uploadedSealEditorRuntime.pendingFinalization && !uploadedSealEditorRuntime.pendingEditorSave) {
+        showUploadedEditorUploadError(error, () => window.location.reload(), "重新載入確認");
+        throw error;
+      }
       const retrySameFile = error?.detail === "editor_runtime_maintenance"
         || error?.retryable === true
         || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
@@ -29986,22 +30181,23 @@ function editorPreparedAuthorizedUrl(result = {}) {
   return "";
 }
 
-async function fetchEditorAuthorizedBlob(url) {
+async function fetchEditorAuthorizedBlob(url, { signal } = {}) {
   if (!url) throw new Error("伺服器未提供短效檔案授權。");
   const apiBase = new URL(`${String(backendApiBase || "/api").replace(/\/$/, "")}/`, window.location.origin);
   const resolved = new URL(url, apiBase).toString();
   const headers = { "Cache-Control": "no-store" };
   if (new URL(resolved).origin === window.location.origin && isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
-  const response = await fetch(resolved, { headers, cache: "no-store" });
-  if (!response.ok) {
-    const message = [401, 403].includes(response.status)
-      ? "檔案存取權限已失效，請重新開啟案件；若仍失敗，請重新登入。"
-      : response.status === 404
-        ? "找不到這份 PDF 檔案，請聯絡管理員確認原稿保存狀態。"
-        : `暫時無法讀取 PDF 檔案（${response.status}），請稍後重新開啟案件。`;
-    throw new Error(message);
-  }
-  return response.blob();
+  return fetchWithDeadline(resolved, { headers, cache: "no-store", signal }, { timeoutMs: 45000, label: "PDF 讀取", read: async (response) => {
+    if (!response.ok) {
+      const message = [401, 403].includes(response.status)
+        ? "檔案存取權限已失效，請重新開啟案件；若仍失敗，請重新登入。"
+        : response.status === 404
+          ? "找不到這份 PDF 檔案，請聯絡管理員確認原稿保存狀態。"
+          : `暫時無法讀取 PDF 檔案（${response.status}），請稍後重新開啟案件。`;
+      throw new Error(message);
+    }
+    return response.blob();
+  } });
 }
 
 function discardUploadedEditorStagedAssets(assets = []) {
@@ -30011,26 +30207,43 @@ function discardUploadedEditorStagedAssets(assets = []) {
   }
 }
 
-async function stageUploadedEditorAuthorizedAssets(state, result, scope) {
+async function stageUploadedEditorAuthorizedAssets(state, result, scope, { signal = null, onProgress = null, onAssetReady = null } = {}) {
   const assets = [];
-  try {
-    for (const source of state.sourceFiles || []) {
-      if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
+  const assertStageCurrent = () => {
+    if (signal?.aborted) throw Object.assign(new Error("已取消開啟，原案件仍保留。"), { name: "AbortError" });
+    if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
+  };
+  const primaryAssetId = state.pages?.[0]?.sourceAssetId || "";
+  const sources = (state.sourceFiles || []).filter((source) => source.kind === "image"
+    || (state.pages || []).some((page) => page.sourceAssetId === (source.assetId || source.asset_id || source.id || "")));
+  sources.sort((left, right) => Number((right.assetId || right.asset_id || right.id) === primaryAssetId)
+    - Number((left.assetId || left.asset_id || left.id) === primaryAssetId));
+  let nextIndex = 0;
+  let completed = 0;
+  let failure = null;
+  const reportProgress = () => onProgress?.({ completed, total: sources.length });
+  const stageOne = async (source) => {
+      assertStageCurrent();
       const assetId = source.assetId || source.asset_id || source.id || "";
       const pages = (state.pages || []).filter((page) => page.sourceAssetId === assetId).sort((a, b) => a.sourcePageIndex - b.sourcePageIndex);
-      if (source.kind !== "image" && !pages.length) continue;
-      const blob = await fetchEditorAuthorizedBlob(editorAuthorizedAssetUrl(source, result));
+      const blob = await fetchEditorAuthorizedBlob(editorAuthorizedAssetUrl(source, result), { signal });
+      assertStageCurrent();
       const file = new File([blob], source.fileName || source.file_name || `asset-${assetId}`, { type: source.mimeType || source.mime_type || blob.type || "application/octet-stream" });
       const staged = { assetId, file, preparation: null };
       assets.push(staged);
-      if (String(source.kind || "").includes("image") || file.type.startsWith("image/")) continue;
+      if (String(source.kind || "").includes("image") || file.type.startsWith("image/")) return staged;
       const library = await ensurePdfJsLibrary();
+      assertStageCurrent();
       const task = library.getDocument({ data: new Uint8Array(await file.arrayBuffer()), enableXfa: false, isEvalSupported: false, useSystemFonts: true });
-      task.onPassword = () => { void task.destroy(); };
+      const cancelParsing = () => { void task.destroy?.(); };
+      signal?.addEventListener("abort", cancelParsing, { once: true });
+      task.onPassword = cancelParsing;
       try {
+        assertStageCurrent();
         const pdfDocument = await task.promise;
         staged.preparation = { file, pdfDocument, pageProxies: new Map() };
         const validation = await validateUploadedPdfDocument(pdfDocument);
+        assertStageCurrent();
         staged.preparation.pageProxies = validation.pageProxies;
         const pageIds = new Set();
         for (const [position, page] of pages.entries()) {
@@ -30038,12 +30251,41 @@ async function stageUploadedEditorAuthorizedAssets(state, result, scope) {
           if (!Number.isInteger(index) || index < 0 || index >= pdfDocument.numPages || pageIds.has(page.pageId)) throw new Error("PDF 頁面對應資料無效，請重新開啟案件。");
           pageIds.add(page.pageId);
         }
+        // Rendering the optional first-page preview must not delay adopting
+        // a fully loaded single-source PDF or block the next source read.
+        if (assetId === primaryAssetId && onAssetReady) {
+          void Promise.resolve(onAssetReady(staged, state.pages[0])).catch(() => {});
+        }
+        assertStageCurrent();
+        return staged;
       } catch (error) {
         if (!staged.preparation) void task.destroy?.();
+        if (signal?.aborted) throw Object.assign(new Error("已取消開啟，原案件仍保留。"), { name: "AbortError" });
         throw error;
+      } finally {
+        signal?.removeEventListener("abort", cancelParsing);
+      }
+  };
+  const worker = async () => {
+    while (!failure && nextIndex < sources.length) {
+      const source = sources[nextIndex++];
+      try {
+        await stageOne(source);
+        completed += 1;
+        reportProgress();
+      } catch (error) {
+        failure ||= error;
       }
     }
-    if (!uploadedSealApplicationScopeIsCurrent(scope)) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
+  };
+  try {
+    assertStageCurrent();
+    reportProgress();
+    // Only two independent authorized files are read at once. Wait for both
+    // workers even after a failure so no late PDF escapes staged cleanup.
+    await Promise.allSettled(Array.from({ length: Math.min(2, sources.length) }, worker));
+    if (failure) throw failure;
+    assertStageCurrent();
     return assets;
   } catch (error) {
     discardUploadedEditorStagedAssets(assets);
@@ -30051,10 +30293,11 @@ async function stageUploadedEditorAuthorizedAssets(state, result, scope) {
   }
 }
 
-async function hydrateUploadedEditorAuthorizedAssets(result = {}, readyAssets = null) {
+async function hydrateUploadedEditorAuthorizedAssets(result = {}, readyAssets = null, { signal = null } = {}) {
   const scope = uploadedSealApplicationScopeSnapshot();
   const state = uploadedSealEditorState;
   const assertHydrationCurrent = () => {
+    if (signal?.aborted) throw Object.assign(new Error("已取消載入 PDF。"), { name: "AbortError" });
     if (!uploadedSealApplicationScopeIsCurrent(scope) || state !== uploadedSealEditorState) throw new Error("登入或草稿已切換，已停止載入先前的 PDF。");
   };
   for (const source of state.sourceFiles) {
@@ -30068,7 +30311,7 @@ async function hydrateUploadedEditorAuthorizedAssets(result = {}, readyAssets = 
     if (!file) {
       const authorizedUrl = editorAuthorizedAssetUrl(source, result);
       if (!authorizedUrl) continue;
-      const blob = await fetchEditorAuthorizedBlob(authorizedUrl);
+      const blob = await fetchEditorAuthorizedBlob(authorizedUrl, { signal });
       assertHydrationCurrent();
       file = new File([blob], source.fileName || source.file_name || `asset-${assetId}`, { type: source.mimeType || source.mime_type || blob.type || "application/octet-stream" });
     }
@@ -30082,7 +30325,7 @@ async function hydrateUploadedEditorAuthorizedAssets(result = {}, readyAssets = 
   }
 }
 
-async function loadUploadedEditorState(documentId) {
+async function loadUploadedEditorState(documentId, { signal = null, onProgress = null, onAssetReady = null, onCommit = null } = {}) {
   const previousScope = uploadedSealApplicationScopeSnapshot();
   await flushUploadedSealDraftBeforeSwitch();
   if (!uploadedSealApplicationScopeIsCurrent(previousScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
@@ -30094,13 +30337,31 @@ async function loadUploadedEditorState(documentId) {
   try {
   // Get the authorized application snapshot before changing the active draft.
   // PDF revisions do not contain the six application fields.
-  const application = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
-  if (!uploadedSealApplicationScopeIsCurrent(openingScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
-  const result = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}/editor-state`);
+  const [application, result] = await Promise.all([
+    backendRequest(`/official-documents/${encodeURIComponent(documentId)}`, { signal }),
+    backendRequest(`/official-documents/${encodeURIComponent(documentId)}/editor-state`, { signal })
+  ]);
+  if (signal?.aborted) throw Object.assign(new Error("已取消開啟，原案件仍保留。"), { name: "AbortError" });
   if (!uploadedSealApplicationScopeIsCurrent(openingScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   const state = result.state || result.editor_state;
   if (!state || Number(state.schemaVersion || state.schema_version) !== PDF_EDITOR_SCHEMA_VERSION) throw new Error("找不到相容的 PDF Editor V2 草稿。");
-  readyAssets = await stageUploadedEditorAuthorizedAssets(state, result, openingScope);
+  if (!["draft", "rejected"].includes(application.current_status)) {
+    const lockedRequest = application.stamp_request || application.application_package?.stamp_request || {};
+    const lockedRevisionId = application.locked_editor_revision_id || lockedRequest.locked_editor_revision_id || "";
+    const displayedRevisionId = result.revision_id || result.revisionId || result.id || result.editor_revision?.id || "";
+    const preparedFileId = result.preparedFileId || result.prepared_file_id || "";
+    const preparedSha256 = result.preparedSha256 || result.prepared_sha256 || "";
+    // Parallel reads can straddle a real submit in another tab. Never install
+    // pre-submit content beneath a locked application's approval metadata.
+    if (!lockedRevisionId || lockedRevisionId !== displayedRevisionId
+      || !lockedRequest.prepared_file_id || lockedRequest.prepared_file_id !== preparedFileId
+      || !lockedRequest.prepared_sha256 || lockedRequest.prepared_sha256 !== preparedSha256
+      || !["locked", "submitted", "approved"].includes(result.status)) {
+      throw new Error("案件版本剛才已更新，尚未切換文件；請重新開啟以取得同一份送簽確認版。");
+    }
+  }
+  readyAssets = await stageUploadedEditorAuthorizedAssets(state, result, openingScope, { signal, onProgress, onAssetReady });
+  if (signal?.aborted) throw Object.assign(new Error("已取消開啟，原案件仍保留。"), { name: "AbortError" });
   if (!uploadedSealApplicationScopeIsCurrent(openingScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   // Leave the old case usable while reads are pending. Do not discard typing
   // or a live gesture that arrived after the initial navigation flush.
@@ -30108,7 +30369,10 @@ async function loadUploadedEditorState(documentId) {
     || uploadedSealEditorRuntime.pointerAction || uploadedSealEditorRuntime.textEdit) {
     throw new Error("你剛才的修改仍保留在原案件，已停止切換；保存完成後請再開啟案件。");
   }
-  clearUploadedEditorSensitivePreviews();
+  // Cancellation ends at the verified commit boundary. Hydration below uses
+  // the staged PDFs only, never another network read or unverified source.
+  onCommit?.();
+  clearUploadedEditorSensitivePreviews({ preserveOpeningPreview: true });
   uploadedSealEditorRuntime.documentId = documentId;
   const loadedScope = uploadedSealApplicationScopeSnapshot();
   uploadedSealEditorState = { ...emptyUploadedSealEditorState(), ...cloneUploadedEditorValue(state), revisionNo: Number(result.revisionNo ?? state.revisionNo ?? 0), manifestSha256: result.manifestSha256 || state.manifestSha256 || "" };
@@ -30145,9 +30409,10 @@ async function loadUploadedEditorState(documentId) {
     }
   }
   if (sealGeometryNormalized && !uploadedSealEditorRuntime.locked) markUploadedEditorDirty();
-  await loadUploadedSealOptions(application.company_id || "");
-  if (!uploadedSealApplicationScopeIsCurrent(loadedScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
-  await refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true });
+  await Promise.all([
+    loadUploadedSealOptions(application.company_id || ""),
+    refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true })
+  ]);
   if (!uploadedSealApplicationScopeIsCurrent(loadedScope)) throw new Error("登入或草稿已切換，請重新開啟案件。");
   renderUploadedSealWorkbench();
   return result;
@@ -30166,21 +30431,110 @@ function officialDocumentHasEditorV2(item = {}) {
   );
 }
 
+function createUploadedEditorOpeningPreview(controller, retry) {
+  const actorScope = frontendSessionScope();
+  document.querySelector("#uploadedEditorOpeningPreview")?.remove();
+  const editor = document.querySelector("#uploadedPdfEditor");
+  if (!editor) return null;
+  const panel = document.createElement("section");
+  panel.id = "uploadedEditorOpeningPreview";
+  panel.className = "panel editor-opening-preview";
+  panel.setAttribute("aria-label", "PDF 載入狀態");
+  panel.innerHTML = `<div class="editor-opening-preview-actions"><strong role="status" aria-live="polite">正在開啟 PDF…</strong><button class="secondary-button" type="button" data-editor-open-cancel>取消</button><button class="secondary-button" type="button" data-editor-open-retry hidden>重新開啟</button></div><figure class="editor-opening-preview-document" hidden><figcaption>原稿預覽・尚在載入</figcaption><canvas class="editor-opening-preview-canvas" aria-label="載入中的原稿第一頁，尚非送簽確認版"></canvas></figure>`;
+  // The editor already owns the wide right-hand grid column. Adding a sibling
+  // would create a third grid item and move the old document to another row.
+  editor.prepend(panel);
+  const status = panel.querySelector('[role="status"]');
+  const cancel = panel.querySelector("[data-editor-open-cancel]");
+  const retryButton = panel.querySelector("[data-editor-open-retry]");
+  const figure = panel.querySelector("figure");
+  const canvas = panel.querySelector("canvas");
+  let previewTask = null;
+  let disposed = false;
+  let committed = false;
+  const stopPreview = () => { previewTask?.cancel?.(); previewTask = null; };
+  const isCurrent = () => !disposed && !controller.signal.aborted && panel.isConnected && actorScope === frontendSessionScope();
+  cancel.addEventListener("click", () => { if (!cancel.disabled) controller.abort(); });
+  retryButton.addEventListener("click", () => { if (!retryButton.disabled) retry(); });
+  controller.signal.addEventListener("abort", stopPreview, { once: true });
+  return {
+    progress({ completed, total }) {
+      if (isCurrent()) status.textContent = total ? `正在開啟 PDF… ${completed}/${total}` : "正在開啟 PDF…";
+    },
+    async assetReady(asset, page) {
+      if (!isCurrent() || !asset.preparation?.pdfDocument) return;
+      try {
+        const proxy = asset.preparation.pageProxies.get(Number(page.sourcePageIndex) + 1)
+          || await asset.preparation.pdfDocument.getPage(Number(page.sourcePageIndex) + 1);
+        if (!isCurrent()) return;
+        const baseViewport = proxy.getViewport({ scale: 1, rotation: Number(page.rotation || 0) });
+        const viewport = proxy.getViewport({ scale: Math.min(1, 620 / baseViewport.width), rotation: Number(page.rotation || 0) });
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        previewTask = proxy.render({ canvasContext: canvas.getContext("2d"), viewport });
+        await previewTask.promise;
+        if (isCurrent()) figure.hidden = false;
+      } catch (error) {
+        // A thumbnail is optional. Failure cannot invalidate an otherwise
+        // authorized, verified PDF or switch the active draft prematurely.
+        if (error?.name !== "RenderingCancelledException") figure.hidden = true;
+      } finally {
+        previewTask = null;
+      }
+    },
+    commit() {
+      committed = true;
+      cancel.disabled = true;
+      status.textContent = "正在顯示文件…";
+      stopPreview();
+    },
+    failure(error) {
+      stopPreview();
+      figure.hidden = true;
+      cancel.hidden = true;
+      retryButton.hidden = false;
+      status.textContent = committed
+        ? `文件已載入，部分資料未完成：${error.message}`
+        : `未能開啟，原案件仍保留：${error.message}`;
+    },
+    dispose() {
+      disposed = true;
+      stopPreview();
+      controller.signal.removeEventListener("abort", stopPreview);
+      panel.remove();
+    }
+  };
+}
+
 async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
   if (!documentId) return false;
   if (uploadedSealApplicationRuntime.openPromise) {
     showToast("正在載入 PDF 草稿，請稍候。");
     return false;
   }
+  const controller = new AbortController();
+  uploadedSealApplicationRuntime.openAbortController = controller;
+  // Show the operation immediately without clearing the active case. Until
+  // the verified commit, its inputs and PDF continue to belong to that case.
+  setView("electronicSeal");
+  const preview = createUploadedEditorOpeningPreview(controller, () => void openOfficialDocumentEditorReview(documentId, mode));
   const openOperation = (async () => {
     try {
-      await loadUploadedEditorState(documentId);
+      await loadUploadedEditorState(documentId, {
+        signal: controller.signal,
+        onProgress: (progress) => preview?.progress(progress),
+        onAssetReady: (asset, page) => preview?.assetReady(asset, page),
+        onCommit: () => preview?.commit()
+      });
       setView("electronicSeal");
       await showUploadedEditorReview(mode);
+      preview?.dispose();
       document.querySelector("#uploadedPdfEditor")?.scrollIntoView({ behavior: "smooth", block: "start" });
       return true;
     } catch (error) {
-      showToast(`PDF 編輯版本載入失敗：${error.message}`);
+      if (controller.signal.aborted || error?.name === "AbortError") preview?.dispose();
+      else if (preview) preview.failure(error);
+      else showToast(`PDF 編輯版本載入失敗：${error.message}`);
       return false;
     }
   })();
@@ -30188,6 +30542,7 @@ async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
   try { return await openOperation; }
   finally {
     if (uploadedSealApplicationRuntime.openPromise === openOperation) uploadedSealApplicationRuntime.openPromise = null;
+    if (uploadedSealApplicationRuntime.openAbortController === controller) uploadedSealApplicationRuntime.openAbortController = null;
   }
 }
 
@@ -30274,6 +30629,7 @@ function openUploadedPdfPicker() {
 }
 
 async function handleUploadedSealPdfChange(fileOverride = null) {
+  const selectionStartedAt = performance.now();
   const input = document.querySelector("#uploadedSealPdfInput");
   const file = fileOverride instanceof File ? fileOverride : input?.files?.[0];
   if (!file) return;
@@ -30310,6 +30666,7 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
   renderUploadedSealWorkbench();
   let intent = null;
   let preparation = null;
+  let uploadController = null;
   try {
     if (
       uploadedSealEditorRuntime.documentId
@@ -30334,41 +30691,47 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     intent = await requestEditorUpload(file, "source_pdf", preparation.sha256);
     setUploadedPdfUploadProgress("uploading", 0, "PDF 已傳輸 0%");
     setUploadedEditorSaveStatus("uploading", "正在上傳 PDF…");
-    await performTusUpload(file, intent, (progress, phase) => {
-      if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
-      const percent = Math.round(progress * 100);
-      const sending = phase === "sending";
-      setUploadedPdfUploadProgress(sending ? "uploading-pending" : "uploading", percent, sending ? `PDF 傳輸中 · 已完成 ${percent}%` : `PDF 已傳輸 ${percent}%`);
-      setUploadedEditorSaveStatus("uploading", sending ? `PDF 傳輸中 · ${percent}%` : `PDF 已上傳 ${percent}%`);
-    });
     assertEditorUploadCurrent(intent);
-    setUploadedPdfUploadProgress("finalizing", null, "檔案已傳完，正在載入編輯頁面…");
-    const uploadCompleteAt = performance.now();
     if (preparation.report.valid) {
-      const finalizePromise = finalizeEditorUpload(intent, file, { allowA4Conversion: true });
-      void finalizePromise.catch(() => {});
-      uploadedSealEditorRuntime.pendingFinalization = {
-        intent, file, finalizePromise, append: false, preparation, uploadCompleteAt, editorLoaded: false
-      };
+      const pending = { intent, file, finalizePromise: null, append: false, preparation,
+        selectionStartedAt, transferComplete: false, editorLoaded: false };
+      uploadedSealEditorRuntime.pendingFinalization = pending;
       uploadedSealEditorRuntime.finalizingAsset = true;
-      setUploadedEditorSaveStatus("checking", "PDF 已上傳，正在完成同步");
+      setUploadedEditorSaveStatus("checking", "正在載入本機 PDF");
       await loadUploadedPdfIntoEditor(file, intent, null, { append: false, preparation });
-      uploadedSealEditorRuntime.pendingFinalization.editorLoaded = true;
+      pending.editorLoaded = true;
       preparation = null;
       uploadedSealPdf = { file, name: file.name, size: file.size, hash: intent.sha256, assetId: intent.asset_id };
       uploadedSealObjectUrl = uploadedSealEditorRuntime.assetUrls.get(intent.asset_id) || "";
       const title = document.querySelector("#uploadedSealTitle");
       if (title && !title.value.trim()) title.value = file.name.replace(/\.pdf$/i, "");
       ensureUploadedEditorPagesA4(uploadedSealEditorState.pages);
-      uploadedSealEditorRuntime.lastEditorReadyMs = Math.round(performance.now() - uploadCompleteAt);
+      // Measure the user's complete selection-to-editor wait, not just the
+      // time after network upload. Editing never waits for transfer completion.
+      uploadedSealEditorRuntime.lastEditorReadyMs = Math.round(performance.now() - selectionStartedAt);
       uploadedSealEditorRuntime.uploading = false;
-      setUploadedEditorSaveStatus("checking", "PDF 已載入，可開始編輯；正在同步文件");
+      setUploadedEditorSaveStatus("checking", "可先編輯 · 檔案尚未同步");
       renderUploadedSealWorkbench();
+      pending.finalizePromise = transferPendingEditorPdf(pending);
+      void pending.finalizePromise.catch(() => {});
       addSealAudit("PDF 編輯來源已載入", `asset ${intent.asset_id || "-"} · ${uploadedSealPageCount} 頁 · hash ${intent.sha256.slice(0, 16)}…`);
-      const finalized = await finishPendingEditorPdfFinalization(uploadedSealEditorRuntime.pendingFinalization);
-      if (finalized) showToast(`PDF 已載入，可開始編輯（${uploadedSealEditorRuntime.lastEditorReadyMs} 毫秒）。`);
+      const finalized = await finishPendingEditorPdfFinalization(pending);
+      if (finalized) showToast("PDF 與編輯內容已同步。");
     } else {
       // Non-A4 documents still require the existing explicit conversion flow.
+      const controller = new AbortController();
+      uploadController = controller;
+      uploadedSealEditorRuntime.uploadAbortController = controller;
+      document.querySelector("#uploadedPdfCancelTransferBtn")?.removeAttribute("hidden");
+      await performTusUpload(file, intent, (progress, phase) => {
+        if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
+        const percent = Math.round(progress * 100);
+        const sending = phase === "sending";
+        setUploadedPdfUploadProgress(sending ? "uploading-pending" : "uploading", percent, sending ? `PDF 傳輸中 · 已完成 ${percent}%` : `PDF 已傳輸 ${percent}%`);
+      }, { signal: controller.signal });
+      if (controller.signal.aborted) throw Object.assign(new Error("已取消檔案傳輸，原稿與編輯仍保留。"), { name: "AbortError" });
+      if (uploadedSealEditorRuntime.uploadAbortController === controller) uploadedSealEditorRuntime.uploadAbortController = null;
+      document.querySelector("#uploadedPdfCancelTransferBtn")?.setAttribute("hidden", "");
       const finalized = await finalizeEditorUpload(intent, file, { allowA4Conversion: true });
       const resolved = await resolveUploadedPdfConversion(file, intent, finalized);
       if (!resolved) return;
@@ -30390,10 +30753,17 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
       showUploadedEditorDraftPrerequisite(error.applicationIssue);
       return;
     }
-    if (!uploadedSealEditorRuntime.pendingFinalization) await reportEditorUploadFailure(intent, error);
+    if (!uploadedSealEditorRuntime.pendingFinalization && error?.name !== "AbortError") await reportEditorUploadFailure(intent, error);
     if (!uploadedSealApplicationScopeIsCurrent(uploadScope, false)) return;
     setUploadedPdfA4Status("error", pdfA4UiErrorMessage(error));
     setUploadedEditorSaveStatus("error", "PDF 未通過上傳或預檢");
+    if (error?.outcomeUnknown === true && !uploadedSealEditorRuntime.pendingFinalization && !uploadedSealEditorRuntime.pendingEditorSave) {
+      // Reload only after the user asks, so the existing unsaved-work warning
+      // remains in effect. Never create another draft on an uncertain result.
+      showUploadedEditorUploadError(error, () => window.location.reload(), "重新載入確認");
+      showToast(`請重新載入確認上傳結果：${pdfA4UiErrorMessage(error)}`);
+      return;
+    }
     const retrySameFile = error?.detail === "editor_runtime_maintenance"
       || error?.retryable === true
       || /^editor_(?:tus|upload)_/.test(String(error?.code || ""));
@@ -30405,7 +30775,11 @@ async function handleUploadedSealPdfChange(fileOverride = null) {
     showToast(`PDF 無法開啟：${pdfA4UiErrorMessage(error)}`);
   } finally {
     if (uploadedSealApplicationScopeIsCurrent(uploadScope, false)) {
-      setUploadedPdfUploadProgress("hidden");
+      if (uploadController && uploadedSealEditorRuntime.uploadAbortController === uploadController) uploadedSealEditorRuntime.uploadAbortController = null;
+      if (!uploadedSealEditorRuntime.uploadAbortController) {
+        document.querySelector("#uploadedPdfCancelTransferBtn")?.setAttribute("hidden", "");
+        setUploadedPdfUploadProgress("hidden");
+      }
       uploadedSealEditorRuntime.uploading = false;
       if (preparation && uploadedSealEditorRuntime.pendingFinalization?.preparation !== preparation) {
         discardUploadedPdfPreparation(preparation);
@@ -30455,7 +30829,9 @@ function renderElectronicSealWorkQueue() {
   const query = String(document.querySelector("#electronicSealWorkQueueSearch")?.value || "").trim().toLocaleLowerCase();
   const visibleItems = items.filter((item) => !query || [item.id, item.title, item.subject, item.applicant_name, item.company_name, officialStatusLabel(item.current_status)].join(" ").toLocaleLowerCase().includes(query));
   list.innerHTML = visibleItems.length ? visibleItems.map((item) => {
-    const stamped = latestOfficialStampedFile(item);
+    // Paginated rows intentionally omit file collections. Offer the committed
+    // final-file entry, then revalidate its exact ID and type from fresh detail.
+    const finalFileId = item.can_download === true ? String(item.stamped_file_id || item.stampedFileId || "") : "";
     return `
       <article class="address-card">
         <strong>${escapeHtml(item.title || item.subject || item.id)}</strong>
@@ -30465,7 +30841,7 @@ function renderElectronicSealWorkQueue() {
           <button class="segment" type="button" data-electronic-seal-open="${escapeHtml(item.id)}">${["draft", "rejected"].includes(item.current_status) && officialDocumentIsApplicant(item) ? "繼續編輯" : "查看 PDF 與章位"}</button>
           ${item.can_retry_stamp ? `<button class="segment" type="button" data-electronic-seal-retry="${escapeHtml(item.id)}">重試用印</button>` : ""}
           ${officialDocumentCanConfirm(item) ? `<button class="segment" type="button" data-electronic-seal-confirm="${escapeHtml(item.id)}">確認收件</button>` : ""}
-          ${stamped ? `<button class="segment" type="button" data-electronic-seal-download="${escapeHtml(stamped.id)}" data-document-id="${escapeHtml(item.id)}">下載用印後檔案</button>` : ""}
+          ${finalFileId ? `<button class="segment" type="button" data-electronic-seal-download="${escapeHtml(finalFileId)}" data-document-id="${escapeHtml(item.id)}">下載用印後檔案</button>` : ""}
         </div>
       </article>
     `;
@@ -30489,8 +30865,37 @@ function renderElectronicSealWorkQueue() {
     });
   });
   list.querySelectorAll("[data-electronic-seal-download]").forEach((button) => {
-    button.addEventListener("click", () => void downloadOfficialWorkflowFile(button.dataset.documentId, button.dataset.electronicSealDownload));
+    button.addEventListener("click", async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      const label = button.textContent;
+      button.textContent = "準備下載…";
+      try { await downloadElectronicSealFinalFile(button.dataset.documentId, button.dataset.electronicSealDownload); }
+      finally {
+        if (button.isConnected) { button.disabled = false; button.textContent = label; }
+      }
+    });
   });
+}
+
+async function downloadElectronicSealFinalFile(documentId, expectedFileId) {
+  if (!documentId || !expectedFileId) return false;
+  const scope = frontendSessionScope();
+  try {
+    const detail = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
+    if (scope !== frontendSessionScope()) return false;
+    if (String(detail.id || "") !== String(documentId) || detail.can_download !== true) {
+      throw new Error("目前帳號無法下載這份文件。");
+    }
+    const finalFile = latestOfficialStampedFile(detail);
+    if (!finalFile || String(finalFile.id || "") !== String(expectedFileId)) {
+      throw new Error("核定檔案已更新或暫時無法取得，請重新整理案件後再試。");
+    }
+    return await downloadOfficialWorkflowFile(documentId, finalFile.id);
+  } catch (error) {
+    if (scope === frontendSessionScope()) showToast(`下載失敗：${error.message}`);
+    return false;
+  }
 }
 
 function renderUploadedSealAvailabilityNotice(hasUsableSeal) {
@@ -33120,6 +33525,7 @@ document.querySelector("#uploadedEditorThumbnailCloseBtn")?.addEventListener("cl
 document.querySelector("#uploadedEditorPropertiesCloseBtn")?.addEventListener("click", () => closeUploadedEditorMobileDrawer());
 document.querySelector("#uploadedEditorMobileBackdrop")?.addEventListener("click", () => closeUploadedEditorMobileDrawer());
 document.querySelector("#uploadedEditorRetryUploadBtn")?.addEventListener("click", () => void retryUploadedEditorUpload());
+document.querySelector("#uploadedPdfCancelTransferBtn")?.addEventListener("click", cancelUploadedPdfTransfer);
 document.querySelector("#uploadedEditorDismissUploadErrorBtn")?.addEventListener("click", clearUploadedEditorUploadError);
 window.addEventListener("resize", syncUploadedEditorMobileDrawer);
 syncUploadedEditorMobileDrawer();

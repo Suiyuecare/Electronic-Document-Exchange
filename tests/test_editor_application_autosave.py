@@ -265,8 +265,8 @@ scheduleUploadedSealApplicationSave();assert.equal(uploadedSealApplicationRuntim
 
     def test_restore_fetches_authorized_application_and_preserves_backend_locks(self):
         source = javascript_function(self.source, 'loadUploadedEditorState')
-        self.assertLess(source.index('await flushUploadedSealDraftBeforeSwitch'), source.index('const application = await backendRequest'))
-        self.assertLess(source.index('const application = await backendRequest'), source.index('clearUploadedEditorSensitivePreviews'))
+        self.assertLess(source.index('await flushUploadedSealDraftBeforeSwitch'), source.index('const [application, result] = await Promise.all'))
+        self.assertLess(source.index('const [application, result] = await Promise.all'), source.index('clearUploadedEditorSensitivePreviews'))
         self.assertIn('restoreUploadedSealApplication(application)', source)
         self.assertIn('!officialDocumentIsApplicant(application)', source)
         self.assertIn('!["draft", "rejected"].includes(application.current_status)', source)

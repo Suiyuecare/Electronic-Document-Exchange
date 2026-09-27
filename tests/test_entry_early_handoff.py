@@ -1,6 +1,7 @@
 """The head probe must preserve the app's one-time handoff and error semantics."""
 from pathlib import Path
 import json
+import re
 import shutil
 import subprocess
 import unittest
@@ -11,6 +12,17 @@ from tests.test_electronic_seal_editor_ui_contract import javascript_function
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def top_level_implementation(source: str, name: str) -> str:
+    """Extract a shipping top-level function, including destructured defaults."""
+    start = re.search(rf"^(?:async )?function {re.escape(name)}\(", source, re.MULTILINE)
+    if start is None:
+        raise AssertionError(f"JavaScript function not found: {name}")
+    following = re.search(r"^\n(?:async )?function \w+\(", source[start.end():], re.MULTILINE)
+    if following is None:
+        raise AssertionError(f"next top-level JavaScript function not found: {name}")
+    return source[start.start():start.end() + following.start()]
+
+
 class EntryEarlyHandoffTest(unittest.TestCase):
     def run_case(self, case: str) -> None:
         node = shutil.which("node")
@@ -18,7 +30,7 @@ class EntryEarlyHandoffTest(unittest.TestCase):
             self.skipTest("Node.js required for entry handoff lifecycle tests")
         source = (ROOT / "app.js").read_text(encoding="utf-8")
         bootstrap = (ROOT / "entry-bootstrap.js").read_text(encoding="utf-8")
-        functions = "\n".join(javascript_function(source, name) for name in (
+        functions = top_level_implementation(source, "fetchWithDeadline") + "\n" + "\n".join(javascript_function(source, name) for name in (
             "readCookieValue", "isProductionEdocHost", "edocReturnUrlForPortal",
             "buildLoggingPortalUrl", "redirectToLoggingPortal", "clearPostedHandoffMarker",
             "resumePostedHandoffSession", "backendRequest", "isRetryableAuthError",
@@ -27,6 +39,11 @@ class EntryEarlyHandoffTest(unittest.TestCase):
         harness = r'''
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
+const {setTimeout:nativeSetTimeout,clearTimeout:nativeClearTimeout}=require('node:timers');
+const NativeAbortController=global.AbortController;
+// Transport deadlines use real timers; only the window auth backoff is instant.
+global.setTimeout=nativeSetTimeout;global.clearTimeout=nativeClearTimeout;
+global.AbortController=NativeAbortController;
 const host = bootstrapSource.match(/hostname !== "([^"]+)"/)[1];
 const loggingPortalUrl = appSource.match(/const loggingPortalUrl = "([^"]+)"/)[1];
 const authStorageKey = 'suiyuecare-edoc-session';
@@ -245,7 +262,7 @@ assert.equal(requests.length,0);assert.equal(redirects.length,0);
     def test_head_script_is_cache_busted_and_precedes_main_bundle(self):
         html = (ROOT / "index.html").read_text(encoding="utf-8")
         self.assertIn("entry-bootstrap.js?v=20260925-handoff-recovery-r2", html)
-        self.assertIn("app.js?v=20260927-editor-race-r1", html)
+        self.assertIn("app.js?v=20260928-file-resilience-r1", html)
         self.assertLess(html.index('src="entry-bootstrap.js'), html.index('src="app.js'))
 
 

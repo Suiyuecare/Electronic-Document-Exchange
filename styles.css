@@ -18,6 +18,34 @@
 
 /* Electronic-seal PDF Editor V2 ------------------------------------------ */
 
+#uploadedEditorOpeningPreview .editor-opening-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#uploadedEditorOpeningPreview .editor-opening-preview-actions [role="status"] {
+  flex: 1 1 180px;
+}
+
+#uploadedEditorOpeningPreview .editor-opening-preview-document {
+  margin: 12px 0 0;
+  color: var(--muted);
+}
+
+#uploadedEditorOpeningPreview .editor-opening-preview-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  max-height: 420px;
+  object-fit: contain;
+  background: var(--panel);
+  margin: 12px auto;
+}
+
+#uploadedPdfCancelTransferBtn { min-height: 44px; }
+
 .pdf-editor-v2 {
   --editor-panel: #f8fafc;
   --editor-border: #cbd5e1;

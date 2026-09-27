@@ -25,9 +25,11 @@ async function main() {
     throw new Error('loopback_signed_endpoint_required');
   }
   const source = fs.readFileSync(path.resolve(__dirname, '../../app.js'), 'utf8');
+  const deadlineStart = source.indexOf('async function fetchWithDeadline(');
+  const deadlineEnd = source.indexOf('\nasync function backendRequest(', deadlineStart);
   const start = source.indexOf('function tusMetadataValue(');
   const end = source.indexOf('function editorUploadFailureCode(', start);
-  if (start < 0 || end <= start) throw new Error('production_client_not_found');
+  if (start < 0 || end <= start || deadlineStart < 0 || deadlineEnd <= deadlineStart) throw new Error('production_client_not_found');
   const trace = [];
   let interrupted = false;
   let invalidKeyRejected = false;
@@ -67,12 +69,12 @@ async function main() {
     return new Response(response.body, { status: response.status, headers: mappedHeaders });
   };
   const context = vm.createContext({
-    URL, TextEncoder, btoa, atob, Blob, File, Headers, Response,
+    URL, TextEncoder, btoa, atob, Blob, File, Headers, Response, AbortController, setTimeout, clearTimeout,
     fetch: mappedFetch,
     window: { location: { href: `${VIRTUAL_ORIGIN}/` }, setTimeout },
     assertEditorUploadCurrent: () => {},
   });
-  vm.runInContext(source.slice(start, end), context, { timeout: 5000 });
+  vm.runInContext(source.slice(deadlineStart, deadlineEnd) + '\n' + source.slice(start, end), context, { timeout: 5000 });
   const file = new File([Buffer.from(input.dataBase64, 'base64')], input.fileName, {
     type: input.mimeType,
   });
