@@ -27,7 +27,7 @@ const tick=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
 function setup(){
  const nodes={};for(const name of ['workspaceLoadStatus','workspaceLoadLabel','workspaceLoadRetryBtn'])nodes['#'+name]={hidden:true,textContent:'',dataset:{}};
  nodes['#uploadedSealCompany']={value:'company-a'};nodes['#officialCompanySelect']={value:'compose-company'};nodes['#composeCompanySelect']={value:'compose-company-name'};
- const c={console:{warn(){}},Map,Set,Promise,Error,scope:'user-a:company-a',authenticated:true,activeRouteTarget:'electronicSeal',headerBackendSyncState:{status:'idle',syncedAt:''},calls:[],pending:[],renders:0,
+ const c={console:{warn(){}},Map,Set,Promise,Error,scope:'user-a:company-a',authenticated:true,activeRouteTarget:'electronicSeal',headerBackendSyncState:{status:'idle',syncedAt:''},workspaceRefreshRequest:null,calls:[],pending:[],renders:0,
    routeBackendDataLoaded:new Set(),routeBackendDataRequests:new Map(),routeBackendDataErrors:new Map(),routeBackendDataScope:'',
    uploadedSealEditorRuntime:{directoryLoading:true},financeDirectoryState:{status:'synced'},inboundDocumentLoadState:{scope:'user-a:company-a'},
    document:{querySelector:s=>nodes[s]||null},nodes,frontendSessionScope:()=>c.scope,hasAuthenticatedBackendSession:()=>c.authenticated,updateHeaderStatus(){},
@@ -83,9 +83,28 @@ const resolveAll=c=>c.pending.forEach(d=>d.resolve());
  c.pending[2].resolve();c.pending[3].resolve({submitAllowed:false,blockers:['missing_manager']});await businessBlocked;
  assert.equal(c.routeBackendDataLoaded.has('electronicSeal'),true);assert.equal(c.routeBackendDataErrors.size,0);
 
- c=setup();c.activeRouteTarget='compose';const compose=c.loadRouteBackendData('compose');resolveAll(c);await tick();
+ c=setup();c.activeRouteTarget='compose';const compose=c.loadRouteBackendData('compose');
+ assert.equal(c.headerBackendSyncState.status,'background');
+ assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);
+ resolveAll(c);await tick();
+ assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);
  assert.deepEqual(c.calls.slice(2).map(x=>x.name),['loadComposeSealOptions','loadOfficialSealOptions','refreshWorkflowReadinessForContext']);
  resolveAll(c);await compose;assert.equal(c.calls[2].args[0],'compose-company-name');assert.equal(c.calls[3].args[0],'compose-company');
+ assert.equal(c.headerBackendSyncState.status,'synced');assert.equal(c.routeBackendDataLoaded.has('compose'),true);
+
+ c=setup();c.activeRouteTarget='compose';const composeFailure=c.loadRouteBackendData('compose');
+ c.pending[0].reject(new Error('offline'));c.pending[1].resolve();await composeFailure;
+ assert.equal(c.nodes['#workspaceLoadStatus'].dataset.state,'error');
+ assert.equal(c.nodes['#workspaceLoadRetryBtn'].hidden,false);
+ assert.equal(c.headerBackendSyncState.status,'error');
+ const composeRetry=c.loadRouteBackendData('compose');assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);
+ resolveAll(c);await tick();resolveAll(c);await composeRetry;
+ assert.equal(c.routeBackendDataLoaded.has('compose'),true);
+
+ c=setup();c.activeRouteTarget='compose';c.workspaceRefreshRequest={scope:c.scope,target:'compose'};
+ const explicitComposeRefresh=c.loadRouteBackendData('compose',true,{force:true});
+ assert.equal(c.headerBackendSyncState.status,'syncing');
+ resolveAll(c);await tick();resolveAll(c);await explicitComposeRefresh;
 
  c=setup();c.activeRouteTarget='settings';const settings=c.loadRouteBackendData('settings');
  assert.deepEqual(c.calls.map(x=>x.name),['loadFinanceCompanyDirectory','loadOfficialWorkflowConfig']);
@@ -104,12 +123,12 @@ const resolveAll=c=>c.pending.forEach(d=>d.resolve());
  assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);
 
  c=setup();c.authenticated=false;await c.loadRouteBackendData('electronicSeal');assert.equal(c.calls.length,0);
- console.log('9 route responsiveness, coalescing, retry and scope scenarios passed');
+ console.log('11 route responsiveness, coalescing, retry and scope scenarios passed');
 })().catch(e=>{console.error(e);process.exit(1)});
 """
         result = subprocess.run(["node", "-e", script, json.dumps(functions)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("9 route responsiveness", result.stdout)
+        self.assertIn("11 route responsiveness", result.stdout)
 
     def test_failed_directory_retry_is_not_throttled_but_healthy_reads_are(self):
         functions = function((ROOT / "app.js").read_text(), "refreshFinanceDirectory")
