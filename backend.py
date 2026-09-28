@@ -11811,7 +11811,9 @@ def official_pdf_party_text(value: Any) -> str:
     return "、".join(official_pdf_party_items(value))
 
 
-def official_pdf_copy_recipients(value: Any, company_name: Any) -> str:
+def official_pdf_copy_recipients(value: Any, company_name: Any, manually_edited: bool = False) -> str:
+    if manually_edited:
+        return official_pdf_party_text(value) or "無"
     company = str(company_name or "").strip()
     additions = [item for item in official_pdf_party_items(value) if item != company]
     return "、".join([company, *additions] if company else additions)
@@ -11899,6 +11901,8 @@ def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
         or metadata.get("originals")
         or metadata.get("original_recipients")
         or metadata.get("originalRecipients")
+        or metadata_extra.get("original_recipients")
+        or metadata_extra.get("originalRecipients")
     )
     copies_value = (
         doc.get("copies")
@@ -11933,7 +11937,14 @@ def official_pdf_info(doc: Dict[str, Any], template: str) -> Dict[str, Any]:
         "security_display": "" if security in {"", "普通", "普通件", "一般", "無"} else security,
         "recipient": recipient,
         "original_recipients": official_pdf_party_text(originals_value) or recipient,
-        "copy_recipients": official_pdf_copy_recipients(copies_value, company),
+        "copy_recipients": official_pdf_copy_recipients(
+            copies_value,
+            company,
+            doc.get("copy_recipients_manual") is True
+            or doc.get("copyRecipientsManual") is True
+            or metadata.get("copy_recipients_manual") is True
+            or metadata_extra.get("copy_recipients_manual") is True,
+        ),
         "agency_code": doc.get("agency_code") or doc.get("agencyCode") or "",
         "subject": doc.get("subject") or "未填主旨",
         "body": str(body or ""),
@@ -21739,10 +21750,15 @@ def official_pdf_document_payload(conn: sqlite3.Connection, document: Dict[str, 
         "company_name": company.get("name") or "歲悅股份有限公司",
         "doc_type": extra.get("document_type") or metadata.get("document_type") or "函",
         "agency_name": document.get("recipient") or "未指定受文者",
+        "original_recipients": official_pdf_party_text(
+            extra.get("original_recipients") or extra.get("originalRecipients") or metadata.get("original_recipients") or document.get("recipient")
+        ),
         "copy_recipients": official_pdf_copy_recipients(
             extra.get("copy_recipients") or extra.get("copyRecipients") or metadata.get("copy_recipients") or metadata.get("copyRecipients"),
             company.get("name") or "",
+            extra.get("copy_recipients_manual") is True,
         ),
+        "copy_recipients_manual": extra.get("copy_recipients_manual") is True,
         "subject": document.get("subject") or document.get("title") or "未命名發文",
         "body": "\n\n".join(body_parts) or document.get("description") or "尚未填寫說明內容。",
         "owner": document.get("handler_name") or document.get("applicant_name") or "承辦人",
@@ -22489,12 +22505,20 @@ def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], 
     extra_metadata["contact_fax"] = str(
         extra_metadata.get("contact_fax") or payload.get("contact_fax") or payload.get("contactFax") or EDOC_DEFAULT_CONTACT_FAX
     ).strip()[:120] or EDOC_DEFAULT_CONTACT_FAX
+    extra_metadata["copy_recipients_manual"] = (
+        extra_metadata.get("copy_recipients_manual") is True or payload.get("copy_recipients_manual") is True
+    )
     extra_metadata["copy_recipients"] = official_pdf_copy_recipients(
         extra_metadata.get("copy_recipients")
         or extra_metadata.get("copyRecipients")
         or payload.get("copy_recipients")
         or payload.get("copyRecipients"),
         company.get("name") or "",
+        extra_metadata["copy_recipients_manual"],
+    )[:OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH]
+    extra_metadata["original_recipients"] = official_pdf_party_text(
+        extra_metadata.get("original_recipients") or extra_metadata.get("originalRecipients")
+        or payload.get("original_recipients") or payload.get("originalRecipients") or payload.get("recipient")
     )[:OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH]
     output_fields = official_output_fields(payload)
     requires_stamp = output_fields["requires_stamp"]
@@ -22670,6 +22694,7 @@ OFFICIAL_CORRECTION_METADATA_TEXT_FIELDS = {
     "contact_phone": 120,
     "contact_fax": 120,
     "contact_email": 320,
+    "original_recipients": OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH,
     "copy_recipients": OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH,
 }
 OFFICIAL_CORRECTION_RENDER_METADATA_FIELDS = {
@@ -22682,7 +22707,9 @@ OFFICIAL_CORRECTION_RENDER_METADATA_FIELDS = {
     "contact_phone",
     "contact_fax",
     "contact_email",
+    "original_recipients",
     "copy_recipients",
+    "copy_recipients_manual",
 }
 
 
@@ -22694,11 +22721,13 @@ def _official_correction_client_metadata(payload: Dict[str, Any]) -> Dict[str, A
             value = source.get(key)
             if key == "contact_fax":
                 value = str(value or EDOC_DEFAULT_CONTACT_FAX).strip() or EDOC_DEFAULT_CONTACT_FAX
-            elif key == "copy_recipients":
+            elif key in {"original_recipients", "copy_recipients"}:
                 value = official_pdf_party_text(value)
             elif key == "attachment_details":
                 value = validated_official_attachment_description(value)
             sanitized[key] = str(value or "").strip()[:limit]
+    if "copy_recipients_manual" in source:
+        sanitized["copy_recipients_manual"] = source.get("copy_recipients_manual") is True
     placements = source.get("seal_placements")
     if isinstance(placements, dict):
         safe_placements: Dict[str, Dict[str, float | int]] = {}
@@ -36691,10 +36720,15 @@ def supabase_official_pdf_document_payload(document: Dict[str, Any]) -> Dict[str
         "company_name": company.get("name") or "歲悅股份有限公司",
         "doc_type": extra.get("document_type") or metadata.get("document_type") or "函",
         "agency_name": document.get("recipient") or "未指定受文者",
+        "original_recipients": official_pdf_party_text(
+            extra.get("original_recipients") or extra.get("originalRecipients") or metadata.get("original_recipients") or document.get("recipient")
+        ),
         "copy_recipients": official_pdf_copy_recipients(
             extra.get("copy_recipients") or extra.get("copyRecipients") or metadata.get("copy_recipients") or metadata.get("copyRecipients"),
             company.get("name") or "",
+            extra.get("copy_recipients_manual") is True,
         ),
+        "copy_recipients_manual": extra.get("copy_recipients_manual") is True,
         "subject": document.get("subject") or document.get("title") or "未命名發文",
         "body": "\n\n".join(body_parts) or document.get("description") or "尚未填寫說明內容。",
         "owner": document.get("handler_name") or document.get("applicant_name") or "承辦人",
@@ -38927,12 +38961,20 @@ def supabase_create_official_document(payload: Dict[str, Any], session: Dict[str
     extra_metadata["contact_fax"] = str(
         extra_metadata.get("contact_fax") or payload.get("contact_fax") or payload.get("contactFax") or EDOC_DEFAULT_CONTACT_FAX
     ).strip()[:120] or EDOC_DEFAULT_CONTACT_FAX
+    extra_metadata["copy_recipients_manual"] = (
+        extra_metadata.get("copy_recipients_manual") is True or payload.get("copy_recipients_manual") is True
+    )
     extra_metadata["copy_recipients"] = official_pdf_copy_recipients(
         extra_metadata.get("copy_recipients")
         or extra_metadata.get("copyRecipients")
         or payload.get("copy_recipients")
         or payload.get("copyRecipients"),
         company.get("name") or "",
+        extra_metadata["copy_recipients_manual"],
+    )[:OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH]
+    extra_metadata["original_recipients"] = official_pdf_party_text(
+        extra_metadata.get("original_recipients") or extra_metadata.get("originalRecipients")
+        or payload.get("original_recipients") or payload.get("originalRecipients") or payload.get("recipient")
     )[:OFFICIAL_COPY_RECIPIENTS_MAX_LENGTH]
     output_fields = official_output_fields(payload)
     requires_stamp = output_fields["requires_stamp"]

@@ -48,8 +48,13 @@ class FrontendAuthoritativeWorkflowsContractTest(unittest.TestCase):
         self.assertIn("route_code: normalizedRoute", readiness)
         self.assertIn("workflowReadinessContextQuery(context)", readiness)
         self.assertIn('sourceOfTruth: "finance"', readiness)
-        compose_submit = self.js[self.js.index('document.querySelector("#composeForm").addEventListener'):]
+        compose_submit = javascript_function(self.js, "handleComposeSubmitRequest")
+        compose_confirm = javascript_function(self.js, "confirmComposeSubmission")
         self.assertIn("await loadOfficialWorkflowReadiness", compose_submit)
+        self.assertIn("workflowReadinessAllowsSubmit", compose_submit)
+        self.assertIn("await loadOfficialWorkflowReadiness", compose_confirm)
+        self.assertIn("workflowReadinessAllowsSubmit", compose_confirm)
+        self.assertIn('document.querySelector("#composeForm").addEventListener("submit", handleComposeSubmitRequest)', self.js)
         uploaded_submit = self.js[self.js.rindex("async function submitUploadedSealApplication") :]
         self.assertIn("await loadOfficialWorkflowReadiness", uploaded_submit)
         self.assertIn("workflowReadinessAllowsSubmit", uploaded_submit)

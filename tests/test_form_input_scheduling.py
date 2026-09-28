@@ -28,6 +28,7 @@ const document={querySelector:key=>nodes[key]};
 const composeInputRuntime={composing:false,compositionScope:'',pending:false};
 let draftPreviewRenderTimer=null,composeCloudTimer=null,composeCloudEpoch=0;
 let draftConfirmed=true,draftSigned=true,activeComposeStep='fill';
+let modalCloses=0;const hideComposeSubmitDialog=()=>{modalCloses++};
 let composeCloudOperation=null,composeCloudDraftId='',composeCloudConflict=false;
 let composeRecoveryCandidate=null,composeRecoveryDismissedIdentity='',composeAiOperation=null,composeAiSuggestion=null,composeAiUndo=null,composeAiReview=null;
 const composeAutosaveIdentity=()=>session,renderComposeAiActions=()=>{};
@@ -60,7 +61,7 @@ markDraftDirty();await tick(220); // Cancel the already scheduled cloud save.
 const before=localWrites.length;startComposeComposition();
 nodes['#subject'].value='組字中的部分';markDraftDirty({isComposing:true});
 await tick(5000);assert.equal(localWrites.length,before);assert.equal(puts.length,0);assert.equal(previews.length,1);
-assert.equal(draftConfirmed,false);assert.equal(nodes['#submitDispatchBtn'].disabled,true);
+assert.equal(draftConfirmed,false);assert.ok(modalCloses>0);
 assert.equal(flushComposeInputUpdates(),false);assert.equal(await saveComposeCloudDraft(),null);
 ''')
 

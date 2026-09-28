@@ -169,7 +169,9 @@ class ComposeOutputContractTest(unittest.TestCase):
         self.assertTrue(by_key["approvalCategory"]["required"])
         self.assertFalse(by_key["approvalCategory"]["done"])
         guard = function(self.js, "applyWorkflowReadinessSubmitGuards")
-        self.assertIn("!draftConfirmed || !composeReady", guard)
+        self.assertIn("composeSubmit.disabled = composeSubmitInFlight", guard)
+        for action in ("handleComposeSubmitRequest", "confirmComposeSubmission"):
+            self.assertIn("workflowReadinessAllowsSubmit(selection, readiness)", function(self.js, action))
 
     def test_electronic_pdf_preview_has_no_stamp_layer(self):
         result = self.evaluate(["renderDraftSealLayer"], '''

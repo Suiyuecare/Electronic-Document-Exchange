@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
-    <link rel="stylesheet" href="styles.css?v=20260928-fluid-experience-r1" />
+    <link rel="stylesheet" href="styles.css?v=20260928-compose-submit-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
@@ -1138,6 +1138,17 @@
                     <input id="recipient" placeholder="例如：臺北市政府社會局" />
                     <span class="field-hint" id="recipientHint"></span>
                   </label>
+                  <div class="compose-field-grid">
+                    <label>
+                      正本
+                      <textarea class="resize-none" id="originalRecipients" rows="2" maxlength="2000" placeholder="預設帶入受文者，可自行修改"></textarea>
+                      <span class="field-hint" id="originalRecipientsHint"></span>
+                    </label>
+                    <label>
+                      副本
+                      <textarea class="resize-none" id="copyRecipients" rows="2" maxlength="2000" placeholder="預設帶入發文單位，可自行修改"></textarea>
+                    </label>
+                  </div>
                   <div class="compose-field-grid compose-document-meta">
                     <label>
                       發文日期
@@ -1157,36 +1168,8 @@
                       </select>
                     </label>
                   </div>
-                  <label>
-                    主旨
-                    <input id="subject" placeholder="可自行輸入，或使用 AI 協助起草" />
-                    <span class="field-hint" id="subjectHint"></span>
-                  </label>
-                  <label>
-                    說明
-                    <textarea id="bodyText" rows="8" placeholder="可自行輸入，或使用 AI 協助起草"></textarea>
-                    <span class="field-hint" id="bodyTextHint"></span>
-                  </label>
-                  <details class="compose-optional-fields compose-attachment-disclosure">
-                    <summary>附件（選填）</summary>
-                    <div class="compose-optional-fields-content">
-                      <label>
-                        附件
-                        <input id="attachments" type="file" multiple />
-                        <span class="field-hint">每份附件上限 3 MB；PDF 須為 A4。附件文字可另行編輯，重試不會重複上傳已成功的檔案。</span>
-                        <div id="composeAttachmentUploadStatus" role="status" aria-live="polite"></div>
-                        <span class="field-hint">送出後附件會保留在同一張公文申請單，後續每一位指定簽核人都可檢視與下載。</span>
-                      </label>
-                      <label>
-                        附件文字內容
-                        <textarea id="attachmentDetails" rows="3" maxlength="5000" placeholder="選擇附件後自動帶入檔名，可改成公文要顯示的附件說明。"></textarea>
-                        <span class="field-hint">公文只顯示此處文字；修改文字不會更改附件檔名或內容。</span>
-                        <span class="field-hint" id="attachmentDetailsHint"></span>
-                      </label>
-                    </div>
-                  </details>
-                  <details class="compose-optional-fields compose-ai-assist-disclosure">
-                    <summary>AI 協助起草（選填）</summary>
+                  <details class="compose-optional-fields compose-ai-assist-disclosure" open>
+                    <summary>AI 協助起稿（選填）</summary>
                     <div class="compose-optional-fields-content">
                       <label class="compose-purpose-field">
                         起草方向
@@ -1208,14 +1191,36 @@
                       </label>
                     </div>
                   </details>
-
                   <label>
-                    副本
-                    <textarea id="copyRecipients" rows="2" placeholder="送件公司會自動列入；可用頓號或換行增補其他副本"></textarea>
-                    <span class="field-hint">送件公司固定列為第一個副本，可自行增補其他單位或人員。</span>
+                    主旨
+                    <input id="subject" placeholder="可自行輸入，或使用 AI 協助起稿" />
+                    <span class="field-hint" id="subjectHint"></span>
                   </label>
                   <label>
-                    公文產出
+                    說明
+                    <textarea id="bodyText" rows="8" placeholder="可自行輸入，或使用 AI 協助起稿"></textarea>
+                    <span class="field-hint" id="bodyTextHint"></span>
+                  </label>
+                  <details class="compose-optional-fields compose-attachment-disclosure">
+                    <summary>附件（選填）</summary>
+                    <div class="compose-optional-fields-content">
+                      <label>
+                        附件
+                        <input id="attachments" type="file" multiple />
+                        <span class="field-hint">每份附件上限 3 MB；PDF 須為 A4。附件文字可另行編輯，重試不會重複上傳已成功的檔案。</span>
+                        <div id="composeAttachmentUploadStatus" role="status" aria-live="polite"></div>
+                        <span class="field-hint">送出後附件會保留在同一張公文申請單，後續每一位指定簽核人都可檢視與下載。</span>
+                      </label>
+                      <label>
+                        附件文字內容
+                        <textarea id="attachmentDetails" rows="3" maxlength="5000" placeholder="選擇附件後自動帶入檔名，可改成公文要顯示的附件說明。"></textarea>
+                        <span class="field-hint">公文只顯示此處文字；修改文字不會更改附件檔名或內容。</span>
+                        <span class="field-hint" id="attachmentDetailsHint"></span>
+                      </label>
+                    </div>
+                  </details>
+                  <label>
+                    公文寄送方式
                     <select id="composeOutputMode" aria-describedby="composeSealModeHint">
                       <option value="electronic">A. 電子公文（不放大小章）</option>
                       <option value="physical" selected>B. 實體公文（可放大小章）</option>
@@ -1249,7 +1254,7 @@
                     </div>
                     <div class="draft-preview-heading-actions">
                       <button class="secondary-button draft-print-button" type="button" data-print-official-draft="#draftPreview">列印函稿</button>
-                      <span class="status-pill" id="draftConfirmStatus">尚未確認</span>
+                      <span class="status-pill" id="draftConfirmStatus">送出前確認</span>
                     </div>
                   </div>
                   <div class="draft-preview-body" id="draftPreviewBody">
@@ -1287,7 +1292,7 @@
                   </div>
                   <div class="draft-preview-heading-actions">
                     <button class="secondary-button draft-print-button" type="button" data-print-official-draft="#draftReviewPreview">列印函稿</button>
-                    <span class="status-pill" id="composeConfirmHint">尚未確認</span>
+                    <span class="status-pill" id="composeConfirmHint">送出前請核對</span>
                   </div>
                 </div>
                 <article class="official-draft-preview review" id="draftReviewPreview" data-draft-preview data-official-format="taiwan-letter-a4" aria-label="正式公文 A4 確認預覽"></article>
@@ -1307,12 +1312,11 @@
             </section>
 
             <div class="compose-bottom-actions">
+              <p class="field-hint workflow-readiness-notice compose-submit-readiness" id="composeConfirmWorkflowReadinessNotice" role="status" aria-live="polite" tabindex="-1" hidden></p>
               <button class="secondary-button" id="composePrevBtn" type="button">回到填寫</button>
               <button class="secondary-button" id="saveDispatchDraftBtn" type="button">儲存草稿</button>
-              <button class="secondary-button" id="resetDraftConfirmBtn" type="button">取消確認</button>
-              <button class="secondary-button" id="confirmDraftBtn" type="button">確認內容無誤</button>
               <button class="primary-button" id="composeNextBtn" type="button">前往確認</button>
-              <button class="primary-button" id="submitDispatchBtn" type="submit" disabled>送出簽核</button>
+              <button class="primary-button" id="submitDispatchBtn" type="submit">送出簽核</button>
             </div>
           </form>
         </section>
@@ -4217,6 +4221,22 @@
       </section>
     </div>
 
+    <div class="modal-backdrop hidden" id="composeSubmitModal" role="dialog" aria-modal="true" aria-labelledby="composeSubmitModalTitle" aria-describedby="composeSubmitModalDescription" tabindex="-1">
+      <section class="contract-modal-card compose-submit-modal-card">
+        <div class="contract-modal-header">
+          <div>
+            <h3 id="composeSubmitModalTitle">確認內容無誤？</h3>
+            <p id="composeSubmitModalDescription">送出後將依會計系統簽核流程交由主管審核；如需修改，請先回到填寫。</p>
+          </div>
+        </div>
+        <div class="compose-submit-modal-actions">
+          <p id="composeSubmitModalError" role="alert" hidden></p>
+          <button class="secondary-button" id="composeSubmitCancelBtn" type="button">再檢查一下</button>
+          <button class="primary-button" id="composeSubmitConfirmBtn" type="button">確認送出簽核</button>
+        </div>
+      </section>
+    </div>
+
     <div class="modal-backdrop hidden" id="officialDecisionModal" role="dialog" aria-modal="true" aria-labelledby="officialDecisionModalTitle" tabindex="-1">
       <section class="contract-modal-card official-decision-modal-card">
         <div class="contract-modal-header">
@@ -4282,6 +4302,6 @@
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260928-library-recovery-r1"></script>
     <script src="editor-seam.js?v=20260911-r1"></script>
     <script src="editor-a4.js?v=20260911-r1"></script>
-    <script src="app.js?v=20260928-fluid-experience-r1"></script>
+    <script src="app.js?v=20260928-compose-submit-r1"></script>
   </body>
 </html>
