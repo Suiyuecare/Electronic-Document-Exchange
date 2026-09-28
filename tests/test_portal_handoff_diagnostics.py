@@ -13,6 +13,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PortalHandoffDiagnosticsTestCase(unittest.TestCase):
+    def test_all_new_tab_and_failure_redirects_reuse_portal_oauth_session_origin(self) -> None:
+        # Portal currently completes Google OAuth on this origin. Browser
+        # storage on the vanity login host cannot resume that session.
+        expected_url = "https://suiyuecare-website.vercel.app/portal/"
+        app = (ROOT / "app.js").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "entry-bootstrap.js").read_text(encoding="utf-8")
+        self.assertIn(f'const loggingPortalUrl = "{expected_url}";', app)
+        self.assertIn(f'const portalUrl = "{expected_url}";', bootstrap)
+        self.assertEqual(backend.EDOC_PORTAL_SESSION_URL, expected_url)
+        self.assertIn("https://suiyuecare-website.vercel.app", backend.EDOC_PORTAL_ALLOWED_ORIGINS)
+
+        handler = object.__new__(backend.Handler)
+        with mock.patch.object(handler, "send_response"), mock.patch.object(handler, "send_header") as send_header, mock.patch.object(handler, "end_headers"):
+            handler.send_handoff_redirect(failure_status=403)
+        location = next(call.args[1] for call in send_header.call_args_list if call.args[0] == "Location")
+        parsed = urllib.parse.urlparse(location)
+        self.assertEqual(f"{parsed.scheme}://{parsed.netloc}{parsed.path}", expected_url)
+        self.assertEqual(urllib.parse.parse_qs(parsed.query), {"returnFrom": ["edoc"], "moduleError": ["sso_denied"]})
+
     @staticmethod
     def form_handler(fields: list[tuple[str, str]]) -> backend.Handler:
         raw = urllib.parse.urlencode(fields).encode("utf-8")

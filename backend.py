@@ -412,6 +412,8 @@ EDOC_PORTAL_ALLOWED_ORIGINS = frozenset({
     "https://login.suiyuecare.com",
     "https://suiyuecare-website.vercel.app",
 })
+# Keep failure returns on the same origin as Portal's Google OAuth callback.
+EDOC_PORTAL_SESSION_URL = "https://suiyuecare-website.vercel.app/portal/"
 PORTAL_FINANCE_IDENTITY_ERROR = "finance_identity_unavailable"
 EDOC_FINANCE_BRIDGE_URL = os.getenv("EDOC_FINANCE_BRIDGE_URL", "").strip()
 EDOC_FINANCE_BRIDGE_SECRET = os.getenv("EDOC_FINANCE_BRIDGE_SECRET", "").strip()
@@ -46741,7 +46743,7 @@ class Handler(SimpleHTTPRequestHandler):
             cookie_headers = self.handoff_cookie_headers(token)
         else:
             code = self.handoff_failure_code(failure_status or 500)
-            location = "https://login.suiyuecare.com/portal/?" + urllib.parse.urlencode({
+            location = EDOC_PORTAL_SESSION_URL + "?" + urllib.parse.urlencode({
                 "returnFrom": "edoc",
                 "moduleError": code,
             })
