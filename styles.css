@@ -12633,17 +12633,15 @@ body[data-session-state="revalidating"] .workspace::after {
 #compose .compose-save-status { gap: 4px 10px; margin-bottom: 10px; padding: 8px 12px; font-size: 13px; }
 #compose .compose-save-status[data-tone="error"] { font-size: 16px; }
 #compose .compose-cloud-drafts { padding: 0 12px; margin-bottom: 12px; }
-#compose .compose-resume-draft, #compose .compose-contact-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fffaf2; }
+#compose .compose-resume-draft { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fffaf2; }
 #compose .compose-resume-draft { margin-bottom: 12px; }
-#compose .compose-resume-draft[hidden], #compose .compose-contact-fields label[hidden] { display: none; }
-#compose .compose-resume-draft p, #compose .compose-contact-summary p { margin: 4px 0 0; color: var(--muted); overflow-wrap: anywhere; }
+#compose .compose-resume-draft[hidden] { display: none; }
+#compose .compose-resume-draft p { margin: 4px 0 0; color: var(--muted); overflow-wrap: anywhere; }
 #compose .compose-resume-draft .form-actions { flex-shrink: 0; margin: 0; }
-#compose .compose-contact-summary { margin: 12px 0 0; }
-#compose .compose-contact-summary > div { min-width: 0; }
-#compose #composeContactToggleBtn { flex-shrink: 0; min-height: 44px; }
+#compose .compose-contact-heading { margin: 0; font-size: 1rem; line-height: 1.5; }
 #compose .compose-contact-fields .compose-contact-required { grid-column: 1 / -1; }
 @media (max-width: 760px) {
-  #compose .compose-resume-draft, #compose .compose-contact-summary { align-items: stretch; flex-direction: column; }
+  #compose .compose-resume-draft { align-items: stretch; flex-direction: column; }
   #compose .compose-resume-draft .form-actions { display: flex; flex-wrap: wrap; }
   #compose .compose-resume-draft button { flex: 1 1 150px; min-height: 44px; }
   #compose .compose-progress-step strong { font-size: 16px; }

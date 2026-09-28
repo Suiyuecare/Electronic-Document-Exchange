@@ -1107,11 +1107,8 @@
                       </select>
                     </label>
                   </div>
-                  <div class="compose-contact-summary">
-                    <div><strong>寄件資訊</strong><p id="composeContactSummaryText">依登入帳號帶入，可自行修改。</p></div>
-                    <button class="secondary-button" id="composeContactToggleBtn" type="button" aria-expanded="false" aria-controls="composeContactFields">修改寄件資訊</button>
-                  </div>
-                  <div class="compose-field-grid compose-contact-fields" id="composeContactFields" aria-label="寄件聯絡資訊">
+                  <h4 class="compose-contact-heading" id="composeContactHeading">寄件資訊</h4>
+                  <div class="compose-field-grid compose-contact-fields" id="composeContactFields" role="group" aria-labelledby="composeContactHeading">
                     <label class="span-all">
                       寄件人地址
                       <input id="contactAddress" placeholder="依登入帳號所屬公司預設，可編輯" />
