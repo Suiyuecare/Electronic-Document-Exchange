@@ -43,6 +43,10 @@ branding or a promise of zero network latency.
   end commits the latest text. Physical OS IME remains a separate device check.
 - Background refresh preserves focused case buttons and inputs; identical
   header state causes no repeated live-region text writes.
+- Compose remains editable while directory, seal and Finance approval reads run.
+  Those reads use a subtle header/local status, not the route-wide moving bar;
+  failures retain the draft and expose retry. Submission still requires fresh
+  Finance approval readiness, and explicit refresh remains visibly busy.
 - Keyboard/mobile drawer and detail dialogs pass Tab/Escape/return focus and
   isolation checks; toast replacement has a full independent duration.
 - Existing upload, locked version, cross-company denial, approval, final-output

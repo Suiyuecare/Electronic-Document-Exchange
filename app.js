@@ -2994,6 +2994,8 @@ function updateHeaderStatus() {
   const topInfo = document.querySelector("#topInfo");
   const syncLabel = headerBackendSyncState.status === "syncing"
     ? "資料更新中"
+    : headerBackendSyncState.status === "background"
+      ? "背景確認中"
     : headerBackendSyncState.status === "error"
       ? "更新未完成"
       : headerBackendSyncState.syncedAt
@@ -3027,7 +3029,7 @@ async function refreshCurrentWorkspace() {
   const token = String(authState?.token || "");
   if (workspaceRefreshRequest?.scope === scope && workspaceRefreshRequest.token === token) return workspaceRefreshRequest.promise;
   const target = activeRouteTarget;
-  const entry = { scope, token, promise: null };
+  const entry = { scope, token, target, promise: null };
   workspaceRefreshRequest = entry;
   const current = () => workspaceRefreshRequest === entry && scope === frontendSessionScope()
     && token === String(authState?.token || "") && hasAuthenticatedBackendSession();
@@ -5664,7 +5666,10 @@ function renderWorkspaceLoadStatus() {
   const notice = document.querySelector("#workspaceLoadStatus");
   if (!notice) return;
   const sameSession = routeBackendDataScope === frontendSessionScope() && hasAuthenticatedBackendSession();
-  const loading = sameSession && routeBackendDataRequests.has(activeRouteTarget);
+  // Compose is editable while its directory, seals and approval checks refresh.
+  // The route-wide moving bar wrongly implies the whole form is still blocked;
+  // its approval/seal notices already own those pending states.
+  const loading = sameSession && activeRouteTarget !== "compose" && routeBackendDataRequests.has(activeRouteTarget);
   const failed = sameSession && routeBackendDataErrors.has(activeRouteTarget);
   notice.hidden = !loading && !failed;
   notice.dataset.state = loading ? "loading" : failed ? "error" : "idle";
@@ -5701,7 +5706,8 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
     && routeBackendDataRequests.get(target) === entry;
   routeBackendDataRequests.set(target, entry);
   routeBackendDataErrors.delete(target);
-  headerBackendSyncState = { ...headerBackendSyncState, status: "syncing" };
+  const manualRefresh = workspaceRefreshRequest?.scope === scope && workspaceRefreshRequest?.target === target;
+  headerBackendSyncState = { ...headerBackendSyncState, status: target === "compose" && !manualRefresh ? "background" : "syncing" };
   updateHeaderStatus();
   renderWorkspaceLoadStatus();
   entry.promise = (async () => {
