@@ -52,9 +52,10 @@ class ComposeLayoutV2ContractTest(unittest.TestCase):
     def test_compose_fields_follow_the_printed_document_order_without_duplicate_ids(self):
         ids = [
             "composeCompanySelect", "docType", "contactAddress", "contactOwner",
-            "contactPhone", "contactFax", "contactEmail", "recipient", "dispatchDate",
-            "dispatchNo", "priority", "subject", "bodyText", "attachments", "attachmentDetails",
-            "documentPurpose", "generateFromPurposeBtn", "copyRecipients",
+            "contactPhone", "contactFax", "contactEmail", "recipient", "originalRecipients",
+            "copyRecipients", "dispatchDate", "dispatchNo", "priority",
+            "documentPurpose", "generateFromPurposeBtn", "subject", "bodyText",
+            "attachments", "attachmentDetails",
             "composeOutputMode", "largeSealType", "smallSealType", "composeApprovalCategorySelect",
         ]
         positions = [self.dom.elements[identity]["position"] for identity in ids]
@@ -82,6 +83,36 @@ class ComposeLayoutV2ContractTest(unittest.TestCase):
         self.assertIn("min-height: 44px", rule)
         self.assertIn("color: #fff", rule)
         self.assertIn("background: #b45309", rule)
+
+    def test_ai_assistance_is_open_above_subject_and_recipients_are_editable(self):
+        ai = re.search(r'<details\s+class="compose-optional-fields compose-ai-assist-disclosure"(?P<attrs>[^>]*)>', self.html)
+        self.assertIsNotNone(ai)
+        self.assertRegex(ai.group("attrs"), r'\bopen\b')
+        self.assertLess(self.dom.elements["documentPurpose"]["position"], self.dom.elements["subject"]["position"])
+        for identity in ("originalRecipients", "copyRecipients"):
+            field = self.dom.elements[identity]
+            self.assertEqual(field["tag"], "textarea")
+            self.assertNotIn("readonly", field["attrs"])
+            self.assertNotIn("disabled", field["attrs"])
+        self.assertLess(self.dom.elements["recipient"]["position"], self.dom.elements["originalRecipients"]["position"])
+
+    def test_dispatch_method_label_and_submit_confirmation_are_one_flow(self):
+        self.assertRegex(self.html, r'公文寄送方式\s*<select id="composeOutputMode"')
+        self.assertNotIn("confirmDraftBtn", self.dom.elements)
+        self.assertNotIn("resetDraftConfirmBtn", self.dom.elements)
+        submit = self.dom.elements["submitDispatchBtn"]["attrs"]
+        self.assertEqual(submit["type"], "submit")
+        dialog = self.dom.elements["composeSubmitModal"]["attrs"]
+        self.assertEqual(dialog["role"], "dialog")
+        self.assertEqual(dialog["aria-modal"], "true")
+        self.assertEqual(dialog["aria-labelledby"], "composeSubmitModalTitle")
+        self.assertIn("hidden", dialog["class"].split())
+        self.assertIn("composeSubmitCancelBtn", self.dom.elements)
+        self.assertIn("composeSubmitConfirmBtn", self.dom.elements)
+        self.assertIn("composeSubmitModalError", self.dom.elements)
+        readiness = self.dom.elements["composeConfirmWorkflowReadinessNotice"]
+        self.assertIn(("form", "composeForm"), readiness["ancestors"])
+        self.assertEqual(readiness["attrs"]["role"], "status")
 
     def test_output_mode_owns_seal_fields_and_preserves_existing_physical_default(self):
         select = re.search(r'<select id="composeOutputMode"[^>]*>(.*?)</select>', self.html, re.S).group(1)

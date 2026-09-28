@@ -72,12 +72,13 @@ let backendRequest=p=>{calls.push(p);return Promise.resolve([{id:'A-1'}])};
 
     def test_compose_validation_order_and_email(self):
         self.run_js(["composeFieldValidations"], r'''
-const data={documentCategory:'fixture',approvalRouteCode:'A',dispatchDate:'2026-09-09',recipient:'recipient',subject:'synthetic subject',body:'synthetic body',contactAddress:'address',contactOwner:'owner',contactPhone:'02-66045432 #31',contactEmail:'bad-email',attachmentDetails:''};
+const data={documentCategory:'fixture',approvalRouteCode:'A',dispatchDate:'2026-09-09',recipient:'recipient',originalRecipients:'synthetic original unit',subject:'synthetic subject',body:'synthetic body',contactAddress:'address',contactOwner:'owner',contactPhone:'02-66045432 #31',contactEmail:'bad-email',attachmentDetails:''};
 const composeValidationData=()=>data,isValidComposeDispatchDate=()=>true,isValidComposeContactPhone=()=>true,Node={DOCUMENT_POSITION_FOLLOWING:4};
-const order=['#contactOwner','#contactAddress','#contactEmail','#contactPhone','#dispatchDate','#recipient','#subject','#bodyText','#attachmentDetails','#composeApprovalCategorySelect'];
+const order=['#contactOwner','#contactAddress','#contactEmail','#contactPhone','#dispatchDate','#recipient','#originalRecipients','#subject','#bodyText','#attachmentDetails','#composeApprovalCategorySelect'];
 const nodes=Object.fromEntries(order.map((id,i)=>[id,{validity:{typeMismatch:id==='#contactEmail'},compareDocumentPosition(other){return i<order.indexOf(other.id)?4:2},id}]));
 const document={querySelector:s=>nodes[s]||{files:[]}};
 const validations=composeFieldValidations();assert.equal(validations[0].selector,'#contactOwner');assert.equal(validations.at(-1).selector,'#composeApprovalCategorySelect');assert.equal(validations.find(x=>x.selector==='#contactEmail').valid,false);
+assert.equal(validations.find(x=>x.selector==='#originalRecipients').valid,true);
 nodes['#contactEmail'].validity.typeMismatch=false;assert.equal(composeFieldValidations().find(x=>x.selector==='#contactEmail').valid,true);
 ''')
 

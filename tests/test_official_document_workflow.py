@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import backend
 from PIL import Image, ImageDraw
@@ -486,6 +487,7 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
                     "source": "compose_form",
                     "company_name": "歲悅股份有限公司",
                     "contact_fax": "N/A",
+                    "original_recipients": "去識別化初版正本單位",
                     "copy_recipients": "歲悅股份有限公司",
                 },
                 "submit": True,
@@ -493,6 +495,7 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
             },
             employee,
         )
+        self.assertEqual(detail["metadata"]["extra"]["original_recipients"], "去識別化初版正本單位")
 
         rejected_step = next(
             step for step in detail["approval_steps"]
@@ -536,12 +539,14 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
                     "source": "compose_form",
                     "company_name": "歲悅股份有限公司",
                     "contact_fax": "N/A",
+                    "original_recipients": "去識別化補正正本單位",
                     "copy_recipients": "歲悅股份有限公司、增補副本單位",
                 },
             },
             employee,
         )
         self.assertEqual(detail["metadata"]["extra"]["contact_fax"], "N/A")
+        self.assertEqual(detail["metadata"]["extra"]["original_recipients"], "去識別化補正正本單位")
         self.assertEqual(
             detail["metadata"]["extra"]["copy_recipients"],
             "歲悅股份有限公司、增補副本單位",
@@ -564,6 +569,8 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
             for page in PdfReader(io.BytesIO(generated_pdf)).pages
         )
         self.assertIn("傳真：N/A", rendered_text)
+        self.assertIn("正本：", rendered_text)
+        self.assertIn("去識別化補正正本單位", rendered_text)
         self.assertIn("副本：", rendered_text)
         self.assertIn("歲悅股份有限公司、增補副本單位", rendered_text)
 
@@ -574,10 +581,85 @@ class OfficialDocumentWorkflowTestCase(unittest.TestCase):
             employee,
         )
         self.assertEqual(resubmitted["metadata"]["extra"]["contact_fax"], "N/A")
+        self.assertEqual(resubmitted["metadata"]["extra"]["original_recipients"], "去識別化補正正本單位")
         self.assertEqual(
             resubmitted["metadata"]["extra"]["copy_recipients"],
             "歲悅股份有限公司、增補副本單位",
         )
+
+    def test_sqlite_create_and_correction_preserve_manual_copy_recipients_in_pdf(self) -> None:
+        employee = self.login_session("sales-assistant@suiyuecare.com")
+        company = {"id": "CO-001", "name": "虛構發文單位", "address": "虛構測試地址"}
+        for manually_edited, expected in (
+            (True, "人工自訂副本單位"),
+            (False, "虛構發文單位、人工自訂副本單位"),
+        ):
+            with self.subTest(manually_edited=manually_edited), mock.patch.object(
+                backend, "official_company_row", return_value=company
+            ):
+                detail = backend.create_official_document(
+                    self.conn,
+                    {
+                        "id": f"OD-SQLITE-COPY-{manually_edited}",
+                        "source_type": "blank_editor",
+                        "company_id": "CO-001",
+                        "output_mode": "electronic",
+                        "subject": "去識別化副本測試",
+                        "description": "此為虛構測試文字。",
+                        "recipient": "虛構受文單位",
+                        "document_category": "主管機關 申請或回覆文件（與 費用、法令無關）",
+                        "metadata": {
+                            "copy_recipients": "人工自訂副本單位",
+                            "copy_recipients_manual": manually_edited,
+                        },
+                        "submit": False,
+                    },
+                    employee,
+                )
+                row = backend.official_document_row(self.conn, detail["id"])
+                self.assertEqual(detail["metadata"]["extra"]["copy_recipients"], expected)
+                self.assertIs(detail["metadata"]["extra"]["copy_recipients_manual"], manually_edited)
+                self.assertEqual(backend.official_pdf_document_payload(self.conn, row)["copy_recipients"], expected)
+
+                latest = max(
+                    (item for item in detail["files"] if item["file_type"] == "generated_pdf"),
+                    key=lambda item: int(item["version"]),
+                )
+                _, _, pdf_data = backend.official_document_download_file(
+                    self.conn, detail["id"], latest["id"], employee, "127.0.0.1", "unit-test-review"
+                )
+                pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(pdf_data)).pages)
+                self.assertIn(expected, pdf_text)
+
+                if manually_edited:
+                    detail = backend.update_official_document_correction(
+                        self.conn,
+                        detail["id"],
+                        {
+                            "expected_content_revision": detail["content_revision"],
+                            "metadata": {
+                                "copy_recipients": "第二版自訂副本單位",
+                                "copy_recipients_manual": True,
+                            },
+                        },
+                        employee,
+                    )
+                    self.assertEqual(detail["metadata"]["extra"]["copy_recipients"], "第二版自訂副本單位")
+                    self.assertIs(detail["metadata"]["extra"]["copy_recipients_manual"], True)
+                    corrected = backend.official_document_row(self.conn, detail["id"])
+                    self.assertEqual(backend.official_pdf_document_payload(self.conn, corrected)["copy_recipients"], "第二版自訂副本單位")
+                    latest = max(
+                        (item for item in detail["files"] if item["file_type"] == "generated_pdf"),
+                        key=lambda item: int(item["version"]),
+                    )
+                    _, _, corrected_pdf = backend.official_document_download_file(
+                        self.conn, detail["id"], latest["id"], employee, "127.0.0.1", "unit-test-review"
+                    )
+                    corrected_text = "\n".join(
+                        page.extract_text() or "" for page in PdfReader(io.BytesIO(corrected_pdf)).pages
+                    )
+                    self.assertIn("第二版自訂副本單位", corrected_text)
+                    self.assertNotIn("虛構發文單位、第二版自訂副本單位", corrected_text)
 
     def test_uploaded_pdf_source_is_private_original_pdf_and_rejects_non_pdf(self) -> None:
         employee = self.login_session("sales-assistant@suiyuecare.com")

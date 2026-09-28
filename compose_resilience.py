@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS official_document_compose_drafts (
 CREATE INDEX IF NOT EXISTS idx_compose_draft_owner ON official_document_compose_drafts(applicant_id, company_id, archived, updated_at);
 """
 
-SELECTORS = frozenset("composeCompanySelect docType priority composeApprovalCategorySelect dispatchNo dispatchDate composeOutputMode recipient copyRecipients documentPurpose contactAddress contactOwner contactPhone contactFax contactEmail largeSealType smallSealType subject bodyText attachmentDetails".split())
+SELECTORS = frozenset("composeCompanySelect docType priority composeApprovalCategorySelect dispatchNo dispatchDate composeOutputMode recipient originalRecipients copyRecipients documentPurpose contactAddress contactOwner contactPhone contactFax contactEmail largeSealType smallSealType subject bodyText attachmentDetails".split())
 
 def draft_payload(draft_id, payload, user):
     if not re.fullmatch(r"OD-[0-9a-fA-F-]{36}", draft_id):
@@ -32,6 +32,8 @@ def draft_payload(draft_id, payload, user):
         raise ValueError("compose_draft_snapshot_invalid")
     # Only a data snapshot: no file bytes, private URLs or executable markup.
     clean = {"schemaVersion": 2, "userId": user["id"], "companyId": user["company_id"], "values": values,
+             "originalRecipientsAutoDefault": snapshot.get("originalRecipientsAutoDefault") is True,
+             "copyRecipientsAutoDefault": snapshot.get("copyRecipientsAutoDefault") is True,
              "draftRequestId": str(snapshot.get("draftRequestId") or "")[:160], "currentComposeDraftId": str(snapshot.get("currentComposeDraftId") or "")[:160],
              "officialContentRevision": snapshot.get("officialContentRevision"),
              "officialDocumentId": str(snapshot.get("officialDocumentId") or "")[:160],

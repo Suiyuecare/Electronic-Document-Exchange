@@ -923,6 +923,8 @@ alignRolePermissionsWithLogging();
 let workflowRole = "總務";
 let draftConfirmed = false;
 let draftSigned = false;
+let composeSubmitInFlight = false;
+let composeSubmitModalFingerprint = "";
 let draftPreviewExpanded = false;
 let draftPreviewRenderTimer = null;
 let activeComposeStep = "fill";
@@ -5199,19 +5201,24 @@ function renderWorkflowReadinessContext(context) {
       notice.textContent = `目前只能保存草稿，無法送簽：${issues.join("；") || readiness.error || "簽核關係尚未完成"}。請由人資或系統管理員先在會計系統補齊人員、主管與部門主任關係，再按重新整理。`;
     }
   }
+  if (context === "compose") {
+    const confirmNotice = document.querySelector("#composeConfirmWorkflowReadinessNotice");
+    if (confirmNotice) {
+      confirmNotice.hidden = activeComposeStep !== "confirm";
+      confirmNotice.dataset.state = notice.dataset.state || "idle";
+      confirmNotice.textContent = notice.textContent;
+    }
+  }
   applyWorkflowReadinessSubmitGuards();
 }
 
 function applyWorkflowReadinessSubmitGuards() {
-  const composeSelection = workflowReadinessSelection("compose");
-  const composeReady = workflowReadinessAllowsSubmit(
-    composeSelection,
-    officialWorkflowReadinessByRoute.get(workflowReadinessCacheKey("compose"))
-  );
   const composeSubmit = document.querySelector("#submitDispatchBtn");
   if (composeSubmit) {
-    composeSubmit.disabled = !draftConfirmed || !composeReady;
-    composeSubmit.title = composeReady ? "" : "會計系統簽核關係尚未完整，只能先保存草稿。";
+    // Keep this control actionable so an applicant can refresh readiness and
+    // see the precise Finance blocker without returning to the edit pane.
+    composeSubmit.disabled = composeSubmitInFlight;
+    composeSubmit.setAttribute("aria-busy", String(composeSubmitInFlight));
   }
   const uploadedSelection = workflowReadinessSelection("uploadedSeal");
   const uploadedReady = workflowReadinessAllowsSubmit(
@@ -7721,10 +7728,23 @@ function composePartyItems(value = "") {
   )];
 }
 
-function composeCopyRecipientsValue(companyName = "", value = "", previousDefault = "") {
+function syncComposeOriginalRecipientsDefault() {
+  const input = document.querySelector("#originalRecipients");
+  if (!input) return;
+  if (input.dataset.autoDefault === "true" || (!input.value.trim() && input.dataset.autoDefault !== "false")) {
+    input.value = document.querySelector("#recipient")?.value.trim() || "";
+    input.dataset.autoDefault = "true";
+  }
+}
+
+function composeCopyRecipientsValue(companyName = "", value = "", previousDefault = "", manuallyEdited = false) {
   const company = String(companyName || "").trim();
   const oldCompany = String(previousDefault || "").trim();
-  const additions = composePartyItems(value).filter((item) => item !== company && item !== oldCompany);
+  const entries = composePartyItems(value);
+  if (manuallyEdited) {
+    return [...new Set(entries.map((item) => item === oldCompany ? company : item).filter(Boolean))].join("、");
+  }
+  const additions = entries.filter((item) => item !== company && item !== oldCompany);
   return [...new Set([company, ...additions].filter(Boolean))].join("、");
 }
 
@@ -7735,9 +7755,10 @@ function syncComposeCopyRecipientsDefault(force = false) {
     || authState?.user?.company_name
     || "";
   const previousDefault = input.dataset.defaultCompany || "";
-  input.value = composeCopyRecipientsValue(companyName, force ? "" : input.value, previousDefault);
+  const manuallyEdited = input.dataset.autoDefault === "false";
+  input.value = composeCopyRecipientsValue(companyName, force && !manuallyEdited ? "" : input.value, previousDefault, manuallyEdited);
   input.dataset.defaultCompany = companyName;
-  input.dataset.autoDefault = composePartyItems(input.value).some((item) => item !== companyName) ? "false" : "true";
+  input.dataset.autoDefault = manuallyEdited ? "false" : "true";
   return input.value;
 }
 
@@ -7884,7 +7905,9 @@ function composePayload() {
     priority: document.querySelector("#priority")?.value || "普通件",
     ...approvalSelection,
     recipient: document.querySelector("#recipient")?.value.trim() || "未指定受文者",
-    copyRecipients: composeCopyRecipientsValue(companyName, copyInput?.value || "", copyInput?.dataset.defaultCompany || ""),
+    originalRecipients: composePartyItems(document.querySelector("#originalRecipients")?.value || "").join("、"),
+    copyRecipients: composeCopyRecipientsValue(companyName, copyInput?.value || "", copyInput?.dataset.defaultCompany || "", copyInput?.dataset.autoDefault === "false") || (copyInput?.dataset.autoDefault === "false" ? "無" : companyName),
+    copyRecipientsManual: copyInput?.dataset.autoDefault === "false",
     purpose: document.querySelector("#documentPurpose")?.value.trim() || "",
     contactAddress: document.querySelector("#contactAddress")?.value.trim() || "",
     contactOwner: document.querySelector("#contactOwner")?.value.trim() || activeRole(),
@@ -7937,6 +7960,7 @@ const composeAutosaveSelectors = [
   "#dispatchDate",
   "#composeOutputMode",
   "#recipient",
+  "#originalRecipients",
   "#copyRecipients",
   "#documentPurpose",
   "#contactAddress",
@@ -7964,6 +7988,8 @@ function composeRawSnapshot() {
     userId: authState?.user?.id || "",
     companyId: authState?.user?.company_id || "",
     values,
+    originalRecipientsAutoDefault: document.querySelector("#originalRecipients")?.dataset.autoDefault === "true",
+    copyRecipientsAutoDefault: document.querySelector("#copyRecipients")?.dataset.autoDefault === "true",
     approval: { ...approvalSelection, approvalFlowNodes: [...approvalSelection.approvalFlowNodes] },
     sealPlacements: {
       large: { ...composeSealPlacements.large },
@@ -8314,6 +8340,8 @@ function composePersistedSnapshotKey(snapshot = {}) {
     userId: snapshot.userId || "",
     companyId: snapshot.companyId || "",
     values: snapshot.values || {},
+    originalRecipientsAutoDefault: snapshot.originalRecipientsAutoDefault === true,
+    copyRecipientsAutoDefault: snapshot.copyRecipientsAutoDefault === true,
     draftRequestId: String(snapshot.draftRequestId || "").slice(0, 160),
     currentComposeDraftId: String(snapshot.currentComposeDraftId || "").slice(0, 160),
     officialContentRevision: snapshot.officialContentRevision ?? null,
@@ -8332,6 +8360,11 @@ function restoreComposeAutosave(savedOverride = null) {
   const snapshot = saved.snapshot;
   if (`${snapshot?.userId || ""}:${snapshot?.companyId || ""}` !== identity) return false;
   const values = snapshot.values || {};
+  const originalInput = document.querySelector("#originalRecipients");
+  if (originalInput && !Object.prototype.hasOwnProperty.call(values, "#originalRecipients")) {
+    originalInput.value = "";
+    delete originalInput.dataset.autoDefault;
+  }
   const approvalCategory = String(values["#composeApprovalCategorySelect"] || snapshot.approval?.documentCategory || "").slice(0, 300);
   renderApprovalCategorySelect("#composeApprovalCategorySelect", approvalCategory, { requireSelection: true });
   composeAutosaveSelectors.forEach((selector) => {
@@ -8346,10 +8379,20 @@ function restoreComposeAutosave(savedOverride = null) {
       delete element.dataset.attachmentFileNames;
       element.dataset.attachmentTextEdited = "true";
     }
-    if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#copyRecipients"].includes(selector)) {
+    if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail"].includes(selector)) {
       element.dataset.autoDefault = "false";
     }
+    if (selector === "#copyRecipients") element.dataset.autoDefault = snapshot.copyRecipientsAutoDefault === true ? "true" : "false";
+    if (selector === "#originalRecipients") element.dataset.autoDefault = snapshot.originalRecipientsAutoDefault === true ? "true" : "false";
   });
+  const restoredCopyInput = document.querySelector("#copyRecipients");
+  if (restoredCopyInput) {
+    // The form may still carry another company's prior default. A manually
+    // restored recipient with that name must never be silently rewritten.
+    restoredCopyInput.dataset.defaultCompany = document.querySelector("#composeCompanySelect")?.value
+      || authState?.user?.company_name || "";
+  }
+  syncComposeOriginalRecipientsDefault();
   syncComposeCopyRecipientsDefault(false);
   ["large", "small"].forEach((kind) => {
     const placement = snapshot.sealPlacements?.[kind] || {};
@@ -8776,9 +8819,7 @@ function syncDraftPreviewChrome(data = composePayload()) {
   const body = document.querySelector("#draftPreviewBody");
   const toggle = document.querySelector("#toggleDraftPreviewBtn");
   const status = document.querySelector("#draftConfirmStatus");
-  const submit = document.querySelector("#submitDispatchBtn");
-  if (status) status.textContent = draftConfirmed ? "已確認" : "尚未確認";
-  if (submit) submit.disabled = !draftConfirmed;
+  if (status) status.textContent = draftConfirmed ? "已確認" : "送出前確認";
   if (panel) panel.classList.remove("is-collapsed");
   if (body) body.hidden = false;
   if (toggle) {
@@ -8886,6 +8927,7 @@ function applyComposeContactDefaults(force = false) {
     }
   });
   syncComposeCopyRecipientsDefault(force);
+  syncComposeOriginalRecipientsDefault();
   renderDraftPreview();
 }
 
@@ -9213,7 +9255,7 @@ function renderOfficialDraftPageHtml(data, content, pageNumber, totalPages, atta
         ${renderOfficialDraftBody(pageContent.body, pageContent.bodyContinued, pageContent.bodyContext)}
         ${isLastPage ? `
           <section class="draft-distribution-block" aria-label="正本與副本">
-            <div><span>正本：</span><strong>${escapeDraftHtml(data.recipient)}</strong></div>
+            <div><span>正本：</span><strong>${escapeDraftHtml(data.originalRecipients || data.recipient)}</strong></div>
             <div><span>副本：</span><strong>${escapeDraftHtml(data.copyRecipients || data.companyName)}</strong></div>
           </section>
         ` : ""}
@@ -9337,6 +9379,38 @@ function setDraftConfirmed(value) {
   renderDraftPreview({ force: true });
 }
 
+function setComposeSubmitBusy(value) {
+  composeSubmitInFlight = Boolean(value);
+  applyWorkflowReadinessSubmitGuards();
+  const submit = document.querySelector("#submitDispatchBtn");
+  if (submit) submit.textContent = composeSubmitInFlight ? "確認簽核中…" : "送出簽核";
+  const confirm = document.querySelector("#composeSubmitConfirmBtn");
+  if (confirm) {
+    confirm.disabled = composeSubmitInFlight;
+    confirm.setAttribute("aria-busy", String(composeSubmitInFlight));
+    confirm.textContent = composeSubmitInFlight ? "正在送出…" : "確認送出簽核";
+  }
+}
+
+function hideComposeSubmitDialog() {
+  const modal = document.querySelector("#composeSubmitModal");
+  if (modal && !modal.classList.contains("hidden")) hideWorkspaceModal(modal);
+  composeSubmitModalFingerprint = "";
+  const error = document.querySelector("#composeSubmitModalError");
+  if (error) error.hidden = true;
+}
+
+function openComposeSubmitDialog() {
+  composeSubmitModalFingerprint = JSON.stringify(composePayload());
+  const error = document.querySelector("#composeSubmitModalError");
+  if (error) error.hidden = true;
+  const modal = document.querySelector("#composeSubmitModal");
+  showWorkspaceModal(modal);
+  // The submit button is temporarily disabled during Finance readiness checks,
+  // so the browser may have moved focus to <body> before the dialog opened.
+  workspaceModalReturnFocus.set(modal, document.querySelector("#submitDispatchBtn"));
+}
+
 function markDraftDirty(options = {}) {
   draftConfirmed = false;
   draftSigned = false;
@@ -9346,15 +9420,14 @@ function markDraftDirty(options = {}) {
   if (options.isComposing && !composeInputIsComposing()) startComposeComposition();
   // Confirmation becomes invalid immediately; expensive pagination and local
   // serialization wait for the latest committed input, not each keystroke.
-  const submit = document.querySelector("#submitDispatchBtn");
-  if (submit) submit.disabled = true;
+  hideComposeSubmitDialog();
   scheduleDraftPreviewRender();
 }
 
 function composeStepState() {
   return [
-    { key: "fill", label: "填寫資料", body: "表單與即時預覽", done: activeComposeStep !== "fill" || draftConfirmed },
-    { key: "confirm", label: "確認送出", body: "函稿預覽與簽核流程", done: draftConfirmed }
+    { key: "fill", label: "填寫資料", body: "表單與即時預覽", done: activeComposeStep !== "fill" },
+    { key: "confirm", label: "確認送出", body: "函稿預覽與簽核流程", done: false }
   ];
 }
 
@@ -9374,6 +9447,7 @@ function composeInputState() {
   return {
     ...approvalSelection,
     recipient: document.querySelector("#recipient")?.value.trim() || "",
+    originalRecipients: document.querySelector("#originalRecipients")?.value.trim() || "",
     subject: document.querySelector("#subject")?.value.trim() || "",
     body: document.querySelector("#bodyText")?.value.trim() || "",
     attachments: [...(document.querySelector("#attachments")?.files || [])].map((file) => file.name),
@@ -9407,6 +9481,14 @@ function composeReadinessChecks() {
       detail: state.recipient ? "已填寫受文機關或單位。" : "請填寫要發給哪個機關或單位。"
     },
     {
+      key: "originalRecipients",
+      label: "正本",
+      target: "originalRecipients",
+      required: true,
+      done: Boolean(state.originalRecipients),
+      detail: state.originalRecipients ? "已填寫正本單位。" : "請填寫正本單位。"
+    },
+    {
       key: "subject",
       label: "主旨",
       target: "subject",
@@ -9434,7 +9516,7 @@ function composeReadinessChecks() {
     },
     {
       key: "seal",
-      label: "公文產出",
+      label: "公文寄送方式",
       target: "seal",
       required: true,
       done: state.outputMode === "electronic" || sealTypes.length > 0,
@@ -9447,8 +9529,8 @@ function composeReadinessChecks() {
       label: "函稿確認",
       target: "confirm",
       required: activeComposeStep !== "fill",
-      done: draftConfirmed,
-      detail: draftConfirmed ? "已確認函稿預覽。" : "送簽前請先展開預覽並按「確認函稿」。"
+      done: activeComposeStep === "confirm",
+      detail: activeComposeStep === "confirm" ? "可檢視函稿並按「送出簽核」完成最後確認。" : "前往確認頁檢視函稿。"
     }
   ];
 }
@@ -9524,6 +9606,7 @@ function focusComposeReadinessTarget(target) {
     dispatchNo: "#dispatchNo",
     approvalCategory: "#composeApprovalCategorySelect",
     recipient: "#recipient",
+    originalRecipients: "#originalRecipients",
     subject: "#subject",
     body: "#bodyText",
     attachments: "#attachments",
@@ -9573,6 +9656,7 @@ function composeValidationData() {
     ...approvalSelection,
     dispatchDate: document.querySelector("#dispatchDate")?.value || "",
     recipient: document.querySelector("#recipient")?.value.trim() || "",
+    originalRecipients: document.querySelector("#originalRecipients")?.value.trim() || "",
     subject: document.querySelector("#subject")?.value.trim() || "",
     body: document.querySelector("#bodyText")?.value.trim() || "",
     contactAddress: document.querySelector("#contactAddress")?.value.trim() || "",
@@ -9611,6 +9695,13 @@ function composeFieldValidations() {
       valid: Boolean(data.recipient),
       invalid: "請填寫受文者。",
       ok: "受文者已填寫。"
+    },
+    {
+      selector: "#originalRecipients",
+      hint: "#originalRecipientsHint",
+      valid: Boolean(data.originalRecipients) && data.originalRecipients.length <= 2000,
+      invalid: data.originalRecipients ? "正本最多 2,000 字。" : "請填寫正本單位。",
+      ok: "正本已填寫。"
     },
     {
       selector: "#subject",
@@ -9672,14 +9763,14 @@ function composeFieldValidations() {
   });
 }
 
-function validateComposeStep(step = activeComposeStep) {
+function validateComposeStep(step = activeComposeStep, options = {}) {
   if (step !== "fill") return true;
   const validations = composeFieldValidations();
   validations.forEach((item) => setComposeFieldValidity(item.selector, item.hint, item.valid, item.valid ? "" : item.invalid));
   renderComposeValidationSummary(validations.filter((item) => !item.valid));
   const firstInvalid = validations.find((item) => !item.valid);
   if (firstInvalid) {
-    focusComposeValidationField(firstInvalid.selector);
+    if (options.focus !== false) focusComposeValidationField(firstInvalid.selector);
     showToast(firstInvalid.invalid);
     return false;
   }
@@ -9716,15 +9807,7 @@ async function advanceComposeStep() {
     setComposeStep("confirm", { force: true });
     return;
   }
-  if (current === "confirm") {
-    if (!draftConfirmed) {
-      setDraftConfirmed(true);
-      addDispatchAudit("確認函稿", "撰寫者已確認函稿預覽、附件與用印位置。");
-      showToast("函稿已確認。");
-      return;
-    }
-    document.querySelector("#composeForm")?.requestSubmit();
-  }
+  if (current === "confirm") document.querySelector("#composeForm")?.requestSubmit();
 }
 
 function retreatComposeStep() {
@@ -9736,9 +9819,7 @@ function retreatComposeStep() {
 
 function composeNextControlState() {
   const disabled = false;
-  const text = activeComposeStep === "confirm"
-    ? (draftConfirmed ? "送出簽核" : "確認內容無誤")
-    : "前往確認";
+  const text = activeComposeStep === "confirm" ? "送出簽核" : "前往確認";
   return { disabled, text };
 }
 
@@ -9778,7 +9859,7 @@ function renderComposeStepper() {
   const stepStatus = document.querySelector("#composeStepStatus");
   if (stepStatus) stepStatus.textContent = activeComposeStep === "confirm" ? "第 2 頁：確認送出" : "第 1 頁：填寫資料";
   const confirmHint = document.querySelector("#composeConfirmHint");
-  if (confirmHint) confirmHint.textContent = draftConfirmed ? "已確認" : "尚未確認";
+  if (confirmHint) confirmHint.textContent = "送出前請核對";
   const activePanes = composePanesForStep();
   document.querySelectorAll("[data-compose-pane]").forEach((panel) => {
     panel.classList.toggle("active", activePanes.includes(panel.dataset.composePane));
@@ -9788,20 +9869,17 @@ function renderComposeStepper() {
   composeView?.classList.add(`compose-step-mode-${activeComposeStep}`);
   const previousButton = document.querySelector("#composePrevBtn");
   const nextButton = document.querySelector("#composeNextBtn");
-  const confirmButton = document.querySelector("#confirmDraftBtn");
-  const resetButton = document.querySelector("#resetDraftConfirmBtn");
   const submitButton = document.querySelector("#submitDispatchBtn");
+  const readinessNotice = document.querySelector("#composeConfirmWorkflowReadinessNotice");
   if (previousButton) previousButton.hidden = activeComposeStep !== "confirm";
   if (nextButton) {
     nextButton.disabled = nextControl.disabled;
     nextButton.textContent = nextControl.text;
     nextButton.hidden = activeComposeStep !== "fill";
   }
-  if (confirmButton) confirmButton.hidden = activeComposeStep !== "confirm" || draftConfirmed;
-  if (resetButton) resetButton.hidden = activeComposeStep !== "confirm" || !draftConfirmed;
+  if (readinessNotice) readinessNotice.hidden = activeComposeStep !== "confirm";
   if (submitButton) {
     submitButton.hidden = activeComposeStep !== "confirm";
-    submitButton.disabled = !draftConfirmed;
   }
   applyWorkflowReadinessSubmitGuards();
   renderComposeSaveStatus();
@@ -10567,7 +10645,7 @@ function setComposeDraftField(selector, value) {
   const text = String(value);
   if (element.tagName === "SELECT" && ![...element.options].some((option) => option.value === text)) return;
   element.value = text;
-  if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#copyRecipients"].includes(selector)) {
+  if (["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#copyRecipients", "#originalRecipients"].includes(selector)) {
     element.dataset.autoDefault = "false";
   }
 }
@@ -10608,7 +10686,10 @@ function beginComposeOfficialCorrection(item) {
     "#dispatchDate": item.dispatch_date || metadata.dispatch_date || composeTodayDate(),
     "#composeOutputMode": item.output_mode || "physical",
     "#recipient": item.recipient || "",
-    "#copyRecipients": metadata.copy_recipients || metadata.copyRecipients || metadata.company_name || item.company_name || authState?.user?.company_name || "",
+    "#originalRecipients": metadata.original_recipients || metadata.originalRecipients || item.recipient || "",
+    "#copyRecipients": metadata.copy_recipients_manual === true
+      ? (metadata.copy_recipients ?? metadata.copyRecipients ?? "")
+      : (metadata.copy_recipients || metadata.copyRecipients || metadata.company_name || item.company_name || authState?.user?.company_name || ""),
     "#documentPurpose": metadata.purpose || item.request_reason || "",
     "#contactAddress": metadata.contact_address || authState?.user?.company_address || "",
     "#contactOwner": metadata.contact_owner || item.handler_name || item.applicant_name || authState?.user?.name || "",
@@ -10622,6 +10703,12 @@ function beginComposeOfficialCorrection(item) {
     "#attachmentDetails": officialComposeAttachmentDescription(item, metadata)
   };
   Object.entries(values).forEach(([selector, value]) => setComposeDraftField(selector, value));
+  const correctedCopies = document.querySelector("#copyRecipients");
+  if (correctedCopies) correctedCopies.dataset.autoDefault = metadata.copy_recipients_manual === true ? "false" : "true";
+  if (!metadata.original_recipients && !metadata.originalRecipients) {
+    const originalInput = document.querySelector("#originalRecipients");
+    if (originalInput) originalInput.dataset.autoDefault = "true";
+  }
   composeDraftRequestId = item.id;
   syncComposeElectronicExchangeMode();
   const attachmentDescription = document.querySelector("#attachmentDetails");
@@ -10652,7 +10739,11 @@ function beginComposeOfficialCorrection(item) {
     documentCategory: item.document_category || metadata.document_category || "",
     approvalRouteCode: item.approval_route_code || metadata.approval_route_code || "",
     to: item.recipient || "",
-    copyRecipients: document.querySelector("#copyRecipients")?.value || values["#composeCompanySelect"],
+    originalRecipients: document.querySelector("#originalRecipients")?.value || item.recipient || "",
+    copyRecipients: metadata.copy_recipients_manual === true
+      ? (document.querySelector("#copyRecipients")?.value || "無")
+      : (document.querySelector("#copyRecipients")?.value || values["#composeCompanySelect"]),
+    copyRecipientsManual: metadata.copy_recipients_manual === true,
     subject: item.subject || item.title || "",
     body: item.description || "",
     status: "草稿",
@@ -13095,6 +13186,8 @@ function dispatchDocSnapshot(doc) {
     approvalFlowNodes: [...(doc.approvalFlowNodes || [])],
     security: doc.security || "普通",
     to: doc.to || "",
+    originalRecipients: doc.originalRecipients || doc.to || "",
+    copyRecipientsManual: doc.copyRecipientsManual === true,
     agencyCode: doc.agencyCode || "",
     subject: doc.subject || "",
     body: doc.body || "",
@@ -13397,7 +13490,9 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
       contact_phone: data.contactPhone,
       contact_fax: data.contactFax,
       contact_email: data.contactEmail,
-      copy_recipients: data.copyRecipients
+      original_recipients: data.originalRecipients,
+      copy_recipients: data.copyRecipients,
+      copy_recipients_manual: data.copyRecipientsManual === true
     },
     submit: false
   };
@@ -13517,6 +13612,8 @@ async function performCreateDispatchFromForm(status = "草稿") {
     approvalFlowNodes: [...data.approvalFlowNodes],
     security: "普通",
     to: data.recipient,
+    originalRecipients: data.originalRecipients,
+    copyRecipientsManual: data.copyRecipientsManual === true,
     agencyCode: "待查詢",
     subject: data.subject,
     body: data.body,
@@ -13578,8 +13675,12 @@ async function performCreateDispatchFromForm(status = "草稿") {
     draftSigned = false;
     composeSaveState = {
       tone: "error",
-      title: error?.status === 409 || /compose_content_revision/.test(error?.message || "") ? "公文版本已由其他裝置修改" : "草稿尚未保存",
-      detail: `${error.message || "後端保存失敗"}；目前輸入仍保留在此瀏覽器，請勿關閉頁面並稍後重試。`
+      title: error?.status === 409 || /compose_content_revision/.test(error?.message || "")
+        ? "公文版本已由其他裝置修改"
+        : status === "草稿" ? "草稿尚未保存" : "送簽未完成",
+      detail: status === "草稿"
+        ? `${error.message || "後端保存失敗"}；目前輸入仍保留在此瀏覽器，請勿關閉頁面並稍後重試。`
+        : `${error.message || "送簽失敗"}；目前畫面內容仍保留。請先查看簽核紀錄確認案件狀態，必要時再重試。`
     };
     renderComposeSaveStatus();
     showToast(`${status === "草稿" ? "草稿保存" : "送出簽核"}失敗：${error.message || "請確認公司、印章與附件設定。"}`);
@@ -14507,6 +14608,7 @@ function createContractRenewalReminder(contract = currentContract()) {
 function linkContractToOfficialDoc(contract = currentContract()) {
   if (!contract) return showToast("請先選取合約。");
   document.querySelector("#recipient").value = contract.counterparty;
+  syncComposeOriginalRecipientsDefault();
   document.querySelector("#subject").value = `檢送${contract.title}簽署資料，請查照。`;
   document.querySelector("#bodyText").value = `一、檢送${contract.title}相關文件，請惠予確認。\n二、本合約相對人為${contract.counterparty}，合約期間為${contract.startDate || "未定"}至${contract.endDate || "未定"}。\n三、如需補充資料，請洽本公司承辦窗口。`;
   document.querySelector("#attachmentDetails").value = contract.attachments?.length ? `附件：${contract.attachments.join("、")}` : "";
@@ -15078,6 +15180,8 @@ function renderAddressResults() {
   document.querySelectorAll("[data-use-address]").forEach((button) => {
     button.addEventListener("click", () => {
       document.querySelector("#recipient").value = button.dataset.useAddress;
+      syncComposeOriginalRecipientsDefault();
+      markDraftDirty();
       addExchangeEvent("帶入地址簿", `已將 ${button.dataset.useAddress}（${button.dataset.useCode}）帶入發文受文者。`);
       showToast("已帶入建立公文的受文者欄位。");
     });
@@ -21881,6 +21985,8 @@ function backendDocumentPayload(doc) {
       outputMode: doc.outputMode || "physical",
       attachmentManifest: doc.attachments || [],
       copy_recipients: doc.copyRecipients || doc.companyName || "",
+      copy_recipients_manual: doc.copyRecipientsManual === true,
+      original_recipients: doc.originalRecipients || doc.to || "",
       documentCategory: doc.documentCategory || "",
       documentCategoryGroup: doc.documentCategoryGroup || "",
       approvalRouteCode: doc.approvalRouteCode || "",
@@ -22188,6 +22294,8 @@ function applyPersistentDocuments(rows = []) {
         : Array.isArray(metadata.approval_flow_nodes) ? [...metadata.approval_flow_nodes] : [],
       security: row.security_level,
       to: row.agency_name,
+      originalRecipients: metadata.original_recipients || metadata.originalRecipients || row.agency_name,
+      copyRecipientsManual: metadata.copy_recipients_manual === true,
       agencyCode: row.agency_code || "待查詢",
       subject: row.subject,
       body: row.body || "",
@@ -23143,6 +23251,7 @@ function applyFormatToCompose() {
   document.querySelector("#docType").value = data.type;
   document.querySelector("#priority").value = data.priority;
   document.querySelector("#recipient").value = data.recipient;
+  syncComposeOriginalRecipientsDefault();
   document.querySelector("#subject").value = data.subject;
   markDraftDirty();
   addFormatAudit("帶入建立公文", `${data.no} 已帶入建立公文表單。`);
@@ -32168,6 +32277,8 @@ function backendPdfPayload(doc, request = null) {
       priority: doc.priority,
       security: doc.security,
       to: doc.to,
+      originalRecipients: doc.originalRecipients || doc.to,
+      copyRecipientsManual: doc.copyRecipientsManual === true,
       agencyCode: doc.agencyCode,
       subject: doc.subject,
       body: doc.body,
@@ -33143,31 +33254,86 @@ document.querySelector("#roleSelect").addEventListener("change", (event) => {
   applyComposeContactDefaults(true);
 });
 
-document.querySelector("#composeForm").addEventListener("submit", async (event) => {
+async function handleComposeSubmitRequest(event) {
   event.preventDefault();
+  if (composeSubmitInFlight) return;
   if (!flushComposeInputUpdates()) return showToast("請先完成文字輸入。");
-  if (!validateComposeStep("fill")) return;
-  if (!draftConfirmed) {
-    setComposeStep("confirm", { force: true });
-    showToast("送出前請先確認函稿預覽。");
-    return;
-  }
-  const selection = workflowReadinessSelection("compose");
-  const readiness = await loadOfficialWorkflowReadiness(selection.approvalRouteCode, { silent: false, force: true, context: "compose" });
-  if (!workflowReadinessAllowsSubmit(selection, readiness)) {
-    renderWorkflowReadinessContext("compose");
+  const fillWasVisible = activeComposeStep === "fill";
+  if (!validateComposeStep("fill", { focus: fillWasVisible })) {
     setComposeStep("fill", { force: true });
-    document.querySelector("#composeWorkflowReadinessNotice")?.scrollIntoView({ behavior: "smooth", block: "center" });
-    showToast("會計系統的簽核關係尚未完整，目前只能保存草稿，不能送簽。");
+    if (!fillWasVisible) {
+      const firstInvalid = composeFieldValidations().find((item) => !item.valid);
+      if (firstInvalid) focusComposeValidationField(firstInvalid.selector);
+    }
     return;
   }
-  const doc = await createDispatchFromForm("待清稿");
-  if (!doc) return;
-  activeComposeStep = "fill";
-  renderComposeStepper();
-  showToast("已建立函稿並加入發文佇列。");
-  setView(isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
-});
+  if (activeComposeStep !== "confirm") return advanceComposeStep();
+  const fingerprint = JSON.stringify(composePayload());
+  setComposeSubmitBusy(true);
+  try {
+    const selection = workflowReadinessSelection("compose");
+    const readiness = await loadOfficialWorkflowReadiness(selection.approvalRouteCode, { silent: true, force: true, context: "compose" });
+    if (fingerprint !== JSON.stringify(composePayload())) return showToast("函稿內容已變更，請再檢查後送出。");
+    if (!workflowReadinessAllowsSubmit(selection, readiness)) {
+      renderWorkflowReadinessContext("compose");
+      const notice = document.querySelector("#composeConfirmWorkflowReadinessNotice");
+      notice?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      notice?.focus({ preventScroll: true });
+      return;
+    }
+    openComposeSubmitDialog();
+  } finally {
+    setComposeSubmitBusy(false);
+  }
+}
+
+async function confirmComposeSubmission() {
+  if (composeSubmitInFlight) return;
+  if (composeSubmitModalFingerprint !== JSON.stringify(composePayload())) {
+    hideComposeSubmitDialog();
+    showToast("函稿內容已變更，請再檢查後送出。");
+    return;
+  }
+  setComposeSubmitBusy(true);
+  try {
+    const selection = workflowReadinessSelection("compose");
+    const readiness = await loadOfficialWorkflowReadiness(selection.approvalRouteCode, { silent: true, force: true, context: "compose" });
+    if (composeSubmitModalFingerprint !== JSON.stringify(composePayload())) {
+      hideComposeSubmitDialog();
+      showToast("函稿內容已變更，請再檢查後送出。");
+      return;
+    }
+    if (!workflowReadinessAllowsSubmit(selection, readiness)) {
+      hideComposeSubmitDialog();
+      renderWorkflowReadinessContext("compose");
+      document.querySelector("#composeConfirmWorkflowReadinessNotice")?.focus({ preventScroll: true });
+      return;
+    }
+    setDraftConfirmed(true);
+    const doc = await createDispatchFromForm("待清稿");
+    if (!doc) {
+      setDraftConfirmed(false);
+      composeSubmitModalFingerprint = JSON.stringify(composePayload());
+      const error = document.querySelector("#composeSubmitModalError");
+      if (error) {
+        const reason = composeSaveState?.tone === "error" ? composeSaveState.detail : "目前無法確認送出結果，請先檢查簽核紀錄或儲存草稿，再重試。";
+        error.textContent = `送出尚未完成，內容仍保留。${reason}`;
+        error.hidden = false;
+      }
+      return;
+    }
+    hideComposeSubmitDialog();
+    addDispatchAudit("確認函稿並送簽", "撰寫者已確認函稿、附件與用印位置，案件已送出簽核。");
+    activeComposeStep = "fill";
+    renderComposeStepper();
+    showToast("已送出簽核。");
+    setView(isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
+  } finally {
+    setComposeSubmitBusy(false);
+  }
+}
+
+document.querySelector("#composeForm").addEventListener("submit", handleComposeSubmitRequest);
 
 document.querySelector("#pullInboundBtn")?.addEventListener("click", pullJagentInbound);
 document.querySelector("#pullJagentBtn").addEventListener("click", pullJagentInbound);
@@ -33382,7 +33548,7 @@ document.querySelector("#contractSealOpenBtn").addEventListener("click", () => v
 document.querySelector("#contractModalCloseBtn").addEventListener("click", closeContractModal);
 document.querySelector("#toast")?.addEventListener("mouseenter", pauseToastDismissal);
 document.querySelector("#toast")?.addEventListener("mouseleave", resumeToastDismissal);
-["#inboundModal", "#contractModal"].forEach((selector) => {
+["#inboundModal", "#contractModal", "#composeSubmitModal"].forEach((selector) => {
   const modal = document.querySelector(selector);
   modal?.addEventListener("keydown", (event) => trapWorkspaceModalFocus(event, modal));
 });
@@ -33409,6 +33575,7 @@ document.addEventListener("keydown", (event) => {
   if (!document.querySelector("#contractModal")?.classList.contains("hidden")) closeContractModal();
   if (!document.querySelector("#inboundModal")?.classList.contains("hidden")) closeInboundModal();
   if (!document.querySelector("#officialDecisionModal")?.classList.contains("hidden")) closeOfficialDecisionDialog();
+  if (!composeSubmitInFlight) hideComposeSubmitDialog();
 });
 document.querySelector("#previewPackageBtn").addEventListener("click", () => {
   const doc = currentDispatchDoc();
@@ -33451,19 +33618,10 @@ document.querySelector("#toggleDraftPreviewBtn")?.addEventListener("click", () =
 document.querySelectorAll("[data-print-official-draft]").forEach((button) => {
   button.addEventListener("click", () => void printOfficialDraft(button.dataset.printOfficialDraft));
 });
-document.querySelector("#confirmDraftBtn").addEventListener("click", () => {
-  if (!flushComposeInputUpdates({ preview: false })) return showToast("請先完成文字輸入。");
-  if (!validateComposeStep("fill")) {
-    setComposeStep("fill", { force: true });
-    return;
-  }
-  setDraftConfirmed(true);
-  showToast("函稿已確認，可以加入發文佇列。");
+document.querySelector("#composeSubmitCancelBtn")?.addEventListener("click", () => {
+  if (!composeSubmitInFlight) hideComposeSubmitDialog();
 });
-document.querySelector("#resetDraftConfirmBtn").addEventListener("click", () => {
-  setDraftConfirmed(false);
-  showToast("已取消函稿確認。");
-});
+document.querySelector("#composeSubmitConfirmBtn")?.addEventListener("click", () => void confirmComposeSubmission());
 document.querySelector("#composePrevBtn").addEventListener("click", retreatComposeStep);
 document.querySelector("#composeNextBtn").addEventListener("click", advanceComposeStep);
 document.querySelector("#composeNextAction").addEventListener("click", (event) => {
@@ -33496,7 +33654,7 @@ document.querySelector("#attachments")?.addEventListener("change", syncComposeAt
 document.querySelector("#attachmentDetails")?.addEventListener("input", (event) => {
   event.currentTarget.dataset.attachmentTextEdited = "true";
 });
-["#composeCompanySelect", "#docType", "#priority", "#composeApprovalCategorySelect", "#recipient", "#copyRecipients", "#documentPurpose", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
+["#composeCompanySelect", "#docType", "#priority", "#composeApprovalCategorySelect", "#recipient", "#originalRecipients", "#copyRecipients", "#documentPurpose", "#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#largeSealType", "#smallSealType", "#subject", "#bodyText", "#attachmentDetails", "#attachments"].forEach((selector) => {
   const element = document.querySelector(selector);
   element?.addEventListener("input", markDraftDirty);
   element?.addEventListener("compositionstart", startComposeComposition);
@@ -33510,6 +33668,10 @@ document.querySelector("#attachmentDetails")?.addEventListener("input", (event) 
     event.currentTarget.dataset.autoDefault = "false";
   });
 });
+document.querySelector("#originalRecipients")?.addEventListener("input", (event) => {
+  event.currentTarget.dataset.autoDefault = "false";
+});
+document.querySelector("#recipient")?.addEventListener("input", syncComposeOriginalRecipientsDefault);
 document.querySelector("#composeCompanySelect")?.addEventListener("change", (event) => {
   event.currentTarget.dataset.userEdited = "true";
   event.currentTarget.dataset.autoDefault = "false";

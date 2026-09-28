@@ -190,15 +190,15 @@ class OperationalReportRegressionTest(unittest.TestCase):
 
 
 class ComposeMobileSimplificationContractTest(unittest.TestCase):
-    def test_primary_text_fields_precede_collapsible_optional_sections(self):
+    def test_open_ai_assistance_precedes_subject_and_attachments_follow_body(self):
         html = (ROOT / "index.html").read_text()
         form_start = html.index('id="composeForm"')
         form_end = html.index("</form>", form_start)
         form = html[form_start:form_end]
-        self.assertLess(form.index('id="subject"'), form.index("compose-attachment-disclosure"))
-        self.assertLess(form.index('id="bodyText"'), form.index("compose-ai-assist-disclosure"))
+        self.assertLess(form.index("compose-ai-assist-disclosure"), form.index('id="subject"'))
+        self.assertLess(form.index('id="bodyText"'), form.index("compose-attachment-disclosure"))
         self.assertIn('<summary>附件（選填）</summary>', form)
-        self.assertIn('<summary>AI 協助起草（選填）</summary>', form)
+        self.assertIn('<summary>AI 協助起稿（選填）</summary>', form)
 
 
 if __name__ == "__main__":

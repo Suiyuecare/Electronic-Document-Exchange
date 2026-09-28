@@ -1,6 +1,6 @@
 # Workspace interaction and file workflow contract
 
-This contract covers the 2026-09-28 file-resilience and fluid-interaction changes.
+This contract covers the 2026-09-28 file-resilience, fluid-interaction and compose-submission changes.
 Existing Finance-aligned visual identity and approval/security contracts remain
 in force. "Apple-like" means continuous, responsive interaction, not Apple
 branding or a promise of zero network latency.
@@ -25,6 +25,8 @@ branding or a promise of zero network latency.
 | Background reads | Scoped route loaders and official list transport | Share identical in-flight reads, not mutations; differing query/cursor/session remain separate. Preserve generation, permission and revision guards. Failure can be explicitly retried. |
 | Initialization | `initializeDeferredWorkspace` | Ordered cooperative batches yield to interaction. Do not remove initialization or reorder dependency steps. Old-session work must stop. |
 | Form input | Existing compose/application lifecycle | During IME composition, hold preview/local/cloud autosave. Commit the final composition before saving; manual transitions cannot submit uncommitted input. Avoid rebuilding unchanged controls. |
+| Compose distribution | `composePayload`, cloud draft snapshot and official PDF metadata | 正本 defaults to the current recipient; 副本 defaults to the selected sending company. Both are editable and must survive draft restore, correction and final PDF generation. Manual edits are preserved; changing the sending company only replaces its previous default when that default is still present. An explicitly cleared 副本 prints as 無. |
+| Compose submission | `handleComposeSubmitRequest` and `confirmComposeSubmission` | One visible 送出簽核 action opens an app-owned confirmation only after the Finance workflow-readiness check passes. Missing Finance approvers are explained beside that action; the button remains actionable for a fresh check, but no backend mutation bypasses the Finance gate. Cancel/Escape preserves the draft and returns focus. |
 | Lists | Existing authorized queue/log renderers | Preserve focused row action, scroll and stable nodes when content is unchanged. Do not restore focus into a different case, hidden control or new actor. |
 | Notices | `showToast` | One notice, one owned 4s timer; identical messages do not rewrite the live region. Hover pauses its remaining duration. Persistent inline errors/retry controls remain authoritative. |
 | Modal/drawer | Existing modal markup with shared isolation/focus helpers | Inert workspace children, never unset authentication's outer inert gate. Tab containment, Escape/cancel and trigger restoration. Reopening an already visible detail does not steal focus. |

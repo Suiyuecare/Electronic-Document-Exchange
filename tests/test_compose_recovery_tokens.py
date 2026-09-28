@@ -9,7 +9,7 @@ from tests import test_compose_resilience_frontend as fixture
 
 class ComposeRecoveryTokenTest(unittest.TestCase):
     run_js = fixture.ComposeResilienceFrontendTest.run_js
-    FUNCTIONS = ["restoreComposeAutosave", "canonicalEditorJson", "composePersistedSnapshotKey"]
+    FUNCTIONS = ["restoreComposeAutosave", "syncComposeOriginalRecipientsDefault", "canonicalEditorJson", "composePersistedSnapshotKey"]
     SETUP = '''
       const composeAutosaveIdentity=()=>"U:CO",refreshComposeCloudDrafts=()=>Promise.resolve(),renderApprovalCategorySelect=()=>{},syncComposeCopyRecipientsDefault=()=>{},syncComposeElectronicExchangeMode=()=>{},renderComposeApprovalRoute=()=>{},renderDraftPreview=()=>{},renderComposeSaveStatus=()=>{},formatComposeSaveTime=()=>"12:00";
       let composeAutosaveRestoredForIdentity="",currentComposeDraftId="",composeDraftRequestId="",composeCloudDraftId="",composeOfficialContentRevision=null,draftConfirmed=false,draftSigned=false,activeComposeStep="fill",composeSaveState={};

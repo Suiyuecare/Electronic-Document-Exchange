@@ -5981,6 +5981,62 @@ body.demo-login-disabled #roleSelect:disabled {
   display: none;
 }
 
+.compose-submit-readiness {
+  flex: 1 0 100%;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff8ec;
+  color: var(--ink);
+  text-align: left;
+}
+
+.compose-field-grid :is(#originalRecipients, #copyRecipients) {
+  min-height: 5.5rem;
+  resize: none;
+}
+
+#submitDispatchBtn {
+  min-width: 9rem;
+}
+
+.compose-submit-readiness[data-state="blocked"] {
+  background: #fff1ed;
+  color: #963e24;
+}
+
+.compose-submit-modal-card {
+  width: min(520px, 100%);
+  grid-template-rows: auto auto;
+}
+
+.compose-submit-modal-card .contract-modal-header p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.compose-submit-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 24px calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+#composeSubmitModalError:not([hidden]) {
+  flex: 1 0 100%;
+  margin: 0;
+  color: #963e24;
+}
+
+@media (max-width: 600px) {
+  .compose-submit-modal-actions > button {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+}
+
 .format-workbench {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
