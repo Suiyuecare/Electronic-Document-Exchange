@@ -13,7 +13,9 @@
     const match = document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith(prefix));
     return match ? match.slice(prefix.length) : "";
   };
-  const portalUrl = "https://login.suiyuecare.com/portal/";
+  // Portal's Google OAuth callback persists its session on this origin.
+  // Returning to the vanity login host would lose that session in a new tab.
+  const portalUrl = "https://suiyuecare-website.vercel.app/portal/";
   const returnToPortal = (code) => {
     const loginUrl = new URL(portalUrl);
     loginUrl.searchParams.set("returnFrom", "edoc");

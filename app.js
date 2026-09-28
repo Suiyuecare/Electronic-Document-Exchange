@@ -21,7 +21,7 @@ const backendOrigin = window.location.protocol === "file:" ? localBackendOrigin 
 const backendApiBase = `${backendOrigin}/api`;
 const authStorageKey = "suiyuecare-edoc-session";
 const composeAutosaveStorageKey = "suiyuecare-edoc-compose-autosave";
-const loggingPortalUrl = "https://login.suiyuecare.com/portal/";
+const loggingPortalUrl = "https://suiyuecare-website.vercel.app/portal/";
 const loggingBridgeStorageKeys = [
   "suiyue-hris-quick-login-user",
   "suiyuecare-logging-session",
