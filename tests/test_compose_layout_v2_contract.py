@@ -47,6 +47,7 @@ class ComposeLayoutV2ContractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.html = (ROOT / "index.html").read_text(encoding="utf-8")
         cls.css = (ROOT / "styles.css").read_text(encoding="utf-8")
+        cls.js = (ROOT / "app.js").read_text(encoding="utf-8")
         cls.dom = ElementIndex(cls.html)
 
     def test_compose_fields_follow_the_printed_document_order_without_duplicate_ids(self):
@@ -62,6 +63,23 @@ class ComposeLayoutV2ContractTest(unittest.TestCase):
         self.assertFalse(set(ids).intersection(self.dom.duplicates))
         for identity in ids:
             self.assertIn(("form", "composeForm"), self.dom.elements[identity]["ancestors"])
+
+    def test_sender_info_fields_are_directly_visible_and_editable(self):
+        group = self.dom.elements["composeContactFields"]["attrs"]
+        self.assertEqual(group["role"], "group")
+        self.assertEqual(group["aria-labelledby"], "composeContactHeading")
+        self.assertIn("寄件資訊</h4>", self.html)
+        self.assertNotIn("composeContactToggleBtn", self.html)
+        self.assertNotIn("composeContactSummaryText", self.html)
+        for identity in ("contactAddress", "contactOwner", "contactPhone", "contactFax", "contactEmail"):
+            field = self.dom.elements[identity]
+            self.assertIn(("div", "composeContactFields"), field["ancestors"])
+            self.assertNotIn("hidden", field["attrs"])
+            self.assertNotIn("readonly", field["attrs"])
+            self.assertNotIn("disabled", field["attrs"])
+        self.assertNotIn("renderComposeContactSummary", self.js)
+        self.assertNotIn("toggleComposeContactSummary", self.js)
+        self.assertNotIn(".compose-contact-fields label[hidden]", self.css)
 
     def test_date_is_editable_but_document_number_has_no_regenerate_action(self):
         date = self.dom.elements["dispatchDate"]["attrs"]
