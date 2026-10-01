@@ -1,6 +1,7 @@
 # Workspace interaction and file workflow contract
 
-This contract covers the 2026-09-28 file-resilience, fluid-interaction and compose-submission changes.
+This contract covers file resilience, fluid interaction, compose submission and
+the 2026-10-02 draft-navigation change.
 Existing Finance-aligned visual identity and approval/security contracts remain
 in force. "Apple-like" means continuous, responsive interaction, not Apple
 branding or a promise of zero network latency.
@@ -21,7 +22,9 @@ branding or a promise of zero network latency.
 
 | Capability | Canonical owner | Contract |
 | --- | --- | --- |
-| Navigation | `setView` and six existing major routes | Immediate selected view; same-route operations preserve scroll/focus; returning restores route scroll only within the current in-memory session; a changed route focuses its title. Integrated sub-sections retain their intentional section navigation. |
+| Navigation | `setView` and seven major routes, including `drafts` | Immediate selected view; same-route operations preserve scroll/focus; returning restores route scroll only within the current in-memory session; a changed route focuses its title. Integrated sub-sections retain their intentional section navigation. `草稿編輯` appears in the Finance-aligned left navigation and mobile drawer, while the four-item mobile bottom bar stays unchanged. |
+| Draft recovery | `composeDraftNavCount`, `composeDraftList` and the scoped compose-draft APIs | `撰寫公文` never automatically restores a prior-session draft or presents an inline resume prompt; it retains the current in-session form when navigating away and back. The separate `草稿編輯` route lists only the authenticated user's unarchived cloud drafts, paginates without duplicates, and shows a distinct card for unsynced local content. A user explicitly chooses `繼續編輯`; switching cannot discard current unsaved input or selected local attachments. |
+| Draft count | `/api/compose-drafts/count` plus a genuinely local-only draft | Badge and accessible name report the exact private cloud total, including unloaded pages. Add one for a local-only draft without a cloud ID; if an ID was assigned but its first write is indeterminate, probe that ID under the same authenticated owner/company before adding one. Unsynced changes to an existing cloud draft show a local recovery card but never double-count it. Hide the numeric badge while the authoritative count or probe is unavailable rather than claim an exact total. Refresh after save, archive, session change and explicit list refresh. |
 | Background reads | Scoped route loaders and official list transport | Share identical in-flight reads, not mutations; differing query/cursor/session remain separate. Preserve generation, permission and revision guards. Failure can be explicitly retried. |
 | Initialization | `initializeDeferredWorkspace` | Ordered cooperative batches yield to interaction. Do not remove initialization or reorder dependency steps. Old-session work must stop. |
 | Form input | Existing compose/application lifecycle | During IME composition, hold preview/local/cloud autosave. Commit the final composition before saving; manual transitions cannot submit uncommitted input. Avoid rebuilding unchanged controls. |
@@ -34,10 +37,21 @@ branding or a promise of zero network latency.
 
 ## Fluid interaction acceptance
 
-- Same-fixture before/after desktop and mobile screenshots for all six pages;
+- Same-fixture before/after desktop and mobile screenshots for all seven pages;
   tablet checks in the six-role suite. No overflow or inaccessible primary action.
-- Route selection is synchronous; measure click-to-visible view locally, not
-  authenticated production network/SSO timing. Navigation must not wait for reads.
+- Route selection and its loading state are synchronous. The local click-to-visible
+  view target is at most 0.5 seconds on the tested desktop/mobile fixture;
+  authenticated production network/SSO and full data refresh are measured
+  separately. Navigation must not wait for reads, and a progress bar must not
+  imply that stale data is current.
+- The draft-route badge exposes a readable count to assistive technology;
+  zero has no numeric badge. A synthetic owner with one cloud draft sees one
+  card and count 1 on desktop/tablet/mobile. Another account's drafts are not
+  visible. A local-only draft is distinguished from cloud state and never
+  silently submitted or sent.
+- Browser acceptance explicitly opens a private cloud draft, checks restored
+  text, verifies that an unsent local attachment prevents switching, then
+  checks that edited text survives a deliberate switch to a second draft.
 - Concurrent identical list loads make one read; different session/query loads
   do not share. Unchanged organization data does not rebuild selectors, but an
   actual organization change with the same version still updates.
@@ -80,6 +94,9 @@ branding or a promise of zero network latency.
    exact locked/final version checks are mandatory.
 8. Six synthetic roles on desktop/tablet/mobile retain usable actions, no
    horizontal overflow, cross-company denial and conflict protection.
+9. The seventh major route exposes the private draft list and count without
+   expanding the mobile bottom bar. A draft is restored only by explicit
+   choice; refresh failures preserve the current editor and local recovery.
 
 Local synthetic browser tests do not establish physical iOS Safari acceptance
 or authenticated production-business workflow proof. Production checks are

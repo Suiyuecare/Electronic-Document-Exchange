@@ -27,7 +27,7 @@ class ComposeOutputContractTest(unittest.TestCase):
     def evaluate(self, names, body):
         code = "\n".join(function(self.js, name) for name in names)
         if "createOfficialApplicationFromCompose" in names:
-            code += '\nconst composeRequestScope = () => "fixture-session"; let composeOfficialContentRevision = null;'
+            code += '\nconst composeRequestScope = () => "fixture-session"; let composeOfficialContentRevision = null, composeCloudDraftId = "";'
         result = subprocess.run(["node", "-e", code + "\n" + body], check=True, text=True, capture_output=True, timeout=20)
         return json.loads(result.stdout)
 

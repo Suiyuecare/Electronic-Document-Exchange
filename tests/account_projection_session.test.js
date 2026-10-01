@@ -70,7 +70,9 @@ test('shipping session reset releases account refresh immediately and stale clea
   const node = { classList: { add() {}, remove() {} }, setAttribute() {}, removeAttribute() {} };
   h.c.document.querySelector = selector => selector === '#accountRefreshBtn' ? h.button : node;
   Object.assign(h.c, { workspaceRefreshRequest: null, headerBackendSyncState: {}, routeScrollPositions: new Map(), routeScrollScope: '',
-    composeAutosaveRestoredForIdentity: '', composeCloudRows: [], composeCloudRevisions: new Map(), composeCloudSavedSnapshots: new Map(), officialAttachmentUploadCache: new Map() });
+    composeAutosaveRestoredForIdentity: '', composeAutosaveLastWrittenRaw: null, composeCloudRows: [], composeCloudRevisions: new Map(), composeCloudSavedSnapshots: new Map(), officialAttachmentUploadCache: new Map(),
+    composeCloudListGeneration: 0, composeCloudCountGeneration: 0, composeCloudListRequest: null, composeCloudCountRequest: null,
+    composePendingArchiveCache: { key: '', rows: [] }, composePendingArchiveRequests: new Map(), renderComposeDraftCount() {}, renderComposeDraftList() {} });
   for (const name of ['clearCurrentFrontendSessionState', 'dismissToast', 'closeInboundModal', 'closeContractModal', 'stopFinanceDirectoryAutoRefresh', 'clearFinanceDirectoryCache',
     'clearUploadedEditorSensitivePreviews', 'resetOfficialWorkflowConfigEditor', 'closeOfficialDecisionDialog', 'clearComposeAutosave', 'resetComposeAsyncScope',
     'cleanPortalHandoffUrl', 'closeMobileNavigation', 'resetCachedSessionShellReveal', 'applyProductionLoginSafetyState']) h.c[name] = () => {};

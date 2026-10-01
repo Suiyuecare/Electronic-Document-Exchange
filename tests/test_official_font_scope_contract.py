@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import io
 import json
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -59,8 +60,11 @@ class OfficialFontScopeContractTest(unittest.TestCase):
         self.assertIn("official_pdf_font_missing_glyphs", javascript)
         self.assertIn("內容含教育部標準楷書不支援的罕見字元", javascript)
         self.assertIn("entry-bootstrap.js?v=20260925-handoff-recovery-r2", html)
-        self.assertIn("styles.css?v=20260928-compose-submit-r1", html)
-        self.assertIn("app.js?v=20260928-compose-submit-r1", html)
+        styles_version = re.search(r'href="styles\.css\?v=([^"]+)"', html)
+        script_version = re.search(r'src="app\.js\?v=([^"]+)"', html)
+        self.assertIsNotNone(styles_version)
+        self.assertIsNotNone(script_version)
+        self.assertEqual(styles_version.group(1), script_version.group(1))
 
         editor_rule = css[css.index("#uploadedSealTextInput") : css.index(".draft-preview-heading-actions")]
         self.assertIn("EDoc LXGW WenKai TC", editor_rule)

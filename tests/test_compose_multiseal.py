@@ -16,7 +16,7 @@ class ComposeMultiSealFrontendTest(unittest.TestCase):
     run_js = frontend_fixture.ComposeResilienceFrontendTest.run_js
 
     EXISTING_SETUP = '''
-      const calls=[],composeRequestScope=()=>"A";let composeOfficialContentRevision=3;
+      const calls=[],composeRequestScope=()=>"A";let composeOfficialContentRevision=3,composeCloudDraftId="";
       const composeCompanyForOfficialApplication=()=>({id:"CO"}),activeUnit=()=>"fixture",officialComposeMetadata=()=>({}),officialSealHasCurrentFile=()=>true;
       const companySealFixedGeometry=seal=>({widthPt:seal.width,heightPt:seal.height,sealSizeType:seal.seal_size_type});
       const seals=[{id:"L",seal_category:"general_seal",seal_size_type:"large_seal",width:99.21,height:99.21},{id:"S",seal_category:"establishment_seal",seal_size_type:"small_seal",width:56.69,height:56.69},{id:"N",seal_category:"bank_seal",seal_size_type:"large_seal",width:90,height:90}];
@@ -58,7 +58,7 @@ class ComposeMultiSealFrontendTest(unittest.TestCase):
         self.assertNotIn("id", result[0])
     def test_both_selected_seals_keep_own_geometry_position_and_one_directory_fetch(self):
         setup = '''
-          const calls=[],composeRequestScope=()=>"A";let composeOfficialContentRevision=null;
+          const calls=[],composeRequestScope=()=>"A";let composeOfficialContentRevision=null,composeCloudDraftId="";
           const composeCompanyForOfficialApplication=()=>({id:"CO"}),activeUnit=()=>"fixture",
             ensureComposeDraftRequestId=()=>"OD-TEST",officialComposeMetadata=()=>({}),officialSealHasCurrentFile=()=>true;
           const companySealFixedGeometry=seal=>({widthPt:seal.width,heightPt:seal.height,sealSizeType:seal.seal_size_type});

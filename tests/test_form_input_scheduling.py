@@ -31,16 +31,19 @@ let draftConfirmed=true,draftSigned=true,activeComposeStep='fill';
 let modalCloses=0;const hideComposeSubmitDialog=()=>{modalCloses++};
 let composeCloudOperation=null,composeCloudDraftId='',composeCloudConflict=false;
 let composeRecoveryCandidate=null,composeRecoveryDismissedIdentity='',composeAiOperation=null,composeAiSuggestion=null,composeAiUndo=null,composeAiReview=null;
-const composeAutosaveIdentity=()=>session,renderComposeAiActions=()=>{};
+const composeAutosaveIdentity=()=>session,renderComposeAiActions=()=>{},renderComposeDraftCount=()=>{};
 let currentComposeDraftId='',composeDraftRequestId='',session='user-one';
 const authState={token:'synthetic',user:{id:'U',company_id:'CO'}};
 const frontendSessionScope=()=>session,composeRequestScope=()=>composeInputScope();
 const composeCloudRevisions=new Map(),composeCloudSavedSnapshots=new Map();
 const composeAutosaveStorageKey='fixture';let composeSaveState={};
+let composeAutosaveLastWrittenRaw=null;
 const composeRawSnapshot=()=>({userId:authState.user.id,companyId:authState.user.company_id,values:{'#subject':nodes['#subject'].value}});
 const composeSnapshotHasMeaningfulContent=snapshot=>!!snapshot.values['#subject'];
 const formatComposeSaveTime=()=>'',renderComposeSaveStatus=()=>{};
+const refreshComposeCloudDraftCount=async()=>{},refreshComposeCloudDrafts=async()=>{};let activeRouteTarget='compose';
 let localWrites=[];const localStorage={setItem:(key,value)=>localWrites.push(JSON.parse(value))};
+const writeComposeAutosaveRaw=raw=>{localStorage.setItem(composeAutosaveStorageKey,raw);composeAutosaveLastWrittenRaw=raw;return true};
 let previews=[];function renderDraftPreview(){previews.push(nodes['#subject'].value);}
 const navigator={onLine:true};let puts=[];
 let backendRequest=async(path,options)=>{puts.push(JSON.parse(options.body));return{revision:puts.length};};
@@ -104,8 +107,8 @@ startComposeComposition();markDraftDirty({isComposing:true});resetComposeAsyncSc
     def test_old_cloud_success_during_new_composition_does_not_write_partial_text(self):
         self.run_case('''
 let release;backendRequest=(path,options)=>{puts.push(JSON.parse(options.body));return new Promise(resolve=>release=resolve);};
-const saving=saveComposeCloudDraft();startComposeComposition();nodes['#subject'].value='未完成組字';markDraftDirty({isComposing:true});
-release({revision:1});await saving;assert.equal(localWrites.length,0);assert.equal(puts.length,1);assert.equal(timers.size,0);
+const saving=saveComposeCloudDraft();const priorWrites=localWrites.length;startComposeComposition();nodes['#subject'].value='未完成組字';markDraftDirty({isComposing:true});
+release({revision:1});await saving;assert.equal(priorWrites,1);assert.equal(localWrites.length,priorWrites);assert.equal(localWrites[0].snapshot.values['#subject'],'Initial');assert.equal(puts.length,1);assert.equal(timers.size,0);
 nodes['#subject'].value='完成新版';finishComposeComposition();await tick(2020);
 assert.equal(puts.length,2);assert.equal(puts[1].snapshot.values['#subject'],'完成新版');
 ''')

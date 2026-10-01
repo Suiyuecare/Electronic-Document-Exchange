@@ -932,6 +932,7 @@ let currentComposeDraftId = "";
 let composeDraftRequestId = "";
 let composeSaveInFlight = null;
 let composeAutosaveRestoredForIdentity = "";
+let composeAutosaveLastWrittenRaw = null;
 let composeCloudTimer = null;
 let composeCloudOperation = null;
 let composeCloudEpoch = 0;
@@ -939,10 +940,20 @@ const composeInputRuntime = { composing: false, compositionScope: "", pending: f
 let composeCloudDraftId = "";
 let composeCloudConflict = false;
 let composeCloudRows = [];
-let composeRecoveryCandidate = null;
-let composeRecoveryDismissedIdentity = "";
+let composeCloudDraftCount = null;
+let composeCloudDraftHasMore = false;
+let composeCloudDraftsLoading = false;
+let composeCloudDraftsError = false;
+let composeCloudProbeId = "";
+let composeCloudProbeExists = null;
+let composeCloudListGeneration = 0;
+let composeCloudCountGeneration = 0;
+let composeCloudListRequest = null;
+let composeCloudCountRequest = null;
 const composeCloudRevisions = new Map();
 const composeCloudSavedSnapshots = new Map();
+let composePendingArchiveCache = { key: "", rows: [] };
+const composePendingArchiveRequests = new Map();
 let composeOfficialContentRevision = null;
 let composeAiOperation = null;
 let composeAiSuggestion = null;
@@ -2539,6 +2550,7 @@ const titles = {
   electronicSeal: "電子用印",
   inbound: "公文收錄",
   compose: "建立電子公文",
+  drafts: "草稿編輯",
   format: "文書格式",
   workflow: "流程控管",
   seals: "印鑑管理",
@@ -2927,7 +2939,6 @@ function setView(target) {
   updateHeaderStatus();
   if (activeMajorRoute === "compose") {
     scheduleOfficialDraftFontRerender();
-    prepareComposeDraftRecovery();
   }
   if (hasAuthenticatedBackendSession()) {
     if (target === "approvalLog") void loadApprovalProgressFromBackend();
@@ -2955,7 +2966,7 @@ function setView(target) {
       heading.focus({ preventScroll: true });
     }
   }
-  void loadRouteBackendData(target, true);
+  void loadRouteBackendData(target, true, { force: activeMajorRoute === "drafts" });
   trackUiUsage("route_view", { route: target });
   if (location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
 }
@@ -2995,7 +3006,7 @@ function updateHeaderStatus() {
   const title = user?.title || user?.role || role;
   const topInfo = document.querySelector("#topInfo");
   const syncLabel = headerBackendSyncState.status === "syncing"
-    ? "資料更新中"
+    ? "背景同步中"
     : headerBackendSyncState.status === "error"
       ? "更新未完成"
       : headerBackendSyncState.syncedAt
@@ -3029,10 +3040,11 @@ async function refreshCurrentWorkspace() {
   const token = String(authState?.token || "");
   if (workspaceRefreshRequest?.scope === scope && workspaceRefreshRequest.token === token) return workspaceRefreshRequest.promise;
   const target = activeRouteTarget;
-  const entry = { scope, token, promise: null };
+  const entry = { scope, token, target, promise: null };
   workspaceRefreshRequest = entry;
   const current = () => workspaceRefreshRequest === entry && scope === frontendSessionScope()
     && token === String(authState?.token || "") && hasAuthenticatedBackendSession();
+  const visibleRoute = () => current() && activeRouteTarget === target;
   headerBackendSyncState = { ...headerBackendSyncState, status: "syncing" };
   updateHeaderStatus();
   const buttons = ["#headerRefreshBtn", "#mobileDrawerRefreshBtn"].map((selector) => document.querySelector(selector)).filter(Boolean);
@@ -3055,20 +3067,24 @@ async function refreshCurrentWorkspace() {
       const results = await Promise.allSettled(reads);
       if (!current()) return false;
       if (results.some((result) => result.status === "rejected" || result.value === false)) {
-        headerBackendSyncState = { ...headerBackendSyncState, status: "error" };
-        updateHeaderStatus();
         routeBackendDataErrors.set(target, true);
         routeBackendDataLoaded.delete(target);
-        renderWorkspaceLoadStatus();
-        showToast("部分資料更新失敗，已保留目前內容，請重試。");
+        if (visibleRoute()) {
+          headerBackendSyncState = { ...headerBackendSyncState, status: "error" };
+          updateHeaderStatus();
+          renderWorkspaceLoadStatus();
+          showToast("部分資料更新失敗，已保留目前內容，請重試。");
+        }
         return false;
       }
-      headerBackendSyncState = { status: "synced", syncedAt: new Date().toISOString() };
-      updateHeaderStatus();
-      showToast("已取得最新資料，未儲存的內容已保留。");
+      if (visibleRoute()) {
+        headerBackendSyncState = { status: "synced", syncedAt: new Date().toISOString() };
+        updateHeaderStatus();
+        showToast("已取得最新資料，未儲存的內容已保留。");
+      }
       return true;
     } finally {
-      if (current() && headerBackendSyncState.status === "syncing") {
+      if (visibleRoute() && headerBackendSyncState.status === "syncing") {
         headerBackendSyncState = { ...headerBackendSyncState, status: "error" };
         updateHeaderStatus();
       }
@@ -3337,12 +3353,12 @@ function canSyncAuditLogs() {
 }
 
 const navByIdentity = {
-  employee: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
-  supervisor: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
+  employee: ["dashboard", "compose", "drafts", "electronicSeal", "approvalLog", "inbound"],
+  supervisor: ["dashboard", "compose", "drafts", "electronicSeal", "approvalLog", "inbound"],
   viewer: ["dashboard", "approvalLog", "inbound"],
-  companyOps: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"],
-  administrativeDirector: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"],
-  executive: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"]
+  companyOps: ["dashboard", "compose", "drafts", "electronicSeal", "approvalLog", "inbound", "settings"],
+  administrativeDirector: ["dashboard", "compose", "drafts", "electronicSeal", "approvalLog", "inbound", "settings"],
+  executive: ["dashboard", "compose", "drafts", "electronicSeal", "approvalLog", "inbound", "settings"]
 };
 
 const secondaryRoutesByIdentity = {
@@ -3392,10 +3408,10 @@ function isRouteAllowed(target) {
 
 function simpleRouteLabels(role = activeRole()) {
   const companyWide = ["行政部主任", "總務", "執行長"].includes(role);
-  if (role === "執行長") return { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程設定", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" };
+  if (role === "執行長") return { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", drafts: "草稿編輯", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程設定", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" };
   return companyWide
-    ? { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" }
-    : { dashboard: "首頁", electronicSeal: "電子用印", contractSeal: "合約用印", compose: "撰寫公文", inbound: "收發管理", notifications: "我的待辦", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢" };
+    ? { dashboard: "首頁", electronicSeal: "電子用印", compose: "撰寫公文", drafts: "草稿編輯", inbound: "收發管理", contracts: "合約管理", contractSeal: "合約用印", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢", seals: "印章檔案庫", settings: "系統設定" }
+    : { dashboard: "首頁", electronicSeal: "電子用印", contractSeal: "合約用印", compose: "撰寫公文", drafts: "草稿編輯", inbound: "收發管理", notifications: "我的待辦", approvalLog: "簽核紀錄", workflow: "簽核流程", search: "公文查詢" };
 }
 
 function simpleRouteTitle(target, role = activeRole()) {
@@ -5665,32 +5681,35 @@ function runAuthenticatedStartupSyncs(silent = true) {
 const routeBackendDataLoaded = new Set();
 const routeBackendDataRequests = new Map();
 const routeBackendDataErrors = new Map();
+const routeBackendDataSyncedAt = new Map();
 let routeBackendDataScope = "";
 
 function renderWorkspaceLoadStatus() {
   const notice = document.querySelector("#workspaceLoadStatus");
   if (!notice) return;
   const sameSession = routeBackendDataScope === frontendSessionScope() && hasAuthenticatedBackendSession();
-  const loading = sameSession && routeBackendDataRequests.has(activeRouteTarget);
   const failed = sameSession && routeBackendDataErrors.has(activeRouteTarget);
-  notice.hidden = !loading && !failed;
-  notice.dataset.state = loading ? "loading" : failed ? "error" : "idle";
+  // Route reads run in the background. The header and each dependent control
+  // own their pending state; this full-width notice is reserved for recovery.
+  notice.hidden = !failed;
+  notice.dataset.state = failed ? "error" : "idle";
   const label = document.querySelector("#workspaceLoadLabel");
-  if (label) label.textContent = loading ? "正在更新工作區…" : failed ? "部分資料未載入，已保留目前內容。" : "";
+  if (label) label.textContent = failed ? "部分資料未載入，已保留目前內容。" : "";
   const retry = document.querySelector("#workspaceLoadRetryBtn");
-  if (retry) retry.hidden = !failed || loading;
+  if (retry) retry.hidden = !failed;
 }
 
 function resetRouteBackendData() {
   routeBackendDataLoaded.clear();
   routeBackendDataRequests.clear();
   routeBackendDataErrors.clear();
+  routeBackendDataSyncedAt.clear();
   routeBackendDataScope = "";
   renderWorkspaceLoadStatus();
 }
 
 async function loadRouteBackendData(target, silent = true, { force = false } = {}) {
-  if (!hasAuthenticatedBackendSession()) { renderWorkspaceLoadStatus(); return; }
+  if (!hasAuthenticatedBackendSession()) { renderWorkspaceLoadStatus(); return false; }
   const scope = frontendSessionScope();
   if (routeBackendDataScope !== scope) {
     resetRouteBackendData();
@@ -5701,15 +5720,27 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
     renderWorkspaceLoadStatus();
     return routeBackendDataRequests.get(target).promise;
   }
-  if (!force && routeBackendDataLoaded.has(target)) { renderWorkspaceLoadStatus(); return true; }
+  const manualRefreshOwnsHeader = () => workspaceRefreshRequest?.scope === scope
+    && workspaceRefreshRequest?.token === String(authState?.token || "")
+    && workspaceRefreshRequest?.target === target;
+  if (!force && routeBackendDataLoaded.has(target)) {
+    if (activeRouteTarget === target && !manualRefreshOwnsHeader()) {
+      headerBackendSyncState = { status: "synced", syncedAt: routeBackendDataSyncedAt.get(target) || "" };
+      updateHeaderStatus();
+    }
+    renderWorkspaceLoadStatus();
+    return true;
+  }
   const entry = { promise: null };
   const retrying = force || routeBackendDataErrors.has(target);
   const current = () => hasAuthenticatedBackendSession() && scope === frontendSessionScope()
     && routeBackendDataRequests.get(target) === entry;
   routeBackendDataRequests.set(target, entry);
   routeBackendDataErrors.delete(target);
-  headerBackendSyncState = { ...headerBackendSyncState, status: "syncing" };
-  updateHeaderStatus();
+  if (activeRouteTarget === target && !manualRefreshOwnsHeader()) {
+    headerBackendSyncState = { ...headerBackendSyncState, status: "syncing" };
+    updateHeaderStatus();
+  }
   renderWorkspaceLoadStatus();
   entry.promise = (async () => {
     try {
@@ -5721,21 +5752,21 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
       if (needsDirectory) {
         if (target === "workflow") {
           await loadFinanceCompanyDirectory();
-          if (!current()) return;
+          if (!current()) return false;
           await loadOfficialWorkflowConfig(silent, { throwOnError: true });
         } else if (target === "settings") {
           await Promise.all([
             loadFinanceCompanyDirectory(),
             loadOfficialWorkflowConfig(silent, { throwOnError: true, deferCandidates: true })
           ]);
-          if (!current()) return;
+          if (!current()) return false;
           if (financeDirectoryState.status === "error") throw new Error("公司與部門資料暫時無法更新");
           renderEditableOfficialWorkflowConfig();
           void loadOfficialWorkflowCandidates();
         } else {
           await Promise.all([loadFinanceCompanyDirectory(), loadOfficialWorkflowConfig(silent, { throwOnError: true })]);
         }
-        if (!current()) return;
+        if (!current()) return false;
         if (financeDirectoryState.status === "error") throw new Error("公司與部門資料暫時無法更新");
       }
       if (target === "compose") void loadComposeSealOptions(document.querySelector("#composeCompanySelect")?.value || "", { force: true });
@@ -5745,7 +5776,7 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
           loadUploadedSealOptions(document.querySelector("#uploadedSealCompany")?.value || "", { throwOnError: true }),
           refreshWorkflowReadinessForContext("uploadedSeal", { silent, force: retrying })
         ]);
-        if (!current()) return;
+        if (!current()) return false;
         if (readiness?.error) throw new Error("簽核資料暫時無法更新");
         uploadedSealEditorRuntime.directoryLoading = false;
         renderUploadedSealWorkbench();
@@ -5756,7 +5787,7 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
           companyId ? loadOfficialSealOptions(companyId, { throwOnError: true }) : Promise.resolve(),
           refreshWorkflowReadinessForContext("compose", { silent, force: retrying })
         ]);
-        if (!current()) return;
+        if (!current()) return false;
         if (readiness?.error) throw new Error("簽核資料暫時無法更新");
       }
       if (target === "workflow") {
@@ -5764,6 +5795,7 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
         if (workflowProxyLoadState === "error") throw new Error("代理簽核資料暫時無法更新");
       }
       if (target === "inbound") await Promise.all([loadInboundDocuments(silent), loadInternalDispatches(silent), loadInboundAssigneeCandidates()]);
+      if (target === "drafts" && !await refreshComposeCloudDrafts()) throw new Error("私人草稿暫時無法更新");
       if (target === "seals") await loadCompanySealModule(true, { throwOnError: true });
       if (target === "jobs") await syncJobsFromBackend(silent);
       if (target === "database") await syncDatabaseFromBackend(silent);
@@ -5777,16 +5809,22 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
       if (target === "ops") await syncGoLiveAuditFromBackend(silent);
       if (current()) {
         routeBackendDataLoaded.add(target);
-        headerBackendSyncState = { status: "synced", syncedAt: new Date().toISOString() };
-        updateHeaderStatus();
+        const syncedAt = new Date().toISOString();
+        routeBackendDataSyncedAt.set(target, syncedAt);
+        if (activeRouteTarget === target && !manualRefreshOwnsHeader()) {
+          headerBackendSyncState = { status: "synced", syncedAt };
+          updateHeaderStatus();
+        }
       }
       return current();
     } catch (error) {
-      if (!current()) return;
+      if (!current()) return false;
       routeBackendDataLoaded.delete(target);
       routeBackendDataErrors.set(target, true);
-      headerBackendSyncState = { ...headerBackendSyncState, status: "error" };
-      updateHeaderStatus();
+      if (activeRouteTarget === target && !manualRefreshOwnsHeader()) {
+        headerBackendSyncState = { ...headerBackendSyncState, status: "error" };
+        updateHeaderStatus();
+      }
       if (["contractSeal", "electronicSeal"].includes(target)) {
         uploadedSealEditorRuntime.directoryLoading = false;
         setUploadedEditorSaveStatus("error", "公司與印章權限載入失敗，請重試");
@@ -6217,6 +6255,7 @@ function enterApp(message = "登入成功，已進入公文收發電子用印系
   startFinanceDirectoryRefresh();
   const requestedRoute = location.hash?.slice(1);
   setView(requestedRoute && titles[requestedRoute] && isRouteAllowed(requestedRoute) ? requestedRoute : "dashboard");
+  if (isRouteAllowed("drafts") && activeRouteTarget !== "drafts") void refreshComposeCloudDraftCount();
   runAuthenticatedStartupSyncs(true);
   completeCachedSessionShellReveal();
   window.requestAnimationFrame(() => {
@@ -6268,6 +6307,8 @@ function enterAuthenticatedAppSafely(message) {
 }
 
 function clearAppSessionUi(leavingSession, { removeStoredSession = false } = {}) {
+  clearComposeAutosave(composeAutosaveLastWrittenRaw);
+  composeAutosaveLastWrittenRaw = null;
   clearCurrentFrontendSessionState(leavingSession);
   authState = null;
   workspaceRefreshRequest = null;
@@ -6292,10 +6333,23 @@ function clearAppSessionUi(leavingSession, { removeStoredSession = false } = {})
   clearUploadedEditorSensitivePreviews();
   resetOfficialWorkflowConfigEditor();
   closeOfficialDecisionDialog();
-  clearComposeAutosave();
   composeAutosaveRestoredForIdentity = "";
   resetComposeAsyncScope();
   composeCloudRows = [];
+  composeCloudDraftCount = null;
+  composeCloudDraftHasMore = false;
+  composeCloudDraftsLoading = false;
+  composeCloudDraftsError = false;
+  composeCloudProbeId = "";
+  composeCloudProbeExists = null;
+  composeCloudListGeneration += 1;
+  composeCloudCountGeneration += 1;
+  composeCloudListRequest = null;
+  composeCloudCountRequest = null;
+  composePendingArchiveCache = { key: "", rows: [] };
+  composePendingArchiveRequests.clear();
+  renderComposeDraftCount();
+  renderComposeDraftList();
   composeCloudRevisions.clear();
   composeCloudSavedSnapshots.clear();
   officialAttachmentUploadCache.clear();
@@ -8075,10 +8129,12 @@ function writeComposeAutosave() {
   const saved = {
     updatedAt: new Date().toISOString(),
     snapshot,
-    cloudRevision: composeCloudDraftId ? composeCloudRevisions.get(composeCloudDraftId) ?? null : null
+    cloudRevision: composeCloudDraftId ? composeCloudRevisions.get(composeCloudDraftId) ?? null : null,
+    needsCloudSync: true
   };
+  const raw = JSON.stringify(saved);
   try {
-    localStorage.setItem(composeAutosaveStorageKey, JSON.stringify(saved));
+    writeComposeAutosaveRaw(raw);
   } catch (error) {
     composeSaveState = {
       tone: "idle",
@@ -8092,11 +8148,127 @@ function writeComposeAutosave() {
     title: "此瀏覽器已保護",
     detail: `${formatComposeSaveTime(saved.updatedAt)} 已保留目前輸入，稍後自動保存到私人雲端草稿。`
   };
+  renderComposeDraftCount();
   scheduleComposeCloudSave();
 }
 
 function composeRequestScope() {
   return `${frontendSessionScope()}|${authState?.token || ""}|${composeCloudEpoch}|${currentComposeDraftId}|${composeDraftRequestId}|${document.querySelector("#composeCompanySelect")?.value || ""}`;
+}
+
+function composePendingArchiveStorageKey() {
+  if (!authState?.user?.id || !authState?.user?.company_id) return "";
+  return frontendScopedSessionKey("submitted-compose-archive-pending-v1");
+}
+
+function submittedComposeArchiveRecords() {
+  const key = composePendingArchiveStorageKey();
+  if (!key) return [];
+  if (composePendingArchiveCache.key !== key) {
+    let rows = [];
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+      if (Array.isArray(parsed)) rows = parsed;
+    } catch (_) { /* A damaged marker never authorizes a cross-account action. */ }
+    composePendingArchiveCache = {
+      key,
+      rows: rows.filter((row) => row && (row.archived === true || /^OD-[0-9a-f-]{36}$/i.test(row.draftId || ""))
+        && /^OD-[a-z0-9-]{1,150}$/i.test(row.officialDocumentId || ""))
+        .map((row) => ({ draftId: row.draftId, officialDocumentId: row.officialDocumentId,
+          expectedRevision: Number.isInteger(row.expectedRevision) && row.expectedRevision > 0 ? row.expectedRevision : 0,
+          archived: row.archived === true, updatedAt: row.updatedAt || "" }))
+    };
+  }
+  return [...composePendingArchiveCache.rows];
+}
+
+function pendingComposeArchives() {
+  return submittedComposeArchiveRecords().filter((row) => !row.archived);
+}
+
+function persistPendingComposeArchives(rows) {
+  const key = composePendingArchiveStorageKey();
+  if (!key) return false;
+  const clean = rows.filter((row) => row && (row.archived === true || /^OD-[0-9a-f-]{36}$/i.test(row.draftId || ""))
+    && /^OD-[a-z0-9-]{1,150}$/i.test(row.officialDocumentId || ""));
+  try {
+    localStorage.setItem(key, JSON.stringify(clean));
+  } catch (_) { return false; }
+  composePendingArchiveCache = { key, rows: clean };
+  return true;
+}
+
+function pendingComposeArchiveForDraft(draftId) {
+  return pendingComposeArchives().find((row) => row.draftId === draftId) || null;
+}
+
+function rememberPendingComposeArchive(draftId, officialDocumentId, expectedRevision = 0) {
+  if (!/^OD-[0-9a-f-]{36}$/i.test(draftId || "") || !/^OD-[a-z0-9-]{1,150}$/i.test(officialDocumentId || "")) return null;
+  const marker = { draftId, officialDocumentId, archived: false,
+    expectedRevision: Number.isInteger(expectedRevision) && expectedRevision > 0 ? expectedRevision : 0,
+    updatedAt: new Date().toISOString() };
+  const rows = submittedComposeArchiveRecords().filter((row) => row.draftId !== draftId && row.officialDocumentId !== officialDocumentId);
+  return persistPendingComposeArchives([...rows, marker]) ? marker : null;
+}
+
+function forgetPendingComposeArchive(draftId) {
+  const rows = submittedComposeArchiveRecords();
+  const marker = rows.find((row) => row.draftId === draftId);
+  if (!marker) return true;
+  return persistPendingComposeArchives(rows.map((row) => row.draftId === draftId
+    ? { ...row, archived: true, updatedAt: new Date().toISOString() } : row));
+}
+
+function rememberSubmittedComposeTombstone(draftId, officialDocumentId) {
+  if (!/^OD-[a-z0-9-]{1,150}$/i.test(officialDocumentId || "")) return false;
+  const rows = submittedComposeArchiveRecords();
+  if (rows.some((row) => row.officialDocumentId === officialDocumentId)) return true;
+  return persistPendingComposeArchives([...rows, {
+    draftId: /^OD-[0-9a-f-]{36}$/i.test(draftId || "") ? draftId : "",
+    officialDocumentId, archived: true, expectedRevision: 0, updatedAt: new Date().toISOString()
+  }]);
+}
+
+function submittedComposeMarkerForSnapshot(snapshot) {
+  return submittedComposeArchiveRecords().find((marker) => composePendingArchiveMatchesSnapshot(marker, snapshot)) || null;
+}
+
+async function retryPendingComposeArchive(draftId, { silent = false } = {}) {
+  const marker = pendingComposeArchiveForDraft(draftId);
+  if (!marker || !authState?.token) return false;
+  const scope = `${composePendingArchiveStorageKey()}|${authState.token}`;
+  const key = `${scope}|${draftId}`;
+  if (composePendingArchiveRequests.has(key)) return composePendingArchiveRequests.get(key);
+  const operation = (async () => {
+    try {
+      const result = await backendRequest(`/compose-drafts/${encodeURIComponent(draftId)}/archive`, {
+        method: "POST", body: JSON.stringify({ official_document_id: marker.officialDocumentId,
+          expected_revision: marker.expectedRevision })
+      });
+      if (scope !== `${composePendingArchiveStorageKey()}|${authState?.token || ""}`) return false;
+      if (result?.archived !== true) throw new Error("compose_archive_unconfirmed");
+      if (!forgetPendingComposeArchive(draftId)) throw new Error("compose_archive_marker_cleanup_failed");
+      composeCloudRows = composeCloudRows.filter((row) => row.id !== draftId);
+      renderComposeDraftList();
+      void refreshComposeCloudDraftCount();
+      if (activeRouteTarget === "drafts") void refreshComposeCloudDrafts();
+      if (!silent) showToast("公文已送簽；私人草稿已完成整理。");
+      return true;
+    } catch (error) {
+      if (scope === `${composePendingArchiveStorageKey()}|${authState?.token || ""}` && !silent) {
+        showToast(error?.status === 409
+          ? "公文已送簽；私人草稿已由其他裝置修改，系統不會刪除新版。請聯絡系統管理員確認。"
+          : !marker.expectedRevision
+            ? "公文已送簽；無法確認私人草稿版本，系統不會刪除。請聯絡系統管理員確認。"
+          : "公文已送簽；私人草稿整理尚未完成，可在「草稿編輯」重試。請勿重複送簽。");
+      }
+      return false;
+    } finally {
+      if (composePendingArchiveRequests.get(key) === operation) composePendingArchiveRequests.delete(key);
+    }
+  })();
+  composePendingArchiveRequests.set(key, operation);
+  return operation;
 }
 
 function resetComposeAsyncScope() {
@@ -8110,8 +8282,6 @@ function resetComposeAsyncScope() {
   composeCloudOperation = null;
   composeCloudDraftId = "";
   composeCloudConflict = false;
-  composeRecoveryCandidate = null;
-  composeRecoveryDismissedIdentity = composeAutosaveIdentity();
   composeAiOperation = null;
   composeAiSuggestion = null;
   composeAiUndo = null;
@@ -8130,9 +8300,60 @@ function scheduleComposeCloudSave() {
   }, 1800);
 }
 
-async function saveComposeCloudDraft({ archived = false } = {}) {
+async function saveComposeCloudDraft({ archived = false, officialDocumentId = "" } = {}) {
   clearTimeout(composeCloudTimer);
+  if (archived) {
+    // Formal submission has already succeeded. Finish any ordinary autosave
+    // first; returning that PUT used to skip the archive entirely.
+    const scope = composeRequestScope();
+    const draftId = composeCloudDraftId;
+    if (!draftId) return { archived: true, noPrivateDraft: true };
+    if (!authState?.token || !/^OD-[a-z0-9-]{1,150}$/i.test(officialDocumentId)) return null;
+    if (composeCloudOperation) await composeCloudOperation;
+    if (scope !== composeRequestScope() || draftId !== composeCloudDraftId) return null;
+    // Record the confirmed submission before any optional final cloud write.
+    // A crash, failed IME flush or lost PUT response must not silently reopen
+    // this already-submitted document as an ordinary editable draft.
+    let expectedRevision = composeCloudRevisions.get(draftId) || 0;
+    let marker = rememberPendingComposeArchive(draftId, officialDocumentId, expectedRevision);
+    if (!flushComposeInputUpdates({ preview: false })) return null;
+    clearTimeout(composeCloudTimer);
+    // Persist the final formal document link for the backend's scoped archive
+    // guard. If this PUT fails, the submitted document remains authoritative;
+    // the ID-only cleanup marker still permits an explicit safe retry.
+    if (!composeCloudConflict && composeCloudSavedSnapshots.get(draftId) !== JSON.stringify(composeRawSnapshot())) {
+      await saveComposeCloudDraft();
+      if (scope !== composeRequestScope() || draftId !== composeCloudDraftId) return null;
+    }
+    const savedRevision = composeCloudRevisions.get(draftId) || 0;
+    if (savedRevision !== expectedRevision) {
+      expectedRevision = savedRevision;
+      marker = rememberPendingComposeArchive(draftId, officialDocumentId, expectedRevision);
+    }
+    // Another tab may have advanced the private row. The server's revision
+    // check protects that newer content; a known local conflict is never
+    // retried as a blind deletion.
+    if (composeCloudConflict) return null;
+    if (!marker) {
+      // Private storage can be unavailable (quota/private mode). Still attempt
+      // backend cleanup; failure must be reported as manual follow-up, not as a
+      // failed formal submission or a falsely completed archive.
+      try {
+        const result = await backendRequest(`/compose-drafts/${encodeURIComponent(draftId)}/archive`, {
+          method: "POST", body: JSON.stringify({ official_document_id: officialDocumentId,
+            expected_revision: expectedRevision })
+        });
+        if (result?.archived !== true) return null;
+        // A first marker may have been written before a later storage failure.
+        // Keep the submitted-but-needs-cleanup warning until it is removable.
+        if (pendingComposeArchiveForDraft(draftId) && !forgetPendingComposeArchive(draftId)) return null;
+        return { archived: true, id: draftId };
+      } catch (_) { return null; }
+    }
+    return await retryPendingComposeArchive(draftId, { silent: true }) ? { archived: true, id: draftId } : null;
+  }
   if (!flushComposeInputUpdates({ preview: false })) return null;
+  clearTimeout(composeCloudTimer);
   if (!authState?.token || composeCloudConflict || !composeSnapshotHasMeaningfulContent(composeRawSnapshot())) return null;
   if (composeCloudOperation) return composeCloudOperation;
   if (!composeCloudDraftId) composeCloudDraftId = `OD-${crypto.randomUUID()}`;
@@ -8140,14 +8361,25 @@ async function saveComposeCloudDraft({ archived = false } = {}) {
   const scope = composeRequestScope();
   const snapshot = composeRawSnapshot();
   const serialized = JSON.stringify(snapshot);
-  if (!archived && composeCloudSavedSnapshots.get(draftId) === serialized) return { id: draftId };
+  if (composeCloudSavedSnapshots.get(draftId) === serialized) return { id: draftId };
+  // Keep the stable draft ID locally before the request. A lost response must
+  // not silently create a second private draft on the next attempt.
+  if (!composeInputIsComposing()) {
+    try {
+      const raw = JSON.stringify({
+        updatedAt: new Date().toISOString(), snapshot,
+        cloudRevision: composeCloudRevisions.get(draftId) ?? null, needsCloudSync: true
+      });
+      writeComposeAutosaveRaw(raw);
+    } catch (_) { /* The in-memory editor remains authoritative this session. */ }
+  }
   const valid = () => scope === composeRequestScope() && draftId === composeCloudDraftId;
   composeSaveState = { tone: "saving", title: "正在自動保存", detail: "文字與用印位置保存至私人雲端草稿；未上傳的附件仍在此裝置。" };
   renderComposeSaveStatus();
   const operation = (async () => {
     try {
       const result = await backendRequest(`/compose-drafts/${encodeURIComponent(draftId)}`, {
-        method: "PUT", body: JSON.stringify({ snapshot, expected_revision: composeCloudRevisions.get(draftId) || 0, archived })
+        method: "PUT", body: JSON.stringify({ snapshot, expected_revision: composeCloudRevisions.get(draftId) || 0, archived: false })
       });
       if (!valid()) return null;
       composeCloudRevisions.set(draftId, result.revision);
@@ -8155,18 +8387,25 @@ async function saveComposeCloudDraft({ archived = false } = {}) {
       // Keep the local recovery token in sync without triggering another
       // autosave. It must never be inferred from a newer cloud/dashboard row.
       try {
-        if (!composeInputIsComposing()) localStorage.setItem(composeAutosaveStorageKey, JSON.stringify({
-          updatedAt: new Date().toISOString(), snapshot: composeRawSnapshot(), cloudRevision: result.revision
-        }));
+        if (!composeInputIsComposing() && JSON.stringify(composeRawSnapshot()) === serialized) {
+          const raw = JSON.stringify({
+            updatedAt: new Date().toISOString(), snapshot, cloudRevision: result.revision, needsCloudSync: false
+          });
+          writeComposeAutosaveRaw(raw);
+        }
       } catch (_) { /* Cloud is saved even when local storage is unavailable. */ }
-      composeSaveState = { tone: "saved", title: "私人雲端草稿已保存", detail: "可在其他裝置從「雲端草稿」繼續；尚未送簽。未上傳的附件請在原裝置完成上傳。" };
+      composeSaveState = { tone: "saved", title: "私人雲端草稿已保存", detail: "可從左側「草稿編輯」繼續；尚未送簽。未上傳的附件請在原裝置完成上傳。" };
       renderComposeSaveStatus();
+      renderComposeDraftCount();
+      void refreshComposeCloudDraftCount();
+      if (activeRouteTarget === "drafts") void refreshComposeCloudDrafts();
       return result;
     } catch (error) {
       if (!valid()) return null;
       composeCloudConflict = error?.status === 409 || /compose_draft_revision_conflict/.test(error?.message || error?.detail || "");
-      composeSaveState = { tone: "error", title: composeCloudConflict ? "其他裝置已修改這份草稿" : "尚未保存到雲端", detail: composeCloudConflict ? "已保留此頁輸入，不會覆蓋別人的版本。可保留為新草稿，或從雲端草稿載入最新版。" : `此頁輸入仍保留。${navigator.onLine === false ? "目前離線，連線恢復後會重試。" : "請按重試保存。"}` };
+      composeSaveState = { tone: "error", title: composeCloudConflict ? "其他裝置已修改這份草稿" : "尚未保存到雲端", detail: composeCloudConflict ? "已保留此頁輸入，不會覆蓋別人的版本。可保留為新草稿，或到左側「草稿編輯」載入最新版。" : `此頁輸入仍保留。${navigator.onLine === false ? "目前離線，連線恢復後會重試。" : "請按重試保存。"}` };
       renderComposeSaveStatus();
+      void refreshComposeCloudDraftCount();
       return null;
     } finally {
       if (composeCloudOperation === operation) composeCloudOperation = null;
@@ -8177,100 +8416,305 @@ async function saveComposeCloudDraft({ archived = false } = {}) {
   return operation;
 }
 
-async function refreshComposeCloudDrafts() {
-  if (!authState?.token) return;
-  const identity = () => `${frontendSessionScope()}|${authState?.token || ""}`;
-  const scope = identity();
-  try {
-    const rows = await backendRequest("/compose-drafts");
-    if (scope !== identity()) return;
-    composeCloudRows = Array.isArray(rows) ? rows : [];
-    const select = document.querySelector("#composeCloudDraftSelect");
-    if (select) select.innerHTML = `<option value="">選擇私人雲端草稿</option>` + composeCloudRows.map(row => `<option value="${escapeHtml(row.id)}">${escapeHtml(row.snapshot?.values?.["#subject"] || row.snapshot?.values?.["#documentPurpose"] || "尚未命名")} · ${escapeHtml(row.updatedAt || "")}</option>`).join("");
-    document.querySelector("#composeCloudDraftNotice")?.replaceChildren(document.createTextNode(`共 ${composeCloudRows.length} 份私人草稿；不會自動蓋掉目前輸入。`));
-    renderComposeRecoveryPrompt();
-  } catch (_) {
-    if (scope === identity()) document.querySelector("#composeCloudDraftNotice")?.replaceChildren(document.createTextNode("雲端草稿暫時無法讀取，請按重新載入。"));
-  }
+function composeCloudIdentityScope() {
+  return `${frontendSessionScope()}|${authState?.token || ""}`;
 }
 
-async function loadComposeCloudDraft(draftId = document.querySelector("#composeCloudDraftSelect")?.value) {
-  const row = composeCloudRows.find(item => item.id === draftId);
-  if (!row) return showToast("請先選擇一份雲端草稿。");
+function composeLocalUnsyncedDraft() {
+  const saved = readComposeAutosave();
+  if (!saved || !(saved.needsCloudSync === true || !saved.snapshot?.cloudDraftId || !Number.isInteger(saved.cloudRevision) || saved.cloudRevision <= 0)) return null;
+  const sameCloudVersion = composeCloudRows.some((row) => row.id === saved.snapshot.cloudDraftId
+    && composePersistedSnapshotKey(row.snapshot) === composePersistedSnapshotKey(saved.snapshot));
+  return sameCloudVersion ? null : saved;
+}
+
+function composePendingArchiveMatchesSnapshot(marker, snapshot) {
+  return Boolean((marker?.draftId && marker.draftId === snapshot?.cloudDraftId)
+    || (marker?.officialDocumentId && marker.officialDocumentId === snapshot?.officialDocumentId)
+    || (marker?.officialDocumentId && marker.officialDocumentId === snapshot?.draftRequestId));
+}
+
+function composeDraftCountState() {
+  const pendingArchives = pendingComposeArchives();
+  const localCandidate = composeLocalUnsyncedDraft();
+  const local = localCandidate && !pendingArchives.some((marker) => composePendingArchiveMatchesSnapshot(marker, localCandidate.snapshot)) ? localCandidate : null;
+  const id = local?.snapshot?.cloudDraftId || "";
+  const confirmed = Number.isInteger(local?.cloudRevision) && local.cloudRevision > 0;
+  const inLoadedRows = id && composeCloudRows.some((row) => row.id === id);
+  const localUncertain = Boolean(id && !confirmed && !inLoadedRows && (composeCloudProbeId !== id || typeof composeCloudProbeExists !== "boolean"));
+  // A submitted row can lie beyond the loaded page. Do not label the raw
+  // server count as "unfinished" until cleanup or an exact row check resolves it.
+  const pendingCountUncertain = pendingArchives.some((marker) => !composeCloudRows.some((row) => row.id === marker.draftId));
+  const uncertain = localUncertain || pendingCountUncertain;
+  const extra = local && (!id || (id && !confirmed && !inLoadedRows && composeCloudProbeId === id && composeCloudProbeExists === false)) ? 1 : 0;
+  const pendingLoaded = composeCloudRows.filter((row) => pendingArchives.some((marker) => marker.draftId === row.id)).length;
+  const total = Number.isInteger(composeCloudDraftCount) && !uncertain ? Math.max(0, composeCloudDraftCount - pendingLoaded + extra) : null;
+  return { local, total, uncertain, pendingCountUncertain, pendingCleanup: pendingArchives.length };
+}
+
+function renderComposeDraftCount() {
+  const badge = document.querySelector("#composeDraftNavCount");
+  const item = badge?.closest(".nav-item");
+  if (!badge || !item) return;
+  const { total: count, pendingCountUncertain } = composeDraftCountState();
+  badge.hidden = !count;
+  badge.textContent = count > 99 ? "99+" : String(count || "");
+  item.setAttribute("aria-label", count === null
+    ? pendingCountUncertain ? "草稿編輯，已送簽草稿待清理，未完成數量暫時無法確認" : "草稿編輯，數量更新中"
+    : `草稿編輯，${count} 份未完成草稿`);
+}
+
+function formatComposeDraftUpdatedAt(value) {
+  const date = new Date(value || "");
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-TW", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function renderComposeDraftList() {
+  const host = document.querySelector("#composeDraftList");
+  const status = document.querySelector("#composeDraftListStatus");
+  const localCard = document.querySelector("#composeLocalDraftCard");
+  if (!host || !status || !localCard) return;
+  const { local, total, uncertain, pendingCountUncertain, pendingCleanup } = composeDraftCountState();
+  localCard.hidden = !local;
+  if (local) {
+    const title = local.snapshot?.values?.["#subject"] || local.snapshot?.values?.["#documentPurpose"] || "尚未命名公文";
+    document.querySelector("#composeLocalDraftTitle").textContent = String(title).slice(0, 120);
+    document.querySelector("#composeLocalDraftMeta").textContent = `${formatComposeDraftUpdatedAt(local.updatedAt)} · 仍保留在此裝置，需完成雲端同步`;
+  }
+  const pendingArchives = pendingComposeArchives();
+  const submittedRecovery = composeSubmittedLocalRecovery();
+  const renderRows = composeCloudRows.map((row) => ({ row, pendingArchive: pendingComposeArchiveForDraft(row.id) }));
+  const missingPending = pendingArchives.filter((marker) => !composeCloudRows.some((row) => row.id === marker.draftId));
+  // Pending/error are status-only changes. Preserve cached cards and keyboard
+  // focus while a background refresh is in flight or temporarily fails.
+  const listSignature = JSON.stringify([
+    Boolean(submittedRecovery),
+    renderRows.map(({ row, pendingArchive }) =>
+      [row.id, row.revision, row.updatedAt, row.snapshot?.values?.["#subject"], row.snapshot?.values?.["#documentPurpose"], Boolean(pendingArchive), pendingArchive?.expectedRevision ?? null]),
+    missingPending.map((marker) => [marker.draftId, marker.expectedRevision ?? null])
+  ]);
+  if (host.dataset.renderSignature !== listSignature) {
+    const recoveryCard = submittedRecovery
+      ? `<article class="draft-list-card draft-submitted-recovery"><div><span class="draft-source">此裝置・其他分頁</span><h4>已送簽文件仍有本機內容</h4><p>若需保留變更，可另存為新草稿；原公文不會變更，附件需重新選擇。</p></div><button class="secondary-button" type="button" data-compose-recover-submitted aria-label="將已送簽文件的本機內容另存為新草稿">另存為新草稿</button></article>`
+      : "";
+    const cloudCards = renderRows.map(({ row, pendingArchive }) => {
+      const title = String(row.snapshot?.values?.["#subject"] || row.snapshot?.values?.["#documentPurpose"] || "尚未命名公文").slice(0, 120);
+      if (pendingArchive) {
+        const needsAdmin = !Number(pendingArchive.expectedRevision || 0);
+        return `<article class="draft-list-card"><div><span class="draft-source">${needsAdmin ? "送簽成功・需管理員確認" : "送簽成功・清理待重試"}</span><h4>${escapeHtml(title)}</h4><p>${needsAdmin ? "雲端版本未確認；請聯絡系統管理員核對後清理。" : "這份草稿已送出，僅需清理舊紀錄。"}</p></div><button class="secondary-button" type="button" data-compose-archive-retry="${escapeHtml(row.id)}" aria-label="${needsAdmin ? "檢查清理狀態" : "重試清理"} ${escapeHtml(title)}">${needsAdmin ? "檢查清理狀態" : "重試清理"}</button></article>`;
+      }
+      return `<article class="draft-list-card"><div><span class="draft-source">私人雲端草稿</span><h4>${escapeHtml(title)}</h4><p>更新：${escapeHtml(formatComposeDraftUpdatedAt(row.updatedAt))}</p></div><button class="secondary-button" type="button" data-compose-draft-id="${escapeHtml(row.id)}" aria-label="繼續編輯 ${escapeHtml(title)}">繼續編輯</button></article>`;
+    }).join("");
+    const pendingCards = missingPending.map((marker) => {
+      const needsAdmin = !Number(marker.expectedRevision || 0);
+      return `<article class="draft-list-card"><div><span class="draft-source">${needsAdmin ? "送簽成功・需管理員確認" : "送簽成功・清理待重試"}</span><h4>已送簽草稿</h4><p>${needsAdmin ? "雲端版本未確認；請聯絡系統管理員核對後清理。" : "送出已完成，僅需清理舊紀錄。"}</p></div><button class="secondary-button" type="button" data-compose-archive-retry="${escapeHtml(marker.draftId)}" aria-label="${needsAdmin ? "檢查清理狀態" : "重試清理"}已送簽草稿">${needsAdmin ? "檢查清理狀態" : "重試清理"}</button></article>`;
+    }).join("");
+    host.innerHTML = recoveryCard + cloudCards + pendingCards;
+    host.dataset.renderSignature = listSignature;
+  }
+  if (composeCloudDraftsError) status.textContent = composeCloudRows.length
+    ? "草稿更新失敗，已載入的草稿仍可編輯；請重新整理。"
+    : "私人草稿暫時無法讀取，請重新整理；此裝置的未同步內容不會被清除。";
+  else if (composeCloudDraftsLoading) status.textContent = composeCloudRows.length
+    ? "正在更新草稿；已載入的草稿仍可編輯。"
+    : "正在載入私人草稿，仍可使用其他功能。";
+  else if (pendingCountUncertain) status.textContent = "已送簽草稿待清理；未完成數量暫時無法確認。可按「重試清理」。";
+  else if (uncertain) status.textContent = "此裝置有一份雲端狀態待確認的草稿；數量確認後會更新。";
+  else if (!Number.isInteger(composeCloudDraftCount)) status.textContent = `${composeCloudRows.length} 份雲端草稿已載入；總數暫時無法確認。`;
+  else if (local && local.snapshot?.cloudDraftId && !total) status.textContent = "此裝置有一份待確認的草稿；雲端目前沒有其他未完成草稿。";
+  else status.textContent = `${total ? `未完成草稿 ${total} 份` : "目前沒有未完成草稿"}${pendingCleanup ? `；${pendingCleanup} 份已送簽資料待清理。` : "。"}`;
+  const more = document.querySelector("#composeDraftLoadMoreBtn");
+  if (more) { more.hidden = !composeCloudDraftHasMore; more.disabled = composeCloudDraftsLoading; }
+  const refresh = document.querySelector("#composeDraftRefreshBtn");
+  if (refresh) { refresh.disabled = composeCloudDraftsLoading; refresh.setAttribute("aria-busy", composeCloudDraftsLoading ? "true" : "false"); }
+}
+
+async function refreshComposeCloudDraftCount() {
+  if (!authState?.token) return false;
+  const scope = composeCloudIdentityScope();
+  const local = composeLocalUnsyncedDraft();
+  const probeId = local?.snapshot?.cloudDraftId && !(Number.isInteger(local.cloudRevision) && local.cloudRevision > 0)
+    && !composeCloudRows.some((row) => row.id === local.snapshot.cloudDraftId) ? local.snapshot.cloudDraftId : "";
+  if (composeCloudCountRequest?.scope === scope && composeCloudCountRequest.probeId === probeId) return composeCloudCountRequest.promise;
+  const generation = ++composeCloudCountGeneration;
+  const entry = { scope, probeId, promise: null };
+  composeCloudCountRequest = entry;
+  entry.promise = (async () => {
+    try {
+      const data = await backendRequest(`/compose-drafts/count${probeId ? `?probe_id=${encodeURIComponent(probeId)}` : ""}`);
+      if (scope !== composeCloudIdentityScope() || generation !== composeCloudCountGeneration) return false;
+      if (!Number.isInteger(data?.count) || data.count < 0 || (probeId && typeof data.probeExists !== "boolean")) throw new Error("invalid_compose_draft_count");
+      composeCloudDraftCount = data.count;
+      composeCloudProbeId = probeId;
+      composeCloudProbeExists = probeId ? data.probeExists : null;
+    } catch (_) {
+      if (scope !== composeCloudIdentityScope() || generation !== composeCloudCountGeneration) return false;
+      composeCloudDraftCount = null;
+      composeCloudProbeId = "";
+      composeCloudProbeExists = null;
+      renderComposeDraftCount();
+      if (activeRouteTarget === "drafts") renderComposeDraftList();
+      return false;
+    } finally {
+      if (composeCloudCountRequest === entry) composeCloudCountRequest = null;
+    }
+    renderComposeDraftCount();
+    if (activeRouteTarget === "drafts") renderComposeDraftList();
+    return true;
+  })();
+  return entry.promise;
+}
+
+async function refreshComposeCloudDrafts({ append = false } = {}) {
+  if (!authState?.token) return false;
+  const scope = composeCloudIdentityScope();
+  if (!append && composeCloudListRequest?.scope === scope && !composeCloudListRequest.append) return composeCloudListRequest.promise;
+  if (append && (composeCloudDraftsLoading || !composeCloudDraftHasMore)) return false;
+  const generation = ++composeCloudListGeneration;
+  const offset = append ? composeCloudRows.length : 0;
+  composeCloudDraftsLoading = true;
+  composeCloudDraftsError = false;
+  renderComposeDraftList();
+  const entry = { scope, append, promise: null };
+  composeCloudListRequest = entry;
+  entry.promise = (async () => {
+    try {
+      const [listResult, countResult] = await Promise.allSettled([
+        backendRequest(`/compose-drafts?offset=${offset}&limit=20`),
+        refreshComposeCloudDraftCount()
+      ]);
+      if (scope !== composeCloudIdentityScope() || generation !== composeCloudListGeneration) return false;
+      if (listResult.status === "fulfilled" && Array.isArray(listResult.value)) {
+        const rows = listResult.value;
+        composeCloudRows = append ? [...composeCloudRows, ...rows.filter((row) => !composeCloudRows.some((existing) => existing.id === row.id))] : rows;
+        composeCloudDraftHasMore = rows.length === 20;
+      } else composeCloudDraftsError = true;
+      if (countResult.status !== "fulfilled" || countResult.value !== true) composeCloudDraftsError = true;
+      return !composeCloudDraftsError;
+    } catch (_) {
+      if (scope !== composeCloudIdentityScope() || generation !== composeCloudListGeneration) return false;
+      composeCloudDraftsError = true;
+      return false;
+    } finally {
+      if (scope === composeCloudIdentityScope() && generation === composeCloudListGeneration) {
+        composeCloudDraftsLoading = false;
+        renderComposeDraftList();
+      }
+      if (composeCloudListRequest === entry) composeCloudListRequest = null;
+    }
+  })();
+  return entry.promise;
+}
+
+async function preserveCurrentComposeBeforeDraftSwitch() {
+  if (composeInputIsComposing()) return showToast("請先完成目前文字輸入，再切換草稿。"), false;
+  if (document.querySelector("#attachments")?.files?.length) {
+    showToast("目前有尚未上傳的本機附件，請先完成上傳或移除，再切換草稿。");
+    return false;
+  }
+  if (!flushComposeInputUpdates({ preview: false })) return false;
+  const current = composeRawSnapshot();
+  if (!composeSnapshotHasMeaningfulContent(current)) return true;
+  if (composeCloudOperation) await composeCloudOperation;
+  if (composeCloudSavedSnapshots.get(composeCloudDraftId) === JSON.stringify(composeRawSnapshot())) return true;
+  const saved = await saveComposeCloudDraft();
+  if (saved) return true;
+  showToast("目前內容尚未保存，已取消切換；請先重試保存。");
+  return false;
+}
+
+async function loadComposeCloudDraft(draftId) {
+  const row = composeCloudRows.find((item) => item.id === draftId);
+  if (!row) return showToast("找不到這份草稿，請重新整理清單。");
   if (row.snapshot?.userId !== authState?.user?.id || row.snapshot?.companyId !== authState?.user?.company_id) {
     return showToast("登入身分或公司已切換，請重新載入私人草稿清單。");
   }
-  if (composeSnapshotHasMeaningfulContent(composeRawSnapshot()) && !window.confirm("載入雲端草稿會取代目前畫面。請先確認目前內容已保存；是否繼續？")) return;
-  // A FileList belongs to the currently open draft, never to the snapshot
-  // selected from another device/document. Do not carry it across this switch.
+  if (pendingComposeArchiveForDraft(draftId)) return showToast("這份草稿已送簽，請重試清理舊紀錄。");
+  if (draftId === composeCloudDraftId) {
+    if (Number(row.revision || 0) <= Number(composeCloudRevisions.get(draftId) || 0)) { setView("compose"); return; }
+    if (composeInputIsComposing() || document.querySelector("#attachments")?.files?.length
+      || composeCloudOperation || composeCloudConflict || !flushComposeInputUpdates({ preview: false })) {
+      return showToast("目前編輯內容尚未保存，請先完成同步，再載入較新的雲端版本。");
+    }
+    const currentSnapshot = composeRawSnapshot();
+    const baseline = composeCloudSavedSnapshots.get(draftId);
+    if ((baseline && JSON.stringify(currentSnapshot) !== baseline)
+      || (!baseline && composeSnapshotHasMeaningfulContent(currentSnapshot))
+      || composeLocalUnsyncedDraft()?.snapshot?.cloudDraftId === draftId) {
+      return showToast("目前編輯內容尚未保存，請先完成同步，再載入較新的雲端版本。");
+    }
+  }
+  const local = composeLocalUnsyncedDraft();
+  if (draftId !== composeCloudDraftId && local && !composeSnapshotHasMeaningfulContent(composeRawSnapshot())) {
+    showToast("此裝置還有未同步的草稿，請先開啟它並完成保存，再切換其他草稿。");
+    return;
+  }
+  if (draftId !== composeCloudDraftId && !await preserveCurrentComposeBeforeDraftSwitch()) return;
+  // A FileList belongs only to the draft currently open in this browser.
   const attachments = document.querySelector("#attachments");
   if (attachments) attachments.value = "";
   document.querySelector("#composeAttachmentUploadStatus")?.replaceChildren();
   resetComposeAsyncScope();
-  const saved = { updatedAt: row.updatedAt, snapshot: { ...row.snapshot, cloudDraftId: row.id }, cloudRevision: row.revision };
-  try { localStorage.setItem(composeAutosaveStorageKey, JSON.stringify(saved)); } catch (_) { /* Recovery still works without local storage. */ }
+  const saved = { updatedAt: row.updatedAt, snapshot: { ...row.snapshot, cloudDraftId: row.id }, cloudRevision: row.revision, needsCloudSync: false };
+  try {
+    const raw = JSON.stringify(saved);
+    writeComposeAutosaveRaw(raw);
+  } catch (_) { /* Recovery still works without local storage. */ }
   composeAutosaveRestoredForIdentity = "";
   restoreComposeAutosave(saved);
   composeCloudDraftId = row.id;
   composeCloudRevisions.set(row.id, row.revision);
   composeCloudSavedSnapshots.set(row.id, JSON.stringify(composeRawSnapshot()));
-  showToast("已載入私人雲端草稿；尚未上傳的附件請重新選擇。");
+  setView("compose");
+  showToast("已載入私人草稿；尚未上傳的附件請重新選擇。");
 }
 
-function renderComposeRecoveryPrompt() {
-  const target = document.querySelector("#composeResumeDraft");
-  if (!target) return;
-  const identity = composeAutosaveIdentity();
-  target.hidden = true;
-  composeRecoveryCandidate = null;
-  if (!identity || identity === composeRecoveryDismissedIdentity || currentComposeDraftId || composeCloudDraftId
-      || composeSnapshotHasMeaningfulContent(composeRawSnapshot())) return;
-  const saved = readComposeAutosave();
-  const cloud = composeCloudRows.find(row => row.snapshot?.userId === authState?.user?.id
-    && row.snapshot?.companyId === authState?.user?.company_id);
-  if (!saved && !cloud) return;
-  composeRecoveryCandidate = { identity, token: authState?.token || "", saved, cloudId: cloud?.id || "" };
-  const snapshot = saved?.snapshot || cloud.snapshot;
-  const title = snapshot.values?.["#subject"] || snapshot.values?.["#documentPurpose"] || "尚未命名公文";
-  const description = document.querySelector("#composeResumeDraftDescription");
-  if (description) description.textContent = `${String(title).slice(0, 80)} · ${saved ? "此瀏覽器上次內容" : "私人雲端草稿"}。不會自動取代目前輸入；尚未上傳的附件須重新選擇。`;
-  target.hidden = false;
-}
-
-function prepareComposeDraftRecovery() {
-  if (!authState?.token) return;
-  renderComposeRecoveryPrompt();
-  void refreshComposeCloudDrafts();
-}
-
-async function resumeComposeDraft() {
-  const candidate = composeRecoveryCandidate;
-  if (!candidate || candidate.identity !== composeAutosaveIdentity() || candidate.token !== (authState?.token || "")) return;
-  if (!candidate.saved) return loadComposeCloudDraft(candidate.cloudId);
-  if (candidate.saved.snapshot?.cloudDraftId && !Number.isInteger(candidate.saved.cloudRevision)) {
-    // Older clients did not persist their optimistic-lock token. Only an exact
-    // snapshot match can recover that token; never adopt a newer edited row.
-    const scope = composeRequestScope();
-    await refreshComposeCloudDrafts();
-    if (scope !== composeRequestScope() || candidate.identity !== composeAutosaveIdentity() || candidate.token !== (authState?.token || "")
-        || composeRecoveryDismissedIdentity === candidate.identity) return;
-  }
-  if (composeSnapshotHasMeaningfulContent(composeRawSnapshot()) && !window.confirm("目前已有輸入，是否以選擇的上次草稿取代？")) return;
-  const saved = candidate.saved;
+async function resumeComposeLocalDraft() {
+  const saved = composeLocalUnsyncedDraft();
+  if (!saved) return showToast("此裝置的草稿已同步，請從私人雲端草稿開啟。");
+  if (composePersistedSnapshotKey(saved.snapshot) === composePersistedSnapshotKey(composeRawSnapshot())) { setView("compose"); return; }
+  if (!await preserveCurrentComposeBeforeDraftSwitch()) return;
   resetComposeAsyncScope();
   const attachments = document.querySelector("#attachments");
   if (attachments) attachments.value = "";
   document.querySelector("#composeAttachmentUploadStatus")?.replaceChildren();
   composeAutosaveRestoredForIdentity = "";
   restoreComposeAutosave(saved);
-  showToast("已接回上次草稿。尚未上傳的附件請重新選擇；不同裝置版本有衝突時不會覆蓋。");
+  setView("compose");
+  showToast("已載入此裝置的草稿；本機附件請重新選擇。");
 }
 
-function dismissComposeRecovery() {
-  composeRecoveryDismissedIdentity = composeAutosaveIdentity();
-  composeRecoveryCandidate = null;
-  document.querySelector("#composeResumeDraft")?.setAttribute("hidden", "");
-  // The previous private draft remains available in the cloud selector.
+async function resumeSubmittedComposeLocalAsNewDraft() {
+  const saved = composeSubmittedLocalRecovery();
+  if (!saved) return showToast("找不到可恢復的本機內容，請重新整理草稿清單。"), false;
+  if (composeInputIsComposing() || document.querySelector("#attachments")?.files?.length) {
+    return showToast("請先完成目前輸入並處理未上傳附件，再另存為新草稿。"), false;
+  }
+  if (composeSnapshotHasMeaningfulContent(composeRawSnapshot())) {
+    return showToast("目前編輯區已有內容，請先保存或清空，再恢復為新草稿。"), false;
+  }
+  const latest = composeSubmittedLocalRecovery();
+  if (!latest || JSON.stringify(latest) !== JSON.stringify(saved)) {
+    return showToast("另一分頁已更新本機內容，請重新檢查後再操作。"), false;
+  }
+  const snapshot = JSON.parse(JSON.stringify(saved.snapshot));
+  snapshot.cloudDraftId = "";
+  snapshot.draftRequestId = "";
+  snapshot.officialDocumentId = "";
+  snapshot.currentComposeDraftId = "";
+  snapshot.officialContentRevision = null;
+  if (snapshot.values) snapshot.values["#dispatchNo"] = "";
+  const fork = { updatedAt: new Date().toISOString(), snapshot, cloudRevision: null, needsCloudSync: true };
+  resetComposeAsyncScope();
+  const attachments = document.querySelector("#attachments");
+  if (attachments) attachments.value = "";
+  document.querySelector("#composeAttachmentUploadStatus")?.replaceChildren();
+  composeAutosaveRestoredForIdentity = "";
+  if (!restoreComposeAutosave(fork)) return showToast("本機內容尚未復原，請勿關閉這個分頁。"), false;
+  writeComposeAutosave();
+  setView("compose");
+  showToast("已作為全新草稿恢復文字；原公文仍以簽核紀錄為準，附件請重新選擇。");
+  return true;
 }
 
 function keepComposeAsNewCloudDraft() {
@@ -8290,40 +8734,87 @@ function composeAutosaveIdentity() {
   return userId && companyId ? `${userId}:${companyId}` : "";
 }
 
-function readComposeAutosave() {
+function composeScopedAutosaveStorageKey() {
+  const userId = String(authState?.user?.id || "").trim();
+  const companyId = String(authState?.user?.company_id || "").trim();
+  return userId && companyId
+    ? `edoc:${encodeURIComponent(userId)}:${encodeURIComponent(companyId)}:compose-autosave-v3`
+    : "";
+}
+
+function readComposeAutosaveRaw() {
+  const key = composeScopedAutosaveStorageKey();
+  if (!key) return "";
+  const current = localStorage.getItem(key) || "";
+  if (current) return current;
+  const migrationKey = `${key}:legacy-migrated`;
+  if (localStorage.getItem(migrationKey) === "1") return "";
+  const legacy = localStorage.getItem(composeAutosaveStorageKey) || "";
+  if (!legacy || legacy.length > 512000) return "";
+  try {
+    const snapshot = JSON.parse(legacy)?.snapshot;
+    if (`${String(snapshot?.userId || "").trim()}:${String(snapshot?.companyId || "").trim()}` !== composeAutosaveIdentity()) return "";
+    localStorage.setItem(key, legacy);
+    localStorage.setItem(migrationKey, "1");
+    if (localStorage.getItem(composeAutosaveStorageKey) === legacy) localStorage.removeItem(composeAutosaveStorageKey);
+  } catch (_) { /* Keep the legacy bytes intact if a scoped copy cannot be confirmed. */ }
+  return legacy;
+}
+
+function writeComposeAutosaveRaw(raw) {
+  const key = composeScopedAutosaveStorageKey();
+  if (!key) return false;
+  localStorage.setItem(key, raw);
+  composeAutosaveLastWrittenRaw = raw;
+  try { localStorage.setItem(`${key}:legacy-migrated`, "1"); } catch (_) { /* A scoped copy is already durable. */ }
+  return true;
+}
+
+function readComposeAutosave({ includeSubmitted = false } = {}) {
   let raw = "";
   try {
-    raw = localStorage.getItem(composeAutosaveStorageKey) || "";
+    raw = readComposeAutosaveRaw();
   } catch (error) {
     return null;
   }
   if (!raw) return null;
   if (raw.length > 512000) {
-    clearComposeAutosave();
+    clearComposeAutosave(raw);
     return null;
   }
   let saved = null;
   try {
     saved = JSON.parse(raw);
   } catch (error) {
-    clearComposeAutosave();
+    clearComposeAutosave(raw);
     return null;
   }
   const snapshot = saved?.snapshot;
   const identity = composeAutosaveIdentity();
   const savedIdentity = `${String(snapshot?.userId || "").trim()}:${String(snapshot?.companyId || "").trim()}`;
   if (!identity) return null;
+  // A shared browser can hold a different account's recovery data. Never
+  // remove it merely because the current account cannot read it.
+  if (savedIdentity !== identity) return null;
   if (
     Number(snapshot?.schemaVersion) !== 2
     || !String(snapshot?.userId || "").trim()
     || !String(snapshot?.companyId || "").trim()
-    || savedIdentity !== identity
     || !composeSnapshotHasMeaningfulContent(snapshot)
   ) {
-    clearComposeAutosave();
+    clearComposeAutosave(raw);
     return null;
   }
+  // Formal submission can succeed just before a tab closes. The scoped
+  // cleanup marker is proof that this local text is already submitted, so it
+  // must never be automatically restored into a fresh editable compose form.
+  if (!includeSubmitted && submittedComposeMarkerForSnapshot(snapshot)) return null;
   return saved;
+}
+
+function composeSubmittedLocalRecovery() {
+  const saved = readComposeAutosave({ includeSubmitted: true });
+  return saved && submittedComposeMarkerForSnapshot(saved.snapshot) ? saved : null;
 }
 
 function clampComposePlacement(value, fallback) {
@@ -8354,7 +8845,6 @@ function restoreComposeAutosave(savedOverride = null) {
   const identity = composeAutosaveIdentity();
   if (!identity || composeAutosaveRestoredForIdentity === identity) return false;
   composeAutosaveRestoredForIdentity = identity;
-  void refreshComposeCloudDrafts();
   const saved = savedOverride || readComposeAutosave();
   if (!saved) return false;
   const snapshot = saved.snapshot;
@@ -8430,12 +8920,18 @@ function restoreComposeAutosave(savedOverride = null) {
   return true;
 }
 
-function clearComposeAutosave() {
+function clearComposeAutosave(expectedRaw) {
+  if (typeof expectedRaw !== "string" || !expectedRaw) return false;
   try {
-    localStorage.removeItem(composeAutosaveStorageKey);
+    const key = composeScopedAutosaveStorageKey();
+    if (!key || localStorage.getItem(key) !== expectedRaw) return false;
+    localStorage.removeItem(key);
   } catch (error) {
-    // Ignore storage cleanup failures; the saved draft in the document list is authoritative.
+    return false;
   }
+  if (composeAutosaveLastWrittenRaw === expectedRaw) composeAutosaveLastWrittenRaw = null;
+  renderComposeDraftCount();
+  return true;
 }
 
 function renderComposeSaveStatus() {
@@ -8444,10 +8940,9 @@ function renderComposeSaveStatus() {
   target.dataset.tone = composeSaveState.tone || "idle";
   target.innerHTML = `<strong>${escapeHtml(composeSaveState.title || "尚未儲存到系統")}</strong><span>${escapeHtml(composeSaveState.detail || "請按暫存草稿完成後端保存。")}</span>`;
   const actions = document.querySelector("#composeSaveRecovery");
-  if (actions) actions.hidden = composeSaveState.tone !== "error";
+  if (actions) actions.hidden = composeSaveState.tone !== "error" || composeSaveState.submitted === true;
   const fork = document.querySelector("#composeKeepNewDraftBtn");
-  if (fork) fork.hidden = !composeCloudConflict && !/版本|裝置|修改/.test(composeSaveState.title || "");
-  renderComposeRecoveryPrompt();
+  if (fork) fork.hidden = composeSaveState.submitted === true || (!composeCloudConflict && !/版本|裝置|修改/.test(composeSaveState.title || ""));
 }
 
 function renderComposeCompanyOptions(preferAccount = false) {
@@ -13466,6 +13961,7 @@ async function createOfficialApplicationFromCompose(doc, data, options = {}) {
     metadata: {
       source: "compose_form",
       legacy_document_id: doc.id,
+      private_compose_draft_id: composeCloudDraftId || "",
       dispatch_date: data.dispatchDate,
       output_mode: data.outputMode,
       company_name: data.companyName,
@@ -13564,6 +14060,59 @@ async function createDispatchFromForm(status = "草稿") {
   } finally {
     composeSaveInFlight = null;
   }
+}
+
+function resetComposeAfterConfirmedSubmission({ cleanupPending = false, markerAvailable = true, recoveryGuardUnavailable = false, expectedAutosaveRaw = null } = {}) {
+  // The formal document is already submitted. Never leave that same content in
+  // an apparently editable new compose form, even if private-draft cleanup
+  // needs a separate retry.
+  resetComposeAsyncScope();
+  composeOfficialContentRevision = null;
+  currentComposeDraftId = "";
+  composeDraftRequestId = "";
+  clearComposeAutosave(expectedAutosaveRaw);
+  const form = document.querySelector("#composeForm");
+  form?.reset();
+  const attachmentInput = document.querySelector("#attachments");
+  if (attachmentInput) attachmentInput.value = "";
+  document.querySelector("#composeAttachmentUploadStatus")?.replaceChildren();
+  ["#contactAddress", "#contactOwner", "#contactPhone", "#contactFax", "#contactEmail", "#originalRecipients", "#copyRecipients"].forEach((selector) => {
+    const field = document.querySelector(selector);
+    if (field) delete field.dataset.autoDefault;
+  });
+  const copy = document.querySelector("#copyRecipients");
+  if (copy) delete copy.dataset.defaultCompany;
+  const attachmentDescription = document.querySelector("#attachmentDetails");
+  if (attachmentDescription) {
+    delete attachmentDescription.dataset.attachmentFileNames;
+    delete attachmentDescription.dataset.attachmentTextEdited;
+  }
+  Object.assign(composeSealPlacements.large, { page: 1, x: 70, y: 80 });
+  Object.assign(composeSealPlacements.small, { page: 1, x: 84, y: 80 });
+  renderComposeCompanyOptions(true);
+  renderApprovalCategorySelect("#composeApprovalCategorySelect", "", { requireSelection: true });
+  const dispatchDate = document.querySelector("#dispatchDate");
+  if (dispatchDate) dispatchDate.value = composeTodayDate();
+  applyComposeContactDefaults(true);
+  setDraftConfirmed(false);
+  draftSigned = false;
+  activeComposeStep = "fill";
+  renderComposeStepper();
+  renderComposeApprovalRoute();
+  renderDraftPreview();
+  composeSaveState = recoveryGuardUnavailable
+    ? { tone: "error", submitted: true, title: "公文已送簽；本機保護未完成",
+        detail: "送簽已完成，不需重新送出。瀏覽器無法保存已送簽標記；若其他分頁仍有舊稿，請勿再次送出並聯絡系統管理員。" }
+    : cleanupPending
+    ? {
+        tone: "error", submitted: true,
+        title: "公文已送簽；私人草稿尚待整理",
+        detail: markerAvailable
+          ? "送簽已完成，不需重新送出。可到左側「草稿編輯」重試整理私人草稿。"
+          : "送簽已完成，不需重新送出。瀏覽器無法保存清理記錄；若草稿仍顯示，請通知系統管理員處理。"
+      }
+    : { tone: "saved", submitted: true, title: "公文已送簽", detail: "可開始撰寫下一份公文；簽核進度請到「簽核紀錄」查看。" };
+  renderComposeSaveStatus();
 }
 
 async function performCreateDispatchFromForm(status = "草稿") {
@@ -13689,17 +14238,19 @@ async function performCreateDispatchFromForm(status = "草稿") {
   selectedDispatchId = doc.id;
   if (status === "草稿") currentComposeDraftId = doc.id;
   if (status !== "草稿") {
-    await saveComposeCloudDraft({ archived: true });
+    const privateDraftId = composeCloudDraftId;
+    rememberSubmittedComposeTombstone(privateDraftId || composeDraftRequestId, doc.officialDocumentId);
+    const archived = await saveComposeCloudDraft({ archived: true, officialDocumentId: doc.officialDocumentId });
     if (requestScope !== composeRequestScope()) return null;
-    resetComposeAsyncScope();
-    composeOfficialContentRevision = null;
-    currentComposeDraftId = "";
-    composeDraftRequestId = "";
-    clearComposeAutosave();
-    const numberInput = document.querySelector("#dispatchNo");
-    if (numberInput) numberInput.value = "";
-    setDraftConfirmed(false);
-    draftSigned = false;
+    doc.composeCleanupPending = !archived?.archived;
+    doc.composeCleanupMarkerAvailable = !privateDraftId || !doc.composeCleanupPending || Boolean(pendingComposeArchiveForDraft(privateDraftId));
+    doc.composeRecoveryGuardUnavailable = !submittedComposeArchiveRecords().some((row) => row.officialDocumentId === doc.officialDocumentId);
+    resetComposeAfterConfirmedSubmission({
+      cleanupPending: doc.composeCleanupPending,
+      markerAvailable: doc.composeCleanupMarkerAvailable,
+      recoveryGuardUnavailable: doc.composeRecoveryGuardUnavailable,
+      expectedAutosaveRaw: composeAutosaveLastWrittenRaw
+    });
   } else {
     draftConfirmed = false;
     draftSigned = false;
@@ -33326,7 +33877,13 @@ async function confirmComposeSubmission() {
     addDispatchAudit("確認函稿並送簽", "撰寫者已確認函稿、附件與用印位置，案件已送出簽核。");
     activeComposeStep = "fill";
     renderComposeStepper();
-    showToast("已送出簽核。");
+    showToast(doc.composeRecoveryGuardUnavailable
+      ? "公文已送簽；瀏覽器無法保存已送簽標記，請勿從其他分頁再次送出，並聯絡系統管理員。"
+      : doc.composeCleanupPending
+      ? (doc.composeCleanupMarkerAvailable
+        ? "公文已送簽；私人草稿整理待重試，請到「草稿編輯」處理。"
+        : "公文已送簽；私人草稿清理狀態無法保存，若草稿仍顯示請通知系統管理員。")
+      : "已送出簽核。");
     setView(isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
   } finally {
     setComposeSubmitBusy(false);
@@ -33588,10 +34145,25 @@ document.querySelector("#clearDispatchLogBtn").addEventListener("click", () => {
 document.querySelector("#saveDispatchDraftBtn").addEventListener("click", saveComposeDraft);
 document.querySelector("#composeCloudRetryBtn")?.addEventListener("click", () => { void saveComposeCloudDraft(); });
 document.querySelector("#composeKeepNewDraftBtn")?.addEventListener("click", keepComposeAsNewCloudDraft);
-document.querySelector("#composeCloudRefreshBtn")?.addEventListener("click", () => { void refreshComposeCloudDrafts(); });
-document.querySelector("#composeCloudLoadBtn")?.addEventListener("click", () => { void loadComposeCloudDraft(); });
-document.querySelector("#composeResumeDraftBtn")?.addEventListener("click", () => { void resumeComposeDraft(); });
-document.querySelector("#composeStartFreshBtn")?.addEventListener("click", dismissComposeRecovery);
+document.querySelector("#composeDraftRefreshBtn")?.addEventListener("click", () => { void loadRouteBackendData("drafts", true, { force: true }); });
+document.querySelector("#composeDraftLoadMoreBtn")?.addEventListener("click", () => { void refreshComposeCloudDrafts({ append: true }); });
+document.querySelector("#composeLocalDraftLoadBtn")?.addEventListener("click", () => { void resumeComposeLocalDraft(); });
+document.querySelector("#composeDraftList")?.addEventListener("click", (event) => {
+  const submittedRecovery = event.target.closest("[data-compose-recover-submitted]");
+  if (submittedRecovery) { void resumeSubmittedComposeLocalAsNewDraft(); return; }
+  const archiveRetry = event.target.closest("[data-compose-archive-retry]");
+  if (archiveRetry) { void retryPendingComposeArchive(archiveRetry.dataset.composeArchiveRetry); return; }
+  const button = event.target.closest("[data-compose-draft-id]");
+  if (button) void loadComposeCloudDraft(button.dataset.composeDraftId);
+});
+window.addEventListener("storage", (event) => {
+  if (event.key !== composeScopedAutosaveStorageKey()
+    && event.key !== composeAutosaveStorageKey
+    && event.key !== composePendingArchiveStorageKey()) return;
+  if (event.key === composePendingArchiveStorageKey()) composePendingArchiveCache = { key: "", rows: [] };
+  renderComposeDraftCount();
+  if (activeRouteTarget === "drafts") renderComposeDraftList();
+});
 document.querySelector("#composeContactToggleBtn")?.addEventListener("click", toggleComposeContactSummary);
 document.querySelector("#composeAiApplyBtn")?.addEventListener("click", applyComposeAiSuggestion);
 document.querySelector("#composeAiDiscardBtn")?.addEventListener("click", discardComposeAiSuggestion);
@@ -34971,7 +35543,6 @@ function initializeDeferredWorkspace() {
     () => { const dateInput = document.querySelector("#dispatchDate"); if (dateInput && !dateInput.value) dateInput.value = composeTodayDate(); },
     () => syncComposeElectronicExchangeMode(),
     () => applyComposeContactDefaults(),
-    () => prepareComposeDraftRecovery(),
     () => renderDraftPreview(),
     () => renderQueueRows(),
     () => renderInboundRows(),

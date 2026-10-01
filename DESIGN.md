@@ -45,7 +45,8 @@ This file mirrors, rather than generates, the existing canonical runtime tokens
 in `styles.css :root`. `primary` maps to `--accent`, `readable-action` to
 `--accent-readable`, and other color names to the same-named variables, except
 `danger` maps to `--rose`. No runtime palette was changed for the file-resilience
-release. Existing PDF-editor semantic state colors remain component-owned.
+release. Existing PDF-editor semantic state colors remain component-owned. The
+draft-navigation change reuses the same Finance-aligned palette and frame.
 
 ## Colors
 
@@ -99,6 +100,13 @@ immediate, returns retain in-session reading position, and unchanged Header
 status is not rewritten. Keep the electronic-seal queue and its pagination;
 slim rows obtain exact final-file authority on demand. Background updates must
 not destroy the user's current action focus or rebuild unchanged controls.
+`草稿編輯` is the seventh left-sidebar item and remains reachable from the
+mobile drawer; the four primary bottom actions remain untouched. Its small
+count badge is hidden at zero or when the authoritative count is unavailable,
+while the navigation's accessible name communicates the count when known.
+Cloud draft cards and this-device unsynced recovery use the existing panel and
+button styles, with concise origin labels. Selecting a card is an explicit
+restore action, never an automatic replacement of a new compose form.
 
 ### Forms and overlays
 
@@ -121,6 +129,9 @@ Motion communicates real work. Use the existing progress/reduced-motion rules;
 do not animate fake percentages or declare completion before server response.
 Reduced-motion removes continuous travel and smooth scrolling across existing
 components. Navigation, save and upload logic never wait for an animation.
+The current route or honest loading state appears immediately while workspace
+data refreshes in the background; a remote network delay is not disguised as
+a successful refresh.
 
 ### Content and data visualization
 
