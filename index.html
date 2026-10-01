@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260713" />
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
-    <link rel="stylesheet" href="styles.css?v=20260928-compose-submit-r1" />
+    <link rel="stylesheet" href="styles.css?v=20261002-draft-route-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
@@ -59,6 +59,11 @@
           <button class="nav-item" data-target="compose" data-icon="寫">
             <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7zM14 3v5h5M10 13h6M10 17h6"></path></svg></span>
             <span class="nav-label">撰寫公文</span>
+          </button>
+          <button class="nav-item" data-target="drafts" data-icon="稿" aria-label="草稿編輯">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5zM15 4v4h4M8 12h8M8 16h5"></path></svg></span>
+            <span class="nav-label">草稿編輯</span>
+            <span class="nav-count" id="composeDraftNavCount" hidden aria-hidden="true"></span>
           </button>
           <button class="nav-item" data-target="electronicSeal" data-icon="章">
             <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 13h8M9 13V9a3 3 0 0 1 6 0v4M6 13h12v4H6zM5 20h14"></path></svg></span>
@@ -1063,22 +1068,6 @@
             <button type="button" class="secondary-button" id="composeCloudRetryBtn">重試保存</button>
             <button type="button" class="secondary-button" id="composeKeepNewDraftBtn" hidden>保留我的內容為新草稿</button>
           </div>
-          <section class="compose-resume-draft" id="composeResumeDraft" hidden aria-labelledby="composeResumeDraftTitle">
-            <div><strong id="composeResumeDraftTitle">繼續上次草稿？</strong><p id="composeResumeDraftDescription"></p></div>
-            <div class="form-actions">
-              <button class="primary-button" type="button" id="composeResumeDraftBtn">繼續上次草稿</button>
-              <button class="secondary-button" type="button" id="composeStartFreshBtn">先寫新公文</button>
-            </div>
-          </section>
-          <details class="compose-cloud-drafts">
-            <summary>雲端草稿 · 換裝置繼續填寫</summary>
-            <div class="form-actions">
-              <label>私人草稿<select id="composeCloudDraftSelect"><option value="">選擇私人雲端草稿</option></select></label>
-              <button class="secondary-button" type="button" id="composeCloudLoadBtn">載入所選草稿</button>
-              <button class="secondary-button" type="button" id="composeCloudRefreshBtn">重新載入</button>
-            </div>
-            <p id="composeCloudDraftNotice" role="status"></p>
-          </details>
           <div class="next-action-card compose-hidden-action" id="composeNextAction" hidden></div>
 
           <form class="compose-form-shell official-document-entry" id="composeForm" novalidate>
@@ -1319,6 +1308,32 @@
               <button class="primary-button" id="submitDispatchBtn" type="submit">送出簽核</button>
             </div>
           </form>
+        </section>
+
+        <section class="view" id="drafts">
+          <div class="section-header">
+            <div>
+              <h3>草稿編輯</h3>
+              <p>未完成的私人草稿只會顯示給你；尚未上傳的本機附件需重新選取。</p>
+            </div>
+            <div class="quick-actions">
+              <button class="secondary-button" type="button" id="composeDraftRefreshBtn">重新整理</button>
+              <button class="primary-button" type="button" data-target="compose">前往撰寫</button>
+            </div>
+          </div>
+          <p class="draft-list-status" id="composeDraftListStatus" role="status" aria-live="polite">正在載入草稿…</p>
+          <section class="draft-local-card" id="composeLocalDraftCard" hidden aria-labelledby="composeLocalDraftTitle">
+            <div>
+              <span class="draft-source">此裝置</span>
+              <h4 id="composeLocalDraftTitle">尚未同步的草稿</h4>
+              <p id="composeLocalDraftMeta"></p>
+            </div>
+            <button class="secondary-button" id="composeLocalDraftLoadBtn" type="button">繼續編輯</button>
+          </section>
+          <div class="draft-list" id="composeDraftList" aria-label="私人雲端草稿"></div>
+          <div class="draft-list-actions">
+            <button class="secondary-button" type="button" id="composeDraftLoadMoreBtn" hidden>載入更多</button>
+          </div>
         </section>
 
         <section class="view" id="workflow">
@@ -4302,6 +4317,6 @@
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260928-library-recovery-r1"></script>
     <script src="editor-seam.js?v=20260911-r1"></script>
     <script src="editor-a4.js?v=20260911-r1"></script>
-    <script src="app.js?v=20260928-compose-submit-r1"></script>
+    <script src="app.js?v=20261002-draft-route-r1"></script>
   </body>
 </html>

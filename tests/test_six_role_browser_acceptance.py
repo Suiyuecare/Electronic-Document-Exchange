@@ -20,8 +20,11 @@ class SixRoleBrowserFixtureContractTests(unittest.TestCase):
         self.assertIn('interfaceFontStylesheet.addEventListener("load", applyInterfaceFont, { once: true });', js)
         self.assertNotRegex(html, r'id="interfaceFontStylesheet"[^>]*onload=')
         self.assertIn("entry-bootstrap.js?v=20260925-handoff-recovery-r2", html)
-        self.assertIn("styles.css?v=20260928-compose-submit-r1", html)
-        self.assertIn("app.js?v=20260928-compose-submit-r1", html)
+        styles_version = re.search(r'href="styles\.css\?v=([^"]+)"', html)
+        script_version = re.search(r'src="app\.js\?v=([^"]+)"', html)
+        self.assertIsNotNone(styles_version)
+        self.assertIsNotNone(script_version)
+        self.assertEqual(styles_version.group(1), script_version.group(1))
         self.assertIn("edukai", js.lower())
 
     def test_mobile_header_touch_targets_are_at_least_44px(self):
@@ -30,9 +33,9 @@ class SixRoleBrowserFixtureContractTests(unittest.TestCase):
             rules = re.findall(re.escape(selector) + r"\s*\{([^}]+)\}", css)
             self.assertTrue(any(re.search(r"(?<!-)width:\s*44px", rule) and re.search(r"(?<!-)height:\s*44px", rule) for rule in rules), selector)
 
-    def test_six_roles_and_six_existing_routes_are_explicit(self):
+    def test_six_roles_and_seven_existing_routes_are_explicit(self):
         self.assertEqual(len(set(BROWSER_ROLES)), 6)
-        self.assertEqual(ROUTES, ("dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"))
+        self.assertEqual(ROUTES, ("dashboard", "compose", "drafts", "electronicSeal", "approvalLog", "inbound", "settings"))
         self.assertEqual(VIEWPORTS, {"desktop": (1440, 1000), "tablet": (900, 1100), "mobile": (390, 844)})
 
     def test_only_new_loopback_origin_is_accepted(self):

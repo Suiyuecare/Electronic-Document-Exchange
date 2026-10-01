@@ -27,8 +27,8 @@ const tick=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
 function setup(){
  const nodes={};for(const name of ['workspaceLoadStatus','workspaceLoadLabel','workspaceLoadRetryBtn'])nodes['#'+name]={hidden:true,textContent:'',dataset:{}};
  nodes['#uploadedSealCompany']={value:'company-a'};nodes['#officialCompanySelect']={value:'compose-company'};nodes['#composeCompanySelect']={value:'compose-company-name'};
- const c={console:{warn(){}},Map,Set,Promise,Error,scope:'user-a:company-a',authenticated:true,activeRouteTarget:'electronicSeal',headerBackendSyncState:{status:'idle',syncedAt:''},calls:[],pending:[],renders:0,
-   routeBackendDataLoaded:new Set(),routeBackendDataRequests:new Map(),routeBackendDataErrors:new Map(),routeBackendDataScope:'',
+ const c={console:{warn(){}},Map,Set,Promise,Error,scope:'user-a:company-a',authenticated:true,authState:{token:'synthetic-session-a'},activeRouteTarget:'electronicSeal',headerBackendSyncState:{status:'idle',syncedAt:''},workspaceRefreshRequest:null,calls:[],pending:[],renders:0,
+   routeBackendDataLoaded:new Set(),routeBackendDataRequests:new Map(),routeBackendDataErrors:new Map(),routeBackendDataSyncedAt:new Map(),routeBackendDataScope:'',
    uploadedSealEditorRuntime:{directoryLoading:true},financeDirectoryState:{status:'synced'},inboundDocumentLoadState:{scope:'user-a:company-a'},
    document:{querySelector:s=>nodes[s]||null},nodes,frontendSessionScope:()=>c.scope,hasAuthenticatedBackendSession:()=>c.authenticated,updateHeaderStatus(){},
    renderUploadedSealCompanyOptions(){},renderUploadedSealWorkbench(){c.renders++},setUploadedEditorSaveStatus(){}};
@@ -42,7 +42,7 @@ const resolveAll=c=>c.pending.forEach(d=>d.resolve());
  let c=setup(),settled=false;
  const a=c.loadRouteBackendData('electronicSeal'),b=c.loadRouteBackendData('electronicSeal').then(()=>settled=true);
  assert.deepEqual(c.calls.map(x=>x.name),['loadFinanceCompanyDirectory','loadOfficialWorkflowConfig']);
- assert.equal(c.nodes['#workspaceLoadStatus'].hidden,false);assert.equal(c.nodes['#workspaceLoadStatus'].dataset.state,'loading');
+ assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);assert.equal(c.headerBackendSyncState.status,'syncing');
  assert.equal(c.routeBackendDataLoaded.has('electronicSeal'),false);
  c.pending[0].resolve();await tick();assert.equal(settled,false);assert.equal(c.calls.length,2);
  c.pending[1].resolve();await tick();
@@ -51,6 +51,7 @@ const resolveAll=c=>c.pending.forEach(d=>d.resolve());
  assert.equal(c.calls[2].args[0],'company-a');assert.equal(settled,false);
  resolveAll(c);await Promise.all([a,b]);
  assert.equal(c.routeBackendDataLoaded.has('electronicSeal'),true);assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);
+ assert.equal(c.headerBackendSyncState.status,'synced');assert.ok(c.routeBackendDataSyncedAt.get('electronicSeal'));
  await c.loadRouteBackendData('electronicSeal');assert.equal(c.calls.length,4);
 
  c=setup();const old=c.loadRouteBackendData('electronicSeal');c.scope='user-b:company-b';
@@ -60,14 +61,26 @@ const resolveAll=c=>c.pending.forEach(d=>d.resolve());
  assert.equal(c.routeBackendDataLoaded.size,0);
  resolveAll(c);await tick();resolveAll(c);await newer;assert.equal(c.routeBackendDataLoaded.size,1);
 
+ c=setup();const olderRoute=c.loadRouteBackendData('electronicSeal');c.activeRouteTarget='dashboard';
+ await c.loadRouteBackendData('dashboard');const dashboardSyncedAt=c.headerBackendSyncState.syncedAt;
+ resolveAll(c);await tick();resolveAll(c);await olderRoute;
+ assert.equal(c.headerBackendSyncState.status,'synced');assert.equal(c.headerBackendSyncState.syncedAt,dashboardSyncedAt);
+ await c.loadRouteBackendData('electronicSeal');assert.equal(c.headerBackendSyncState.status,'synced');
+
  c=setup();const logout=c.loadRouteBackendData('electronicSeal');c.resetRouteBackendData();resolveAll(c);await logout;
  assert.equal(c.calls.length,2);assert.equal(c.routeBackendDataLoaded.size,0);assert.equal(c.renders,0);
 
  c=setup();const fail=c.loadRouteBackendData('electronicSeal');c.pending[0].reject(new Error('offline'));c.pending[1].resolve();await fail;
  assert.equal(c.routeBackendDataLoaded.size,0);assert.equal(c.nodes['#workspaceLoadRetryBtn'].hidden,false);
  assert.equal(c.nodes['#workspaceLoadStatus'].dataset.state,'error');assert.equal(c.nodes['#uploadedSealCompany'].value,'company-a');
- const retry=c.loadRouteBackendData('electronicSeal');assert.equal(c.nodes['#workspaceLoadRetryBtn'].hidden,true);
+ const retry=c.loadRouteBackendData('electronicSeal');assert.equal(c.nodes['#workspaceLoadRetryBtn'].hidden,true);assert.equal(c.headerBackendSyncState.status,'syncing');
  resolveAll(c);await tick();resolveAll(c);await retry;assert.equal(c.routeBackendDataLoaded.size,1);
+
+ c=setup();c.workspaceRefreshRequest={scope:c.scope,token:c.authState.token,target:'electronicSeal'};
+ c.headerBackendSyncState.status='syncing';const manual=c.loadRouteBackendData('electronicSeal',true,{force:true});
+ assert.equal(c.headerBackendSyncState.status,'syncing');assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);
+ resolveAll(c);await tick();resolveAll(c);await manual;
+ assert.equal(c.headerBackendSyncState.status,'syncing');
 
  c=setup();c.financeDirectoryState.status='error';const unavailable=c.loadRouteBackendData('electronicSeal');resolveAll(c);await unavailable;
  assert.equal(c.calls.length,2);assert.equal(c.routeBackendDataLoaded.size,0);assert.equal(c.routeBackendDataErrors.has('electronicSeal'),true);
@@ -104,12 +117,12 @@ const resolveAll=c=>c.pending.forEach(d=>d.resolve());
  assert.equal(c.nodes['#workspaceLoadStatus'].hidden,true);
 
  c=setup();c.authenticated=false;await c.loadRouteBackendData('electronicSeal');assert.equal(c.calls.length,0);
- console.log('9 route responsiveness, coalescing, retry and scope scenarios passed');
+ console.log('11 route responsiveness, coalescing, retry and scope scenarios passed');
 })().catch(e=>{console.error(e);process.exit(1)});
 """
         result = subprocess.run(["node", "-e", script, json.dumps(functions)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("9 route responsiveness", result.stdout)
+        self.assertIn("11 route responsiveness", result.stdout)
 
     def test_failed_directory_retry_is_not_throttled_but_healthy_reads_are(self):
         functions = function((ROOT / "app.js").read_text(), "refreshFinanceDirectory")

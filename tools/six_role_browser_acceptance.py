@@ -16,6 +16,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import uuid
 from unittest import mock
 from urllib.parse import urlparse
 from reportlab.lib.pagesizes import A4
@@ -26,12 +27,14 @@ sys.path.insert(0, str(ROOT))
 from tests.support.five_account_browser_fixture import BROWSER_ROLES, isolated_browser_session
 from tests.test_five_account_http_acceptance import FiveAccountHttpAcceptanceTest, QuietAcceptanceHandler
 
-ROUTES = ("dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings")
+ROUTES = ("dashboard", "compose", "drafts", "electronicSeal", "approvalLog", "inbound", "settings")
 VIEWPORTS = {"desktop": (1440, 1000), "tablet": (900, 1100), "mobile": (390, 844)}
 SESSION = "edoc-roles-20260908"
 TELEMETRY = """<script>
 window.__fixtureTiming={loaderVisibleMs:null,appInteractiveMs:null};
 window.__fixtureErrors=[];
+window.__fixtureLongTasks=[];
+try{new PerformanceObserver(list=>list.getEntries().forEach(e=>window.__fixtureLongTasks.push({startMs:e.startTime,durationMs:e.duration}))).observe({type:'longtask',buffered:true})}catch(_){}
 window.addEventListener('error',e=>{if(e.message)window.__fixtureErrors.push(e.message)});
 window.addEventListener('unhandledrejection',e=>window.__fixtureErrors.push(String(e.reason?.message||e.reason)));
 function fixtureFrame(){
@@ -55,7 +58,22 @@ AUDIT_JS = """(()=>{
  errors:window.__fixtureErrors||[],timing:window.__fixtureTiming||{},
  composePrimaryFields:page?.id==='compose'?Object.fromEntries(['#subject','#bodyText','.compose-attachment-disclosure','.compose-ai-assist-disclosure'].map(s=>{const e=page.querySelector(s),r=e?.getBoundingClientRect();return [s,e?{top:Math.round(r.top+scrollY),visible:visible(e)}:null]})):null,
  firstContentfulPaintMs:performance.getEntriesByName('first-contentful-paint')[0]?.startTime??null,
- navigationLinks:[...document.querySelectorAll('.sidebar .nav-item')].map(e=>({route:e.dataset.target,hidden:!visible(e)}))};})()"""
+ routeClickToVisibleMs:window.__fixtureRouteTiming?.route===page?.id?window.__fixtureRouteTiming.visibleMs:null,
+ navigationLinks:[...document.querySelectorAll('.sidebar .nav-item')].map(e=>({route:e.dataset.target,hidden:!visible(e)})),
+ drafts:page?.id==='drafts'?{cloudRows:document.querySelectorAll('#composeDraftList [data-compose-draft-id]').length,
+  badge:document.querySelector('#composeDraftNavCount')?.textContent?.trim()||'',
+  badgeHidden:document.querySelector('#composeDraftNavCount')?.hidden,
+  navAccessibleName:document.querySelector('.sidebar .nav-item[data-target="drafts"]')?.getAttribute('aria-label')||'',
+  localOnlyVisible:!document.querySelector('#composeLocalDraftCard')?.hidden}:null};})()"""
+NAVIGATION_TIMING_JS = """(()=>{
+ const navigation=performance.getEntriesByType('navigation')[0];
+ const relevant=performance.getEntriesByType('resource').filter(e=>/\/(app\.js|styles\.css|entry-bootstrap\.js)(\?|$)|\/api\/auth\/me(\?|$)/.test(e.name));
+ return {...window.__fixtureTiming,
+ domContentLoadedMs:navigation?.domContentLoadedEventEnd??null,
+ loadEventEndMs:navigation?.loadEventEnd??null,
+  longTasks:(window.__fixtureLongTasks||[]).filter(e=>e.startMs<(window.__fixtureTiming?.appInteractiveMs??Infinity)),
+  resourceMilestones:relevant.map(e=>({name:new URL(e.name).pathname,startMs:e.startTime,responseEndMs:e.responseEnd,durationMs:e.duration,transferSize:e.transferSize}))};
+})()"""
 
 
 def require_local_origin(origin: str) -> None:
@@ -115,6 +133,97 @@ def editor_case(browser, fixture, auth, role, device, output):
     return result
 
 
+def draft_recovery_case(browser, fixture, auth, draft_id, role, device, output):
+    """Exercise explicit restore and attachment/unsaved-change guards locally."""
+    result = {"role": role, "device": device, "scope": "isolated_fixture_no_submission"}
+    try:
+        if device == "mobile" and not browser.evaluate("document.body.classList.contains('mobile-navigation-open')"):
+            browser.run("click", "#mobileMenuButton")
+        if device == "mobile":
+            browser.until("Math.abs(document.querySelector('#primarySidebar').getBoundingClientRect().left)<0.5")
+        browser.run("click", '.sidebar .nav-item[data-target="drafts"]')
+        browser.until("document.querySelector('.view.active')?.id==='drafts'&&document.querySelectorAll('#composeDraftList [data-compose-draft-id]').length===1")
+        browser.click_visible(f'#composeDraftList [data-compose-draft-id="{draft_id}"]')
+        browser.until("document.querySelector('.view.active')?.id==='compose'&&document.querySelector('#documentPurpose')?.value==='去識別化草稿驗收'")
+        result["explicitRestore"] = True
+        result["inlineResumeAbsent"] = not browser.evaluate("!!document.querySelector('#composeResumeDraft,#composeCloudDraftSelect')")
+
+        second_id = f"OD-{uuid.uuid4()}"
+        fixture._expect_json("PUT", f"/api/compose-drafts/{second_id}", 200, token=auth["token"], json_body={
+            "snapshot": {"schemaVersion": 2, "userId": auth["user"]["id"], "companyId": auth["user"]["company_id"],
+                         "values": {"#documentPurpose": "去識別化第二草稿"}},
+            "expected_revision": 0,
+        })
+        local_attachment = Path(fixture.tmp.name) / "synthetic-unsent-attachment.txt"
+        local_attachment.write_text("ISOLATED ATTACHMENT; NEVER SENT", encoding="utf-8")
+        browser.run("upload", "#attachments", str(local_attachment))
+        browser.until("document.querySelector('#attachments')?.files.length===1")
+        if device == "mobile":
+            browser.run("click", "#mobileMenuButton")
+            browser.until("Math.abs(document.querySelector('#primarySidebar').getBoundingClientRect().left)<0.5")
+        browser.run("click", '.sidebar .nav-item[data-target="drafts"]')
+        browser.until("document.querySelector('.view.active')?.id==='drafts'")
+        browser.click_visible("#composeDraftRefreshBtn")
+        browser.until("document.querySelectorAll('#composeDraftList [data-compose-draft-id]').length===2")
+        browser.click_visible(f'#composeDraftList [data-compose-draft-id="{second_id}"]')
+        browser.until("document.querySelector('#toast')?.textContent.includes('尚未上傳的本機附件')")
+        result["attachmentGuard"] = browser.evaluate("document.querySelector('.view.active')?.id==='drafts'&&document.querySelector('#attachments')?.files.length===1&&document.querySelector('#documentPurpose')?.value==='去識別化草稿驗收'")
+
+        browser.evaluate("(()=>{const input=document.querySelector('#attachments');input.value='';input.dispatchEvent(new Event('change',{bubbles:true}));return true})()")
+        browser.click_visible(f'#composeDraftList [data-compose-draft-id="{draft_id}"]')
+        browser.until("document.querySelector('.view.active')?.id==='compose'")
+        browser.run("fill", "#documentPurpose", "去識別化的未送簽修改")
+        if device == "mobile":
+            browser.run("click", "#mobileMenuButton")
+            browser.until("Math.abs(document.querySelector('#primarySidebar').getBoundingClientRect().left)<0.5")
+        browser.run("click", '.sidebar .nav-item[data-target="drafts"]')
+        browser.until("document.querySelector('.view.active')?.id==='drafts'")
+        browser.click_visible(f'#composeDraftList [data-compose-draft-id="{second_id}"]')
+        browser.until("document.querySelector('.view.active')?.id==='compose'&&document.querySelector('#documentPurpose')?.value==='去識別化第二草稿'")
+        rows = fixture._expect_json("GET", "/api/compose-drafts", 200, token=auth["token"])
+        result["unsavedChangePreserved"] = any(
+            row["id"] == draft_id and row["snapshot"]["values"].get("#documentPurpose") == "去識別化的未送簽修改"
+            for row in rows
+        )
+        result["status"] = "passed" if all(result[key] for key in ("explicitRestore", "inlineResumeAbsent", "attachmentGuard", "unsavedChangePreserved")) else "failed"
+        browser.run("screenshot", str(output / f"{role}-{device}-draft-recovery.png"), "--full")
+    except Exception as error:
+        result.update(status="failed", errorCode=str(error) if str(error).startswith("browser_") else type(error).__name__)
+        browser.run("screenshot", str(output / f"{role}-{device}-draft-recovery-failed.png"), "--full")
+    return result
+
+
+def submitted_local_recovery_case(browser, fixture, role, device, output):
+    """A submitted tab's local text must require an explicit new-draft fork."""
+    result = {"role": role, "device": device, "scope": "isolated_fixture_no_submission"}
+    try:
+        staged = browser.evaluate("""(()=>{
+          resetComposeAfterConfirmedSubmission();
+          const draftId='OD-'+crypto.randomUUID(),formalId='OD-SYNTHETIC-SUBMITTED-ONLY';
+          const snapshot={schemaVersion:2,userId:authState.user.id,companyId:authState.user.company_id,
+            cloudDraftId:draftId,officialDocumentId:formalId,values:{'#subject':'已送簽後的去識別化本機文字'}};
+          const saved={updatedAt:new Date().toISOString(),snapshot,cloudRevision:0,needsCloudSync:true};
+          return rememberSubmittedComposeTombstone(draftId,formalId)&&writeComposeAutosaveRaw(JSON.stringify(saved));
+        })()""")
+        if staged is not True:
+            raise RuntimeError("browser_submitted_recovery_stage_failed")
+        browser.run("open", fixture.origin + f"/?fixture_submitted_recovery={time.monotonic_ns()}#drafts")
+        browser.until("document.querySelector('.view.active')?.id==='drafts'&&!!document.querySelector('#composeDraftList [data-compose-recover-submitted]')")
+        result["explicitCard"] = browser.evaluate("""(()=>{const card=document.querySelector('#composeDraftList [data-compose-recover-submitted]')?.closest('article');
+          return !!card&&card.textContent.includes('已送簽文件仍有本機內容')&&!card.querySelector('[data-compose-draft-id]');})()""")
+        result["notAutoRestored"] = browser.evaluate("document.querySelector('#subject')?.value!== '已送簽後的去識別化本機文字'")
+        browser.run("screenshot", str(output / f"{role}-{device}-submitted-recovery-card.png"), "--full")
+        browser.click_visible("#composeDraftList [data-compose-recover-submitted]")
+        browser.until("document.querySelector('.view.active')?.id==='compose'&&document.querySelector('#subject')?.value==='已送簽後的去識別化本機文字'")
+        result["forkClearedFormalIds"] = browser.evaluate("""(()=>{const draft=composeRawSnapshot();return !draft.cloudDraftId&&!draft.draftRequestId&&!draft.officialDocumentId&&!draft.currentComposeDraftId&&!document.querySelector('#dispatchNo')?.value;})()""")
+        result["status"] = "passed" if all(result[key] for key in ("explicitCard", "notAutoRestored", "forkClearedFormalIds")) else "failed"
+        browser.run("screenshot", str(output / f"{role}-{device}-submitted-recovery-fork.png"), "--full")
+    except Exception as error:
+        result.update(status="failed", errorCode=str(error) if str(error).startswith("browser_") else type(error).__name__)
+        browser.run("screenshot", str(output / f"{role}-{device}-submitted-recovery-failed.png"), "--full")
+    return result
+
+
 class Browser:
     def __init__(self, config: Path, *, session=SESSION, namespace="edoc-roles-isolated"):
         self.config = config
@@ -153,6 +262,32 @@ class Browser:
         self.until("document.fonts.check('14px \"EDoc LXGW WenKai TC\"')")
         self.click_visible("#uploadedEditorInlineDone")
         self.until("!uploadedSealEditorRuntime.textEdit")
+    def arm_route_timing(self, route):
+        """Measure the in-browser click-to-view interval, excluding CLI latency."""
+        self.evaluate("""(()=>{
+          const route=%s;
+          const item=document.querySelector('.sidebar .nav-item[data-target="'+route+'"]');
+          const view=document.getElementById(route);
+          if(!item||!view)return false;
+          const timing=window.__fixtureRouteTiming={route,startMs:null,visibleMs:null};
+          const observer=new MutationObserver(()=>{
+            if(timing.startMs!==null&&view.classList.contains('active')){
+              timing.visibleMs=performance.now()-timing.startMs;
+              observer.disconnect();
+            }
+          });
+          item.addEventListener('click',()=>{
+            timing.startMs=performance.now();
+            observer.observe(view,{attributes:true,attributeFilter:['class']});
+            queueMicrotask(()=>{
+              if(timing.visibleMs===null&&view.classList.contains('active')){
+                timing.visibleMs=performance.now()-timing.startMs;
+                observer.disconnect();
+              }
+            });
+          },{capture:true,once:true});
+          return true;
+        })()""" % json.dumps(route))
     def until(self, expression, timeout=25):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -208,16 +343,23 @@ def audit(args) -> dict:
         try:
             for role in args.roles:
                 auth = isolated_browser_session(fixture, role)
+                draft_id = f"OD-{uuid.uuid4()}"
+                fixture._expect_json("PUT", f"/api/compose-drafts/{draft_id}", 200, token=auth["token"], json_body={
+                    "snapshot": {"schemaVersion": 2, "userId": auth["user"]["id"], "companyId": auth["user"]["company_id"],
+                                 "values": {"#documentPurpose": "去識別化草稿驗收"}},
+                    "expected_revision": 0,
+                })
                 browser.run("open", fixture.origin + "/assets/favicon-32.png")
                 browser.evaluate("localStorage.clear();sessionStorage.clear();localStorage.setItem('suiyuecare-edoc-session'," + json.dumps(json.dumps(auth)) + ");true")
                 for device in args.devices:
                     width, height = VIEWPORTS[device]
                     browser.run("set", "viewport", str(width), str(height))
-                    for navigation in ("cold" if role == args.roles[0] and device == "desktop" else "cached", "warm"):
+                    navigation_kinds = ["cold" if role == args.roles[0] and device == "desktop" else "cached"] + ["warm"] * args.navigation_repeats
+                    for iteration, navigation in enumerate(navigation_kinds):
                         browser.run("open", fixture.origin + f"/?fixture_navigation={time.monotonic_ns()}#dashboard")
                         browser.until("window.__fixtureTiming?.appInteractiveMs")
-                        report.setdefault("navigation", []).append({"role": role, "device": device, "kind": navigation, **browser.evaluate("window.__fixtureTiming")})
-                    for route in (() if args.editor_only else ROUTES):
+                        report.setdefault("navigation", []).append({"role": role, "device": device, "kind": navigation, "iteration": iteration, **browser.evaluate(NAVIGATION_TIMING_JS)})
+                    for route in (() if args.editor_only or args.navigation_only else ROUTES):
                         # Actual navigation handler, preserving permission checks.
                         if device == "mobile" and not browser.evaluate("document.body.classList.contains('mobile-navigation-open')"):
                             browser.run("click", "#mobileMenuButton")
@@ -230,26 +372,38 @@ def audit(args) -> dict:
                                 browser.run("click", "#mobileDrawerCloseBtn")
                                 browser.until("!document.body.classList.contains('mobile-navigation-open')")
                             continue
-                        browser.run("click", '.sidebar .nav-item[data-target="' + route + '"]')
+                        browser.arm_route_timing(route)
+                        # The mobile drawer has its own scroll container; a
+                        # user scrolls down before tapping a later item.
+                        browser.click_visible('.sidebar .nav-item[data-target="' + route + '"]')
                         browser.until("document.querySelector('.view.active')?.id===" + json.dumps(route))
+                        browser.until("window.__fixtureRouteTiming?.visibleMs!==null")
+                        if route == "drafts":
+                            browser.until("(()=>{const badge=document.querySelector('#composeDraftNavCount');const name=document.querySelector('.sidebar .nav-item[data-target=\"drafts\"]')?.getAttribute('aria-label')||'';return badge&&!badge.hidden&&badge.textContent.trim()==='1'&&name.includes('1')&&document.querySelectorAll('#composeDraftList [data-compose-draft-id]').length===1})()")
                         time.sleep(0.4)
                         result = browser.evaluate(AUDIT_JS)
                         filename = f"{role}-{device}-{route}.png"
                         browser.run("screenshot", str(output / filename), "--full")
                         report["rows"].append({"role": role, "device": device, "screenshot": filename, **result})
-                    report["editor"].append(editor_case(browser, fixture, auth, role, device, output))
-                    if role == args.roles[0]:
+                    if not args.navigation_only:
+                        report["editor"].append(editor_case(browser, fixture, auth, role, device, output))
+                    if not args.navigation_only and role == args.roles[0]:
                         error_result = browser.evaluate("(async()=>{try{await backendRequest('/fixture-runtime-error');return {failed:false};}catch(error){showToast(error.message);return {failed:true,status:error.status,errorId:error.errorId,message:error.message,visibleToast:document.querySelector('#toast').textContent}}})()")
                         report.setdefault("errorPresentation", []).append({"device": device, **error_result})
                         browser.run("screenshot", str(output / f"{role}-{device}-error-reference.png"))
                     (output / "report.partial.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
                     print(json.dumps({"completed": role, "device": device}), flush=True)
+                if not args.editor_only and not args.navigation_only and role == args.roles[0]:
+                    report["draftRecovery"] = draft_recovery_case(browser, fixture, auth, draft_id, role, args.devices[-1], output)
+                    report["submittedLocalRecovery"] = submitted_local_recovery_case(browser, fixture, role, args.devices[-1], output)
             report["screenshots"] = sum("screenshot" in row for row in report["rows"])
             report["documentOverflowCount"] = sum(row["overflow"] for row in report["rows"])
+            report["slowRouteCount"] = sum((row.get("routeClickToVisibleMs") or 0) > 500 for row in report["rows"])
             return report
         except Exception:
-            diagnostics = browser.evaluate("({errors:window.__fixtureErrors,menuOpen:document.body.classList.contains('mobile-navigation-open'),closeButtonRect:document.querySelector('#mobileDrawerCloseBtn')?.getBoundingClientRect().toJSON(),activeElement:document.activeElement?.id,closeBefore:window.__closeBefore,closeObserved:window.__closeObserved,closeStateAtClick:window.__closeStateAtClick})")
+            diagnostics = browser.evaluate("""(()=>{const e=document.querySelector('.sidebar .nav-item[data-target="settings"]'),r=e?.getBoundingClientRect(),n=e?.closest('.nav-list');return {errors:window.__fixtureErrors,menuOpen:document.body.classList.contains('mobile-navigation-open'),closeButtonRect:document.querySelector('#mobileDrawerCloseBtn')?.getBoundingClientRect().toJSON(),activeElement:document.activeElement?.id,settingsRect:r?.toJSON(),settingsHit:r?document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.outerHTML?.slice(0,300):null,navScroll:n?{top:n.scrollTop,height:n.clientHeight,scrollHeight:n.scrollHeight}:null,closeBefore:window.__closeBefore,closeObserved:window.__closeObserved,closeStateAtClick:window.__closeStateAtClick}})()""")
             (output / "failure.json").write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+            browser.run("screenshot", str(output / "failure.png"))
             raise
         finally:
             browser.run("close")
@@ -262,15 +416,22 @@ def main() -> int:
     parser.add_argument("--roles", nargs="+", choices=BROWSER_ROLES, default=list(BROWSER_ROLES))
     parser.add_argument("--devices", nargs="+", choices=VIEWPORTS, default=list(VIEWPORTS))
     parser.add_argument("--slow-font-ms", type=int, default=0)
-    parser.add_argument("--editor-only", action="store_true", help="Run role-specific uploads and editing without repeating the six-page visual audit")
+    parser.add_argument("--editor-only", action="store_true", help="Run role-specific uploads and editing without repeating the seven-page visual audit")
+    parser.add_argument("--navigation-only", action="store_true", help="Measure isolated fixture startup without routes, uploads or screenshot work")
+    parser.add_argument("--navigation-repeats", type=int, default=1, help="Number of warm reloads after the first per role and device")
     args = parser.parse_args()
+    if args.navigation_repeats < 0 or args.navigation_repeats > 20 or (args.editor_only and args.navigation_only):
+        parser.error("Choose one audit mode and 0-20 warm navigation repeats")
     # A named browser session must never be driven by two audit processes.
     with open("/tmp/edoc-six-role-browser.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         report = audit(args)
     (args.output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
-    print(json.dumps({"report": str(args.output / "report.json"), "screenshots": report["screenshots"], "overflow": report["documentOverflowCount"]}))
-    return int(bool(report["documentOverflowCount"] or any(item["status"] != "passed" for item in report["editor"])))
+    print(json.dumps({"report": str(args.output / "report.json"), "screenshots": report["screenshots"], "overflow": report["documentOverflowCount"], "slowRoutes": report["slowRouteCount"]}))
+    return int(bool(report["documentOverflowCount"] or report["slowRouteCount"]
+                    or report.get("draftRecovery", {}).get("status", "passed") != "passed"
+                    or report.get("submittedLocalRecovery", {}).get("status", "passed") != "passed"
+                    or any(item["status"] != "passed" for item in report["editor"])))
 
 
 if __name__ == "__main__":

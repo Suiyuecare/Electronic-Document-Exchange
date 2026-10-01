@@ -21,9 +21,35 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         navigation = self.js[start:end]
         self.assertNotIn('"contractSeal"', navigation)
         self.assertNotIn('"workflow"', navigation)
-        for route in ("dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"):
+        for route in ("dashboard", "compose", "drafts", "electronicSeal", "approvalLog", "inbound", "settings"):
             self.assertIn(f'"{route}"', navigation)
         self.assertNotIn('"search"', navigation)
+
+    def test_draft_navigation_respects_compose_role_boundary(self) -> None:
+        start = self.js.index("const navByIdentity = {")
+        end = self.js.index("\n};", start)
+        navigation = self.js[start:end]
+        for identity in ("employee", "supervisor", "companyOps", "administrativeDirector", "executive"):
+            row = next(line for line in navigation.splitlines() if line.strip().startswith(f"{identity}:"))
+            self.assertIn('"compose"', row)
+            self.assertIn('"drafts"', row)
+        viewer = next(line for line in navigation.splitlines() if line.strip().startswith("viewer:"))
+        self.assertNotIn('"compose"', viewer)
+        self.assertNotIn('"drafts"', viewer)
+
+    def test_draft_recovery_has_its_own_accessible_route_not_an_inline_compose_prompt(self) -> None:
+        self.assertIn('<section class="view" id="drafts">', self.html)
+        self.assertIn('id="composeDraftListStatus" role="status" aria-live="polite"', self.html)
+        self.assertIn('id="composeLocalDraftCard" hidden', self.html)
+        self.assertIn('id="composeDraftList" aria-label="私人雲端草稿"', self.html)
+        self.assertIn('id="composeDraftLoadMoreBtn" hidden', self.html)
+        self.assertNotIn('id="composeResumeDraft"', self.html)
+        self.assertNotIn('id="composeCloudDraftSelect"', self.html)
+        draft_nav = re.search(r'<button class="nav-item" data-target="drafts"[^>]*>(.*?)</button>', self.html, re.DOTALL)
+        self.assertIsNotNone(draft_nav)
+        self.assertIn('aria-label="草稿編輯"', draft_nav.group(0))
+        self.assertIn('class="nav-label">草稿編輯</span>', draft_nav.group(1))
+        self.assertRegex(draft_nav.group(1), r'id="composeDraftNavCount" hidden aria-hidden="true"')
 
     def test_legacy_contract_route_is_retired_from_daily_navigation(self) -> None:
         start = self.js.index("const secondaryRoutesByIdentity = {")
@@ -174,9 +200,13 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertIn("background: #c2410c; font-size: 10px; font-weight: 900;", normalized)
         self.assertIn('d="M6 17h12M8 17V9a4 4 0 0 1 8 0v8M10 20h4"', self.html)
         self.assertIn('id="moduleTodoBadge" hidden', self.html)
-        self.assertIn("styles.css?v=20260928-compose-submit-r1", self.html)
+        styles_version = re.search(r'href="styles\.css\?v=([^"]+)"', self.html)
+        script_version = re.search(r'src="app\.js\?v=([^"]+)"', self.html)
+        self.assertIsNotNone(styles_version)
+        self.assertIsNotNone(script_version)
+        self.assertEqual(styles_version.group(1), script_version.group(1))
 
-    def test_mobile_shell_has_four_primary_actions_and_six_item_drawer(self) -> None:
+    def test_mobile_shell_has_four_primary_actions_and_seven_item_drawer(self) -> None:
         nav_start = self.html.index('<nav class="mobile-primary-nav"')
         nav_end = self.html.index("</nav>", nav_start)
         mobile_navigation = self.html[nav_start:nav_end]
@@ -189,6 +219,9 @@ class UiUxSimplificationContractTest(unittest.TestCase):
                 ("approvalLog", "簽核紀錄"),
             ],
         )
+        self.assertNotIn('data-target="drafts"', mobile_navigation)
+        sidebar = self.html[self.html.index('<aside class="sidebar"') : self.html.index('</aside>')]
+        self.assertIn('data-target="drafts"', sidebar)
         for element_id in (
             "primarySidebar",
             "mobileMenuButton",
@@ -222,27 +255,31 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertNotIn("使用 Google 帳號快速登入", login_surface)
         self.assertIn("returnToLoggingPortalModulePicker", self.js)
 
-    def test_navigation_uses_exactly_six_major_functions_without_second_row(self) -> None:
+    def test_navigation_uses_exactly_seven_major_functions_without_second_row(self) -> None:
         nav_start = self.html.index('<nav class="nav-list"')
         nav_end = self.html.index("</nav>", nav_start)
         navigation = self.html[nav_start:nav_end]
-        routes_and_labels = re.findall(
-            r'class="nav-item(?: active)?" data-target="([^"]+)" data-icon="[^"]+"[^>]*>.*?'
-            r'<span class="nav-label">([^<]+)</span>\s*</button>',
+        buttons = re.findall(
+            r'<button class="nav-item(?: active)?" data-target="([^"]+)"[^>]*>(.*?)</button>',
             navigation,
             flags=re.DOTALL,
         )
+        routes_and_labels = [
+            (route, re.search(r'<span class="nav-label">([^<]+)</span>', body).group(1))
+            for route, body in buttons
+        ]
         self.assertEqual(routes_and_labels, [
             ("dashboard", "首頁"),
             ("compose", "撰寫公文"),
+            ("drafts", "草稿編輯"),
             ("electronicSeal", "電子用印"),
             ("approvalLog", "簽核紀錄"),
             ("inbound", "收發管理"),
             ("settings", "系統設定"),
         ])
-        self.assertEqual(navigation.count('class="nav-item'), 6)
-        self.assertEqual(navigation.count('class="nav-ico"'), 6)
-        self.assertEqual(navigation.count('class="nav-label"'), 6)
+        self.assertEqual(navigation.count('class="nav-item'), 7)
+        self.assertEqual(navigation.count('class="nav-ico"'), 7)
+        self.assertEqual(navigation.count('class="nav-label"'), 7)
         normalized_css = re.sub(r"\s+", " ", self.css)
         self.assertIn(".nav-list { display: grid; grid-auto-rows: max-content; gap: 0; align-content: start;", normalized_css)
         self.assertIn(".nav-ico svg { width: 18px; height: 18px; fill: none; stroke: currentColor;", normalized_css)
@@ -265,7 +302,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         self.assertNotIn("renderWorkspaceSubnavigation", self.js)
         self.assertNotIn("workspace-subnav-button", self.css)
 
-    def test_legacy_pages_are_integrated_into_the_six_major_pages_at_runtime(self) -> None:
+    def test_legacy_pages_are_integrated_into_the_seven_major_pages_at_runtime(self) -> None:
         start = self.js.index("const mergedNavigationParents = Object.freeze({")
         end = self.js.index("\n});", start) + 4
         parents = self.js[start:end]

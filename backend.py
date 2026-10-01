@@ -22443,22 +22443,95 @@ def compose_draft_user(session: Dict[str, Any] | None) -> Dict[str, Any]:
     return user
 
 
-def list_compose_drafts(conn: sqlite3.Connection, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+def compose_draft_page(query: Dict[str, List[str]] | None = None) -> Tuple[int, int]:
+    """Bound recovery pages without changing the legacy first-page response."""
+    query = query or {}
+    offset_value = (query.get("offset") or ["0"])[0]
+    limit_value = (query.get("limit") or ["20"])[0]
+    if not re.fullmatch(r"[0-9]{1,7}", offset_value) or not re.fullmatch(r"[0-9]{1,7}", limit_value):
+        raise ValueError("compose_draft_pagination_invalid")
+    offset, limit = int(offset_value), int(limit_value)
+    if offset > 1_000_000 or limit < 1:
+        raise ValueError("compose_draft_pagination_invalid")
+    return offset, min(limit, 100)
+
+
+def compose_draft_probe_id(query: Dict[str, List[str]] | None = None) -> str | None:
+    """Accept only one private compose ID; never probe a client-chosen scope."""
+    if not query or "probe_id" not in query:
+        return None
+    values = query["probe_id"]
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str) or not re.fullmatch(r"OD-[0-9a-fA-F-]{36}", values[0]):
+        raise ValueError("compose_draft_id_invalid")
+    return values[0]
+
+
+def list_compose_drafts(conn: sqlite3.Connection, session: Dict[str, Any] | None, query: Dict[str, List[str]] | None = None) -> List[Dict[str, Any]]:
     user = compose_draft_user(session)
+    offset, limit = compose_draft_page(query)
     return [public_draft(row) for row in conn.execute(
-        "SELECT * FROM official_document_compose_drafts WHERE applicant_id=? AND company_id=? AND archived=0 ORDER BY updated_at DESC LIMIT 20",
-        (user["id"], user["company_id"]),
+        "SELECT * FROM official_document_compose_drafts WHERE applicant_id=? AND company_id=? AND archived=0 ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+        (user["id"], user["company_id"], limit, offset),
     ).fetchall()]
+
+
+def count_compose_drafts(conn: sqlite3.Connection, session: Dict[str, Any] | None, query: Dict[str, List[str]] | None = None) -> Dict[str, Any]:
+    user = compose_draft_user(session)
+    probe_id = compose_draft_probe_id(query)
+    row = conn.execute(
+        "SELECT COUNT(*) AS count FROM official_document_compose_drafts WHERE applicant_id=? AND company_id=? AND archived=0",
+        (user["id"], user["company_id"]),
+    ).fetchone()
+    result = {"count": int(row["count"])}
+    if probe_id is not None:
+        result["probeExists"] = conn.execute(
+            "SELECT 1 FROM official_document_compose_drafts WHERE id=? AND applicant_id=? AND company_id=? AND archived=0 LIMIT 1",
+            (probe_id, user["id"], user["company_id"]),
+        ).fetchone() is not None
+    return result
 
 
 def save_compose_draft(conn: sqlite3.Connection, draft_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     return save_sqlite_draft(conn, draft_id, payload, compose_draft_user(session), now())
 
 
-def supabase_list_compose_drafts(session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+def supabase_list_compose_drafts(session: Dict[str, Any] | None, query: Dict[str, List[str]] | None = None) -> List[Dict[str, Any]]:
     user = compose_draft_user(session)
-    rows = supabase_filter_rows("official_document_compose_drafts", {"applicant_id": user["id"], "company_id": user["company_id"], "archived": False}, limit=20, order="updated_at.desc")
+    offset, limit = compose_draft_page(query)
+    rows = supabase_filter_rows("official_document_compose_drafts", {"applicant_id": user["id"], "company_id": user["company_id"], "archived": False}, limit=limit, offset=offset, order="updated_at.desc,id.desc")
     return [public_draft(row) for row in rows]
+
+
+def supabase_count_compose_drafts(session: Dict[str, Any] | None, query: Dict[str, List[str]] | None = None) -> Dict[str, Any]:
+    """PostgREST exact HEAD count for the authenticated user's private drafts."""
+    user = compose_draft_user(session)
+    probe_id = compose_draft_probe_id(query)
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise SupabaseConfigurationError("supabase_runtime_env_missing")
+    params = urllib.parse.urlencode({
+        "select": "id", "limit": "1", "applicant_id": f"eq.{user['id']}",
+        "company_id": f"eq.{user['company_id']}", "archived": "eq.false",
+    })
+    url = f"{SUPABASE_URL}/rest/v1/official_document_compose_drafts?{params}"
+    request = urllib.request.Request(url, headers=supabase_headers({"Prefer": "count=exact"}), method="HEAD")
+    try:
+        with _urlopen_no_redirect(request, timeout=20) as response:
+            content_range = response.headers.get("Content-Range", "").strip()
+    except urllib.error.HTTPError as exc:
+        marker, business_conflict = _safe_http_error_contract(exc, "supabase_request_failed")
+        if business_conflict:
+            raise ValueError(business_conflict) from None
+        raise RuntimeError(marker) from None
+    match = re.fullmatch(r"(?:\*|[0-9]+-[0-9]+)/([0-9]+)", content_range)
+    if not match:
+        raise RuntimeError("supabase_count_invalid_response")
+    result = {"count": int(match.group(1))}
+    if probe_id is not None:
+        rows = supabase_filter_rows("official_document_compose_drafts", {
+            "id": probe_id, "applicant_id": user["id"], "company_id": user["company_id"], "archived": False,
+        }, limit=1, select="id")
+        result["probeExists"] = any(row.get("id") == probe_id for row in rows)
+    return result
 
 
 def supabase_save_compose_draft(draft_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -22470,6 +22543,122 @@ def supabase_save_compose_draft(draft_id: str, payload: Dict[str, Any], session:
         "p_archived": bool(payload.get("archived")),
     })
     return public_draft(raw[0] if isinstance(raw, list) else raw)
+
+
+def compose_draft_archive_input(draft_id: str, payload: Dict[str, Any]) -> Tuple[str, int | None]:
+    """An archive request carries only a formal document ID and a draft CAS."""
+    if not re.fullmatch(r"OD-[0-9a-fA-F-]{36}", draft_id):
+        raise ValueError("compose_draft_id_invalid")
+    if not isinstance(payload, dict) or set(payload) - {"official_document_id", "expected_revision"}:
+        raise ValueError("compose_draft_archive_payload_invalid")
+    document_id = payload.get("official_document_id")
+    if not isinstance(document_id, str) or not document_id.strip() or len(document_id) > 160:
+        raise ValueError("compose_draft_archive_document_required")
+    expected = payload.get("expected_revision")
+    # Zero means the client has no acknowledged private revision. It is safe
+    # only for an absent/already archived row, never as authority to mutate.
+    if expected is not None and (type(expected) is not int or expected < 0):
+        raise ValueError("compose_draft_revision_required")
+    return document_id.strip(), expected
+
+
+def require_submitted_compose_archive_document(document: Dict[str, Any] | None, user: Dict[str, Any]) -> Dict[str, Any]:
+    """A submitted compose document, not a general records permission, authorizes cleanup."""
+    if not document or document.get("applicant_id") != user["id"] or document.get("company_id") != user["company_id"]:
+        raise PermissionError("compose_draft_archive_document_forbidden")
+    if not document.get("current_status") or document.get("current_status") == "draft":
+        raise ValueError("compose_draft_archive_document_not_submitted")
+    if document.get("source_type") != "blank_editor" or document.get("document_type") != "outgoing_official_document":
+        raise ValueError("compose_draft_archive_document_invalid")
+    metadata = parse_json_field(document.get("metadata_json"))
+    extra = metadata.get("extra") if isinstance(metadata.get("extra"), dict) else {}
+    if metadata.get("source") != "compose_form" and extra.get("source") != "compose_form":
+        raise ValueError("compose_draft_archive_document_invalid")
+    return extra
+
+
+def require_compose_draft_archive_link(draft: Dict[str, Any], document_id: str, draft_id: str, document_extra: Dict[str, Any]) -> None:
+    """Do not archive another same-owner draft when a formal ID is unrelated."""
+    snapshot = parse_json_field(draft.get("snapshot_json"))
+    linked_ids = [str(snapshot.get(key) or "").strip() for key in ("draftRequestId", "officialDocumentId")]
+    if any(value and value != document_id for value in linked_ids):
+        raise ValueError("compose_draft_archive_link_mismatch")
+    authoritative_draft_id = str(document_extra.get("private_compose_draft_id") or "").strip()
+    if authoritative_draft_id and authoritative_draft_id != draft_id:
+        raise ValueError("compose_draft_archive_link_mismatch")
+    if not any(linked_ids) and not authoritative_draft_id:
+        raise ValueError("compose_draft_archive_link_required")
+
+
+def archive_compose_draft(conn: sqlite3.Connection, draft_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, bool]:
+    user = compose_draft_user(session)
+    document_id, expected = compose_draft_archive_input(draft_id, payload)
+    document = conn.execute(
+        "SELECT id, applicant_id, company_id, current_status, source_type, document_type, metadata_json FROM official_documents WHERE id=? AND applicant_id=? AND company_id=?",
+        (document_id, user["id"], user["company_id"]),
+    ).fetchone()
+    extra = require_submitted_compose_archive_document(row_to_dict(document) if document else None, user)
+    row = conn.execute(
+        "SELECT * FROM official_document_compose_drafts WHERE id=? AND applicant_id=? AND company_id=?",
+        (draft_id, user["id"], user["company_id"]),
+    ).fetchone()
+    if not row or bool(row["archived"]):
+        return {"archived": True}
+    if expected is None:
+        raise ValueError("compose_draft_revision_required")
+    if expected == 0:
+        raise ValueError("compose_draft_revision_conflict")
+    require_compose_draft_archive_link(row_to_dict(row), document_id, draft_id, extra)
+    if int(row["revision"]) != expected:
+        raise ValueError("compose_draft_revision_conflict")
+    changed = conn.execute(
+        "UPDATE official_document_compose_drafts SET archived=1, revision=revision+1, updated_at=? "
+        "WHERE id=? AND applicant_id=? AND company_id=? AND archived=0 AND revision=? "
+        "AND EXISTS (SELECT 1 FROM official_documents WHERE id=? AND applicant_id=? AND company_id=? "
+        "AND current_status<>'draft' AND source_type='blank_editor' AND document_type='outgoing_official_document' "
+        "AND metadata_json=?)",
+        (now(), draft_id, user["id"], user["company_id"], expected, document_id, user["id"], user["company_id"], document["metadata_json"]),
+    ).rowcount
+    if changed != 1:
+        current = conn.execute(
+            "SELECT archived FROM official_document_compose_drafts WHERE id=? AND applicant_id=? AND company_id=?",
+            (draft_id, user["id"], user["company_id"]),
+        ).fetchone()
+        if current and bool(current["archived"]):
+            return {"archived": True}
+        raise ValueError("compose_draft_revision_conflict")
+    return {"archived": True}
+
+
+def supabase_archive_compose_draft(draft_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, bool]:
+    user = compose_draft_user(session)
+    document_id, expected = compose_draft_archive_input(draft_id, payload)
+    documents = supabase_filter_rows("official_documents", {
+        "id": document_id, "applicant_id": user["id"], "company_id": user["company_id"],
+    }, limit=1, select="id,applicant_id,company_id,current_status,source_type,document_type,metadata_json")
+    extra = require_submitted_compose_archive_document(documents[0] if documents else None, user)
+    filters = {"id": draft_id, "applicant_id": user["id"], "company_id": user["company_id"]}
+    rows = supabase_filter_rows("official_document_compose_drafts", filters, limit=1,
+                                select="id,applicant_id,company_id,revision,snapshot_json,archived")
+    if not rows or bool(rows[0].get("archived")):
+        return {"archived": True}
+    if expected is None:
+        raise ValueError("compose_draft_revision_required")
+    if expected == 0:
+        raise ValueError("compose_draft_revision_conflict")
+    require_compose_draft_archive_link(rows[0], document_id, draft_id, extra)
+    if int(rows[0]["revision"]) != expected:
+        raise ValueError("compose_draft_revision_conflict")
+    updated = supabase_update_many("official_document_compose_drafts", {
+        **filters, "archived": False, "revision": expected,
+    }, {"archived": True, "revision": expected + 1, "updated_at": now()})
+    if (len(updated) == 1 and updated[0].get("id") == draft_id
+            and updated[0].get("archived") is True and int(updated[0].get("revision") or 0) == expected + 1):
+        return {"archived": True}
+    current = supabase_filter_rows("official_document_compose_drafts", filters, limit=1, select="id,archived,revision")
+    if not current or bool(current[0].get("archived")):
+        return {"archived": True}
+    raise ValueError("compose_draft_revision_conflict")
 
 
 def create_official_document(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -34161,8 +34350,10 @@ def supabase_import_formal_account_roster(payload: Dict[str, Any], session: Dict
     }
 
 
-def supabase_filter_rows(table: str, filters: Dict[str, Any] | None = None, *, order: str = "", limit: int = 500, select: str = "*") -> List[Dict[str, Any]]:
+def supabase_filter_rows(table: str, filters: Dict[str, Any] | None = None, *, order: str = "", limit: int = 500, offset: int = 0, select: str = "*") -> List[Dict[str, Any]]:
     params: Dict[str, str] = {"select": select, "limit": str(limit)}
+    if offset:
+        params["offset"] = str(offset)
     for key, value in (filters or {}).items():
         if value is None:
             continue
@@ -46103,7 +46294,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
-            self.handle_api("GET", parsed.path, parse_qs(parsed.query, keep_blank_values=parsed.path.rstrip("/") == "/api/cron/monitoring"))
+            self.handle_api("GET", parsed.path, parse_qs(parsed.query, keep_blank_values=parsed.path.rstrip("/") in {"/api/cron/monitoring", "/api/compose-drafts/count"}))
             return
         super().do_GET()
 
@@ -47781,10 +47972,17 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(supabase_list_official_documents(scoped_query, session))
                     return
                 if parts == ["compose-drafts"] and method == "GET":
-                    self.send_json(supabase_list_compose_drafts(supabase_current_session(self.bearer_token())))
+                    self.send_json(supabase_list_compose_drafts(supabase_current_session(self.bearer_token()), query), extra_headers=[("Cache-Control", "private, no-store")])
+                    return
+                if parts == ["compose-drafts", "count"] and method == "GET":
+                    self.send_json(supabase_count_compose_drafts(supabase_current_session(self.bearer_token()), query), extra_headers=[("Cache-Control", "private, no-store")])
                     return
                 if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
                     self.send_json(supabase_save_compose_draft(parts[1], self.read_json(), supabase_current_session(self.bearer_token())))
+                    return
+                if len(parts) == 3 and parts[0] == "compose-drafts" and parts[2] == "archive" and method == "POST":
+                    self.send_json(supabase_archive_compose_draft(parts[1], self.read_json(), supabase_current_session(self.bearer_token())),
+                                   extra_headers=[("Cache-Control", "private, no-store")])
                     return
                 if method == "GET" and parts == ["official-documents", "my-requests"]:
                     session = supabase_current_session(self.bearer_token())
@@ -48832,12 +49030,20 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(list_official_documents(conn, scoped_query, session))
                     return
                 if parts == ["compose-drafts"] and method == "GET":
-                    self.send_json(list_compose_drafts(conn, current_session(conn, self.bearer_token())))
+                    self.send_json(list_compose_drafts(conn, current_session(conn, self.bearer_token()), query), extra_headers=[("Cache-Control", "private, no-store")])
+                    return
+                if parts == ["compose-drafts", "count"] and method == "GET":
+                    self.send_json(count_compose_drafts(conn, current_session(conn, self.bearer_token()), query), extra_headers=[("Cache-Control", "private, no-store")])
                     return
                 if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
                     result = save_compose_draft(conn, parts[1], self.read_json(), current_session(conn, self.bearer_token()))
                     conn.commit()
                     self.send_json(result)
+                    return
+                if len(parts) == 3 and parts[0] == "compose-drafts" and parts[2] == "archive" and method == "POST":
+                    result = archive_compose_draft(conn, parts[1], self.read_json(), current_session(conn, self.bearer_token()))
+                    conn.commit()
+                    self.send_json(result, extra_headers=[("Cache-Control", "private, no-store")])
                     return
                 if method == "GET" and parts == ["official-documents", "my-requests"]:
                     session = current_session(conn, self.bearer_token())

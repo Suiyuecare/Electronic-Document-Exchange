@@ -92,7 +92,10 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
       const flushComposeInputUpdates=()=>true,composeInputIsComposing=()=>false;
       let composeCloudTimer=null,composeCloudOperation=null,composeCloudDraftId="OD-00000000-0000-4000-8000-000000000001",composeCloudConflict=false,composeSaveState={},authState={token:"fixture"},scope="A",nextSnapshot={values:{"#subject":"草稿"}};
       const composeCloudRevisions=new Map(),composeCloudSavedSnapshots=new Map();
+      const refreshComposeCloudDraftCount=async()=>{},refreshComposeCloudDrafts=async()=>{},renderComposeDraftCount=()=>{};
+      let activeRouteTarget="compose";
       const composeRequestScope=()=>scope,composeRawSnapshot=()=>nextSnapshot,composeSnapshotHasMeaningfulContent=()=>true,renderComposeSaveStatus=()=>{};
+      const writeComposeAutosaveRaw=()=>true;
       let scheduled=0;const scheduleComposeCloudSave=()=>scheduled++;
       global.navigator={onLine:true};let resolve,reject,calls=0;
       const backendRequest=()=>{calls++;return new Promise((yes,no)=>{resolve=yes;reject=no})};
@@ -135,7 +138,7 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
 
     def test_recovered_snapshot_token_is_not_upgraded_by_newer_dashboard_cache(self):
         setup = '''
-          let composeOfficialContentRevision=2;const composeRequestScope=()=>"same",calls=[];
+          let composeOfficialContentRevision=2,composeCloudDraftId="";const composeRequestScope=()=>"same",calls=[];
           const composeCompanyForOfficialApplication=()=>({id:"CO"}),activeUnit=()=>"fixture",officialComposeMetadata=()=>({});
           global.document={querySelector:()=>({files:[]})};
           const backendRequest=async(path,options)=>{calls.push(JSON.parse(options.body));return{id:"OD-A",dispatch_no:"TEST",content_revision:3}};
@@ -150,13 +153,293 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
           const authState={user:{id:"U",company_id:"CO"}};
           const composeCloudRows=[{id:"B",revision:4,snapshot:{userId:"U",companyId:"CO",values:{"#subject":"B"}}}];
           const composeRawSnapshot=()=>({}),composeSnapshotHasMeaningfulContent=()=>true,resetComposeAsyncScope=()=>{},restoreComposeAutosave=()=>{},showToast=()=>{};
+          const composeLocalUnsyncedDraft=()=>null,preserveCurrentComposeBeforeDraftSwitch=async()=>true,setView=()=>{};
+          const pendingComposeArchiveForDraft=()=>null;
+          const composeCloudDraftsError=false,composeCloudDraftsLoading=false;
           let composeAutosaveRestoredForIdentity="A",composeCloudDraftId="A";
           const composeAutosaveStorageKey="fixture",composeCloudRevisions=new Map(),composeCloudSavedSnapshots=new Map();
+          const writeComposeAutosaveRaw=()=>true;
           global.document={querySelector:k=>k==="#attachments"?oldFiles:k==="#composeAttachmentUploadStatus"?status:{value:"B"}};
           global.window={confirm:()=>true};global.localStorage={setItem:()=>{}};
         '''
-        value = self.run_js(["loadComposeCloudDraft"], setup, '''await loadComposeCloudDraft();console.log(JSON.stringify({fileValue:oldFiles.value,cleared:status.cleared,id:composeCloudDraftId,revision:composeCloudRevisions.get("B")}));''')
+        value = self.run_js(["loadComposeCloudDraft"], setup, '''await loadComposeCloudDraft("B");console.log(JSON.stringify({fileValue:oldFiles.value,cleared:status.cleared,id:composeCloudDraftId,revision:composeCloudRevisions.get("B")}));''')
         self.assertEqual(value, {"fileValue": "", "cleared": True, "id": "B", "revision": 4})
+
+    def test_draft_badge_counts_local_only_without_double_counting_cloud_edits(self):
+        setup = '''
+          let composeCloudDraftCount=3,composeCloudProbeId="",composeCloudProbeExists=null;
+          const composeCloudRows=[];let local={snapshot:{cloudDraftId:"OD-A"},cloudRevision:4,needsCloudSync:true};
+          const pendingComposeArchives=()=>[];
+          const item={label:"",setAttribute(_,value){this.label=value}},badge={hidden:true,textContent:"",closest:()=>item};
+          const document={querySelector:()=>badge},composeLocalUnsyncedDraft=()=>local;
+        '''
+        value = self.run_js(["composeDraftCountState", "renderComposeDraftCount"], setup, '''
+          renderComposeDraftCount();const existing={count:badge.textContent,label:item.label};
+          local={snapshot:{},cloudRevision:null,needsCloudSync:true};renderComposeDraftCount();
+          const localOnly={count:badge.textContent,label:item.label};
+          local={snapshot:{cloudDraftId:"OD-B"},cloudRevision:null,needsCloudSync:true};renderComposeDraftCount();
+          const pending={hidden:badge.hidden,label:item.label};
+          composeCloudProbeId="OD-B";composeCloudProbeExists=false;renderComposeDraftCount();
+          const probedMissing={count:badge.textContent,label:item.label};
+          composeCloudProbeExists=true;renderComposeDraftCount();
+          const probedPresent={count:badge.textContent,label:item.label};
+          composeCloudDraftCount=0;local=null;renderComposeDraftCount();
+          console.log(JSON.stringify({existing,localOnly,pending,probedMissing,probedPresent,empty:{hidden:badge.hidden,label:item.label}}));
+        ''')
+        self.assertEqual(value, {
+            "existing": {"count": "3", "label": "草稿編輯，3 份未完成草稿"},
+            "localOnly": {"count": "4", "label": "草稿編輯，4 份未完成草稿"},
+            "pending": {"hidden": True, "label": "草稿編輯，數量更新中"},
+            "probedMissing": {"count": "4", "label": "草稿編輯，4 份未完成草稿"},
+            "probedPresent": {"count": "3", "label": "草稿編輯，3 份未完成草稿"},
+            "empty": {"hidden": True, "label": "草稿編輯，0 份未完成草稿"},
+        })
+
+    def test_draft_switch_stops_if_current_changes_cannot_be_saved(self):
+        setup = '''
+          let composeCloudOperation=null,composeCloudDraftId="OD-A",notice="";
+          const document={querySelector:()=>({files:[]})};
+          const composeInputIsComposing=()=>false,flushComposeInputUpdates=()=>true;
+          const composeRawSnapshot=()=>({values:{"#subject":"尚未保存"}}),composeSnapshotHasMeaningfulContent=()=>true;
+          const composeCloudSavedSnapshots=new Map(),saveComposeCloudDraft=async()=>null,showToast=value=>{notice=value};
+        '''
+        value = self.run_js(["preserveCurrentComposeBeforeDraftSwitch"], setup, '''
+          const allowed=await preserveCurrentComposeBeforeDraftSwitch();console.log(JSON.stringify({allowed,notice}));
+        ''')
+        self.assertEqual(value["allowed"], False)
+        self.assertIn("已取消切換", value["notice"])
+
+    DRAFT_FETCH_SETUP = '''
+      let scope="account-A",activeRouteTarget="drafts";
+      const authState={token:"fixture"},composeCloudIdentityScope=()=>scope,composeLocalUnsyncedDraft=()=>null;
+      let composeCloudRows=[{id:"OD-old",revision:1,snapshot:{values:{"#subject":"已載入"}}}],composeCloudDraftCount=1;
+      let composeCloudDraftHasMore=false,composeCloudDraftsLoading=false,composeCloudDraftsError=false;
+      let composeCloudProbeId="",composeCloudProbeExists=null,composeCloudListGeneration=0,composeCloudCountGeneration=0;
+      let composeCloudListRequest=null,composeCloudCountRequest=null;
+      let renders=0;const renderComposeDraftList=()=>{renders++},renderComposeDraftCount=()=>{};
+      let resolveList,rejectList,resolveCount,rejectCount;
+      const backendRequest=(path)=>new Promise((yes,no)=>{
+        if(path.startsWith("/compose-drafts/count")){resolveCount=yes;rejectCount=no}
+        else {resolveList=yes;rejectList=no}
+      });
+    '''
+
+    def test_draft_refresh_waits_for_list_and_exact_count(self):
+        value = self.run_js(["refreshComposeCloudDraftCount", "refreshComposeCloudDrafts"], self.DRAFT_FETCH_SETUP, '''
+          let settled=false;const pending=refreshComposeCloudDrafts().then(result=>{settled=true;return result});
+          resolveList([{id:"OD-new",revision:2,snapshot:{values:{"#subject":"新版"}}}]);
+          await new Promise(setImmediate);
+          const beforeCount={settled,loading:composeCloudDraftsLoading,rows:composeCloudRows[0].id};
+          resolveCount({count:5});const success=await pending;
+          console.log(JSON.stringify({beforeCount,success,loading:composeCloudDraftsLoading,count:composeCloudDraftCount,rows:composeCloudRows[0].id,error:composeCloudDraftsError}));
+        ''')
+        self.assertEqual(value, {"beforeCount": {"settled": False, "loading": True, "rows": "OD-old"},
+                                 "success": True, "loading": False, "count": 5, "rows": "OD-new", "error": False})
+
+    def test_failed_draft_refresh_preserves_cached_rows_and_reports_failure(self):
+        value = self.run_js(["refreshComposeCloudDraftCount", "refreshComposeCloudDrafts"], self.DRAFT_FETCH_SETUP, '''
+          const first=refreshComposeCloudDrafts();rejectList(new Error("offline"));resolveCount({count:1});
+          const listFailure=await first;
+          const cachedAfterListFailure=composeCloudRows[0].id;
+          const second=refreshComposeCloudDrafts();resolveList([{id:"OD-new",revision:2,snapshot:{values:{"#subject":"新版"}}}]);rejectCount(new Error("offline"));
+          const countFailure=await second;
+          console.log(JSON.stringify({listFailure,cachedAfterListFailure,countFailure,updatedRow:composeCloudRows[0].id,count:composeCloudDraftCount,error:composeCloudDraftsError}));
+        ''')
+        self.assertEqual(value, {"listFailure": False, "cachedAfterListFailure": "OD-old", "countFailure": False,
+                                 "updatedRow": "OD-new", "count": None, "error": True})
+
+    def test_concurrent_draft_refreshes_share_one_list_and_count_read(self):
+        setup = self.DRAFT_FETCH_SETUP.replace('const backendRequest=(path)=>new Promise((yes,no)=>{',
+                                               'let calls=0;const backendRequest=(path)=>new Promise((yes,no)=>{calls++;')
+        value = self.run_js(["refreshComposeCloudDraftCount", "refreshComposeCloudDrafts"], setup, '''
+          const first=refreshComposeCloudDrafts(),second=refreshComposeCloudDrafts();
+          resolveList([{id:"OD-new",revision:2,snapshot:{values:{"#subject":"新版"}}}]);resolveCount({count:1});
+          const results=await Promise.all([first,second]);
+          console.log(JSON.stringify({results,calls,rows:composeCloudRows.length,error:composeCloudDraftsError}));
+        ''')
+        self.assertEqual(value, {"results": [True, True], "calls": 2, "rows": 1, "error": False})
+
+    def test_draft_cards_remain_clickable_and_keep_focus_across_refresh_status(self):
+        setup = '''
+          let composeCloudRows=[{id:"OD-1",revision:2,updatedAt:"2026-10-01T00:00:00Z",snapshot:{values:{"#subject":"去識別草稿"}}}];
+          let composeCloudDraftsLoading=false,composeCloudDraftsError=false,composeCloudDraftHasMore=false,composeCloudDraftCount=1;
+          let pending=false,writes=0;
+          const host={dataset:{},_html:"",set innerHTML(value){writes++;this._html=value},get innerHTML(){return this._html}};
+          const status={},localCard={},refresh={setAttribute(name,value){this[name]=value}},more={};
+          const nodes={"#composeDraftList":host,"#composeDraftListStatus":status,"#composeLocalDraftCard":localCard,
+            "#composeDraftLoadMoreBtn":more,"#composeDraftRefreshBtn":refresh};
+          global.document={querySelector:key=>nodes[key]};
+          const composeDraftCountState=()=>({local:null,total:1,uncertain:false});
+          const formatComposeDraftUpdatedAt=()=>"2026/10/1",escapeHtml=value=>String(value);
+          const pendingComposeArchiveForDraft=()=>pending?{draftId:"OD-1"}:null;
+          const pendingComposeArchives=()=>pending?[{draftId:"OD-1",officialDocumentId:"OD-official"}]:[];
+          const composeSubmittedLocalRecovery=()=>null;
+        '''
+        value = self.run_js(["renderComposeDraftList"], setup, '''
+          renderComposeDraftList();const initial=host.innerHTML;
+          composeCloudDraftsLoading=true;renderComposeDraftList();const during={writes,html:host.innerHTML,status:status.textContent};
+          composeCloudDraftsLoading=false;composeCloudDraftsError=true;renderComposeDraftList();
+          const failed={writes,html:host.innerHTML,status:status.textContent};
+          pending=true;renderComposeDraftList();const archived=host.innerHTML;
+          console.log(JSON.stringify({initialClickable:initial.includes("data-compose-draft-id")&&!initial.includes("disabled"),
+            duringSame:during.html===initial,duringWrites:during.writes,duringStatus:during.status,
+            failedSame:failed.html===initial,failedWrites:failed.writes,failedStatus:failed.status,
+            archivedRetry:archived.includes("data-compose-archive-retry")&&!archived.includes("data-compose-draft-id")}));
+        ''')
+        self.assertTrue(value["initialClickable"])
+        self.assertTrue(value["duringSame"])
+        self.assertEqual(value["duringWrites"], 1)
+        self.assertIn("仍可編輯", value["duringStatus"])
+        self.assertTrue(value["failedSame"])
+        self.assertEqual(value["failedWrites"], 1)
+        self.assertIn("更新失敗", value["failedStatus"])
+        self.assertTrue(value["archivedRetry"])
+
+    def test_pending_archive_without_cloud_row_still_has_cleanup_card_not_local_editor(self):
+        setup = '''
+          let composeCloudRows=[],composeCloudDraftsLoading=false,composeCloudDraftsError=true,composeCloudDraftHasMore=false,composeCloudDraftCount=3;
+          const marker={draftId:"OD-submitted",officialDocumentId:"OD-official"};
+          const pendingComposeArchives=()=>[marker],pendingComposeArchiveForDraft=()=>null;
+          const composeSubmittedLocalRecovery=()=>null;
+          const composeLocalUnsyncedDraft=()=>({snapshot:{cloudDraftId:"OD-submitted",draftRequestId:"OD-official",values:{"#subject":"已送簽"}},cloudRevision:0});
+          const composeCloudProbeId="",composeCloudProbeExists=null;
+          const host={dataset:{},innerHTML:""},status={},localCard={},more={},refresh={setAttribute(){}};
+          const nodes={"#composeDraftList":host,"#composeDraftListStatus":status,"#composeLocalDraftCard":localCard,
+            "#composeDraftLoadMoreBtn":more,"#composeDraftRefreshBtn":refresh};
+          global.document={querySelector:key=>nodes[key]};const escapeHtml=value=>String(value),formatComposeDraftUpdatedAt=()=>"";
+        '''
+        value = self.run_js(["composePendingArchiveMatchesSnapshot", "composeDraftCountState", "renderComposeDraftList"], setup, '''
+          renderComposeDraftList();
+          console.log(JSON.stringify({localHidden:localCard.hidden,retry:host.innerHTML.includes("data-compose-archive-retry"),editable:host.innerHTML.includes("data-compose-draft-id"),count:composeDraftCountState().total}));
+        ''')
+        self.assertEqual(value, {"localHidden": True, "retry": True, "editable": False, "count": None})
+
+    def test_submitted_other_tab_text_has_explicit_new_draft_recovery_not_badge_count(self):
+        setup = '''
+          let recovery={updatedAt:"2026-10-02T00:00:00Z",snapshot:{values:{"#subject":"已送簽後的新文字"}}};
+          const composeSubmittedLocalRecovery=()=>recovery,composeCloudRows=[],pendingComposeArchives=()=>[];
+          const pendingComposeArchiveForDraft=()=>null,composeCloudDraftsLoading=false,composeCloudDraftsError=false;
+          const composeCloudDraftHasMore=false,composeCloudDraftCount=0;
+          let writes=0;const host={dataset:{},_html:"",set innerHTML(value){writes++;this._html=value},get innerHTML(){return this._html}};
+          const status={},localCard={},more={},refresh={setAttribute(){}};
+          const nodes={"#composeDraftList":host,"#composeDraftListStatus":status,"#composeLocalDraftCard":localCard,
+            "#composeDraftLoadMoreBtn":more,"#composeDraftRefreshBtn":refresh};
+          global.document={querySelector:key=>nodes[key]};
+          const composeDraftCountState=()=>({local:null,total:0,uncertain:false,pendingCleanup:0});
+          const escapeHtml=value=>String(value),formatComposeDraftUpdatedAt=()=>"";
+        '''
+        value = self.run_js(["renderComposeDraftList"], setup, '''
+          renderComposeDraftList();const before={visible:host.innerHTML.includes("data-compose-recover-submitted"),
+            wording:host.innerHTML.includes("已送簽文件仍有本機內容")&&host.innerHTML.includes("若需保留變更，可另存為新草稿")&&host.innerHTML.includes("原公文不會變更"),
+            editable:host.innerHTML.includes("data-compose-draft-id"),status:status.textContent,writes};
+          recovery=null;renderComposeDraftList();
+          console.log(JSON.stringify({before,cleared:!host.innerHTML.includes("data-compose-recover-submitted"),writes}));
+        ''')
+        self.assertEqual(value["before"], {"visible": True, "wording": True, "editable": False,
+                                           "status": "目前沒有未完成草稿。", "writes": 1})
+        self.assertTrue(value["cleared"])
+        self.assertEqual(value["writes"], 2)
+        source = (ROOT / "app.js").read_text()
+        self.assertIn('event.target.closest("[data-compose-recover-submitted]")', source)
+        self.assertIn('void resumeSubmittedComposeLocalAsNewDraft();', source)
+
+    def test_unloaded_pending_archive_never_overstates_unfinished_badge(self):
+        setup = '''
+          const composeCloudRows=[],composeCloudDraftCount=3,composeCloudProbeId="",composeCloudProbeExists=null;
+          const composeLocalUnsyncedDraft=()=>null,pendingComposeArchives=()=>[{draftId:"OD-submitted",officialDocumentId:"OD-official"}];
+          const item={setAttribute(name,value){this[name]=value}},badge={closest:()=>item};
+          global.document={querySelector:()=>badge};
+        '''
+        value = self.run_js(["composeDraftCountState", "renderComposeDraftCount"], setup, '''
+          renderComposeDraftCount();console.log(JSON.stringify({count:composeDraftCountState().total,hidden:badge.hidden,label:item["aria-label"]}));
+        ''')
+        self.assertEqual(value, {"count": None, "hidden": True,
+                                 "label": "草稿編輯，已送簽草稿待清理，未完成數量暫時無法確認"})
+
+    DRAFT_ROUTE_SETUP = '''
+      let scope="A",authenticated=true,activeRouteTarget="drafts",workspaceRefreshRequest=null;
+      const authState={token:"fixture"},frontendSessionScope=()=>scope,hasAuthenticatedBackendSession=()=>authenticated;
+      const routeBackendDataLoaded=new Set(),routeBackendDataRequests=new Map(),routeBackendDataErrors=new Map(),routeBackendDataSyncedAt=new Map();
+      let routeBackendDataScope="A",headerBackendSyncState={status:"idle",syncedAt:""};
+      const renderWorkspaceLoadStatus=()=>{},updateHeaderStatus=()=>{},resetRouteBackendData=()=>{};
+      let finish;const refreshComposeCloudDrafts=()=>new Promise(yes=>{finish=yes});
+    '''
+
+    def test_drafts_route_reports_synced_only_after_both_reads_and_failure_is_false(self):
+        value = self.run_js(["loadRouteBackendData"], self.DRAFT_ROUTE_SETUP, '''
+          const first=loadRouteBackendData("drafts",true,{force:true});
+          const pendingStatus=headerBackendSyncState.status;
+          finish(false);const failure=await first;
+          const failedStatus=headerBackendSyncState.status;
+          const second=loadRouteBackendData("drafts",true,{force:true});
+          finish(true);const success=await second;
+          console.log(JSON.stringify({pendingStatus,failure,failedStatus,success,finalStatus:headerBackendSyncState.status,loaded:routeBackendDataLoaded.has("drafts")}));
+        ''')
+        self.assertEqual(value, {"pendingStatus": "syncing", "failure": False, "failedStatus": "error",
+                                 "success": True, "finalStatus": "synced", "loaded": True})
+
+    def test_stale_scope_route_load_is_not_reported_as_success(self):
+        value = self.run_js(["loadRouteBackendData"], self.DRAFT_ROUTE_SETUP, '''
+          const pending=loadRouteBackendData("drafts",true,{force:true});scope="B";finish(true);
+          const result=await pending;console.log(JSON.stringify({result,synced:headerBackendSyncState.status==="synced"}));
+        ''')
+        self.assertEqual(value, {"result": False, "synced": False})
+
+    def test_workspace_refresh_does_not_toast_success_for_false_route_read(self):
+        setup = '''
+          let activeRouteTarget="drafts",workspaceRefreshRequest=null,headerBackendSyncState={status:"idle",syncedAt:""};
+          const authState={token:"fixture"},hasAuthenticatedBackendSession=()=>true,frontendSessionScope=()=>"A";
+          let finish;const loadRouteBackendData=()=>new Promise(yes=>{finish=yes});
+          const syncNotificationsFromBackend=async()=>true,routeBackendDataErrors=new Map(),routeBackendDataLoaded=new Set();
+          const renderWorkspaceLoadStatus=()=>{},updateHeaderStatus=()=>{};let toast="";const showToast=value=>{toast=value};
+          const button={setAttribute(){},removeAttribute(){}};
+          global.document={querySelector:()=>button};
+        '''
+        value = self.run_js(["refreshCurrentWorkspace"], setup, '''
+          const pending=refreshCurrentWorkspace();const before=headerBackendSyncState.status;
+          finish(false);const result=await pending;
+          console.log(JSON.stringify({before,result,status:headerBackendSyncState.status,toast,button:button.textContent}));
+        ''')
+        self.assertEqual(value["before"], "syncing")
+        self.assertFalse(value["result"])
+        self.assertEqual(value["status"], "error")
+        self.assertIn("失敗", value["toast"])
+        self.assertEqual(value["button"], "重新整理")
+
+    SAME_DRAFT_SETUP = '''
+      const id="OD-00000000-0000-4000-8000-000000000001";
+      const authState={user:{id:"U",company_id:"CO"}},row={id,revision:4,updatedAt:"2026-10-01T00:00:00Z",snapshot:{userId:"U",companyId:"CO",values:{"#subject":"雲端新版"}}};
+      const composeCloudRows=[row],composeCloudRevisions=new Map([[id,2]]);
+      let current={values:{"#subject":"舊版"}},restored=0,route="",notice="";
+      const composeCloudSavedSnapshots=new Map([[id,JSON.stringify(current)]]),composeRawSnapshot=()=>current;
+      let composeCloudDraftId=id,composeCloudOperation=null,composeCloudConflict=false,composeAutosaveRestoredForIdentity="";
+      const composeLocalUnsyncedDraft=()=>null,pendingComposeArchiveForDraft=()=>null;
+      const composeInputIsComposing=()=>false,flushComposeInputUpdates=()=>true,composeSnapshotHasMeaningfulContent=()=>true;
+      const resetComposeAsyncScope=()=>{},restoreComposeAutosave=saved=>{restored++;current=saved.snapshot};
+      const setView=value=>{route=value},showToast=value=>{notice=value};
+      const composeAutosaveStorageKey="fixture";global.localStorage={setItem:()=>{}};
+      const writeComposeAutosaveRaw=()=>true;
+      const files={value:"",files:[]};global.document={querySelector:key=>key==="#attachments"?files:key==="#composeAttachmentUploadStatus"?{replaceChildren:()=>{}}:null};
+    '''
+
+    def test_same_draft_newer_revision_restores_only_when_current_editor_is_clean(self):
+        value = self.run_js(["loadComposeCloudDraft"], self.SAME_DRAFT_SETUP, '''
+          await loadComposeCloudDraft(id);
+          console.log(JSON.stringify({restored,revision:composeCloudRevisions.get(id),route,subject:current.values["#subject"]}));
+        ''')
+        self.assertEqual(value, {"restored": 1, "revision": 4, "route": "compose", "subject": "雲端新版"})
+
+    def test_same_draft_newer_revision_never_overwrites_unsaved_edits_or_file(self):
+        value = self.run_js(["loadComposeCloudDraft"], self.SAME_DRAFT_SETUP, '''
+          current={values:{"#subject":"本機未存修改"}};await loadComposeCloudDraft(id);
+          const dirty={restored,route,notice,subject:current.values["#subject"]};
+          current={values:{"#subject":"舊版"}};files.files=[{name:"unuploaded.pdf"}];await loadComposeCloudDraft(id);
+          console.log(JSON.stringify({dirty,fileBlocked:restored===0&&files.files.length===1,notice}));
+        ''')
+        self.assertEqual(value["dirty"]["restored"], 0)
+        self.assertEqual(value["dirty"]["subject"], "本機未存修改")
+        self.assertIn("尚未保存", value["dirty"]["notice"])
+        self.assertTrue(value["fileBlocked"])
 
 
 if __name__ == "__main__": unittest.main()
