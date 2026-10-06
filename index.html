@@ -4254,12 +4254,12 @@
               <p>請依序確認申請資訊、原稿或送簽版、全部附件，以及 PDF 編輯內容；完成檢視後才能作成決定。</p>
             </div>
             <div class="official-decision-evidence-actions" id="officialDecisionEvidenceActions"></div>
+            <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required />我已查看原稿／送簽 PDF，並核對申請目的。</label>
+            <label class="decision-check"><input id="officialReviewAttachments" type="checkbox" required />我已查看全部附件，或確認本案沒有附件。</label>
+            <label class="decision-check"><input id="officialReviewEdited" type="checkbox" required />我已查看 PDF 編輯版與用印位置，或確認本案沒有編輯內容。</label>
           </section>
           <section id="officialApprovalReviewFields" class="official-decision-section">
             <h4>送出核准前確認</h4>
-            <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required />我已查看原稿／送簽 PDF，內容與申請目的相符。</label>
-            <label class="decision-check"><input id="officialReviewAttachments" type="checkbox" required />我已查看全部附件，或確認本案沒有附件。</label>
-            <label class="decision-check"><input id="officialReviewEdited" type="checkbox" required />我已查看 PDF 編輯版與用印位置，或確認本案沒有編輯內容。</label>
             <label><span id="officialApprovalCommentLabel">核准意見</span><textarea id="officialApprovalComment" rows="3" minlength="2" maxlength="1000" required placeholder="請填寫核准判斷或注意事項（至少 2 個字）"></textarea></label>
           </section>
           <section id="officialWorkflowActionFields" class="official-decision-section" hidden>
@@ -4269,7 +4269,7 @@
           </section>
           <section id="officialRejectionFields" class="official-decision-section" hidden>
             <h4>退回補正內容</h4>
-            <label>駁回原因分類<select id="officialRejectCategory">
+            <label>補正原因分類<select id="officialRejectCategory">
               <option value="" selected disabled>請選擇原因</option>
               <option value="content_error">內容錯誤或不完整</option>
               <option value="attachment_missing">附件缺漏</option>
@@ -4287,7 +4287,7 @@
               <label><input type="checkbox" name="officialMissingItem" value="applicant_information" />申請資料</label>
             </fieldset>
             <label>補正期限<input id="officialCorrectionDueDate" type="date" /></label>
-            <label>具體駁回原因<textarea id="officialRejectComment" rows="4" minlength="6" maxlength="1000" required placeholder="請明確說明需修改的位置與完成條件"></textarea></label>
+            <label>具體補正內容<textarea id="officialRejectComment" rows="4" minlength="6" maxlength="1000" required placeholder="請明確說明需修改的位置與完成條件"></textarea></label>
           </section>
           <p class="official-decision-error" id="officialDecisionError" role="alert" hidden></p>
           <div class="form-actions">

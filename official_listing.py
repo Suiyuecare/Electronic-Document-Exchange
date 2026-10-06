@@ -12,7 +12,7 @@ STATUS_LABELS = {
     "pending_approval": "待簽核", "approved": "已核准", "stamping": "用印中", "stamped": "已完成用印",
     "pending_general_affairs_dispatch": "等待總務寄發", "returned_to_applicant_for_send": "回申請人自行寄發",
     "dispatched": "已由總務正式發文", "sent_by_applicant": "已由申請人自行寄出", "closed": "已結案歸檔",
-    "rejected": "已駁回", "cancelled": "已取消", "stamping_failed": "用印失敗",
+    "rejected": "退回補正", "declined": "不通過（已終止）", "cancelled": "已取消", "stamping_failed": "用印失敗",
 }
 STEP_LABELS = {
     "applicant_manager": "申請人主管", "department_head": "部門主任", "ceo": "執行長",

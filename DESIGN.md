@@ -92,6 +92,12 @@ Retain concise labelled actions. Busy downloads prevent duplicate clicks;
 cancel ends transmission, not an already-started server finalization. Recovery
 acts on the same upload intent or reloads the authoritative case version.
 
+Approval actions distinguish resumable 退回補正 from terminal 不通過（終止案件）.
+The latter uses the existing danger treatment and focuses Cancel on opening.
+File-review acknowledgements belong to the shared review section, not the
+approval-only fields; review confirms inspection, not endorsement of contents.
+The server decides which actions are visible at each workflow boundary.
+
 ### Navigation and data display
 
 Keep the Finance-aligned sidebar/header frame and colors. Route selection is

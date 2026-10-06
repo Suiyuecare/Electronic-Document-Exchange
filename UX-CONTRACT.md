@@ -30,6 +30,7 @@ branding or a promise of zero network latency.
 | Lists | Existing authorized queue/log renderers | Preserve focused row action, scroll and stable nodes when content is unchanged. Do not restore focus into a different case, hidden control or new actor. |
 | Notices | `showToast` | One notice, one owned 4s timer; identical messages do not rewrite the live region. Hover pauses its remaining duration. Persistent inline errors/retry controls remain authoritative. |
 | Modal/drawer | Existing modal markup with shared isolation/focus helpers | Inert workspace children, never unset authentication's outer inert gate. Tab containment, Escape/cancel and trigger restoration. Reopening an already visible detail does not steal focus. |
+| Approval actions | Server `available_actions` and existing `officialDecisionModal` | Withdraw only while approval is pending and stamping has not been claimed. Return previous reopens the approved predecessor without applicant editing. Correction is resumable; decline is terminal. Shared review checkboxes start disabled, enable only after the corresponding successful view/download, and require manual acknowledgement for all approver decisions. Destructive decline initially focuses Cancel. Server errors preserve entered reason; conflicts refresh the case and require fresh review. |
 | Motion/layers | `styles.css` | Finance colors/frame unchanged. Shared dialog/toast layer tokens; toast above dialog on all widths. Reduced motion disables travel; no operation waits for animation. |
 
 ## Fluid interaction acceptance

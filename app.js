@@ -10169,7 +10169,8 @@ const officialStatusLabels = {
   dispatched: "已由總務正式發文",
   sent_by_applicant: "已由申請人自行寄出",
   closed: "已結案歸檔",
-  rejected: "已駁回",
+  rejected: "退回補正",
+  declined: "不通過（已終止）",
   cancelled: "已取消",
   stamping_failed: "用印失敗"
 };
@@ -11075,6 +11076,9 @@ function officialHumanProgress(item = {}) {
   if (status === "rejected") {
     return { owner: `${applicant}（補正）`, waiting: workflowWaitDuration(item.updated_at), next: "補正完成後重新由第一關簽核" };
   }
+  if (status === "declined") {
+    return { owner: "案件不通過，已終止", waiting: "不再計時", next: "可查看原稿、簽核原因與歷程" };
+  }
   if (status === "cancelled") {
     return { owner: "流程已取消", waiting: "不再計時", next: "如需辦理請建立新申請" };
   }
@@ -11224,6 +11228,7 @@ function renderOfficialFinalStampedDownload(item = {}) {
   const label = electronic ? "已核准電子公文" : "最終用印檔";
   const documentId = escapeDraftHtml(item.id || "");
   if (!file) {
+    if (item.current_status === "declined") return `<section class="official-final-download pending" data-final-stamped-download><div><span>案件已終止</span><strong>不通過，不產生用印／寄發檔</strong><p>原稿、附件及簽核原因仍可於本案查看。</p></div></section>`;
     const missingLockedFile = Boolean(item.stamped_file_id || item.stampedFileId);
     return `
       <section class="official-final-download pending" data-final-stamped-download>
@@ -11267,7 +11272,7 @@ function renderOfficialStepRows(item, steps) {
       <time>${escapeHtml(step.step_order)}</time>
       <div>
         <strong>${escapeHtml(step.step_name)}</strong>
-        <span>${escapeHtml(officialApprovalStepActor(step).label)} · ${escapeHtml(({ approved: "已通過", rejected: "已退回", cancelled: "本輪已取消", skipped: "本輪已取消", pending: step.step_key === item.current_step ? "待處理" : "待後續" })[step.status] || step.status)}</span>
+        <span>${escapeHtml(officialApprovalStepActor(step).label)} · ${escapeHtml(({ approved: "已通過", rejected: item.current_status === "declined" ? "不通過" : "退回補正", cancelled: "本輪已取消", skipped: "本輪已取消", pending: step.step_key === item.current_step ? "待處理" : "待後續" })[step.status] || step.status)}</span>
         ${officialApprovalStepActor(step).delegated ? `<small>${escapeHtml(officialApprovalStepActor(step).delegated)}</small>` : ""}
         ${step.comment ? `<small>${escapeHtml(step.comment)}</small>` : ""}
       </div>
@@ -11286,7 +11291,7 @@ function renderOfficialApprovalHistory(item) {
   if (!rows.length) return "";
   const generations = [...new Set(rows.map((step) => Number(step.workflow_generation || 1)))].sort((left, right) => right - left);
   const stepGenerations = new Map(rows.map((step) => [step.id, Number(step.workflow_generation || 1)]));
-  const changes = (item.logs || item.process_logs || []).filter((log) => ["submit", "resubmit", "return_previous", "add_sign", "withdraw", "reject"].includes(log.action));
+  const changes = (item.logs || item.process_logs || []).filter((log) => ["submit", "resubmit", "return_previous", "add_sign", "withdraw", "reject", "decline"].includes(log.action));
   return `<details class="official-approval-history"><summary>完整簽核歷程（${generations.length} 輪）</summary>${generations.map((generation) => {
     const steps = rows.filter((step) => Number(step.workflow_generation || 1) === generation).sort((left, right) => Number(left.step_order || 0) - Number(right.step_order || 0));
     const events = changes.filter((log) => {
@@ -11303,7 +11308,7 @@ function renderOfficialLogs(logs = [], emptyText = "尚無紀錄。") {
     <article class="timeline-item">
       <time datetime="${escapeHtml(log.created_at || "")}">${escapeHtml(log.created_at || "時間未記錄")}</time>
       <div>
-        <strong>${escapeHtml(({ submit: "送出簽核", resubmit: "重新送簽", approve: "通過", reject: "退回申請人", return_previous: "退回上一關", add_sign: "通過並加簽", withdraw: "申請人抽單" })[log.action] || log.action)} · ${escapeHtml(log.actor_name || "")}</strong>
+        <strong>${escapeHtml(({ submit: "送出簽核", resubmit: "重新送簽", approve: "通過", reject: "退回補正", return_previous: "退回上一關", add_sign: "通過並加簽", withdraw: "申請人抽單", decline: "不通過（終止案件）" })[log.action] || log.action)} · ${escapeHtml(log.actor_name || "")}</strong>
         <p>${escapeHtml(log.comment || log.file_id || "")}</p>
       </div>
     </article>
@@ -11375,18 +11380,18 @@ function renderOfficialDispatchInfo(item = {}) {
 }
 
 function officialDocumentAvailableActions(item) {
-  const supported = ["approve", "reject", "return-previous", "add-sign", "withdraw"];
+  const supported = ["approve", "reject", "return-previous", "add-sign", "withdraw", "decline"];
   if (Array.isArray(item?.available_actions)) return item.available_actions.filter((action) => supported.includes(action));
   return item?.can_act === true ? ["approve", "reject"] : [];
 }
 
 function officialWorkflowActionLabel(action) {
-  return ({ approve: "通過", reject: "退回申請人", "return-previous": "退回上一關", "add-sign": "通過並加簽", withdraw: "抽單" })[action] || "簽核";
+  return ({ approve: "通過", reject: "退回補正", "return-previous": "退回上一關", "add-sign": "通過並加簽", withdraw: "抽單", decline: "不通過（終止案件）" })[action] || "簽核";
 }
 
 function renderOfficialWorkflowActionButtons(item, source = "workflow") {
-  const ids = { approve: "officialApproveBtn", reject: "officialRejectBtn", "return-previous": "officialReturnPreviousBtn", "add-sign": "officialAddSignBtn", withdraw: "officialWithdrawBtn" };
-  return officialDocumentAvailableActions(item).map((action) => `<button class="${action === "approve" ? "primary-button" : "secondary-button"}" type="button" ${source === "workflow" ? `id="${ids[action]}"` : ""} data-progress-official-action="${action}" data-progress-official-id="${escapeDraftHtml(item.id)}">${officialWorkflowActionLabel(action)}</button>`).join("");
+  const ids = { approve: "officialApproveBtn", reject: "officialRejectBtn", "return-previous": "officialReturnPreviousBtn", "add-sign": "officialAddSignBtn", withdraw: "officialWithdrawBtn", decline: "officialDeclineBtn" };
+  return officialDocumentAvailableActions(item).map((action) => `<button class="${action === "approve" ? "primary-button" : "secondary-button"}${action === "decline" ? " official-decline-button" : ""}" type="button" ${source === "workflow" ? `id="${ids[action]}"` : ""} data-progress-official-action="${action}" data-progress-official-id="${escapeDraftHtml(item.id)}">${officialWorkflowActionLabel(action)}</button>`).join("");
 }
 
 function renderOfficialWorkflowDetail() {
@@ -12206,9 +12211,9 @@ function markOfficialDecisionEvidenceReviewed(kind) {
     attachments: "#officialReviewAttachments",
     editor: "#officialReviewEdited"
   }[kind];
-  if (checkbox && kind === "application") {
+  if (checkbox) {
     const node = document.querySelector(checkbox);
-    if (node) node.checked = true;
+    if (node) { node.disabled = false; node.checked = false; }
   }
   const button = document.querySelector(`[data-decision-evidence="${kind}"]`);
   if (button) {
@@ -12237,7 +12242,7 @@ function updateOfficialDecisionSubmitAvailability() {
     submit.disabled = !(fullDetailReady && evidenceReady && categoryReady && commentReady && (!dueDate || isValidFutureOrToday(dueDate)));
     return;
   }
-  const commentReady = (document.querySelector("#officialApprovalComment")?.value.trim().length || 0) >= 2;
+  const commentReady = (document.querySelector("#officialApprovalComment")?.value.trim().length || 0) >= (action === "decline" ? 6 : 2);
   const targetReady = action !== "add-sign" || (officialDecisionState.candidates || []).some((person) => person.id === document.querySelector("#officialAddSignPerson")?.value);
   submit.disabled = !(fullDetailReady && evidenceReady && commentReady && targetReady);
 }
@@ -12324,7 +12329,7 @@ function trapOfficialDecisionFocus(event) {
 
 async function openOfficialDecisionDialog(item, action, source = "workflow") {
   const openScope = frontendSessionScope();
-  if (!item?.id || !["approve", "reject", "return-previous", "add-sign", "withdraw"].includes(action)) return showToast("找不到可處理的簽核案件。");
+  if (!item?.id || !["approve", "reject", "return-previous", "add-sign", "withdraw", "decline"].includes(action)) return showToast("找不到可處理的簽核案件。");
   if (!officialDocumentDetailReady.has(item.id)) {
     showToast("正在載入完整申請資料與附件，完成後才能作成決定。");
     try {
@@ -12351,15 +12356,17 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
     error.hidden = true;
     error.textContent = "";
   }
-  const isApprove = ["approve", "return-previous", "add-sign"].includes(action);
-  document.querySelector("#officialApprovalCommentLabel").textContent = action === "return-previous" ? "退回上一關原因" : action === "add-sign" ? "通過與加簽意見" : "核准意見";
-  document.querySelector("#officialApprovalComment").placeholder = action === "return-previous" ? "請說明需要前一關重新審核的原因（至少 2 個字）" : "請填寫核准判斷或注意事項（至少 2 個字）";
+  const isApprove = ["approve", "return-previous", "add-sign", "decline"].includes(action);
+  approval.querySelector("h4").textContent = action === "decline" ? "確認不通過" : "簽核前確認";
+  document.querySelector("#officialApprovalCommentLabel").textContent = action === "decline" ? "不通過原因" : action === "return-previous" ? "退回上一關原因" : action === "add-sign" ? "通過與加簽意見" : "核准意見";
+  document.querySelector("#officialApprovalComment").minLength = action === "decline" ? 6 : 2;
+  document.querySelector("#officialApprovalComment").placeholder = action === "decline" ? "請說明終止案件的原因（至少 6 個字）" : action === "return-previous" ? "請說明需要前一關重新審核的原因（至少 2 個字）" : "請填寫核准判斷或注意事項（至少 2 個字）";
   approval.hidden = !isApprove;
   rejection.hidden = action !== "reject";
   approval.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = !isApprove; });
   rejection.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = action !== "reject"; });
   const actionFields = document.querySelector("#officialWorkflowActionFields");
-  actionFields.hidden = !["return-previous", "add-sign", "withdraw"].includes(action);
+  actionFields.hidden = !["return-previous", "add-sign", "withdraw", "decline"].includes(action);
   document.querySelector("#officialAddSignPersonLabel").hidden = action !== "add-sign";
   document.querySelector("#officialAddSignPerson").disabled = action !== "add-sign";
   document.querySelector("#officialAddSignPerson").innerHTML = '<option value="">載入可加簽人員中…</option>';
@@ -12368,7 +12375,8 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   const previous = item.workflow_action_context?.previous_step;
   document.querySelector("#officialWorkflowActionExplanation").textContent = action === "add-sign"
     ? "會通過目前這一關，接著交給指定人員加簽；加簽通過後繼續後續流程。"
-    : action === "return-previous" ? `退回${[previous?.name, previous?.approver_name].filter(Boolean).join(" · ") || "上一關"}重新審核，不會退回申請人修改文件。`
+    : action === "decline" ? "案件將終止，不能補正、重新送簽或用印。若只需修改內容，請改用「退回補正」。"
+      : action === "return-previous" ? `退回${[previous?.name, previous?.approver_name].filter(Boolean).join(" · ") || "上一關"}重新審核，不會退回申請人修改文件。`
       : "抽單後停止本輪簽核並回到草稿；既有簽核與抽單紀錄會保留。";
   document.querySelector("#officialDecisionEvidence").hidden = action === "withdraw";
   ["#officialReviewOriginal", "#officialReviewAttachments", "#officialReviewEdited"].forEach((selector) => {
@@ -12377,6 +12385,7 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   });
   document.querySelector("#officialDecisionModalTitle").textContent = `確認${officialWorkflowActionLabel(action)}`;
   document.querySelector("#officialDecisionSubmitBtn").textContent = `確認${officialWorkflowActionLabel(action)}`;
+  document.querySelector("#officialDecisionSubmitBtn").classList.toggle("official-decline-button", action === "decline");
   document.querySelector("#officialDecisionSubmitBtn").disabled = true;
   const dueDate = document.querySelector("#officialCorrectionDueDate");
   if (dueDate) {
@@ -12398,7 +12407,7 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   syncWorkspaceOverlayIsolation();
   updateOfficialDecisionSubmitAvailability();
   if (action === "add-sign") void loadOfficialAddSignCandidates(item.id, officialDecisionState.operationId);
-  const initialFocus = document.querySelector(action === "withdraw" ? "#officialWithdrawComment" : "[data-decision-evidence]:not([disabled])");
+  const initialFocus = document.querySelector(action === "decline" ? "#officialDecisionCancelBtn" : action === "withdraw" ? "#officialWithdrawComment" : "[data-decision-evidence]:not([disabled])");
   (initialFocus || workspaceModalFocusableItems(modal)[0] || modal).focus({ preventScroll: true });
 }
 
@@ -12449,7 +12458,7 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
       renderApprovalLog();
     }
     refreshDashboardWorkEntryPoints();
-    showToast(({ approve: "已完成核准並保存檢閱證據。", reject: "已退回申請人補正。", "return-previous": "已退回上一關重新審核。", "add-sign": "已通過本關並交由指定人員加簽。", withdraw: "已抽單並保留簽核歷程，可重新編輯草稿。" })[action]);
+    showToast(({ approve: "已完成核准並保存檢閱證據。", reject: "已退回申請人補正。", "return-previous": "已退回上一關重新審核。", "add-sign": "已通過本關並交由指定人員加簽。", withdraw: "已抽單並保留簽核歷程，可重新編輯草稿。", decline: "案件不通過，已終止並通知申請人。" })[action]);
     return true;
   } catch (error) {
     if (scope !== frontendSessionScope()) return false;
@@ -12474,6 +12483,8 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
         : "案件已更新，但最新完整資料尚未載入。請重新整理後再檢閱；目前不開放簽核，系統未重送本次操作。");
       return false;
     }
+    const notice = document.querySelector("#officialDecisionError");
+    if (notice && officialDecisionState.documentId === item.id) { notice.hidden = false; notice.textContent = error.message || "簽核操作失敗，輸入已保留，請稍後重試。"; }
     showToast(error.message || "簽核操作失敗。");
     return false;
   }
@@ -12505,7 +12516,7 @@ async function submitOfficialDecision(event) {
   const integrity = officialDecisionIntegrity(item);
   const reviewAcknowledgements = officialDecisionReviewAcknowledgements();
   let payload;
-  if (["approve", "return-previous", "add-sign"].includes(action)) {
+  if (["approve", "return-previous", "add-sign", "decline"].includes(action)) {
     const comment = document.querySelector("#officialApprovalComment")?.value.trim() || "";
     if (!Object.values(reviewAcknowledgements).every(Boolean)) {
       if (error) {
@@ -12514,10 +12525,10 @@ async function submitOfficialDecision(event) {
       }
       return;
     }
-    if (comment.length < 2) {
+    if (comment.length < (action === "decline" ? 6 : 2)) {
       if (error) {
         error.hidden = false;
-        error.textContent = "請填寫至少 2 個字的核准意見，留下本次判斷依據。";
+        error.textContent = action === "decline" ? "請填寫至少 6 個字的不通過原因。" : "請填寫至少 2 個字的核准意見，留下本次判斷依據。";
       }
       document.querySelector("#officialApprovalComment")?.focus();
       return;
@@ -12573,7 +12584,7 @@ async function submitOfficialDecision(event) {
       review_acknowledgements: reviewAcknowledgements
     };
   }
-  if (["return-previous", "add-sign", "withdraw"].includes(action)) Object.assign(payload, { operation_id: operationId, expected_step_id: expectedStepId });
+  if (["return-previous", "add-sign", "withdraw", "decline"].includes(action)) Object.assign(payload, { operation_id: operationId, expected_step_id: expectedStepId });
   officialDecisionState.busy = true;
   if (submit) submit.disabled = true;
   const ok = await mutateOfficialDocument(action, payload, item, source);
@@ -17090,7 +17101,7 @@ function uxHealthMetrics() {
   const averageCompletionMs = completionDurations.length
     ? completionDurations.reduce((sum, value) => sum + value, 0) / completionDurations.length
     : null;
-  const returned = documents.filter((item) => item.current_status === "rejected" || (item.approval_steps || []).some((step) => step.status === "rejected"));
+  const returned = documents.filter((item) => item.current_status !== "declined" && (item.current_status === "rejected" || (item.approval_steps || []).some((step) => step.status === "rejected")));
   return {
     documentCount: documents.length,
     completedCount: completionDurations.length,
@@ -23831,7 +23842,7 @@ function approvalLogRecords(officialItems = officialWorkflowItems) {
       actorLabel: officialApprovalStepActor(step).label,
       delegated: officialApprovalStepActor(step).delegated,
       state: step.status === "approved" ? "done" : step.status === "rejected" ? "returned" : step.step_key === item.current_step ? "current" : "pending",
-      status: step.status === "approved" ? "已核准" : step.status === "rejected" ? "已退回" : ["cancelled", "skipped"].includes(step.status) ? "本輪已取消" : step.step_key === item.current_step ? "待處理" : "待後續",
+      status: step.status === "approved" ? "已核准" : step.status === "rejected" ? (item.current_status === "declined" ? "不通過" : "退回補正") : ["cancelled", "skipped"].includes(step.status) ? "本輪已取消" : step.step_key === item.current_step ? "待處理" : "待後續",
       time: step.approved_at || "尚未到關",
       comment: step.comment || "尚未填寫簽核意見。"
     }));
@@ -23956,7 +23967,7 @@ function approvalRecordDueTimestamp({ officialDocument, task } = {}) {
 
 function approvalRecordIsOverdue(record = {}) {
   const due = approvalRecordDueTimestamp(record);
-  return Boolean(due && due < Date.now() && !["closed", "cancelled"].includes(record.officialDocument?.current_status));
+  return Boolean(due && due < Date.now() && !["closed", "cancelled", "declined"].includes(record.officialDocument?.current_status));
 }
 
 function approvalProgressCategory({ task, currentStep, officialDocument } = {}) {

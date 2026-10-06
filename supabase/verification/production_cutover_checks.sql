@@ -291,6 +291,7 @@ with required_rpcs(signature) as (
     ('public.edoc_copy_editor_conflict(jsonb)'),
     ('public.edoc_save_official_workflow_config(jsonb)'),
     ('public.edoc_mutate_official_workflow(jsonb)'),
+    ('public.edoc_decline_official_document(jsonb)'),
     ('public.edoc_confirm_official_document(jsonb)'),
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
@@ -340,6 +341,7 @@ with required_rpcs(signature) as (
     ('public.edoc_copy_editor_conflict(jsonb)'),
     ('public.edoc_save_official_workflow_config(jsonb)'),
     ('public.edoc_mutate_official_workflow(jsonb)'),
+    ('public.edoc_decline_official_document(jsonb)'),
     ('public.edoc_confirm_official_document(jsonb)'),
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
@@ -377,6 +379,7 @@ with allowed(signature) as (
     ('public.edoc_copy_editor_conflict(jsonb)'),
     ('public.edoc_save_official_workflow_config(jsonb)'),
     ('public.edoc_mutate_official_workflow(jsonb)'),
+    ('public.edoc_decline_official_document(jsonb)'),
     ('public.edoc_confirm_official_document(jsonb)'),
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),

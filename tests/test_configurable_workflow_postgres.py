@@ -28,6 +28,8 @@ class ConfigurableWorkflowPostgresTest(fixture.EditorCrossCompanyWorkflowPostgre
                 cls.pg.execute("INSERT INTO edoc_private.shared_project_migration_ledger(file_name) VALUES (%s) ON CONFLICT DO NOTHING", (fixture.MIGRATION,))
                 cls.pg.execute(render_shared_forward())
                 cls.pg.execute(render_shared_forward())
+            from tools.terminal_decline_shared_forward import SOURCE as terminal_source, render_shared_forward as terminal_forward
+            cls.pg.execute((ROOT / "supabase/migrations" / terminal_source).read_text() if cls.namespace == "public" else terminal_forward())
         finally:
             cls.pg.execute("RESET ROLE")
         for actor, role in (("EXTRA", "員工"), ("CONFIGADMIN", "執行長")):

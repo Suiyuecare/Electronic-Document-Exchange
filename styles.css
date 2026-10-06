@@ -13250,3 +13250,13 @@ body[data-session-state="revalidating"] .workspace::after {
     font-size: 16px;
   }
 }
+.official-decline-button {
+  color: #a52620;
+  background: #fff4f2;
+  border-color: #d88e87;
+}
+
+.official-decline-button:hover:not(:disabled) {
+  color: #fff;
+  background: #a52620;
+}
