@@ -28101,7 +28101,45 @@ def inbound_document_detail(
         raise PermissionError("inbound_document_view_forbidden")
     data["metadata"] = parse_json_field(data.get("metadata_json"))
     data["attachments"] = inbound_document_attachments(conn, inbound_id)
+    assignee = conn.execute("SELECT id,status,company_id,finance_tenant_id FROM users WHERE id=?", (data.get("assignee_user_id") or "",)).fetchone()
+    data["handover_required"] = inbound_handover_required(data, row_to_dict(assignee) if assignee else None)
     return data
+
+
+def inbound_handover_required(document: Dict[str, Any], assignee: Dict[str, Any] | None) -> bool:
+    """Keep historical names, but flag unresolved work owned by an inactive identity."""
+    if not document.get("assignee_user_id") or document.get("status") in {"closed", "archived", "cancelled"}:
+        return False
+    return not assignee or assignee.get("status") != "啟用" or any(
+        roster_text(assignee.get(field)) != roster_text(document.get(field))
+        for field in ("company_id", "finance_tenant_id")
+    )
+
+
+def normalized_case_due_at(value: Any) -> str:
+    text = roster_text(value)
+    if not text:
+        return ""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?", text):
+        raise ValueError("case_due_at_invalid")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("case_due_at_invalid") from exc
+    return parsed.strftime("%Y-%m-%d") if len(text) == 10 else parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def internal_dispatch_deadline(payload: Dict[str, Any], reply_required: bool) -> Tuple[int, str]:
+    if not reply_required:
+        return 0, ""
+    raw_days = payload.get("reply_due_days", 3)
+    if isinstance(raw_days, bool) or not re.fullmatch(r"\d{1,3}", str(raw_days)):
+        raise ValueError("internal_dispatch_due_days_invalid")
+    days = int(raw_days)
+    if not 1 <= days <= 365:
+        raise ValueError("internal_dispatch_due_days_invalid")
+    due_at = normalized_case_due_at(payload.get("due_at"))
+    return days, due_at or (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def can_access_inbound_document(
@@ -28686,7 +28724,7 @@ def assign_inbound_document(conn: sqlite3.Connection, inbound_id: str, payload: 
         "recipient_department_name": roster_text(assignee.get("unit")),
         "assignee_user_id": assignee_id,
         "assignee_name": assignee.get("name") or "",
-        "due_at": payload.get("due_at") or "",
+        "due_at": normalized_case_due_at(payload.get("due_at")),
         "status": "assigned",
         "mutation_version": current_version + 1,
         "updated_at": now(),
@@ -29228,8 +29266,7 @@ def create_internal_dispatch(conn: sqlite3.Connection, payload: Dict[str, Any], 
             session,
         )
     reply_required = any(recipient_actions)
-    due_days = int(pdf_safe_float(payload.get("reply_due_days"), 0)) if reply_required else 0
-    due_at = payload.get("due_at") or ((datetime.now() + timedelta(days=due_days)).strftime("%Y-%m-%d %H:%M:%S") if due_days else "")
+    due_days, due_at = internal_dispatch_deadline(payload, reply_required)
     row = {
         "id": dispatch_id,
         "official_document_id": official_document_id or None,
@@ -40872,6 +40909,8 @@ def supabase_inbound_document_detail(inbound_id: str, session: Dict[str, Any] | 
         raise PermissionError("inbound_document_view_forbidden")
     row["metadata"] = parse_json_any(row.get("metadata_json"), {}) or {}
     row["attachments"] = supabase_filter_rows("inbound_document_attachments", {"inbound_document_id": inbound_id}, order="created_at.desc", limit=100)
+    assignee_id = row.get("assignee_user_id") or ""
+    row["handover_required"] = inbound_handover_required(row, supabase_get("users", assignee_id) if assignee_id else None)
     return row
 
 
@@ -40985,6 +41024,39 @@ def supabase_inbound_document_download_attachment(
     return document, {**attachment, "object": file_object}, signed
 
 
+def supabase_inbound_related_rows(table: str, column: str, ids: List[str], *, select: str = "*") -> List[Dict[str, Any]]:
+    allowed = {
+        ("inbound_document_attachments", "inbound_document_id"),
+        ("internal_dispatches", "id"),
+        ("users", "id"),
+    }
+    if (table, column) not in allowed:
+        raise ValueError("inbound_related_query_invalid")
+    values = list(dict.fromkeys(str(value) for value in ids if value))
+    result: List[Dict[str, Any]] = []
+    for start in range(0, len(values), 50):
+        chunk = values[start:start + 50]
+        offset = 0
+        seen: set[str] = set()
+        while True:
+            params = {"select": select, column: "in.(" + ",".join(json.dumps(value) for value in chunk) + ")", "order": "id.asc", "limit": "1000", "offset": str(offset)}
+            batch = supabase_request("GET", f"{table}?{urllib.parse.urlencode(params)}")
+            if not isinstance(batch, list):
+                raise RuntimeError("inbound_related_response_invalid")
+            for row in batch:
+                row_id = roster_text(row.get("id"))
+                if not row_id or row_id in seen or row.get(column) not in chunk:
+                    raise RuntimeError("inbound_related_response_invalid")
+                seen.add(row_id)
+                result.append(row)
+            if len(batch) < 1000:
+                break
+            offset += len(batch)
+            if offset > 50000:
+                raise RuntimeError("inbound_related_result_too_large")
+    return result
+
+
 def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = supabase_official_session_user(session)
     scope = inbound_finance_user_scope(user)
@@ -41007,9 +41079,8 @@ def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session:
             {"recipient_user_id": user.get("id") or ""},
             limit=1000,
         )
-        for recipient in recipient_rows:
-            dispatch = supabase_get("internal_dispatches", recipient.get("dispatch_id") or "")
-            if dispatch and dispatch.get("inbound_document_id"):
+        for dispatch in supabase_inbound_related_rows("internal_dispatches", "id", [row.get("dispatch_id") or "" for row in recipient_rows]):
+            if dispatch.get("inbound_document_id"):
                 linked_inbound_ids.add(dispatch["inbound_document_id"])
     scoped: List[Dict[str, Any]] = []
     for row in rows:
@@ -41025,7 +41096,16 @@ def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session:
         if not company_wide:
             if row.get("assignee_user_id") != user.get("id") and row.get("created_by") != user.get("id") and row.get("id") not in linked_inbound_ids:
                 continue
-        scoped.append(supabase_inbound_document_detail(row["id"]))
+        scoped.append(dict(row))
+    attachments = supabase_inbound_related_rows("inbound_document_attachments", "inbound_document_id", [row["id"] for row in scoped])
+    assignees = {row["id"]: row for row in supabase_inbound_related_rows("users", "id", [row.get("assignee_user_id") or "" for row in scoped], select="id,status,company_id,finance_tenant_id")}
+    by_document: Dict[str, List[Dict[str, Any]]] = {}
+    for attachment in attachments:
+        by_document.setdefault(attachment["inbound_document_id"], []).append(attachment)
+    for row in scoped:
+        row["metadata"] = parse_json_any(row.get("metadata_json"), {}) or {}
+        row["attachments"] = sorted(by_document.get(row["id"], []), key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        row["handover_required"] = inbound_handover_required(row, assignees.get(row.get("assignee_user_id") or ""))
     return scoped
 
 
@@ -41179,6 +41259,8 @@ def supabase_atomic_inbound_mutation(
         payload.get("assignee_user_id") or payload.get("user_id")
     ):
         raise ValueError("inbound_assignee_required")
+    if normalized_mutation == "assign":
+        bound["due_at"] = normalized_case_due_at(payload.get("due_at"))
 
     request_sha256 = inbound_mutation_request_sha256(
         normalized_mutation,
@@ -41627,8 +41709,7 @@ def supabase_create_internal_dispatch(payload: Dict[str, Any], session: Dict[str
             session,
         )
     reply_required = any(recipient_actions)
-    due_days = int(pdf_safe_float(payload.get("reply_due_days"), 0)) if reply_required else 0
-    due_at = payload.get("due_at") or ((datetime.now() + timedelta(days=due_days)).strftime("%Y-%m-%d %H:%M:%S") if due_days else "")
+    due_days, due_at = internal_dispatch_deadline(payload, reply_required)
     row = supabase_insert("internal_dispatches", {
         "id": dispatch_id,
         "official_document_id": official_document_id or None,

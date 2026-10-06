@@ -4745,6 +4745,14 @@ tr:last-child td {
   gap: 10px;
 }
 
+.official-detail-grid > div {
+  min-width: 0;
+}
+
+.official-detail-grid dd {
+  overflow-wrap: anywhere;
+}
+
 .official-package-summary {
   display: flex;
   flex-wrap: wrap;
