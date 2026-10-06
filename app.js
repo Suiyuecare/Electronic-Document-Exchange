@@ -203,6 +203,9 @@ let officialStampPositionSeq = 1;
 let officialStampPositions = [createOfficialStampPosition()];
 let selectedOfficialStampPositionId = officialStampPositions[0].id;
 let internalDispatchItems = [];
+let inboundAssigneeCandidates = [];
+let inboundAssigneeLoadGeneration = 0;
+let inboundAssignmentInFlight = false;
 let internalDispatchRecipientDirectory = [];
 let internalDispatchLoadGeneration = 0;
 let internalDispatchLoadStatus = "idle";
@@ -4082,19 +4085,19 @@ function dailyActionItems(limit = 3) {
 
   if (kind === "generalAffairs") {
     scopedInboundDocs()
-      .filter((doc) => ["待登錄", "待分派", "異常待處理"].includes(doc.status))
+      .filter((doc) => doc.handoverRequired || ["待登錄", "待分派", "異常待處理"].includes(doc.status))
       .forEach((doc) => items.push({
         id: `INBOUND-${doc.id}`,
         dedupeKey: `INBOUND-${doc.id}`,
-        tone: doc.status === "異常待處理" ? "issue" : "normal",
+        tone: doc.handoverRequired || doc.status === "異常待處理" ? "issue" : "normal",
         badge: "收文",
         title: doc.subject,
         meta: `${doc.receiveNo} · ${doc.agency}`,
-        body: `${doc.status} · 承辦 ${doc.owner}`,
-        action: doc.status === "待登錄" ? "登錄收文" : doc.status === "待分派" ? "分派承辦" : "處理異常",
+        body: `${doc.handoverRequired ? "承辦待交接" : doc.status} · 承辦 ${doc.owner}`,
+        action: doc.handoverRequired ? "重新分派" : doc.status === "待登錄" ? "登錄收文" : doc.status === "待分派" ? "分派承辦" : "處理異常",
         target: "inbound",
         selectInboundId: doc.id,
-        priority: doc.status === "異常待處理" ? 3 : 2
+        priority: doc.handoverRequired || doc.status === "異常待處理" ? 3 : 2
       }));
     scopedDispatchDocs()
       .filter((doc) => ["交換失敗", "等待確認", "已封裝"].includes(doc.status))
@@ -4366,7 +4369,7 @@ function dashboardRoleData() {
     ] : [
       ["先看簽核", `${pendingWorkflow.length} 件流程待主管核定或退回補正。`],
       ["盯逾期", `${myTracking.filter((item) => ["逾期提醒", "未收確認", "退回補正"].includes(item.status)).length} 件稽催風險需追蹤。`],
-      ["看營運報表", `SLA ${report.slaRate}%、交換健康 ${report.exchangeHealth}。`],
+      ["看營運報表", `流程完成率 ${report.slaRate}%、交換健康 ${report.exchangeHealth}。`],
       ["用印風險", "核准用印會自動押章並留存 PDF 版本與雜湊。"]
     ],
     employee: [
@@ -4489,7 +4492,7 @@ function dashboardRoleData() {
       metrics: [
         ["待簽核", pendingWorkflow.length, "流程核准、退回、改派與會辦"],
         ["逾期風險", overdue.length, overdue.length ? overdue[0].title : "目前無高風險逾期"],
-        ["SLA", `${report.slaRate}%`, "登錄、分派、交換、歸檔"],
+        ["流程完成率", `${report.slaRate}%`, "登錄、分派、交換、歸檔"],
         ["交換健康", report.exchangeHealth, `成功率 ${report.successRate}% / 異常 ${report.exceptionItems.length}`]
       ],
       pipeline: [
@@ -4729,7 +4732,7 @@ function renderSupervisorCommandDashboard() {
   const decision = operationalExceptions.length || stats.overdueItems.length
     ? "今天先處理異常與逾期"
     : "營運穩定，維持簽核節奏";
-  document.querySelector("#supervisorCommandStatus").textContent = `${role} · ${stats.slaRate}% SLA`;
+  document.querySelector("#supervisorCommandStatus").textContent = `${role} · 流程完成 ${stats.slaRate}%`;
   document.querySelector("#supervisorDecisionTitle").textContent = decision;
   document.querySelector("#supervisorDecisionBody").textContent = internalOnly
     ? `目前有 ${riskItems.length} 件需注意、${stats.overdueItems.length} 件逾期。請先確認內容、附件與簽核關卡，再決定核准、退回或改派。`
@@ -4855,7 +4858,7 @@ function rolePerspectiveReviews() {
       evidence: [
         `${supervisorTasks.length} 件主管或主任待簽核/待查核`,
         `${supervisorRisks.length} 件主管風險或逾期項目`,
-        `目前全站 SLA ${stats.slaRate}%、交換成功率 ${stats.successRate}%`
+        `目前已載入資料流程完成率 ${stats.slaRate}%、交換成功率 ${stats.successRate}%`
       ],
       fix: "已補上主管決策面板、風險排序、部門負載與簽核進度快照。",
       action: "看簽核",
@@ -5763,7 +5766,7 @@ async function loadRouteBackendData(target, silent = true, { force = false } = {
         await loadWorkflowDelegations(silent);
         if (workflowProxyLoadState === "error") throw new Error("代理簽核資料暫時無法更新");
       }
-      if (target === "inbound") await Promise.all([loadInboundDocuments(silent), loadInternalDispatches(silent), loadInboundAssigneeCandidates()]);
+      if (target === "inbound") await Promise.all([loadInboundDocuments(silent), loadInternalDispatches(silent, { throwOnError: true }), loadInboundAssigneeCandidates({ throwOnError: true })]);
       if (target === "seals") await loadCompanySealModule(true, { throwOnError: true });
       if (target === "jobs") await syncJobsFromBackend(silent);
       if (target === "database") await syncDatabaseFromBackend(silent);
@@ -6424,6 +6427,8 @@ function clearFrontendSeedRecordsForAuthenticatedSession() {
   });
   officialWorkflowItems = [];
   internalDispatchItems = [];
+  inboundAssigneeCandidates = [];
+  inboundAssigneeLoadGeneration += 1;
   internalDispatchRecipientDirectory = [];
   internalDispatchLoadGeneration += 1;
   internalDispatchLoadStatus = "idle";
@@ -6735,7 +6740,7 @@ function canViewInternalDispatch() {
   return hasAuthenticatedBackendSession() && isRouteAllowed("inbound");
 }
 
-function setInboundSection(section = "records") {
+function setInboundSection(section = "records", { load = true } = {}) {
   const requested = ["records", "archive", "dispatch"].includes(section) ? section : "records";
   inboundSection = requested === "archive" && !canManageInboundOperations()
     ? "records"
@@ -6752,7 +6757,7 @@ function setInboundSection(section = "records") {
     panel.hidden = panel.dataset.inboundSectionPanel !== inboundSection;
   });
   if (inboundSection === "archive") prepareInboundArchiveForm();
-  if (inboundSection === "dispatch") {
+  if (inboundSection === "dispatch" && load) {
     void loadInternalDispatches(true).then(() => markInternalDispatchRead(selectedInternalDispatchId, { silent: true }));
   }
 }
@@ -6887,7 +6892,7 @@ function renderInboundRows() {
       <td data-label="來文單位">${escapeHtml(doc.agency)}<small>${escapeHtml(doc.agencyCode)}</small></td>
       <td data-label="主旨">${escapeHtml(doc.subject)}</td>
       <td data-label="狀態"><span class="badge ${safeHtmlClassToken(badgeClass(doc.status), "info")}">${escapeHtml(doc.status)}</span></td>
-      <td data-label="承辦">${escapeHtml(doc.owner)}<small>${escapeHtml(doc.dept)}</small></td>
+      <td data-label="承辦">${escapeHtml(doc.owner)}<small>${escapeHtml(doc.dept)}</small>${doc.handoverRequired ? `<span class="badge danger">待交接</span>` : ""}${doc.dueDate ? `<small>${caseIsOverdue(doc.dueDate) && !["結案", "已歸檔", "已取消"].includes(doc.status) ? "逾期 · " : "期限 · "}${escapeHtml(doc.dueDate)}</small>` : ""}</td>
     </tr>
   `).join("");
 
@@ -6934,14 +6939,15 @@ function inboundDetailMarkup(doc) {
         <div><dt>承辦</dt><dd>${escapeHtml(doc.dept || "未分派")} / ${escapeHtml(doc.owner || "未指派")}</dd></div>
       </dl>
       <p>${escapeHtml(note)}</p>
+      ${doc.handoverRequired ? `<p class="status-pill danger" role="status">原承辦已停用或移出單位，請重新分派；原承辦與處理歷程仍會保留。</p>` : ""}
       <div class="attachment-list">
         ${attachments.length ? attachments.map((file) => `<button class="file-chip" type="button" data-file="${escapeHtml(inboundAttachmentName(file))}" data-inbound-attachment-id="${escapeHtml(inboundAttachmentId(file))}">${escapeHtml(inboundAttachmentName(file))}</button>`).join("") : `<span class="empty-text">尚無附件。</span>`}
       </div>
       <div class="detail-actions">
         ${doc.status === "待登錄" && canManageInboundOperations() ? `<button class="primary-button" type="button" data-inbound-action="register">登錄</button>` : ""}
-        ${["待分派", "異常待處理"].includes(doc.status) && canManageInboundOperations() ? `<button class="secondary-button" type="button" data-inbound-action="assign">分派承辦</button>` : ""}
-        ${canCreateInternalDispatch() ? `<button class="secondary-button" type="button" data-inbound-action="internal-dispatch">內部派發</button>` : ""}
-        ${canManageInboundOperations() ? `<button class="secondary-button" type="button" data-inbound-action="exception">誤送／漏送</button>` : ""}
+        ${["待分派", "異常待處理", "已收文"].includes(doc.status) && canManageInboundOperations() ? `<button class="secondary-button" type="button" data-inbound-action="assign">${doc.assigneeUserId ? "重新分派" : "分派承辦"}</button>` : ""}
+        ${canCreateInternalDispatch() && !["待登錄", "結案", "已歸檔", "已取消"].includes(doc.status) ? `<button class="secondary-button" type="button" data-inbound-action="internal-dispatch">派發並追蹤回覆</button>` : ""}
+        ${canManageInboundOperations() && !["待登錄", "結案", "已歸檔", "已取消"].includes(doc.status) ? `<button class="secondary-button" type="button" data-inbound-action="exception">誤送／漏送</button>` : ""}
         <button class="secondary-button" type="button" data-inbound-action="export">匯出</button>
       </div>
       ${renderDocumentAclPanel(doc)}
@@ -6963,24 +6969,81 @@ function bindInboundDetailActions(container, doc) {
       button.disabled = true;
       let completed = true;
       if (action === "register") completed = await registerInbound([doc.id]);
-      if (action === "assign") completed = await assignInbound([doc.id]);
+      if (action === "assign") {
+        closeInboundModal();
+        prepareInboundAssignment(doc);
+      }
       if (action === "internal-dispatch") {
-        setInboundSection("dispatch");
-        window.setTimeout(() => {
-          const select = document.querySelector("#internalDispatchDocumentSelect");
-          if (select) select.value = doc.id;
-        }, 80);
+        closeInboundModal();
+        setInboundSection("dispatch", { load: false });
+        await prepareInternalDispatchForInbound(doc);
       }
       if (action === "exception") completed = await createInboundException([doc.id], document.querySelector("#exceptionType").value);
       if (action === "export") {
-        addInboundAudit("匯出收文清單", `已匯出 ${filteredInboundDocs().length} 筆目前篩選資料。`);
-        showToast("已產生收文清單匯出檔。");
+        exportFilteredInboundCsv();
       }
-      if (["register", "assign", "exception"].includes(action) && completed) openInboundModal(doc.id);
+      if (["register", "exception"].includes(action) && completed) openInboundModal(doc.id);
       if (button.isConnected) button.disabled = false;
     });
   });
   bindDocumentAclButtons(doc, renderInboundDetail);
+}
+
+function inboundCsvCell(value) {
+  const text = String(value ?? "");
+  const safe = /^[\s]*[=+@-]/.test(text) ? `'${text}` : text;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+
+function inboundTodayDateValue() {
+  const today = new Date();
+  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+}
+
+function exportFilteredInboundCsv() {
+  const rows = filteredInboundDocs();
+  if (!rows.length) return showToast("目前沒有可匯出的收文。");
+  const columns = ["收文號", "來文單位", "主旨", "狀態", "承辦", "部門", "期限", "待交接"];
+  const content = [columns.map(inboundCsvCell).join(","), ...rows.map((doc) => [doc.receiveNo, doc.agency, doc.subject, doc.status, doc.owner, doc.dept, doc.dueDate, doc.handoverRequired ? "是" : "否"].map(inboundCsvCell).join(","))].join("\r\n");
+  downloadTextFile(`收文清單-${inboundTodayDateValue()}.csv`, `\uFEFF${content}`, "text/csv;charset=utf-8");
+  addInboundAudit("匯出收文清單", `已匯出 ${rows.length} 筆目前權限與篩選範圍內資料。`);
+  showToast(`已下載 ${rows.length} 筆收文清單。`);
+}
+
+function prepareInboundAssignment(doc) {
+  selectedInboundId = doc.id;
+  const form = document.querySelector("#assignForm");
+  const disclosure = form?.closest("details");
+  if (disclosure) disclosure.open = true;
+  const owner = document.querySelector("#assignOwner");
+  const due = document.querySelector("#assignDueDate");
+  if (owner) owner.value = inboundAssigneeCandidates.some((item) => item.id === doc.assigneeUserId) ? doc.assigneeUserId : "";
+  if (due) due.value = isValidFutureOrToday(String(doc.dueDate || "").slice(0, 10)) ? doc.dueDate.slice(0, 10) : inboundTodayDateValue();
+  form?.scrollIntoView({ behavior: "smooth", block: "center" });
+  owner?.focus({ preventScroll: true });
+}
+
+async function prepareInternalDispatchForInbound(doc) {
+  const scope = frontendSessionScope();
+  try {
+    await loadInternalDispatches(true, { throwOnError: true });
+  } catch (_error) {
+    showToast("派發名冊尚未載入，請重新整理派發清單後再試。");
+    return false;
+  }
+  if (frontendSessionScope() !== scope || !hasAuthenticatedBackendSession()) return false;
+  const select = document.querySelector("#internalDispatchDocumentSelect");
+  if (select) select.value = doc.id;
+  const title = document.querySelector("#internalDispatchTitleInput");
+  const body = document.querySelector("#internalDispatchBodyInput");
+  if (title) title.value = doc.subject || "內部公文派發";
+  if (body) body.value = doc.note || "請依派發要求辦理並回覆處理結果。";
+  document.querySelectorAll(".internal-dispatch-recipient-check").forEach((checkbox) => {
+    checkbox.checked = checkbox.value === doc.assigneeUserId;
+    const action = document.querySelector(`[data-recipient-action-for="${CSS.escape(checkbox.value)}"]`);
+    if (action) { action.value = "required"; action.disabled = !checkbox.checked; }
+  });
+  title?.focus({ preventScroll: true });
 }
 
 function renderInboundDetail() {
@@ -7056,6 +7119,7 @@ function mapBackendInboundDocument(row = {}) {
     status: statusLabel,
     owner: row.assignee_name || "待指派",
     assigneeUserId: row.assignee_user_id || "",
+    handoverRequired: row.handover_required === true,
     dept: row.recipient_department_name || "待分派",
     departmentId: row.recipient_department_id || "",
     receivedAt: metadata.received_date || row.created_at || "",
@@ -7592,39 +7656,46 @@ async function saveInboundRegistrationDraft() {
 }
 
 function inboundAssigneeBySelection(value = document.querySelector("#assignOwner")?.value || "") {
-  return workflowProxyCandidates.find((candidate) => candidate.id === value) || null;
+  return inboundAssigneeCandidates.find((candidate) => candidate.id === value) || null;
 }
 
 function renderInboundAssigneeOptions() {
   const select = document.querySelector("#assignOwner");
   if (!select) return;
   const previous = select.value;
-  const candidates = workflowProxyCandidates.filter((candidate) => candidate?.id && candidate?.name);
+  const candidates = inboundAssigneeCandidates.filter((candidate) => candidate?.id && candidate?.name);
   select.innerHTML = candidates.length
-    ? `<option value="">請選擇承辦人</option>${candidates.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(workflowProxyPersonLabel(candidate.id))}</option>`).join("")}`
+    ? `<option value="">請選擇承辦人</option>${candidates.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(`${candidate.name} · ${candidate.unit || "未設定單位"}`)}</option>`).join("")}`
     : `<option value="">Finance 人員名冊尚未載入</option>`;
   if (candidates.some((candidate) => candidate.id === previous)) select.value = previous;
   select.disabled = !canManageInboundOperations() || !candidates.length;
 }
 
-async function loadInboundAssigneeCandidates() {
+async function loadInboundAssigneeCandidates({ throwOnError = false } = {}) {
+  const scope = frontendSessionScope();
+  const generation = ++inboundAssigneeLoadGeneration;
   if (!hasAuthenticatedBackendSession() || !canManageInboundOperations()) {
-    workflowProxyCandidates = [];
+    inboundAssigneeCandidates = [];
     renderInboundAssigneeOptions();
     return;
   }
   try {
-    const directory = await backendRequest("/workflow-delegations/candidates");
-    if (!Array.isArray(directory?.users)) throw new Error("Finance 人員名冊格式不正確");
-    workflowProxyCandidates = directory.users.filter((candidate) => candidate?.id && candidate?.name);
+    const directory = await backendRequest("/internal-dispatches/recipients");
+    if (!hasAuthenticatedBackendSession() || frontendSessionScope() !== scope || generation !== inboundAssigneeLoadGeneration) return;
+    if (!Array.isArray(directory)) throw new Error("Finance 人員名冊格式不正確");
+    inboundAssigneeCandidates = directory.filter((candidate) => candidate?.id && candidate?.name);
   } catch (error) {
-    workflowProxyCandidates = [];
-    console.warn("inbound assignee directory load failed", error);
+    if (frontendSessionScope() !== scope || generation !== inboundAssigneeLoadGeneration) return;
+    inboundAssigneeCandidates = [];
+    renderInboundAssigneeOptions();
+    console.warn("inbound assignee directory load failed");
+    if (throwOnError) throw error;
   }
   renderInboundAssigneeOptions();
 }
 
 async function assignInbound(ids) {
+  if (inboundAssignmentInFlight) return false;
   if (!canManageInboundOperations()) return showToast("目前帳號沒有收文分派權限。");
   const targetIds = ids?.length ? ids : selectedInboundDocs().map((doc) => doc.id);
   if (!targetIds.length) return showToast("請先選取要分派的收文。");
@@ -7634,13 +7705,16 @@ async function assignInbound(ids) {
   const dueDate = document.querySelector("#assignDueDate").value;
   if (!owner) return blockOperation("請先選擇承辦人。", addInboundAudit, "收文分派防呆");
   if (!isValidFutureOrToday(dueDate)) return blockOperation("辦理期限不可空白，也不可早於今天。", addInboundAudit, "收文分派防呆");
-  const invalidStatus = targetDocs.find((doc) => !["待分派", "異常待處理"].includes(doc.status));
-  if (invalidStatus) return blockOperation(`${invalidStatus.no} 目前狀態為「${invalidStatus.status}」，不可直接分派。`, addInboundAudit, "收文分派防呆");
+  const invalidStatus = targetDocs.find((doc) => !["待分派", "異常待處理", "已收文"].includes(doc.status));
+  if (invalidStatus) return blockOperation(`${invalidStatus.receiveNo} 目前狀態為「${invalidStatus.status}」，不可直接分派。`, addInboundAudit, "收文分派防呆");
   const denied = targetDocs.filter((doc) => !canUseDocAction(doc, "sign"));
   if (denied.length) return showToast("此角色未取得部分收文的分派/簽核權限。");
   const hasSensitive = targetDocs.some((doc) => doc.security && doc.security !== "普通");
   if ((targetDocs.length > 3 || hasSensitive) && !confirmOperation("確認收文分派", `即將分派 ${targetDocs.length} 筆收文給 ${owner}${hasSensitive ? "，其中包含密件或限閱文件" : ""}。`)) return;
   let completed = 0;
+  inboundAssignmentInFlight = true;
+  const submitButton = document.querySelector("#assignForm button[type=submit]");
+  if (submitButton) submitButton.disabled = true;
   try {
     for (const doc of targetDocs) {
       if (!Number.isInteger(doc.version) || doc.version < 1) throw new Error(`${doc.receiveNo} 缺少後端版本資訊，請重新整理後再試。`);
@@ -7665,6 +7739,9 @@ async function assignInbound(ids) {
     showToast(inboundMutationFailureMessage(error));
     if (completed) addInboundAudit("部分收文已分派", `已完成 ${completed} 筆，其餘保留待重試。`);
     return false;
+  } finally {
+    inboundAssignmentInFlight = false;
+    if (submitButton) submitButton.disabled = false;
   }
 }
 
@@ -10092,7 +10169,8 @@ const officialStatusLabels = {
   dispatched: "已由總務正式發文",
   sent_by_applicant: "已由申請人自行寄出",
   closed: "已結案歸檔",
-  rejected: "已駁回",
+  rejected: "退回補正",
+  declined: "不通過（已終止）",
   cancelled: "已取消",
   stamping_failed: "用印失敗"
 };
@@ -10998,6 +11076,9 @@ function officialHumanProgress(item = {}) {
   if (status === "rejected") {
     return { owner: `${applicant}（補正）`, waiting: workflowWaitDuration(item.updated_at), next: "補正完成後重新由第一關簽核" };
   }
+  if (status === "declined") {
+    return { owner: "案件不通過，已終止", waiting: "不再計時", next: "可查看原稿、簽核原因與歷程" };
+  }
   if (status === "cancelled") {
     return { owner: "流程已取消", waiting: "不再計時", next: "如需辦理請建立新申請" };
   }
@@ -11147,6 +11228,7 @@ function renderOfficialFinalStampedDownload(item = {}) {
   const label = electronic ? "已核准電子公文" : "最終用印檔";
   const documentId = escapeDraftHtml(item.id || "");
   if (!file) {
+    if (item.current_status === "declined") return `<section class="official-final-download pending" data-final-stamped-download><div><span>案件已終止</span><strong>不通過，不產生用印／寄發檔</strong><p>原稿、附件及簽核原因仍可於本案查看。</p></div></section>`;
     const missingLockedFile = Boolean(item.stamped_file_id || item.stampedFileId);
     return `
       <section class="official-final-download pending" data-final-stamped-download>
@@ -11190,7 +11272,7 @@ function renderOfficialStepRows(item, steps) {
       <time>${escapeHtml(step.step_order)}</time>
       <div>
         <strong>${escapeHtml(step.step_name)}</strong>
-        <span>${escapeHtml(officialApprovalStepActor(step).label)} · ${escapeHtml(({ approved: "已通過", rejected: "已退回", cancelled: "本輪已取消", skipped: "本輪已取消", pending: step.step_key === item.current_step ? "待處理" : "待後續" })[step.status] || step.status)}</span>
+        <span>${escapeHtml(officialApprovalStepActor(step).label)} · ${escapeHtml(({ approved: "已通過", rejected: item.current_status === "declined" ? "不通過" : "退回補正", cancelled: "本輪已取消", skipped: "本輪已取消", pending: step.step_key === item.current_step ? "待處理" : "待後續" })[step.status] || step.status)}</span>
         ${officialApprovalStepActor(step).delegated ? `<small>${escapeHtml(officialApprovalStepActor(step).delegated)}</small>` : ""}
         ${step.comment ? `<small>${escapeHtml(step.comment)}</small>` : ""}
       </div>
@@ -11209,7 +11291,7 @@ function renderOfficialApprovalHistory(item) {
   if (!rows.length) return "";
   const generations = [...new Set(rows.map((step) => Number(step.workflow_generation || 1)))].sort((left, right) => right - left);
   const stepGenerations = new Map(rows.map((step) => [step.id, Number(step.workflow_generation || 1)]));
-  const changes = (item.logs || item.process_logs || []).filter((log) => ["submit", "resubmit", "return_previous", "add_sign", "withdraw", "reject"].includes(log.action));
+  const changes = (item.logs || item.process_logs || []).filter((log) => ["submit", "resubmit", "return_previous", "add_sign", "withdraw", "reject", "decline"].includes(log.action));
   return `<details class="official-approval-history"><summary>完整簽核歷程（${generations.length} 輪）</summary>${generations.map((generation) => {
     const steps = rows.filter((step) => Number(step.workflow_generation || 1) === generation).sort((left, right) => Number(left.step_order || 0) - Number(right.step_order || 0));
     const events = changes.filter((log) => {
@@ -11226,7 +11308,7 @@ function renderOfficialLogs(logs = [], emptyText = "尚無紀錄。") {
     <article class="timeline-item">
       <time datetime="${escapeHtml(log.created_at || "")}">${escapeHtml(log.created_at || "時間未記錄")}</time>
       <div>
-        <strong>${escapeHtml(({ submit: "送出簽核", resubmit: "重新送簽", approve: "通過", reject: "退回申請人", return_previous: "退回上一關", add_sign: "通過並加簽", withdraw: "申請人抽單" })[log.action] || log.action)} · ${escapeHtml(log.actor_name || "")}</strong>
+        <strong>${escapeHtml(({ submit: "送出簽核", resubmit: "重新送簽", approve: "通過", reject: "退回補正", return_previous: "退回上一關", add_sign: "通過並加簽", withdraw: "申請人抽單", decline: "不通過（終止案件）" })[log.action] || log.action)} · ${escapeHtml(log.actor_name || "")}</strong>
         <p>${escapeHtml(log.comment || log.file_id || "")}</p>
       </div>
     </article>
@@ -11298,18 +11380,18 @@ function renderOfficialDispatchInfo(item = {}) {
 }
 
 function officialDocumentAvailableActions(item) {
-  const supported = ["approve", "reject", "return-previous", "add-sign", "withdraw"];
+  const supported = ["approve", "reject", "return-previous", "add-sign", "withdraw", "decline"];
   if (Array.isArray(item?.available_actions)) return item.available_actions.filter((action) => supported.includes(action));
   return item?.can_act === true ? ["approve", "reject"] : [];
 }
 
 function officialWorkflowActionLabel(action) {
-  return ({ approve: "通過", reject: "退回申請人", "return-previous": "退回上一關", "add-sign": "通過並加簽", withdraw: "抽單" })[action] || "簽核";
+  return ({ approve: "通過", reject: "退回補正", "return-previous": "退回上一關", "add-sign": "通過並加簽", withdraw: "抽單", decline: "不通過（終止案件）" })[action] || "簽核";
 }
 
 function renderOfficialWorkflowActionButtons(item, source = "workflow") {
-  const ids = { approve: "officialApproveBtn", reject: "officialRejectBtn", "return-previous": "officialReturnPreviousBtn", "add-sign": "officialAddSignBtn", withdraw: "officialWithdrawBtn" };
-  return officialDocumentAvailableActions(item).map((action) => `<button class="${action === "approve" ? "primary-button" : "secondary-button"}" type="button" ${source === "workflow" ? `id="${ids[action]}"` : ""} data-progress-official-action="${action}" data-progress-official-id="${escapeDraftHtml(item.id)}">${officialWorkflowActionLabel(action)}</button>`).join("");
+  const ids = { approve: "officialApproveBtn", reject: "officialRejectBtn", "return-previous": "officialReturnPreviousBtn", "add-sign": "officialAddSignBtn", withdraw: "officialWithdrawBtn", decline: "officialDeclineBtn" };
+  return officialDocumentAvailableActions(item).map((action) => `<button class="${action === "approve" ? "primary-button" : "secondary-button"}${action === "decline" ? " official-decline-button" : ""}" type="button" ${source === "workflow" ? `id="${ids[action]}"` : ""} data-progress-official-action="${action}" data-progress-official-id="${escapeDraftHtml(item.id)}">${officialWorkflowActionLabel(action)}</button>`).join("");
 }
 
 function renderOfficialWorkflowDetail() {
@@ -12129,9 +12211,9 @@ function markOfficialDecisionEvidenceReviewed(kind) {
     attachments: "#officialReviewAttachments",
     editor: "#officialReviewEdited"
   }[kind];
-  if (checkbox && kind === "application") {
+  if (checkbox) {
     const node = document.querySelector(checkbox);
-    if (node) node.checked = true;
+    if (node) { node.disabled = false; node.checked = false; }
   }
   const button = document.querySelector(`[data-decision-evidence="${kind}"]`);
   if (button) {
@@ -12160,7 +12242,7 @@ function updateOfficialDecisionSubmitAvailability() {
     submit.disabled = !(fullDetailReady && evidenceReady && categoryReady && commentReady && (!dueDate || isValidFutureOrToday(dueDate)));
     return;
   }
-  const commentReady = (document.querySelector("#officialApprovalComment")?.value.trim().length || 0) >= 2;
+  const commentReady = (document.querySelector("#officialApprovalComment")?.value.trim().length || 0) >= (action === "decline" ? 6 : 2);
   const targetReady = action !== "add-sign" || (officialDecisionState.candidates || []).some((person) => person.id === document.querySelector("#officialAddSignPerson")?.value);
   submit.disabled = !(fullDetailReady && evidenceReady && commentReady && targetReady);
 }
@@ -12247,7 +12329,7 @@ function trapOfficialDecisionFocus(event) {
 
 async function openOfficialDecisionDialog(item, action, source = "workflow") {
   const openScope = frontendSessionScope();
-  if (!item?.id || !["approve", "reject", "return-previous", "add-sign", "withdraw"].includes(action)) return showToast("找不到可處理的簽核案件。");
+  if (!item?.id || !["approve", "reject", "return-previous", "add-sign", "withdraw", "decline"].includes(action)) return showToast("找不到可處理的簽核案件。");
   if (!officialDocumentDetailReady.has(item.id)) {
     showToast("正在載入完整申請資料與附件，完成後才能作成決定。");
     try {
@@ -12274,15 +12356,17 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
     error.hidden = true;
     error.textContent = "";
   }
-  const isApprove = ["approve", "return-previous", "add-sign"].includes(action);
-  document.querySelector("#officialApprovalCommentLabel").textContent = action === "return-previous" ? "退回上一關原因" : action === "add-sign" ? "通過與加簽意見" : "核准意見";
-  document.querySelector("#officialApprovalComment").placeholder = action === "return-previous" ? "請說明需要前一關重新審核的原因（至少 2 個字）" : "請填寫核准判斷或注意事項（至少 2 個字）";
+  const isApprove = ["approve", "return-previous", "add-sign", "decline"].includes(action);
+  approval.querySelector("h4").textContent = action === "decline" ? "確認不通過" : "簽核前確認";
+  document.querySelector("#officialApprovalCommentLabel").textContent = action === "decline" ? "不通過原因" : action === "return-previous" ? "退回上一關原因" : action === "add-sign" ? "通過與加簽意見" : "核准意見";
+  document.querySelector("#officialApprovalComment").minLength = action === "decline" ? 6 : 2;
+  document.querySelector("#officialApprovalComment").placeholder = action === "decline" ? "請說明終止案件的原因（至少 6 個字）" : action === "return-previous" ? "請說明需要前一關重新審核的原因（至少 2 個字）" : "請填寫核准判斷或注意事項（至少 2 個字）";
   approval.hidden = !isApprove;
   rejection.hidden = action !== "reject";
   approval.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = !isApprove; });
   rejection.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = action !== "reject"; });
   const actionFields = document.querySelector("#officialWorkflowActionFields");
-  actionFields.hidden = !["return-previous", "add-sign", "withdraw"].includes(action);
+  actionFields.hidden = !["return-previous", "add-sign", "withdraw", "decline"].includes(action);
   document.querySelector("#officialAddSignPersonLabel").hidden = action !== "add-sign";
   document.querySelector("#officialAddSignPerson").disabled = action !== "add-sign";
   document.querySelector("#officialAddSignPerson").innerHTML = '<option value="">載入可加簽人員中…</option>';
@@ -12291,7 +12375,8 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   const previous = item.workflow_action_context?.previous_step;
   document.querySelector("#officialWorkflowActionExplanation").textContent = action === "add-sign"
     ? "會通過目前這一關，接著交給指定人員加簽；加簽通過後繼續後續流程。"
-    : action === "return-previous" ? `退回${[previous?.name, previous?.approver_name].filter(Boolean).join(" · ") || "上一關"}重新審核，不會退回申請人修改文件。`
+    : action === "decline" ? "案件將終止，不能補正、重新送簽或用印。若只需修改內容，請改用「退回補正」。"
+      : action === "return-previous" ? `退回${[previous?.name, previous?.approver_name].filter(Boolean).join(" · ") || "上一關"}重新審核，不會退回申請人修改文件。`
       : "抽單後停止本輪簽核並回到草稿；既有簽核與抽單紀錄會保留。";
   document.querySelector("#officialDecisionEvidence").hidden = action === "withdraw";
   ["#officialReviewOriginal", "#officialReviewAttachments", "#officialReviewEdited"].forEach((selector) => {
@@ -12300,6 +12385,7 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   });
   document.querySelector("#officialDecisionModalTitle").textContent = `確認${officialWorkflowActionLabel(action)}`;
   document.querySelector("#officialDecisionSubmitBtn").textContent = `確認${officialWorkflowActionLabel(action)}`;
+  document.querySelector("#officialDecisionSubmitBtn").classList.toggle("official-decline-button", action === "decline");
   document.querySelector("#officialDecisionSubmitBtn").disabled = true;
   const dueDate = document.querySelector("#officialCorrectionDueDate");
   if (dueDate) {
@@ -12321,7 +12407,7 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   syncWorkspaceOverlayIsolation();
   updateOfficialDecisionSubmitAvailability();
   if (action === "add-sign") void loadOfficialAddSignCandidates(item.id, officialDecisionState.operationId);
-  const initialFocus = document.querySelector(action === "withdraw" ? "#officialWithdrawComment" : "[data-decision-evidence]:not([disabled])");
+  const initialFocus = document.querySelector(action === "decline" ? "#officialDecisionCancelBtn" : action === "withdraw" ? "#officialWithdrawComment" : "[data-decision-evidence]:not([disabled])");
   (initialFocus || workspaceModalFocusableItems(modal)[0] || modal).focus({ preventScroll: true });
 }
 
@@ -12372,7 +12458,7 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
       renderApprovalLog();
     }
     refreshDashboardWorkEntryPoints();
-    showToast(({ approve: "已完成核准並保存檢閱證據。", reject: "已退回申請人補正。", "return-previous": "已退回上一關重新審核。", "add-sign": "已通過本關並交由指定人員加簽。", withdraw: "已抽單並保留簽核歷程，可重新編輯草稿。" })[action]);
+    showToast(({ approve: "已完成核准並保存檢閱證據。", reject: "已退回申請人補正。", "return-previous": "已退回上一關重新審核。", "add-sign": "已通過本關並交由指定人員加簽。", withdraw: "已抽單並保留簽核歷程，可重新編輯草稿。", decline: "案件不通過，已終止並通知申請人。" })[action]);
     return true;
   } catch (error) {
     if (scope !== frontendSessionScope()) return false;
@@ -12397,6 +12483,8 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
         : "案件已更新，但最新完整資料尚未載入。請重新整理後再檢閱；目前不開放簽核，系統未重送本次操作。");
       return false;
     }
+    const notice = document.querySelector("#officialDecisionError");
+    if (notice && officialDecisionState.documentId === item.id) { notice.hidden = false; notice.textContent = error.message || "簽核操作失敗，輸入已保留，請稍後重試。"; }
     showToast(error.message || "簽核操作失敗。");
     return false;
   }
@@ -12428,7 +12516,7 @@ async function submitOfficialDecision(event) {
   const integrity = officialDecisionIntegrity(item);
   const reviewAcknowledgements = officialDecisionReviewAcknowledgements();
   let payload;
-  if (["approve", "return-previous", "add-sign"].includes(action)) {
+  if (["approve", "return-previous", "add-sign", "decline"].includes(action)) {
     const comment = document.querySelector("#officialApprovalComment")?.value.trim() || "";
     if (!Object.values(reviewAcknowledgements).every(Boolean)) {
       if (error) {
@@ -12437,10 +12525,10 @@ async function submitOfficialDecision(event) {
       }
       return;
     }
-    if (comment.length < 2) {
+    if (comment.length < (action === "decline" ? 6 : 2)) {
       if (error) {
         error.hidden = false;
-        error.textContent = "請填寫至少 2 個字的核准意見，留下本次判斷依據。";
+        error.textContent = action === "decline" ? "請填寫至少 6 個字的不通過原因。" : "請填寫至少 2 個字的核准意見，留下本次判斷依據。";
       }
       document.querySelector("#officialApprovalComment")?.focus();
       return;
@@ -12496,7 +12584,7 @@ async function submitOfficialDecision(event) {
       review_acknowledgements: reviewAcknowledgements
     };
   }
-  if (["return-previous", "add-sign", "withdraw"].includes(action)) Object.assign(payload, { operation_id: operationId, expected_step_id: expectedStepId });
+  if (["return-previous", "add-sign", "withdraw", "decline"].includes(action)) Object.assign(payload, { operation_id: operationId, expected_step_id: expectedStepId });
   officialDecisionState.busy = true;
   if (submit) submit.disabled = true;
   const ok = await mutateOfficialDocument(action, payload, item, source);
@@ -12665,6 +12753,8 @@ function internalDispatchStatusLabel(status = "") {
     sent: "已派發",
     pending: "待回文",
     reply_completed: "已完成回文",
+    completed: "已完成回文",
+    not_required: "無需回覆",
     closed: "已結案",
     cancelled: "已取消"
   }[status] || status || "未建立";
@@ -12903,7 +12993,7 @@ function renderInternalDispatchDetail() {
         <div><dt>建立者</dt><dd>${escapeDraftHtml(item.sender_name || "未記錄")}</dd></div>
         <div><dt>處理要求</dt><dd>${requiredRecipients.length ? `${requiredRecipients.length} 人需要處理` : "全部僅供知悉"}</dd></div>
         <div><dt>期限</dt><dd>${escapeHtml(item.due_at || "未設定")}</dd></div>
-        <div><dt>回文狀態</dt><dd>${escapeHtml(item.reply_status || "未建立")}</dd></div>
+        <div><dt>回文狀態</dt><dd>${escapeHtml(internalDispatchStatusLabel(item.reply_status))}</dd></div>
       </div>
       ${linkedInbound ? `
         <div class="internal-dispatch-source-document">
@@ -13052,7 +13142,7 @@ async function performCreateInternalDispatchFromForm() {
   });
   const replyRequired = recipients.some((recipient) => recipient.action_required);
   const dueDays = Number(document.querySelector("#internalDispatchDueDaysInput")?.value || 0);
-  if (replyRequired && dueDays < 1) return showToast("有人需要處理時，期限天數至少為 1 天。");
+  if (replyRequired && (!Number.isInteger(dueDays) || dueDays < 1 || dueDays > 365)) return showToast("回覆期限請填 1–365 天的整數。");
   try {
     const result = await backendRequest("/internal-dispatches", {
       method: "POST",
@@ -16881,6 +16971,26 @@ function addReportsAudit(title, body) {
   renderReportsAuditLog();
 }
 
+function caseDueTimestamp(value) {
+  const text = String(value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$/.test(text)) return NaN;
+  const timestamp = Date.parse(text.length === 10 ? `${text}T23:59:59` : text.replace(" ", "T"));
+  if (!Number.isFinite(timestamp)) return NaN;
+  const parsed = new Date(timestamp);
+  const [year, month, day] = text.slice(0, 10).split("-").map(Number);
+  return parsed.getFullYear() === year && parsed.getMonth() + 1 === month && parsed.getDate() === day ? timestamp : NaN;
+}
+
+function caseIsOverdue(value) {
+  const deadline = caseDueTimestamp(value);
+  return Number.isFinite(deadline) && deadline < Date.now();
+}
+
+function internalDispatchPendingRecipients(item) {
+  if (["closed", "cancelled", "reply_completed"].includes(item.status)) return [];
+  return (item.recipients || []).filter((recipient) => Boolean(recipient.action_required) && !["replied", "closed", "cancelled"].includes(recipient.status));
+}
+
 function reportStats() {
   const inboundCount = inboundDocs.length;
   const dispatchCount = dispatchDocs.length;
@@ -16896,35 +17006,41 @@ function reportStats() {
     ...trackingCases.filter((doc) => ["未收確認", "退回補正"].includes(doc.status)).map((doc) => ({ type: doc.status, title: doc.title, owner: doc.owner }))
   ];
   const overdueItems = [
-    ...trackingCases.filter((doc) => ["逾期提醒", "未收確認", "退回補正"].includes(doc.status)).map((doc) => ({ id: doc.id, title: doc.title, owner: doc.owner, dueDate: doc.dueDate, status: doc.status })),
-    ...workflowTasks.filter((task) => /待|退回/.test(task.status)).map((task) => ({ id: task.id, title: task.title, owner: task.role, dueDate: "依流程期限", status: task.status }))
+    ...trackingCases.filter((doc) => !/完成|結案|取消/.test(doc.status) && caseIsOverdue(doc.dueDate)).map((doc) => ({ id: doc.id, title: doc.title, owner: doc.owner, dueDate: doc.dueDate, status: doc.status })),
+    ...workflowTasks.filter((task) => /待|退回/.test(task.status) && caseIsOverdue(task.dueDate || task.due_at)).map((task) => ({ id: task.id, title: task.title, owner: task.role, dueDate: task.dueDate || task.due_at, status: task.status })),
+    ...inboundDocs.filter((doc) => !["結案", "已歸檔", "已取消"].includes(doc.status) && caseIsOverdue(doc.dueDate)).map((doc) => ({ id: doc.id, title: doc.subject, owner: doc.owner, dueDate: doc.dueDate, status: "收文逾期" })),
+    ...internalDispatchItems.filter((item) => internalDispatchPendingRecipients(item).length && caseIsOverdue(item.due_at)).map((item) => ({ id: item.id, title: item.subject || item.title, owner: internalDispatchPendingRecipients(item).map((recipient) => recipient.recipient_name).filter(Boolean).join("、"), dueDate: item.due_at, status: "回覆逾期" }))
   ];
+  const replyPendingCount = internalDispatchItems.filter((item) => internalDispatchPendingRecipients(item).length).length;
+  const handoverItems = inboundDocs.filter((doc) => doc.handoverRequired);
   const owners = [...new Set([
     ...inboundDocs.map((doc) => doc.owner),
     ...dispatchDocs.map((doc) => doc.owner),
     ...workflowTasks.map((task) => task.role),
-    ...trackingCases.map((doc) => doc.owner)
+    ...trackingCases.map((doc) => doc.owner),
+    ...internalDispatchItems.flatMap((item) => internalDispatchPendingRecipients(item).map((recipient) => recipient.recipient_name))
   ])].filter(Boolean);
   const ownerRows = owners.map((owner) => ({
     owner,
     inbound: inboundDocs.filter((doc) => doc.owner === owner).length,
     dispatch: dispatchDocs.filter((doc) => doc.owner === owner).length,
-    pending: workflowTasks.filter((task) => task.role === owner && /待|退回/.test(task.status)).length,
+    pending: workflowTasks.filter((task) => task.role === owner && /待|退回/.test(task.status)).length + internalDispatchItems.filter((item) => internalDispatchPendingRecipients(item).some((recipient) => recipient.recipient_name === owner)).length,
     overdue: overdueItems.filter((item) => item.owner === owner).length
   }));
   const slaRows = [
-    { name: "收文登錄", target: "2 小時內", done: inboundDocs.filter((doc) => !/待登錄/.test(doc.status)).length, total: inboundDocs.length },
-    { name: "分派承辦", target: "當日完成", done: inboundDocs.filter((doc) => !/待分派/.test(doc.status)).length, total: inboundDocs.length },
-    { name: "發文交換", target: "清稿後當日", done: dispatchDocs.filter((doc) => ["交換完成", "等待確認"].includes(doc.status)).length, total: dispatchDocs.length },
-    { name: "歸檔雜湊", target: "交換後 1 日", done: archiveRecords.filter((doc) => doc.hashStatus === "雜湊通過").length, total: archiveRecords.length }
+    { name: "收文登錄", target: "已登錄比例", done: inboundDocs.filter((doc) => !/待登錄/.test(doc.status)).length, total: inboundDocs.length },
+    { name: "分派承辦", target: "有效承辦比例", done: inboundDocs.filter((doc) => doc.assigneeUserId && !doc.handoverRequired).length, total: inboundDocs.length },
+    { name: "發文交換", target: "完成交換比例", done: dispatchDocs.filter((doc) => doc.status === "交換完成").length, total: dispatchDocs.length },
+    { name: "歸檔雜湊", target: "已驗證比例", done: archiveRecords.filter((doc) => doc.hashStatus === "雜湊通過").length, total: archiveRecords.length }
   ].map((row) => ({ ...row, rate: Math.round((row.done / Math.max(row.total, 1)) * 100) }));
   const slaRate = Math.round(slaRows.reduce((sum, row) => sum + row.rate, 0) / Math.max(slaRows.length, 1));
-  const backlogPressure = pendingInbound + pendingDispatch + overdueItems.length;
+  const backlogPressure = pendingInbound + pendingDispatch + replyPendingCount + handoverItems.length;
   const failedCount = dispatchDocs.filter((doc) => /失敗|退回/.test(doc.status + doc.lastReply)).length;
   const exchangeHealth = failedCount > 1 || successRate < 80 ? "需注意" : successRate < 95 ? "觀察" : "正常";
   const priorityItems = [
     ...dispatchDocs.filter((doc) => ["交換失敗", "退回補正"].includes(doc.status)).map((doc) => ({ type: "交換異常", title: doc.subject, owner: doc.owner, action: "重送或補正" })),
     ...inboundDocs.filter((doc) => ["待登錄", "待分派"].includes(doc.status)).map((doc) => ({ type: "收文待辦", title: doc.subject, owner: doc.owner, action: doc.status === "待登錄" ? "完成登錄" : "分派部門" })),
+    ...handoverItems.map((doc) => ({ type: "承辦待交接", title: doc.subject, owner: doc.owner, action: "重新分派" })),
     ...overdueItems.map((item) => ({ type: "逾期稽催", title: item.title, owner: item.owner, action: "建立提醒" }))
   ];
   const agencyRows = [...inboundDocs, ...dispatchDocs, ...archiveRecords, ...trackingCases].reduce((acc, item) => {
@@ -16938,11 +17054,11 @@ function reportStats() {
   const agencyRank = Object.values(agencyRows)
     .map((row) => ({ ...row, risk: Math.round((row.exception / Math.max(row.total, 1)) * 100) }))
     .sort((a, b) => b.total - a.total || b.risk - a.risk);
-  const unitRows = ["總務", "行政部", "人資", "會計", "業務部", "居家照顧課", "社區據點課", "總管理處"].map((unit) => {
+  const unitRows = [...new Set([...inboundDocs.map((doc) => doc.dept), ...userAccounts.filter((account) => account.status === "啟用").map((account) => account.unit)].filter(Boolean))].map((unit) => {
     const inbound = inboundDocs.filter((doc) => doc.dept === unit || doc.owner === unit).length;
-    const users = userAccounts.filter((account) => account.unit === unit || account.role === unit).length || 1;
-    const pending = [...inboundDocs, ...dispatchDocs].filter((doc) => (doc.dept === unit || doc.owner === unit) && !/完成/.test(doc.status)).length;
-    return { unit, inbound, users, pending, load: Math.round(pending / users) };
+    const users = userAccounts.filter((account) => account.status === "啟用" && (account.unit === unit || account.role === unit)).length;
+    const pending = [...inboundDocs, ...dispatchDocs].filter((doc) => (doc.dept === unit || doc.owner === unit) && !/完成|結案|歸檔|取消/.test(doc.status)).length;
+    return { unit, inbound, users, pending, load: Math.round(pending / Math.max(users, 1)) };
   }).filter((row) => row.inbound || row.pending);
   const agingRows = [
     { bucket: "今天必處理", count: priorityItems.length, note: "交換失敗、待登錄、待分派與逾期件" },
@@ -16960,6 +17076,8 @@ function reportStats() {
     pendingDispatch,
     exceptionItems,
     overdueItems,
+    replyPendingCount,
+    handoverItems,
     ownerRows,
     slaRows,
     slaRate,
@@ -16983,7 +17101,7 @@ function uxHealthMetrics() {
   const averageCompletionMs = completionDurations.length
     ? completionDurations.reduce((sum, value) => sum + value, 0) / completionDurations.length
     : null;
-  const returned = documents.filter((item) => item.current_status === "rejected" || (item.approval_steps || []).some((step) => step.status === "rejected"));
+  const returned = documents.filter((item) => item.current_status !== "declined" && (item.current_status === "rejected" || (item.approval_steps || []).some((step) => step.status === "rejected")));
   return {
     documentCount: documents.length,
     completedCount: completionDurations.length,
@@ -17067,7 +17185,7 @@ function formalReportPayload() {
       requiredActions: [
         stats.overdueItems.length ? `建立 ${stats.overdueItems.length} 件稽催並要求承辦回覆期限。` : "逾期件為 0，維持翌日查核。",
         stats.exceptionItems.length ? `異常 ${stats.exceptionItems.length} 件需由主管確認補正或重送。` : "異常件為 0，維持抽核。",
-        stats.slaRate < 90 ? "SLA 未達 90%，需檢討登錄、分派、交換或歸檔瓶頸。" : "SLA 達標。"
+        stats.slaRate < 90 ? "流程完成率未達 90%，請檢視未辦案件；時效依各件實際期限判定。" : "流程完成率達 90%；不代表所有案件均符合時效。"
       ]
     }
   };
@@ -17083,7 +17201,7 @@ function renderFormalReport(report = latestFormalReport) {
   document.querySelector("#formalReportScopeNote").textContent = report?.scope.dataSource || "收文、發文、流程、稽催、歸檔";
   document.querySelector("#formalReportHash").textContent = report?.reportHash || "待產生";
   document.querySelector("#formalReportDecision").textContent = report?.managementConclusion.decision || "待檢視";
-  document.querySelector("#formalReportDecisionNote").textContent = report ? report.managementConclusion.requiredActions[0] : "依 SLA、異常、逾期與交換健康判定";
+  document.querySelector("#formalReportDecisionNote").textContent = report ? report.managementConclusion.requiredActions[0] : "依流程完成率、異常、逾期與交換健康判定";
 }
 
 function generateFormalReport() {
@@ -17107,7 +17225,7 @@ function formalReportCsv(report = latestFormalReport || formalReportPayload()) {
     ["收文", report.kpi.inbound],
     ["發文", report.kpi.dispatch],
     ["交換成功率", `${report.kpi.successRate}%`],
-    ["SLA 達成率", `${report.kpi.slaRate}%`],
+    ["流程完成率", `${report.kpi.slaRate}%`],
     ["異常件", report.kpi.exceptionCount],
     ["逾期件", report.kpi.overdueCount],
     ["交換健康", report.kpi.exchangeHealth],
@@ -17126,7 +17244,7 @@ function renderReportsSummary() {
   document.querySelector("#reportExceptionCount").textContent = stats.exceptionItems.length;
   document.querySelector("#reportExceptionNote").textContent = stats.exceptionItems.length ? "已有異常需追蹤" : "目前無異常";
   document.querySelector("#reportOverdueCount").textContent = stats.overdueItems.length;
-  document.querySelector("#reportOverdueNote").textContent = `${stats.overdueItems.filter((item) => item.status === "逾期提醒").length} 件逾期提醒`;
+  document.querySelector("#reportOverdueNote").textContent = `${stats.replyPendingCount} 件待回覆 · ${stats.handoverItems.length} 件待交接`;
   document.querySelector("#reportTrendStatus").textContent = document.querySelector("#reportPeriod").value;
   document.querySelector("#reportSlaRate").textContent = `${stats.slaRate}%`;
   document.querySelector("#reportSlaNote").textContent = stats.slaRate >= 90 ? "營運節奏穩定" : "需加速登錄、分派或歸檔";
@@ -17136,7 +17254,7 @@ function renderReportsSummary() {
   document.querySelector("#reportExchangeHealthNote").textContent = `成功率 ${stats.successRate}%，異常 ${stats.exceptionItems.length} 件`;
   document.querySelector("#reportPriorityCount").textContent = stats.priorityItems.length;
   document.querySelector("#reportPriorityNote").textContent = stats.priorityItems[0]?.action || "目前無急件";
-  document.querySelector("#reportOpsNarrative").textContent = `本期共處理 ${stats.inboundCount + stats.dispatchCount} 件公文，交換成功率 ${stats.successRate}%，SLA 達成率 ${stats.slaRate}%。目前待辦壓力為 ${stats.backlogPressure} 件，${stats.exchangeHealth === "正常" ? "交換中心狀態穩定" : "交換中心或異常件需要主管追蹤"}。`;
+  document.querySelector("#reportOpsNarrative").textContent = `目前已載入 ${stats.inboundCount + stats.dispatchCount} 件公文，交換成功率 ${stats.successRate}%，流程完成率 ${stats.slaRate}%。待回覆 ${stats.replyPendingCount} 件，待交接 ${stats.handoverItems.length} 件；逾期依實際期限判定。${stats.exchangeHealth === "正常" ? "請持續追蹤未結案件。" : "交換或異常件需要主管追蹤。"}`;
   document.querySelector("#reportOpsActions").innerHTML = stats.priorityItems.slice(0, 4).map((item) => `
     <article>
       <strong>${item.type}</strong>
@@ -17246,7 +17364,7 @@ function renderReportLists() {
   const recommendations = [
     stats.exceptionItems.length ? `先處理 ${stats.exceptionItems.length} 件異常，避免交換失敗累積。` : "異常件為 0，維持每日交換查核。",
     stats.overdueItems.length ? `由報表建立 ${stats.overdueItems.length} 件稽催，並指派承辦回覆期限。` : "逾期件為 0，可抽查歸檔雜湊。",
-    stats.slaRate < 90 ? "SLA 低於 90%，建議檢查收文登錄、分派與歸檔是否卡關。" : "SLA 達標，可維持目前作業節奏。",
+    stats.slaRate < 90 ? "流程完成率低於 90%，請檢查登錄、分派與歸檔；不以此比例推定辦理時效。" : "流程完成率已達 90%，仍須依期限追蹤未結與待回文案件。",
     stats.agencyRank[0] ? `本期往來最多機關為 ${stats.agencyRank[0].agency}，可列為月報重點。` : "尚無機關排行資料。"
   ];
   document.querySelector("#reportActionRecommendationList").innerHTML = recommendations.map((text, index) => `
@@ -23724,7 +23842,7 @@ function approvalLogRecords(officialItems = officialWorkflowItems) {
       actorLabel: officialApprovalStepActor(step).label,
       delegated: officialApprovalStepActor(step).delegated,
       state: step.status === "approved" ? "done" : step.status === "rejected" ? "returned" : step.step_key === item.current_step ? "current" : "pending",
-      status: step.status === "approved" ? "已核准" : step.status === "rejected" ? "已退回" : ["cancelled", "skipped"].includes(step.status) ? "本輪已取消" : step.step_key === item.current_step ? "待處理" : "待後續",
+      status: step.status === "approved" ? "已核准" : step.status === "rejected" ? (item.current_status === "declined" ? "不通過" : "退回補正") : ["cancelled", "skipped"].includes(step.status) ? "本輪已取消" : step.step_key === item.current_step ? "待處理" : "待後續",
       time: step.approved_at || "尚未到關",
       comment: step.comment || "尚未填寫簽核意見。"
     }));
@@ -23849,7 +23967,7 @@ function approvalRecordDueTimestamp({ officialDocument, task } = {}) {
 
 function approvalRecordIsOverdue(record = {}) {
   const due = approvalRecordDueTimestamp(record);
-  return Boolean(due && due < Date.now() && !["closed", "cancelled"].includes(record.officialDocument?.current_status));
+  return Boolean(due && due < Date.now() && !["closed", "cancelled", "declined"].includes(record.officialDocument?.current_status));
 }
 
 function approvalProgressCategory({ task, currentStep, officialDocument } = {}) {

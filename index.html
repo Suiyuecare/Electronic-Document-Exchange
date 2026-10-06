@@ -777,7 +777,7 @@
                     <legend>收件人與處理要求</legend>
                     <div class="internal-dispatch-recipient-picker" id="internalDispatchRecipientsPicker"></div>
                   </fieldset>
-                  <label>處理期限天數<input id="internalDispatchDueDaysInput" type="number" min="1" value="3" /></label>
+                  <label>處理期限天數<input id="internalDispatchDueDaysInput" type="number" min="1" max="365" step="1" value="3" /></label>
                   <button class="primary-button" id="internalDispatchSubmitBtn" type="submit">送出內部派發</button>
                 </form>
               </div>
@@ -793,7 +793,7 @@
           </section>
 
           <details class="advanced-section inbound-advanced">
-            <summary>既有交換收文：登錄、分派與異常處理</summary>
+            <summary>收文承辦、重新分派與異常處理</summary>
             <div class="inbound-workbench">
             <section class="panel">
               <div class="panel-heading">
@@ -819,8 +819,8 @@
                 <span class="status-pill">角色權限</span>
               </div>
               <form class="compact-form" id="assignForm">
-                <label>業務助理<select id="assignOwner"><option>王督導</option><option>陳經理</option><option>林主任</option><option>李品管</option></select></label>
-                <label>處理期限<input id="assignDueDate" type="date" value="2026-05-29" /></label>
+                <label>承辦人<select id="assignOwner"><option value="">正在載入在職人員</option></select></label>
+                <label>處理期限<input id="assignDueDate" type="date" /></label>
                 <label>分派意見<textarea id="assignNote" rows="3">請依來文主旨辦理，並於期限前回覆處理進度。</textarea></label>
                 <button class="primary-button" type="submit">確認分派</button>
               </form>
@@ -3103,7 +3103,7 @@
               <article>
                 <span>主管結論</span>
                 <strong id="formalReportDecision">待檢視</strong>
-                <small id="formalReportDecisionNote">依 SLA、異常、逾期與交換健康判定</small>
+                <small id="formalReportDecisionNote">依流程完成率、異常、逾期與交換健康判定</small>
               </article>
             </div>
             <div class="detail-actions">
@@ -3144,7 +3144,7 @@
               <small id="reportOverdueNote">待處理與稽催逾期</small>
             </article>
             <article class="metric-card">
-              <span>SLA 達成率</span>
+              <span>流程完成率</span>
               <strong id="reportSlaRate">0%</strong>
               <small id="reportSlaNote">登錄、分派、交換、歸檔</small>
             </article>
@@ -3186,8 +3186,8 @@
           <div class="report-ops-grid">
             <section class="panel">
               <div class="panel-heading">
-                <h3>SLA 營運看板</h3>
-                <span class="status-pill" id="reportSlaStatus">SLA</span>
+                <h3>流程完成看板</h3>
+                <span class="status-pill" id="reportSlaStatus">完成率</span>
               </div>
               <div class="report-sla-grid" id="reportSlaGrid"></div>
             </section>
@@ -4254,12 +4254,12 @@
               <p>請依序確認申請資訊、原稿或送簽版、全部附件，以及 PDF 編輯內容；完成檢視後才能作成決定。</p>
             </div>
             <div class="official-decision-evidence-actions" id="officialDecisionEvidenceActions"></div>
+            <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required />我已查看原稿／送簽 PDF，並核對申請目的。</label>
+            <label class="decision-check"><input id="officialReviewAttachments" type="checkbox" required />我已查看全部附件，或確認本案沒有附件。</label>
+            <label class="decision-check"><input id="officialReviewEdited" type="checkbox" required />我已查看 PDF 編輯版與用印位置，或確認本案沒有編輯內容。</label>
           </section>
           <section id="officialApprovalReviewFields" class="official-decision-section">
             <h4>送出核准前確認</h4>
-            <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required />我已查看原稿／送簽 PDF，內容與申請目的相符。</label>
-            <label class="decision-check"><input id="officialReviewAttachments" type="checkbox" required />我已查看全部附件，或確認本案沒有附件。</label>
-            <label class="decision-check"><input id="officialReviewEdited" type="checkbox" required />我已查看 PDF 編輯版與用印位置，或確認本案沒有編輯內容。</label>
             <label><span id="officialApprovalCommentLabel">核准意見</span><textarea id="officialApprovalComment" rows="3" minlength="2" maxlength="1000" required placeholder="請填寫核准判斷或注意事項（至少 2 個字）"></textarea></label>
           </section>
           <section id="officialWorkflowActionFields" class="official-decision-section" hidden>
@@ -4269,7 +4269,7 @@
           </section>
           <section id="officialRejectionFields" class="official-decision-section" hidden>
             <h4>退回補正內容</h4>
-            <label>駁回原因分類<select id="officialRejectCategory">
+            <label>補正原因分類<select id="officialRejectCategory">
               <option value="" selected disabled>請選擇原因</option>
               <option value="content_error">內容錯誤或不完整</option>
               <option value="attachment_missing">附件缺漏</option>
@@ -4287,7 +4287,7 @@
               <label><input type="checkbox" name="officialMissingItem" value="applicant_information" />申請資料</label>
             </fieldset>
             <label>補正期限<input id="officialCorrectionDueDate" type="date" /></label>
-            <label>具體駁回原因<textarea id="officialRejectComment" rows="4" minlength="6" maxlength="1000" required placeholder="請明確說明需修改的位置與完成條件"></textarea></label>
+            <label>具體補正內容<textarea id="officialRejectComment" rows="4" minlength="6" maxlength="1000" required placeholder="請明確說明需修改的位置與完成條件"></textarea></label>
           </section>
           <p class="official-decision-error" id="officialDecisionError" role="alert" hidden></p>
           <div class="form-actions">

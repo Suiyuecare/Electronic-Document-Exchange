@@ -161,6 +161,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_list_official_document_candidates",
     "edoc_mutate_inbound_document_v1",
     "edoc_mutate_official_workflow",
+    "edoc_decline_official_document",
     "edoc_register_official_archive_export",
     "edoc_resolve_finance_session_v1",
     "edoc_resolve_portal_finance_user",
@@ -22058,12 +22059,13 @@ def official_document_active_read_delegation(
         raise
 
 
-def official_workflow_action_capabilities(document: Dict[str, Any], steps: List[Dict[str, Any]], user: Dict[str, Any] | None, delegation: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def official_workflow_action_capabilities(document: Dict[str, Any], steps: List[Dict[str, Any]], user: Dict[str, Any] | None, delegation: Dict[str, Any] | None = None, stamp_request: Dict[str, Any] | None = None) -> Dict[str, Any]:
     current = next((row for row in steps if row.get("status") == "pending" and row.get("step_key") == document.get("current_step")), None)
-    active = bool(current and current.get("step_key") != "applicant_confirm" and document.get("current_status") == official_step_status(current["step_key"]))
+    irreversible = bool(document.get("stamped_file_id") or (stamp_request and (stamp_request.get("claim_token") or stamp_request.get("stamped_file_id") or stamp_request.get("status") in {"stamping", "stamped", "completed"})))
+    active = bool(not irreversible and current and current.get("step_key") != "applicant_confirm" and document.get("current_status") == official_step_status(current["step_key"]))
     can_decide = bool(active and user and user.get("id") != document.get("applicant_id") and (current.get("approver_user_id") == user.get("id") or delegation))
     previous = next((row for row in reversed(steps) if current and row.get("status") == "approved" and int(row.get("step_order") or 0) < int(current.get("step_order") or 0)), None)
-    actions = ["approve", "reject", "add-sign"] if can_decide else []
+    actions = ["approve", "reject", "add-sign", "decline"] if can_decide else []
     if can_decide and previous:
         actions.append("return-previous")
     if active and user and user.get("id") == document.get("applicant_id"):
@@ -22213,7 +22215,7 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         "stamp_request": package.get("stamp_request"),
         "dispatch_record": dispatch_record,
         "correction": correction,
-        **official_workflow_action_capabilities(document, steps, user, active_delegation),
+        **official_workflow_action_capabilities(document, steps, user, active_delegation, stamp_request),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
         "can_download": bool(is_participant or active_delegation),
@@ -24396,7 +24398,7 @@ def reject_official_document(conn: sqlite3.Connection, document_id: str, payload
 
 
 def official_workflow_action_identity(action: str, document_id: str, actor_id: str, payload: Dict[str, Any]) -> Tuple[str, str]:
-    if action not in {"return_previous", "add_sign", "withdraw"}:
+    if action not in {"return_previous", "add_sign", "withdraw", "decline"}:
         raise ValueError("official_workflow_action_invalid")
     operation_id = str(payload.get("operation_id") or "")
     if not re.fullmatch(r"[a-zA-Z0-9_-]{8,120}", operation_id):
@@ -24436,13 +24438,13 @@ def plan_official_workflow_mutation(
     if document.get("stamped_file_id") or (stamp_request and (stamp_request.get("status") in {"stamping", "stamped", "completed"} or stamp_request.get("stamped_file_id") or stamp_request.get("claim_token"))):
         raise ValueError("official_workflow_action_conflict")
     comment = str(payload.get("comment") or "").strip()
-    if not comment or len(comment) > 2000:
+    if len(comment) < (6 if action in {"withdraw", "decline"} else 2) or len(comment) > 2000:
         raise ValueError("official_workflow_action_comment_required")
     timestamp = now()
     current_index = current_rows.index(current)
     if any(row.get("status") == "pending" for row in current_rows[:current_index]):
         raise ValueError("official_workflow_action_conflict")
-    next_generation = generation if action == "withdraw" else generation + 1
+    next_generation = generation if action in {"withdraw", "decline"} else generation + 1
     new_rows: List[Dict[str, Any]] = []
     result: Dict[str, Any] = {"action": action, "workflow_generation": next_generation, "current_step_id": "", "approval_restart_required": action == "withdraw"}
     if action == "withdraw":
@@ -24451,6 +24453,9 @@ def plan_official_workflow_mutation(
         expected_revision = payload.get("expected_content_revision")
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision != int(document.get("content_revision") or 0):
             raise ValueError("compose_content_revision_conflict")
+    elif action == "decline":
+        if actor["id"] == document.get("applicant_id"):
+            raise PermissionError("applicant_cannot_self_approve")
     else:
         if actor["id"] == document.get("applicant_id"):
             raise PermissionError("applicant_cannot_self_approve")
@@ -24499,7 +24504,7 @@ def plan_official_workflow_mutation(
         if snapshot:
             snapshot["snapshot_json"] = parse_json_any(snapshot["snapshot_json"], {})
             snapshots.append(snapshot)
-    patch = {"current_status": "draft" if action == "withdraw" else official_step_status(next_pending["step_key"]), "current_step": "" if action == "withdraw" else next_pending["step_key"], "content_revision": int(document.get("content_revision") or 0) + (1 if action == "withdraw" else 0), "metadata_json": parse_json_field(document.get("metadata_json"))}
+    patch = {"current_status": "draft" if action == "withdraw" else "declined" if action == "decline" else official_step_status(next_pending["step_key"]), "current_step": "" if action in {"withdraw", "decline"} else next_pending["step_key"], "content_revision": int(document.get("content_revision") or 0) + (1 if action == "withdraw" else 0), "metadata_json": parse_json_field(document.get("metadata_json"))}
     result.update({"editor_revision_id": (editor_clone or {}).get("id") or "", "cloning": False})
     log_evidence = {**(decision_evidence or {}), "operation_id": operation_id, "request_sha256": request_hash, "action_result": result}
     return {
@@ -24555,7 +24560,7 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
         assert_official_step_actor(actor, current, document, conn=conn)
         document_evidence = sqlite_official_decision_document_evidence(conn, document, stamp_request)
         review_access = sqlite_official_review_access_evidence(conn, document_id, current, actor["id"], document_evidence)
-        evidence = official_approval_decision_evidence(document, stamp_request, payload, has_attachments=bool(document_evidence["attachments"]), step=current, actor=actor, principal_actor_id=current["approver_user_id"], document_evidence=document_evidence, review_access=review_access)
+        evidence = official_approval_decision_evidence(document, stamp_request, payload, has_attachments=bool(document_evidence["attachments"]), step=current, actor=actor, principal_actor_id=current["approver_user_id"], document_evidence=document_evidence, review_access=review_access, decision_type="decline" if action == "decline" else "approve")
         if action == "add_sign":
             target = active_user_by_id(conn, str(payload.get("target_user_id") or ""))
             applicant = active_user_by_id(conn, document["applicant_id"]) or {}
@@ -24564,7 +24569,7 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
             if not official_designated_actor_allowed(target, applicant, official_company_row(conn, document["company_id"]), document):
                 raise ValueError("official_workflow_add_sign_target_invalid")
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
-    if action != "withdraw":
+    if action not in {"withdraw", "decline"}:
         next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
         if not next_step or not active_user_by_id(conn, str(next_step.get("approver_user_id") or "")):
             raise ValueError("official_workflow_next_approver_inactive")
@@ -24579,6 +24584,9 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
         if changed.rowcount != 1:
             raise ValueError("official_workflow_action_conflict")
         conn.execute("UPDATE official_document_approval_steps SET status='skipped',updated_at=? WHERE document_id=? AND workflow_generation=? AND status='pending'", (plan["timestamp"], document_id, plan["expected_generation"]))
+        if action == "decline":
+            conn.execute("UPDATE official_document_approval_steps SET status='rejected',comment=?,approved_at=?,decision_actor_user_id=?,decision_evidence_json=?,updated_at=? WHERE id=?", (plan["approval_log"]["comment"], plan["timestamp"], actor["id"], json.dumps({**evidence, "workflow_action": "decline"}, ensure_ascii=False), plan["timestamp"], plan["expected_step_id"]))
+            conn.execute("UPDATE official_document_stamp_requests SET status='cancelled',updated_at=? WHERE document_id=?", (plan["timestamp"], document_id))
         for row in plan["steps"]:
             insert_row(conn, "official_document_approval_steps", {**row, "decision_evidence_json": json.dumps(row["decision_evidence_json"], ensure_ascii=False)})
         snapshot_official_document_approval_steps(conn, document_id, plan["steps"])
@@ -24587,9 +24595,9 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
             if clone:
                 insert_row(conn, "official_document_editor_revisions", {**clone, "editor_state_json": json.dumps(clone["editor_state_json"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
         insert_row(conn, "official_document_approval_logs", {**plan["approval_log"], "decision_evidence_json": json.dumps(plan["approval_log"]["decision_evidence_json"], ensure_ascii=False)})
-        recipient_id = document["applicant_id"] if action == "withdraw" else next(row["approver_user_id"] for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"])
+        recipient_id = document["applicant_id"] if action in {"withdraw", "decline"} else next(row["approver_user_id"] for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"])
         recipient = active_user_by_id(conn, recipient_id) or {}
-        create_notification(conn, {"id": "NTF-WORKFLOW-" + sha256_bytes(operation_id.encode())[:32], "type": "簽核流程異動", "title": "簽核流程已更新", "target_user_id": recipient_id, "target_company_id": recipient.get("company_id") or "", "channel": "Email + 系統通知", "source": document_id, "body": "請至簽核紀錄查看待處理案件。", "created_at": plan["timestamp"]})
+        create_notification(conn, {"id": "NTF-WORKFLOW-" + sha256_bytes(operation_id.encode())[:32], "type": "簽核流程異動", "title": "案件不通過，已終止" if action == "decline" else "簽核流程已更新", "target_user_id": recipient_id, "target_company_id": recipient.get("company_id") or "", "channel": "Email + 系統通知", "source": document_id, "body": plan["approval_log"]["comment"] if action == "decline" else "請至簽核紀錄查看待處理案件。", "created_at": plan["timestamp"]})
         log_audit(conn, actor["id"], action, "official_documents", document_id, f"generation={plan['workflow_generation']};operation_id={operation_id}", actor_user_id=actor["id"], request_id=operation_id, metadata={"request_sha256": request_hash, "workflow_generation": plan["workflow_generation"]})
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
     except Exception:
@@ -24608,7 +24616,7 @@ def cancel_official_document(conn: sqlite3.Connection, document_id: str, payload
     if document["applicant_id"] != user["id"]:
         raise PermissionError("only_applicant_can_cancel")
     stamp_request = official_document_stamp_request(conn, document_id)
-    if document["current_status"] in {"approved", "stamping", "stamping_failed", "stamped", "pending_general_affairs_dispatch", "returned_to_applicant_for_send", "dispatched", "sent_by_applicant", "closed"} or document.get("current_step") == "auto_stamp" or (stamp_request and stamp_request.get("status") in {"stamping", "stamped"}):
+    if document["current_status"] in {"declined", "approved", "stamping", "stamping_failed", "stamped", "pending_general_affairs_dispatch", "returned_to_applicant_for_send", "dispatched", "sent_by_applicant", "closed"} or document.get("current_step") == "auto_stamp" or (stamp_request and (stamp_request.get("claim_token") or stamp_request.get("status") in {"stamping", "stamped"})):
         raise ValueError("official_document_cannot_cancel_after_stamp")
     timestamp = now()
     conn.execute("SAVEPOINT official_document_cancel")
@@ -28101,7 +28109,45 @@ def inbound_document_detail(
         raise PermissionError("inbound_document_view_forbidden")
     data["metadata"] = parse_json_field(data.get("metadata_json"))
     data["attachments"] = inbound_document_attachments(conn, inbound_id)
+    assignee = conn.execute("SELECT id,status,company_id,finance_tenant_id FROM users WHERE id=?", (data.get("assignee_user_id") or "",)).fetchone()
+    data["handover_required"] = inbound_handover_required(data, row_to_dict(assignee) if assignee else None)
     return data
+
+
+def inbound_handover_required(document: Dict[str, Any], assignee: Dict[str, Any] | None) -> bool:
+    """Keep historical names, but flag unresolved work owned by an inactive identity."""
+    if not document.get("assignee_user_id") or document.get("status") in {"closed", "archived", "cancelled"}:
+        return False
+    return not assignee or assignee.get("status") != "啟用" or any(
+        roster_text(assignee.get(field)) != roster_text(document.get(field))
+        for field in ("company_id", "finance_tenant_id")
+    )
+
+
+def normalized_case_due_at(value: Any) -> str:
+    text = roster_text(value)
+    if not text:
+        return ""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?", text):
+        raise ValueError("case_due_at_invalid")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("case_due_at_invalid") from exc
+    return parsed.strftime("%Y-%m-%d") if len(text) == 10 else parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def internal_dispatch_deadline(payload: Dict[str, Any], reply_required: bool) -> Tuple[int, str]:
+    if not reply_required:
+        return 0, ""
+    raw_days = payload.get("reply_due_days", 3)
+    if isinstance(raw_days, bool) or not re.fullmatch(r"\d{1,3}", str(raw_days)):
+        raise ValueError("internal_dispatch_due_days_invalid")
+    days = int(raw_days)
+    if not 1 <= days <= 365:
+        raise ValueError("internal_dispatch_due_days_invalid")
+    due_at = normalized_case_due_at(payload.get("due_at"))
+    return days, due_at or (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def can_access_inbound_document(
@@ -28686,7 +28732,7 @@ def assign_inbound_document(conn: sqlite3.Connection, inbound_id: str, payload: 
         "recipient_department_name": roster_text(assignee.get("unit")),
         "assignee_user_id": assignee_id,
         "assignee_name": assignee.get("name") or "",
-        "due_at": payload.get("due_at") or "",
+        "due_at": normalized_case_due_at(payload.get("due_at")),
         "status": "assigned",
         "mutation_version": current_version + 1,
         "updated_at": now(),
@@ -29228,8 +29274,7 @@ def create_internal_dispatch(conn: sqlite3.Connection, payload: Dict[str, Any], 
             session,
         )
     reply_required = any(recipient_actions)
-    due_days = int(pdf_safe_float(payload.get("reply_due_days"), 0)) if reply_required else 0
-    due_at = payload.get("due_at") or ((datetime.now() + timedelta(days=due_days)).strftime("%Y-%m-%d %H:%M:%S") if due_days else "")
+    due_days, due_at = internal_dispatch_deadline(payload, reply_required)
     row = {
         "id": dispatch_id,
         "official_document_id": official_document_id or None,
@@ -37109,7 +37154,7 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         "stamp_request": package.get("stamp_request"),
         "dispatch_record": dispatch_record,
         "correction": correction,
-        **official_workflow_action_capabilities(document, steps, user, active_delegation),
+        **official_workflow_action_capabilities(document, steps, user, active_delegation, stamp_request),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
         "can_download": bool(is_participant or active_delegation),
@@ -40445,7 +40490,7 @@ def supabase_mutate_official_workflow(document_id: str, action: str, payload: Di
         assert_official_step_actor(actor, current, document, supabase_mode=True)
         document_evidence = supabase_official_decision_document_evidence(document, stamp_request)
         review_access = supabase_official_review_access_evidence(document_id, current, actor["id"], document_evidence)
-        evidence = official_approval_decision_evidence(document, stamp_request, payload, has_attachments=bool(document_evidence["attachments"]), step=current, actor=actor, principal_actor_id=current["approver_user_id"], document_evidence=document_evidence, review_access=review_access)
+        evidence = official_approval_decision_evidence(document, stamp_request, payload, has_attachments=bool(document_evidence["attachments"]), step=current, actor=actor, principal_actor_id=current["approver_user_id"], document_evidence=document_evidence, review_access=review_access, decision_type="decline" if action == "decline" else "approve")
         if action == "add_sign":
             target = supabase_user_by_id(str(payload.get("target_user_id") or ""))
             applicant = supabase_user_by_id(document["applicant_id"]) or {}
@@ -40454,11 +40499,11 @@ def supabase_mutate_official_workflow(document_id: str, action: str, payload: Di
             if not official_designated_actor_allowed(target, applicant, supabase_official_company_row(document["company_id"]), document):
                 raise ValueError("official_workflow_add_sign_target_invalid")
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
-    if action != "withdraw":
+    if action not in {"withdraw", "decline"}:
         next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
         if not next_step or not supabase_user_by_id(str(next_step.get("approver_user_id") or "")):
             raise ValueError("official_workflow_next_approver_inactive")
-    raw = supabase_request("POST", "rpc/edoc_mutate_official_workflow", {"p_request": plan})
+    raw = supabase_request("POST", "rpc/edoc_decline_official_document" if action == "decline" else "rpc/edoc_mutate_official_workflow", {"p_request": plan})
     response = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
     if not isinstance(response, dict) or not response.get("ok") or not response.get("committed") or response.get("document_id") != document_id or response.get("operation_id") != operation_id:
         raise ValueError("official_workflow_action_conflict")
@@ -40473,6 +40518,8 @@ def supabase_cancel_official_document(document_id: str, payload: Dict[str, Any],
     document = supabase_official_document_row(document_id)
     if document["applicant_id"] != user["id"]:
         raise PermissionError("only_applicant_can_cancel")
+    if document.get("current_status") == "declined":
+        raise ValueError("official_workflow_action_conflict")
     raw = supabase_request(
         "POST",
         "rpc/edoc_cancel_official_document",
@@ -40872,6 +40919,8 @@ def supabase_inbound_document_detail(inbound_id: str, session: Dict[str, Any] | 
         raise PermissionError("inbound_document_view_forbidden")
     row["metadata"] = parse_json_any(row.get("metadata_json"), {}) or {}
     row["attachments"] = supabase_filter_rows("inbound_document_attachments", {"inbound_document_id": inbound_id}, order="created_at.desc", limit=100)
+    assignee_id = row.get("assignee_user_id") or ""
+    row["handover_required"] = inbound_handover_required(row, supabase_get("users", assignee_id) if assignee_id else None)
     return row
 
 
@@ -40985,6 +41034,39 @@ def supabase_inbound_document_download_attachment(
     return document, {**attachment, "object": file_object}, signed
 
 
+def supabase_inbound_related_rows(table: str, column: str, ids: List[str], *, select: str = "*") -> List[Dict[str, Any]]:
+    allowed = {
+        ("inbound_document_attachments", "inbound_document_id"),
+        ("internal_dispatches", "id"),
+        ("users", "id"),
+    }
+    if (table, column) not in allowed:
+        raise ValueError("inbound_related_query_invalid")
+    values = list(dict.fromkeys(str(value) for value in ids if value))
+    result: List[Dict[str, Any]] = []
+    for start in range(0, len(values), 50):
+        chunk = values[start:start + 50]
+        offset = 0
+        seen: set[str] = set()
+        while True:
+            params = {"select": select, column: "in.(" + ",".join(json.dumps(value) for value in chunk) + ")", "order": "id.asc", "limit": "1000", "offset": str(offset)}
+            batch = supabase_request("GET", f"{table}?{urllib.parse.urlencode(params)}")
+            if not isinstance(batch, list):
+                raise RuntimeError("inbound_related_response_invalid")
+            for row in batch:
+                row_id = roster_text(row.get("id"))
+                if not row_id or row_id in seen or row.get(column) not in chunk:
+                    raise RuntimeError("inbound_related_response_invalid")
+                seen.add(row_id)
+                result.append(row)
+            if len(batch) < 1000:
+                break
+            offset += len(batch)
+            if offset > 50000:
+                raise RuntimeError("inbound_related_result_too_large")
+    return result
+
+
 def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = supabase_official_session_user(session)
     scope = inbound_finance_user_scope(user)
@@ -41007,9 +41089,8 @@ def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session:
             {"recipient_user_id": user.get("id") or ""},
             limit=1000,
         )
-        for recipient in recipient_rows:
-            dispatch = supabase_get("internal_dispatches", recipient.get("dispatch_id") or "")
-            if dispatch and dispatch.get("inbound_document_id"):
+        for dispatch in supabase_inbound_related_rows("internal_dispatches", "id", [row.get("dispatch_id") or "" for row in recipient_rows]):
+            if dispatch.get("inbound_document_id"):
                 linked_inbound_ids.add(dispatch["inbound_document_id"])
     scoped: List[Dict[str, Any]] = []
     for row in rows:
@@ -41025,7 +41106,16 @@ def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session:
         if not company_wide:
             if row.get("assignee_user_id") != user.get("id") and row.get("created_by") != user.get("id") and row.get("id") not in linked_inbound_ids:
                 continue
-        scoped.append(supabase_inbound_document_detail(row["id"]))
+        scoped.append(dict(row))
+    attachments = supabase_inbound_related_rows("inbound_document_attachments", "inbound_document_id", [row["id"] for row in scoped])
+    assignees = {row["id"]: row for row in supabase_inbound_related_rows("users", "id", [row.get("assignee_user_id") or "" for row in scoped], select="id,status,company_id,finance_tenant_id")}
+    by_document: Dict[str, List[Dict[str, Any]]] = {}
+    for attachment in attachments:
+        by_document.setdefault(attachment["inbound_document_id"], []).append(attachment)
+    for row in scoped:
+        row["metadata"] = parse_json_any(row.get("metadata_json"), {}) or {}
+        row["attachments"] = sorted(by_document.get(row["id"], []), key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        row["handover_required"] = inbound_handover_required(row, assignees.get(row.get("assignee_user_id") or ""))
     return scoped
 
 
@@ -41179,6 +41269,8 @@ def supabase_atomic_inbound_mutation(
         payload.get("assignee_user_id") or payload.get("user_id")
     ):
         raise ValueError("inbound_assignee_required")
+    if normalized_mutation == "assign":
+        bound["due_at"] = normalized_case_due_at(payload.get("due_at"))
 
     request_sha256 = inbound_mutation_request_sha256(
         normalized_mutation,
@@ -41627,8 +41719,7 @@ def supabase_create_internal_dispatch(payload: Dict[str, Any], session: Dict[str
             session,
         )
     reply_required = any(recipient_actions)
-    due_days = int(pdf_safe_float(payload.get("reply_due_days"), 0)) if reply_required else 0
-    due_at = payload.get("due_at") or ((datetime.now() + timedelta(days=due_days)).strftime("%Y-%m-%d %H:%M:%S") if due_days else "")
+    due_days, due_at = internal_dispatch_deadline(payload, reply_required)
     row = supabase_insert("internal_dispatches", {
         "id": dispatch_id,
         "official_document_id": official_document_id or None,
@@ -47933,7 +48024,7 @@ class Handler(SimpleHTTPRequestHandler):
                     payload["user_agent"] = self.client_device()
                     self.send_json(supabase_upload_official_document_attachment(parts[1], payload, session), 201)
                     return
-                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position", "retry-stamp", "return-previous", "add-sign", "withdraw"}:
+                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position", "retry-stamp", "return-previous", "add-sign", "withdraw", "decline"}:
                     session = supabase_current_session(self.bearer_token())
                     # This route multiplexes applicant and approver actions.
                     # Managers/CEO intentionally have todo/records rather than
@@ -47945,7 +48036,7 @@ class Handler(SimpleHTTPRequestHandler):
                     payload["ip_address"] = self.client_ip()
                     payload["user_agent"] = self.client_device()
                     action = parts[2]
-                    if action in {"return-previous", "add-sign", "withdraw"}:
+                    if action in {"return-previous", "add-sign", "withdraw", "decline"}:
                         result = supabase_mutate_official_workflow(parts[1], action.replace("-", "_"), payload, session)
                     elif action == "submit":
                         result = supabase_submit_official_document(parts[1], payload, session)
@@ -49027,12 +49118,12 @@ class Handler(SimpleHTTPRequestHandler):
                     conn.commit()
                     self.send_json(result, 201)
                     return
-                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position", "retry-stamp", "return-previous", "add-sign", "withdraw"}:
+                if method == "POST" and len(parts) == 3 and parts[0] == "official-documents" and parts[2] in {"submit", "approve", "reject", "cancel", "confirm", "stamp-position", "retry-stamp", "return-previous", "add-sign", "withdraw", "decline"}:
                     session = current_session(conn, self.bearer_token())
                     payload = self.read_json()
                     payload.setdefault("ip_address", self.client_ip())
                     payload.setdefault("user_agent", self.client_device())
-                    if parts[2] in {"return-previous", "add-sign", "withdraw"}:
+                    if parts[2] in {"return-previous", "add-sign", "withdraw", "decline"}:
                         result = mutate_official_workflow(conn, parts[1], parts[2].replace("-", "_"), payload, session)
                     elif parts[2] == "submit":
                         result = submit_official_document(conn, parts[1], payload, session)

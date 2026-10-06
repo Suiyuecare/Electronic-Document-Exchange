@@ -151,6 +151,7 @@ jobs:
               tests.test_editor_applicant_selection_postgres \
               tests.test_editor_cross_company_workflow_postgres \
               tests.test_configurable_workflow_postgres \
+              tests.test_terminal_decline_postgres \
               tests.test_official_receipt_confirmation_postgres \
               tests.test_official_listing_postgres \
               tests.test_official_dispatch_generation_postgres \
