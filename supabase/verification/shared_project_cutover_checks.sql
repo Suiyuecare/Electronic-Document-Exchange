@@ -101,7 +101,7 @@ declare
   v_rpc text;
   v_role text;
 begin
-  foreach v_rpc in array array['edoc_save_official_workflow_config(jsonb)','edoc_mutate_official_workflow(jsonb)','edoc_decline_official_document(jsonb)'] loop
+  foreach v_rpc in array array['edoc_save_official_workflow_config(jsonb)','edoc_mutate_official_workflow(jsonb)','edoc_decline_official_document(jsonb)','edoc_manage_official_handover(jsonb)'] loop
     select * into v_proc from pg_catalog.pg_proc
       where oid=pg_catalog.to_regprocedure(v_schema || '.' || v_rpc);
     if not found then raise exception 'configurable_workflow_rpc_missing'; end if;
@@ -213,7 +213,7 @@ checks(check_name, passed, observed) as (
       (select count(*) from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
-         and class_row.relkind in ('r','p','v','m')) = 96,
+         and class_row.relkind in ('r','p','v','m')) = 98,
       (select count(*)::text from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
@@ -221,7 +221,7 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 69
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 70
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133144_compose_resilience_drafts_revision.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133603_editor_conflict_copy_atomic.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913055452_editor_applicant_selection_scope.sql')
@@ -232,7 +232,8 @@ checks(check_name, passed, observed) as (
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924154315_scoped_official_document_listing.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260924155456_latest_generation_dispatch_owner.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260925044708_editor_pdf_uploads_skip_antivirus_preflight_required.sql')
-      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261006154028_terminal_official_decline.sql'),
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261006154028_terminal_official_decline.sql')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261007004716_offboarding_handover.sql'),
       (select count(*)::text from edoc_private.shared_project_migration_ledger)
     ),
     (

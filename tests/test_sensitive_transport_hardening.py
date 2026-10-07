@@ -84,6 +84,17 @@ class SensitiveTransportHardeningTests(unittest.TestCase):
         "inbound_version_conflict",
         "inbound_registration_state_conflict",
         "inbound_mutation_state_conflict",
+        "handover_operation_conflict",
+        "handover_pending_request_exists",
+        "handover_request_already_resolved",
+        "handover_version_conflict",
+        "handover_assignment_conflict",
+        "handover_workflow_irreversible",
+        "handover_followup_lineage_invalid",
+        "handover_original_not_correctable",
+        "handover_current_step_conflict",
+        "handover_pending_assignment_missing",
+        "handover_corrupt_active_generation",
     }
     POSTGREST_23505_CONFLICTS = {
         "finance_member_sync_event_id_conflict",

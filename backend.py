@@ -52,6 +52,8 @@ from runtime_observability import capture_runtime_error, error_tracking_status
 from edoc_numbering import SQLITE_NUMBERING_SQL, install_sqlite_numbering
 from compose_resilience import SQLITE_COMPOSE_DRAFT_SQL, draft_payload as compose_draft_payload, public_draft, save_sqlite_draft, attachment_id, require_content_revision
 from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position
+import official_handover_service
+import official_handover_followup
 
 from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
 from finance_bridge import (
@@ -162,6 +164,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_mutate_inbound_document_v1",
     "edoc_mutate_official_workflow",
     "edoc_decline_official_document",
+    "edoc_manage_official_handover",
     "edoc_register_official_archive_export",
     "edoc_resolve_finance_session_v1",
     "edoc_resolve_portal_finance_user",
@@ -264,6 +267,17 @@ EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
 # immutable, non-sensitive business codes may cross the transport boundary as
 # application errors.  Everything else remains an opaque machine-code marker.
 POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
+    "handover_operation_conflict",
+    "handover_pending_request_exists",
+    "handover_request_already_resolved",
+    "handover_version_conflict",
+    "handover_assignment_conflict",
+    "handover_workflow_irreversible",
+    "handover_followup_lineage_invalid",
+    "handover_original_not_correctable",
+    "handover_current_step_conflict",
+    "handover_pending_assignment_missing",
+    "handover_corrupt_active_generation",
     "official_workflow_config_conflict",
     "official_workflow_config_version_conflict",
     "official_workflow_action_conflict",
@@ -2263,6 +2277,43 @@ CREATE TABLE IF NOT EXISTS official_document_approval_logs (
   FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE CASCADE,
   FOREIGN KEY(step_id) REFERENCES official_document_approval_steps(id) ON DELETE SET NULL,
   FOREIGN KEY(file_id) REFERENCES official_document_files(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_document_handovers (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES official_documents(id) ON DELETE RESTRICT,
+  company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+  finance_tenant_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('pending_approver','followup_owner')),
+  former_user_id TEXT NOT NULL,
+  successor_user_id TEXT NOT NULL,
+  proposer_user_id TEXT NOT NULL,
+  confirmer_user_id TEXT,
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+  request_sha256 TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  expected_snapshot TEXT NOT NULL,
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(former_user_id <> successor_user_id),
+  CHECK(proposer_user_id <> successor_user_id),
+  CHECK(confirmer_user_id IS NULL OR confirmer_user_id <> proposer_user_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS official_handover_pending_assignment
+  ON official_document_handovers(document_id,kind,former_user_id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS official_handover_queue
+  ON official_document_handovers(company_id,finance_tenant_id,status,created_at,id);
+
+CREATE TABLE IF NOT EXISTS official_document_followup_owners (
+  document_id TEXT PRIMARY KEY REFERENCES official_documents(id) ON DELETE RESTRICT,
+  original_applicant_id TEXT NOT NULL,
+  process_owner_user_id TEXT NOT NULL,
+  handover_id TEXT NOT NULL UNIQUE REFERENCES official_document_handovers(id) ON DELETE RESTRICT,
+  company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+  finance_tenant_id TEXT NOT NULL,
+  correction_policy TEXT NOT NULL CHECK(correction_policy='linked_new_application'),
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS official_document_stamp_requests (
@@ -21142,7 +21193,7 @@ def official_dispatch_route_notification_payload(
             "body": f"{completed_version}，請完成寄發並回填寄送日期與證明。",
         }
     if owner_type == "applicant":
-        target = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+        target = official_followup_notification_actor(document, conn=conn)
         return {
             "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
             "type": "發文寄發待辦",
@@ -21153,7 +21204,7 @@ def official_dispatch_route_notification_payload(
             "priority": "高",
             "body": f"{completed_version}，請完成寄送並回填寄送日期與證明。",
         }
-    target = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+    target = official_followup_notification_actor(document, conn=conn)
     return {
         "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
         "type": "發文申請人確認",
@@ -21195,6 +21246,7 @@ def can_manage_official_dispatch(
     record: Dict[str, Any] | None,
     session: Dict[str, Any] | None = None,
     workflow_steps: Iterable[Dict[str, Any]] | None = None,
+    *, followup_binding: Dict[str, Any] | None = None,
 ) -> bool:
     if not user:
         return False
@@ -21211,8 +21263,28 @@ def can_manage_official_dispatch(
         return user_id == owner_id == workflow_owner_id
     if owner_type == "applicant":
         applicant_id = str(document.get("applicant_id") or "").strip()
-        return bool(applicant_id and user_id == applicant_id and owner_id == applicant_id)
+        return bool(applicant_id and owner_id == applicant_id and (user_id == applicant_id or (
+            followup_binding and followup_binding.get("document_id") == document.get("id")
+            and followup_binding.get("original_applicant_id") == applicant_id
+            and followup_binding.get("process_owner_user_id") == user_id)))
     return False
+
+
+def official_dispatch_actor_allowed(user, document, record, session, steps, *, conn=None):
+    binding = official_document_followup_binding(document, user, conn=conn)
+    return can_manage_official_dispatch(user, document, record, session, steps, followup_binding=binding)
+
+
+def official_followup_notification_actor(document, *, conn=None):
+    """Resolve responsibility without changing the original applicant identity."""
+    actor = (active_user_by_id(conn, document.get("applicant_id") or "") if conn is not None
+             else supabase_get("users", document.get("applicant_id") or ""))
+    if actor and actor.get("status") == "啟用":
+        return actor
+    binding = official_handover_followup.load(sys.modules[__name__], document, conn=conn)
+    if binding:
+        return binding["owner"]
+    raise ValueError("official_followup_handover_required")
 
 
 def official_dispatch_record_editable(record: Dict[str, Any] | None) -> bool:
@@ -21333,7 +21405,7 @@ def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, 
     document = official_document_row(conn, document_id)
     steps = official_document_steps(conn, document_id)
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_followup_binding(document, user, conn=conn) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
         raise PermissionError("official_dispatch_access_denied")
     record = official_dispatch_record(conn, document_id)
     if not record:
@@ -21345,10 +21417,10 @@ def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, 
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_update_forbidden")
         record = upsert_official_dispatch_record(conn, document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
         raise PermissionError("official_dispatch_update_forbidden")
     require_official_dispatch_record_editable(record)
     if "proof_file_id" in payload:
@@ -21389,7 +21461,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
                 "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
                 "dispatch_owner_user_id": owner.get("id") or "",
             }
-            if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+            if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
                 raise PermissionError("official_dispatch_complete_forbidden")
             record = upsert_official_dispatch_record(conn, document, method, user)
             enqueue_official_dispatch_route(
@@ -21399,7 +21471,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
                 user,
                 str(document.get("stamped_file_id") or ""),
             )
-        if not can_manage_official_dispatch(user, document, record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_complete_forbidden")
         if record.get("dispatch_owner_type") == "general_affairs" and document.get("current_status") != "pending_general_affairs_dispatch":
             raise ValueError("official_document_not_pending_general_affairs_dispatch")
@@ -21456,7 +21528,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
             ip_address=payload.get("ip_address") or "",
             user_agent=payload.get("user_agent") or "",
         )
-        applicant = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+        applicant = official_followup_notification_actor(document, conn=conn)
         create_notification(conn, {
             "id": f"NTF-DISPATCH-COMPLETE-{record['id']}",
             "type": "發文申請人確認",
@@ -21487,10 +21559,10 @@ def upload_official_dispatch_proof_file(conn: sqlite3.Connection, document_id: s
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_proof_upload_forbidden")
         record = upsert_official_dispatch_record(conn, document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
         raise PermissionError("official_dispatch_proof_upload_forbidden")
     require_official_dispatch_record_editable(record)
     content = payload.get("content_base64") or ""
@@ -22011,6 +22083,15 @@ def canDownloadOfficialDocument(
     return user_id in official_document_participant_ids(document, steps, actor_snapshots)
 
 
+def official_document_followup_binding(document, user, *, conn=None):
+    """Server-only confirmed responsibility; does not rewrite participation."""
+    if (not user or user.get("id") == document.get("applicant_id")
+            or user.get("account_source") != "finance"
+            or user.get("company_id") != document.get("company_id")):
+        return None
+    return official_handover_followup.load(sys.modules[__name__], document, conn=conn, actor_id=user.get("id"))
+
+
 def official_document_active_read_delegation(
     document: Dict[str, Any],
     steps: Iterable[Dict[str, Any]],
@@ -22171,12 +22252,13 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
     user = session.get("user") if session else None
     is_participant = bool(user and canDownloadOfficialDocument(user, document, all_steps, actor_snapshots))
+    followup_binding = official_document_followup_binding(document, user, conn=conn)
     current_step = next((
         step for step in steps
         if step.get("step_key") == document.get("current_step") and step.get("status") == "pending"
     ), None)
     active_delegation = official_document_active_read_delegation(document, all_steps, user, conn=conn)
-    if user and not is_participant and not active_delegation:
+    if user and not is_participant and not active_delegation and not followup_binding:
         if not official_document_user_same_company(user, document) or not str(user.get("company_id") or "").strip():
             raise PermissionError("official_document_company_forbidden")
         if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
@@ -22218,10 +22300,12 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         **official_workflow_action_capabilities(document, steps, user, active_delegation, stamp_request),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
-        "can_download": bool(is_participant or active_delegation),
-        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
+        "can_download": bool(is_participant or active_delegation or followup_binding),
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
+        "can_create_linked_application": bool(followup_binding and document.get("current_status") in {"draft", "rejected"}),
+        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps, followup_binding=followup_binding)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
-        "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
+        "can_confirm": bool(user and (user.get("id") == document.get("applicant_id") or followup_binding) and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
         "can_act": bool(user and current_step and current_step.get("status") == "pending" and (current_step.get("approver_user_id") == user.get("id") or active_delegation)),
         "acting_for_user_id": current_step.get("approver_user_id") if active_delegation and current_step else "",
         "delegation_id": active_delegation.get("id") if active_delegation else "",
@@ -24380,7 +24464,7 @@ def reject_official_document(conn: sqlite3.Connection, document_id: str, payload
         decision_evidence=rejection_evidence,
     )
     editor_revision = clone_official_editor_revision_after_reject(conn, document_id, user)
-    applicant = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+    applicant = official_followup_notification_actor(document, conn=conn)
     create_and_deliver_notification(conn, {
         "type": "發文退回",
         "title": f"{document['title']} 已駁回",
@@ -24571,7 +24655,8 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
     if action not in {"withdraw", "decline"}:
         next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
-        if not next_step or not active_user_by_id(conn, str(next_step.get("approver_user_id") or "")):
+        if not next_step or not (active_user_by_id(conn, str(next_step.get("approver_user_id") or ""))
+                or (next_step.get("step_key") == "applicant_confirm" and official_handover_followup.load(sys.modules[__name__], document, conn=conn))):
             raise ValueError("official_workflow_next_approver_inactive")
     savepoint = "workflow_mutation_" + secrets.token_hex(4)
     conn.execute(f"SAVEPOINT {savepoint}")
@@ -24596,7 +24681,9 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
                 insert_row(conn, "official_document_editor_revisions", {**clone, "editor_state_json": json.dumps(clone["editor_state_json"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
         insert_row(conn, "official_document_approval_logs", {**plan["approval_log"], "decision_evidence_json": json.dumps(plan["approval_log"]["decision_evidence_json"], ensure_ascii=False)})
         recipient_id = document["applicant_id"] if action in {"withdraw", "decline"} else next(row["approver_user_id"] for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"])
-        recipient = active_user_by_id(conn, recipient_id) or {}
+        recipient = (official_followup_notification_actor(document, conn=conn) if recipient_id == document["applicant_id"]
+                     else active_user_by_id(conn, recipient_id) or {})
+        recipient_id = recipient.get("id") or recipient_id
         create_notification(conn, {"id": "NTF-WORKFLOW-" + sha256_bytes(operation_id.encode())[:32], "type": "簽核流程異動", "title": "案件不通過，已終止" if action == "decline" else "簽核流程已更新", "target_user_id": recipient_id, "target_company_id": recipient.get("company_id") or "", "channel": "Email + 系統通知", "source": document_id, "body": plan["approval_log"]["comment"] if action == "decline" else "請至簽核紀錄查看待處理案件。", "created_at": plan["timestamp"]})
         log_audit(conn, actor["id"], action, "official_documents", document_id, f"generation={plan['workflow_generation']};operation_id={operation_id}", actor_user_id=actor["id"], request_id=operation_id, metadata={"request_sha256": request_hash, "workflow_generation": plan["workflow_generation"]})
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -24674,11 +24761,12 @@ def confirm_official_document(conn: sqlite3.Connection, document_id: str, payloa
     conn.execute(f"SAVEPOINT {savepoint}")
     try:
         document = official_document_row(conn, document_id)
-        if document["applicant_id"] != user["id"]:
+        followup_binding = official_document_followup_binding(document, user, conn=conn)
+        if document["applicant_id"] != user["id"] and not followup_binding:
             raise PermissionError("only_applicant_can_confirm")
         steps = current_official_document_steps(conn, document_id)
         receipts = [item for item in steps if item.get("step_key") == "applicant_confirm"]
-        if len(receipts) != 1 or receipts[0].get("approver_user_id") != user["id"]:
+        if len(receipts) != 1 or receipts[0].get("approver_user_id") != document["applicant_id"]:
             raise ValueError("official_document_receipt_step_conflict")
         step = receipts[0]
         existing = conn.execute(
@@ -24703,9 +24791,10 @@ def confirm_official_document(conn: sqlite3.Connection, document_id: str, payloa
             evidence = {**(parse_json_any(step.get("decision_evidence_json"), {}) or {}),
                         "schema_version": 1, "decision_type": "confirm", "expected_step_id": step["id"],
                         "workflow_generation": int(step.get("workflow_generation") or 1),
-                        "decision_actor_user_id": user["id"], "principal_actor_id": user["id"], "confirmed_at": timestamp}
+                        "decision_actor_user_id": user["id"], "principal_actor_id": document["applicant_id"], "confirmed_at": timestamp,
+                        **({"followup_handover_id": followup_binding["handover_id"]} if followup_binding else {})}
             log = insert_official_log(conn, document_id, "confirm", user, payload.get("comment") or "申請人確認已用印版本",
-                                     step_id=step["id"], principal_actor_id=user["id"], decision_evidence=evidence,
+                                     step_id=step["id"], principal_actor_id=document["applicant_id"], decision_evidence=evidence,
                                      ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
             evidence["confirmation_log_id"] = log["id"]
             changed = conn.execute(
@@ -25431,7 +25520,7 @@ def official_document_download_file(conn: sqlite3.Connection, document_id: str, 
     document = official_document_row(conn, document_id)
     steps = official_document_steps(conn, document_id)
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, conn=conn):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, conn=conn) and not official_document_followup_binding(document, user, conn=conn):
         raise PermissionError("official_document_download_forbidden")
     # A clean stamped derivative must not become a bypass for an unscanned or
     # later-quarantined original/attachment that remains part of the package.
@@ -26634,7 +26723,7 @@ def _editor_assert_document_access(
     else:
         steps = official_document_steps(conn, document["id"])
         actor_snapshots = official_document_actor_snapshots(conn, document["id"])
-        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots)
+        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots) or official_document_followup_binding(document, user, conn=conn)
         active_delegation = None if is_participant else official_document_active_read_delegation(document, steps, user, conn=conn)
         if not is_participant and not active_delegation:
             if (
@@ -36453,10 +36542,10 @@ def supabase_update_official_dispatch_record(document_id: str, payload: Dict[str
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_update_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_update_forbidden")
     require_official_dispatch_record_editable(record)
     if "proof_file_id" in payload:
@@ -36485,10 +36574,10 @@ def supabase_complete_official_dispatch(document_id: str, payload: Dict[str, Any
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_complete_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_complete_forbidden")
     if record.get("dispatch_owner_type") == "general_affairs" and document.get("current_status") != "pending_general_affairs_dispatch":
         raise ValueError("official_document_not_pending_general_affairs_dispatch")
@@ -36536,10 +36625,10 @@ def supabase_upload_official_dispatch_proof_file(document_id: str, payload: Dict
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_proof_upload_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_proof_upload_forbidden")
     require_official_dispatch_record_editable(record)
     content = payload.get("content_base64") or ""
@@ -37109,12 +37198,13 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
     actor_snapshots = supabase_official_document_actor_snapshots(document_id)
     user = session.get("user") if session else None
     is_participant = bool(user and canDownloadOfficialDocument(user, document, all_steps, actor_snapshots))
+    followup_binding = official_document_followup_binding(document, user)
     current_step = next((
         step for step in steps
         if step.get("step_key") == document.get("current_step") and step.get("status") == "pending"
     ), None)
     active_delegation = official_document_active_read_delegation(document, all_steps, user, supabase_mode=True)
-    if user and not is_participant and not active_delegation:
+    if user and not is_participant and not active_delegation and not followup_binding:
         if not official_document_user_same_company(user, document) or not str(user.get("company_id") or "").strip():
             raise PermissionError("official_document_company_forbidden")
         if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
@@ -37157,10 +37247,12 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         **official_workflow_action_capabilities(document, steps, user, active_delegation, stamp_request),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
-        "can_download": bool(is_participant or active_delegation),
-        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
+        "can_download": bool(is_participant or active_delegation or followup_binding),
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
+        "can_create_linked_application": bool(followup_binding and document.get("current_status") in {"draft", "rejected"}),
+        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps, followup_binding=followup_binding)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
-        "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
+        "can_confirm": bool(user and (user.get("id") == document.get("applicant_id") or followup_binding) and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
         "can_act": bool(user and current_step and current_step.get("status") == "pending" and (current_step.get("approver_user_id") == user.get("id") or active_delegation)),
         "acting_for_user_id": current_step.get("approver_user_id") if active_delegation and current_step else "",
         "delegation_id": active_delegation.get("id") if active_delegation else "",
@@ -37194,7 +37286,7 @@ def _supabase_editor_assert_document_access(document: Dict[str, Any], session: D
     else:
         steps = supabase_official_document_steps(document["id"])
         actor_snapshots = supabase_official_document_actor_snapshots(document["id"])
-        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots)
+        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots) or official_document_followup_binding(document, user)
         active_delegation = None if is_participant else official_document_active_read_delegation(document, steps, user, supabase_mode=True)
         if not is_participant and not active_delegation:
             if (
@@ -40501,7 +40593,8 @@ def supabase_mutate_official_workflow(document_id: str, action: str, payload: Di
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
     if action not in {"withdraw", "decline"}:
         next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
-        if not next_step or not supabase_user_by_id(str(next_step.get("approver_user_id") or "")):
+        if not next_step or not (supabase_user_by_id(str(next_step.get("approver_user_id") or ""))
+                or (next_step.get("step_key") == "applicant_confirm" and official_handover_followup.load(sys.modules[__name__], document))):
             raise ValueError("official_workflow_next_approver_inactive")
     raw = supabase_request("POST", "rpc/edoc_decline_official_document" if action == "decline" else "rpc/edoc_mutate_official_workflow", {"p_request": plan})
     response = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
@@ -40537,7 +40630,8 @@ def supabase_cancel_official_document(document_id: str, payload: Dict[str, Any],
 def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
     document = supabase_official_document_row(document_id)
-    if document["applicant_id"] != user["id"]:
+    followup_binding = official_document_followup_binding(document, user)
+    if document["applicant_id"] != user["id"] and not followup_binding:
         raise PermissionError("only_applicant_can_confirm")
     all_steps = supabase_official_document_steps(document_id)
     generation = max((int(row.get("workflow_generation") or 1) for row in all_steps), default=0)
@@ -40549,6 +40643,7 @@ def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any]
     raw = supabase_request("POST", "rpc/edoc_confirm_official_document", {"p_request": {
         "document_id": document_id, "actor_id": user["id"], "expected_step_id": step["id"],
         "workflow_generation": generation, "comment": payload.get("comment") or "申請人確認已用印版本",
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
         "dispatch": {key: payload.get(key) for key in ("external_official_document_number", "dispatch_date", "recipient", "recipient_contact", "dispatch_note")},
         "ip_address": payload.get("ip_address") or "", "user_agent": (payload.get("user_agent") or "")[:180],
     }})
@@ -40872,7 +40967,7 @@ def supabase_official_document_download_file(document_id: str, file_id: str, ses
     document = supabase_official_document_row(document_id)
     steps = supabase_official_document_steps(document_id)
     actor_snapshots = supabase_official_document_actor_snapshots(document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, supabase_mode=True):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, supabase_mode=True) and not official_document_followup_binding(document, user):
         raise PermissionError("official_document_download_forbidden")
     supabase_assert_official_document_uploads_av_clean(document)
     rows = supabase_filter_rows("official_document_files", {"id": file_id, "document_id": document_id}, limit=1)
@@ -47227,6 +47322,44 @@ class Handler(SimpleHTTPRequestHandler):
         expected = f"Bearer {secret}"
         return len(provided) == len(expected) and hmac.compare_digest(provided, expected)
 
+    def handle_handover_api(self, method, parts, query, session, conn=None):
+        if len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "linked-application":
+            service = official_handover_followup.LinkedApplication(sys.modules[__name__], session, conn)
+            if method == "GET":
+                context, _, _ = service.context(parts[1])
+                result = {key: value for key, value in context.items() if key != "snapshot"}
+            elif method == "POST":
+                result = service.create(parts[1], self.read_json())
+                if conn is not None:
+                    conn.commit()
+            else:
+                self.send_json({"error": "method_not_allowed"}, 405)
+                return True
+            self.send_json(result)
+            return True
+        is_queue = parts == ["official-handovers"]
+        is_context = len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "handover-context"
+        is_proposal = len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "handovers"
+        is_resolution = len(parts) == 3 and parts[0] == "official-handovers" and parts[2] in {"confirm", "reject"}
+        if not (is_queue or is_context or is_proposal or is_resolution):
+            return False
+        service = official_handover_service.Service(sys.modules[__name__], session, conn)
+        if method == "GET" and is_queue:
+            result = service.queue(query)
+        elif method == "GET" and is_context:
+            result = service.context(parts[1], query)
+        elif method == "POST" and is_proposal:
+            result = service.propose(parts[1], self.read_json())
+        elif method == "POST" and is_resolution:
+            result = service.resolve(parts[1], parts[2], self.read_json())
+        else:
+            self.send_json({"error": "method_not_allowed"}, 405)
+            return True
+        if conn is not None and method == "POST":
+            conn.commit()
+        self.send_json(result)
+        return True
+
     def handle_api(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
         parts = [part for part in path.split("/") if part][1:]
         try:
@@ -47398,6 +47531,8 @@ class Handler(SimpleHTTPRequestHandler):
                         return
                 if method == "GET" and parts == ["finance-directory"]:
                     self.send_json(supabase_finance_directory(session))
+                    return
+                if parts and parts[0] != "cron" and self.handle_handover_api(method, parts, query, session):
                     return
                 if is_operations_maintenance_endpoint(method, parts):
                     session = supabase_current_session(self.bearer_token())
@@ -48403,6 +48538,8 @@ class Handler(SimpleHTTPRequestHandler):
                         return
                 if method == "GET" and parts == ["finance-directory"]:
                     self.send_json(local_finance_directory(conn, session))
+                    return
+                if parts and parts[0] != "cron" and self.handle_handover_api(method, parts, query, session, conn):
                     return
                 if is_operations_maintenance_endpoint(method, parts):
                     session = current_session(conn, self.bearer_token())

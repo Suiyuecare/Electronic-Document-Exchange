@@ -625,7 +625,15 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                     if table == "official_document_compose_drafts" else numbering_sql
                 )
                 self.assertIn(f"grant {privileges} on public.{table} to service_role;", forward_sql)
-        self.assertEqual(set(expected_matrix), granted_select | later_select | set(numbering_matrix))
+        handover_tables = {"official_document_handovers", "official_document_followup_owners"}
+        handover_sql = (MIGRATIONS / "20261007004716_offboarding_handover.sql").read_text(encoding="utf-8").lower()
+        self.assertIn(
+            "grant select on public.official_document_handovers,public.official_document_followup_owners to service_role;",
+            handover_sql,
+        )
+        for table in handover_tables:
+            self.assertEqual("s", expected_matrix[table])
+        self.assertEqual(set(expected_matrix), granted_select | later_select | set(numbering_matrix) | handover_tables)
         for privilege, marker in (("insert", "i"), ("update", "u"), ("delete", "d")):
             block = re.search(
                 rf"grant {privilege} on table\s+(.*?)\s+to service_role;",
@@ -674,6 +682,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "edoc_decline_official_document": "20261006154028_terminal_official_decline.sql",
             "edoc_confirm_official_document": "20260924154226_atomic_official_receipt_confirmation.sql",
             "edoc_list_official_document_candidates": "20260924154315_scoped_official_document_listing.sql",
+            "edoc_manage_official_handover": "20261007004716_offboarding_handover.sql",
         }
         later_granted_rpc_names: set[str] = set()
         for rpc_name, migration_name in repair_rpcs.items():
@@ -705,7 +714,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             (granted_rpc_names - {"edoc_company_seal_dimensions_are_valid"}) | later_granted_rpc_names,
             required_rpc_names,
         )
-        self.assertEqual(len(required_rpc_names), 30)
+        self.assertEqual(len(required_rpc_names), 31)
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
         fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
         self.assertIn("from information_schema.table_privileges", cutover)

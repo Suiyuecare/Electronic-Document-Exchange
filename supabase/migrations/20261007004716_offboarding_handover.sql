@@ -1,0 +1,607 @@
+-- Candidate offboarding transactions. No browser mutation grants or exchange calls.
+begin;
+create table if not exists public.official_document_handovers (
+  id text primary key,
+  document_id text not null references public.official_documents(id) on delete restrict,
+  company_id text not null references public.companies(id) on delete restrict,
+  finance_tenant_id text not null,
+  kind text not null check(kind in ('pending_approver','followup_owner')),
+  former_user_id text not null,
+  successor_user_id text not null,
+  proposer_user_id text not null,
+  confirmer_user_id text,
+  status text not null check(status in ('pending','approved','rejected')),
+  request_sha256 text not null check(request_sha256 ~ '^[a-f0-9]{64}$'),
+  request_json jsonb not null,
+  result_json jsonb,
+  expected_snapshot jsonb not null,
+  created_at text not null,
+  updated_at text not null,
+  check(former_user_id<>successor_user_id),
+  check(proposer_user_id<>successor_user_id),
+  check(confirmer_user_id is null or confirmer_user_id<>proposer_user_id)
+);
+-- The isolated parity fixture derives a bootstrap schema from SQLite. Keep
+-- typed JSON/CAS columns authoritative here; no existing document is modified.
+alter table public.official_document_handovers alter column request_json type jsonb using request_json::jsonb;
+alter table public.official_document_handovers alter column result_json type jsonb using result_json::jsonb;
+alter table public.official_document_handovers add column if not exists expected_snapshot jsonb;
+alter table public.official_document_handovers alter column expected_snapshot set not null;
+create unique index if not exists official_handover_pending_assignment on public.official_document_handovers(document_id,kind,former_user_id) where status='pending';
+create index if not exists official_handover_queue on public.official_document_handovers(company_id,finance_tenant_id,status,created_at,id);
+create table if not exists public.official_document_followup_owners (
+  document_id text primary key references public.official_documents(id) on delete restrict,
+  original_applicant_id text not null,
+  process_owner_user_id text not null,
+  handover_id text not null unique references public.official_document_handovers(id) on delete restrict,
+  company_id text not null references public.companies(id) on delete restrict,
+  finance_tenant_id text not null,
+  correction_policy text not null check(correction_policy='linked_new_application'),
+  updated_at text not null
+);
+alter table public.official_document_handovers enable row level security;
+alter table public.official_document_followup_owners enable row level security;
+revoke all on public.official_document_handovers,public.official_document_followup_owners from public,anon,authenticated,service_role;
+grant select on public.official_document_handovers,public.official_document_followup_owners to service_role;
+create policy handover_backend_read on public.official_document_handovers for select to service_role using(true);
+create policy followup_backend_read on public.official_document_followup_owners for select to service_role using(true);
+
+create or replace function edoc_private.official_handover_snapshot(p_document_id text)
+returns jsonb language sql stable security invoker set search_path='' as $function$
+  select pg_catalog.jsonb_build_object(
+    'document',pg_catalog.jsonb_build_object('id',d.id,'company_id',d.company_id,'applicant_id',d.applicant_id,
+      'current_status',d.current_status,'current_step',d.current_step,'content_revision',d.content_revision,
+      'updated_at',d.updated_at,'stamped_file_id',d.stamped_file_id),
+    'steps',coalesce((select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+      'id',s.id,'workflow_generation',s.workflow_generation,'step_order',s.step_order,'step_key',s.step_key,
+      'approver_user_id',s.approver_user_id,'approver_name',s.approver_name,'approver_role',s.approver_role,
+      'status',s.status,'decision_actor_user_id',s.decision_actor_user_id,'approved_at',s.approved_at,
+      'updated_at',s.updated_at,'decision_evidence_json',coalesce(s.decision_evidence_json,'{}'::jsonb)) order by s.step_order)
+      from public.official_document_approval_steps s where s.document_id=d.id and s.workflow_generation=(
+        select max(workflow_generation) from public.official_document_approval_steps where document_id=d.id)),'[]'::jsonb),
+    'stamp',coalesce((select pg_catalog.jsonb_build_object('id',r.id,'status',r.status,'claim_token',r.claim_token,
+      'stamped_file_id',r.stamped_file_id,'updated_at',r.updated_at)
+      from public.official_document_stamp_requests r where r.document_id=d.id order by r.created_at desc,r.id desc limit 1),
+      '{"id":null,"status":null,"claim_token":null,"stamped_file_id":null,"updated_at":null}'::jsonb))
+    || coalesce((select pg_catalog.jsonb_build_object('followup_binding',pg_catalog.to_jsonb(f))
+      from public.official_document_followup_owners f where f.document_id=d.id),'{}'::jsonb)
+  from public.official_documents d where d.id=p_document_id
+$function$;
+revoke all on function edoc_private.official_handover_snapshot(text) from public,anon,authenticated,service_role;
+
+create or replace function public.edoc_manage_official_handover(p_request jsonb)
+returns jsonb language plpgsql security definer set search_path='' set lock_timeout='5s' as $function$
+declare
+  v_action text:=p_request->>'action';
+  v_actor_id text:=p_request->>'actor_id';
+  v_id text:=p_request->>'handover_id';
+  v_doc_id text:=p_request->>'document_id';
+  v_time text:=pg_catalog.to_char(pg_catalog.clock_timestamp(),'YYYY-MM-DD HH24:MI:SS');
+  v_document public.official_documents%rowtype;
+  v_company public.companies%rowtype;
+  v_actor public.users%rowtype;
+  v_proposer public.users%rowtype;
+  v_former public.users%rowtype;
+  v_successor public.users%rowtype;
+  v_handover public.official_document_handovers%rowtype;
+  v_binding public.official_document_followup_owners%rowtype;
+  v_stamp public.official_document_stamp_requests%rowtype;
+  v_step public.official_document_approval_steps%rowtype;
+  v_new public.official_document_approval_steps%rowtype;
+  v_record jsonb;
+  v_snapshot jsonb;
+  v_targets jsonb;
+  v_generation integer;
+  v_current public.official_document_approval_steps%rowtype;
+  v_result jsonb;
+  v_recipient text;
+  v_page integer;
+  v_page_size integer;
+  v_view text;
+  v_queue jsonb;
+  v_followup jsonb;
+  v_link_id text;
+  v_link_log text;
+  v_link_evidence jsonb;
+  v_link_metadata jsonb;
+  v_link_witness public.official_document_approval_logs%rowtype;
+begin
+  -- Bounded operational metadata only; no file/body download capability is
+  -- conferred by appearing in this queue. Always revalidate live Finance.
+  if v_action='queue' then
+    select * into v_actor from public.users where id=v_actor_id;
+    select * into v_company from public.companies where id=v_actor.company_id;
+    if v_actor.id is null or v_actor.status is distinct from '啟用'
+       or v_actor.account_source is distinct from 'finance'
+       or coalesce(v_actor.role,'') not in ('總務','行政部主任','行政部門主任')
+       or v_company.id is null or v_company.status is distinct from 'active'
+       or v_company.source_system is distinct from 'finance'
+       or nullif(v_company.finance_tenant_id,'') is null
+       or v_actor.finance_tenant_id is distinct from v_company.finance_tenant_id then
+      raise exception using errcode='42501',message='handover_manage_forbidden';
+    end if;
+    v_page:=(p_request->>'page')::integer;
+    v_page_size:=(p_request->>'page_size')::integer;
+    v_view:=p_request->>'view';
+    if coalesce(v_page,0) not between 1 and 10000 or coalesce(v_page_size,0) not between 1 and 50
+       or coalesce(v_view,'') not in ('needs','pending','history') then
+      raise exception using errcode='22023',message='handover_pagination_invalid';
+    end if;
+    select coalesce(pg_catalog.jsonb_agg(pg_catalog.to_jsonb(q) order by q.updated_at desc,q.id),'[]'::jsonb)
+      into v_queue from (
+      select d.id,d.dispatch_no,d.subject,d.current_status,d.updated_at from public.official_documents d
+      where d.company_id=v_company.id and (
+        (v_view in ('pending','history') and exists(select 1 from public.official_document_handovers h
+          where h.document_id=d.id and (v_view='history' or h.status='pending')))
+        or (v_view='needs' and d.current_status not in ('closed','declined','cancelled') and (
+          (not exists(select 1 from public.official_document_followup_owners f where f.document_id=d.id)
+            and exists(select 1 from public.users u where u.id=d.applicant_id and u.status<>'啟用'
+              and u.account_source='finance' and u.company_id=d.company_id and u.finance_tenant_id=v_company.finance_tenant_id))
+          or exists(select 1 from public.official_document_followup_owners f join public.users u on u.id=f.process_owner_user_id
+            where f.document_id=d.id and u.status<>'啟用' and u.account_source='finance'
+              and u.company_id=d.company_id and u.finance_tenant_id=v_company.finance_tenant_id)
+          or exists(select 1 from public.official_document_approval_steps s join public.users u on u.id=s.approver_user_id
+            where s.document_id=d.id and s.workflow_generation=(select max(workflow_generation)
+              from public.official_document_approval_steps where document_id=d.id)
+              and s.status='pending' and s.step_key<>'applicant_confirm' and u.status<>'啟用'
+              and u.account_source='finance' and u.company_id=d.company_id and u.finance_tenant_id=v_company.finance_tenant_id))))
+      order by d.updated_at desc,d.id limit v_page_size+1 offset (v_page-1)*v_page_size
+    ) q;
+    return pg_catalog.jsonb_build_object('items',(select coalesce(pg_catalog.jsonb_agg(item order by n),'[]'::jsonb)
+        from pg_catalog.jsonb_array_elements(v_queue) with ordinality x(item,n) where n<=v_page_size),
+      'page',v_page,'page_size',v_page_size,'has_more',pg_catalog.jsonb_array_length(v_queue)>v_page_size,
+      'view',v_view,'can_propose',v_actor.role='總務','can_confirm',v_actor.role in ('行政部主任','行政部門主任'));
+  end if;
+  if coalesce(v_action,'') not in ('propose','confirm','reject','linked_create') or coalesce(v_id,'') !~ '^[a-zA-Z0-9_-]{8,120}$' then
+    raise exception using errcode='22023',message='handover_action_invalid';
+  end if;
+  -- Same document/dispatch lock ordering as receipt, followed by ordered rows.
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('edoc:official-dispatch:'||v_doc_id,0));
+  select * into v_document from public.official_documents where id=v_doc_id for update;
+  if not found then raise exception using errcode='P0002',message='official_document_not_found'; end if;
+  select * into v_company from public.companies where id=v_document.company_id for share;
+  if not found or nullif(v_company.finance_tenant_id,'') is null or v_company.source_system is distinct from 'finance'
+     or v_company.status is distinct from 'active' then
+    raise exception using errcode='42501',message='handover_finance_scope_forbidden';
+  end if;
+  if v_action='linked_create' then
+    if coalesce(p_request->>'operation_id','') !~ '^[a-zA-Z0-9_-]{8,120}$' then
+      raise exception using errcode='22023',message='handover_operation_id_invalid';
+    end if;
+    perform id from public.users where id in(v_actor_id,v_document.applicant_id) order by id for share;
+    select * into v_actor from public.users where id=v_actor_id;
+    perform document_id from public.official_document_followup_owners where document_id=v_doc_id for update;
+    v_followup:=edoc_private.official_followup_owner(v_doc_id,v_actor_id);
+    if v_followup is null or v_followup->>'handover_id' is distinct from v_id then
+      raise exception using errcode='42501',message='handover_linked_application_forbidden';
+    end if;
+    v_link_id:='ODLINK-'||pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p_request->>'operation_id','UTF8')),'hex'),32);
+    v_link_log:='ODLINKLOG-'||pg_catalog.substr(v_link_id,8);
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('edoc:linked-operation:'||(p_request->>'operation_id'),0));
+    select * into v_link_witness from public.official_document_approval_logs where id=v_link_log;
+    if found then
+      if v_link_witness.document_id is distinct from v_link_id or v_link_witness.actor_id is distinct from v_actor_id
+         or v_link_witness.action is distinct from 'linked_from'
+         or v_link_witness.decision_evidence_json->>'original_document_id' is distinct from v_doc_id
+         or v_link_witness.decision_evidence_json->>'handover_id' is distinct from v_id
+         or v_link_witness.decision_evidence_json->>'expected_fingerprint' is distinct from p_request->>'expected_fingerprint' then
+        raise exception using errcode='PT409',message='handover_operation_conflict';
+      end if;
+      return pg_catalog.jsonb_build_object('document_id',v_link_id,'original_document_id',v_doc_id,'idempotent',true);
+    end if;
+    if v_document.current_status not in('draft','rejected') then
+      raise exception using errcode='PT409',message='handover_original_not_correctable';
+    end if;
+    if edoc_private.official_handover_snapshot(v_doc_id) is distinct from p_request->'expected_snapshot'
+       or coalesce(p_request->>'expected_fingerprint','') !~ '^[a-f0-9]{64}$' then
+      raise exception using errcode='PT409',message='handover_version_conflict';
+    end if;
+    v_link_evidence:=pg_catalog.jsonb_build_object('original_document_id',v_doc_id,'handover_id',v_id,
+      'created_by_user_id',v_actor_id,'relation_type','offboarding_correction','operation_id',p_request->>'operation_id',
+      'expected_fingerprint',p_request->>'expected_fingerprint','requires_fresh_files',true,'requires_full_approval',true);
+    v_link_metadata:=pg_catalog.jsonb_build_object('linked_application',v_link_evidence,'requires_fresh_files',true);
+    if v_document.source_type='uploaded_pdf' then
+      if p_request#>'{editor_state,sourceFiles}' is distinct from '[]'::jsonb
+         or p_request#>'{editor_state,pages}' is distinct from '[]'::jsonb
+         or p_request#>'{editor_state,elements}' is distinct from '[]'::jsonb
+         or p_request#>>'{editor_state,revisionNo}' is distinct from '1'
+         or p_request#>>'{editor_state,schemaVersion}' is distinct from '2'
+         or coalesce(p_request#>>'{editor_state,manifestSha256}','') !~ '^[a-f0-9]{64}$'
+         or nullif(p_request->>'renderer_version','') is null then
+        raise exception using errcode='22023',message='handover_linked_editor_invalid';
+      end if;
+      v_link_metadata:=v_link_metadata||pg_catalog.jsonb_build_object('pdf_editor_v2',true,'editor_schema_version',2);
+    else
+      v_link_metadata:=v_link_metadata||pg_catalog.jsonb_build_object('source','compose_form');
+    end if;
+    insert into public.official_documents(id,company_id,document_type,source_type,title,subject,description,method,recipient,
+      dispatch_unit,handler_name,applicant_id,applicant_name,applicant_department_id,applicant_department_name,
+      dispatch_method,requires_stamp,output_mode,dispatch_date,current_status,current_step,request_reason,
+      metadata_json,created_at,updated_at)
+    values(v_link_id,v_company.id,v_document.document_type,v_document.source_type,v_document.title,v_document.subject,
+      v_document.description,v_document.method,v_document.recipient,p_request#>>'{department,name}',v_actor.name,
+      v_actor.id,v_actor.name,p_request#>>'{department,id}',p_request#>>'{department,name}',v_document.dispatch_method,
+      v_document.requires_stamp,v_document.output_mode,pg_catalog.to_char(current_date,'YYYY-MM-DD'),'draft','',
+      v_document.request_reason,v_link_metadata::text,v_time,v_time);
+    if v_document.source_type='uploaded_pdf' then
+      insert into public.official_document_editor_revisions(id,document_id,revision_no,schema_version,editor_state_json,
+        manifest_sha256,renderer_version,created_by,created_at)
+      values('ODLINKREV-'||pg_catalog.substr(v_link_id,8),v_link_id,1,2,p_request->'editor_state',
+        p_request#>>'{editor_state,manifestSha256}',p_request->>'renderer_version',v_actor_id,v_time);
+    end if;
+    insert into public.official_document_approval_logs(id,document_id,actor_id,actor_name,action,comment,decision_evidence_json,created_at)
+    values(v_link_log,v_link_id,v_actor_id,v_actor.name,'linked_from','離職案件補正另立新案；原案保留',v_link_evidence,v_time),
+      ('ODLINKTO-'||pg_catalog.substr(v_link_id,8),v_doc_id,v_actor_id,v_actor.name,'linked_to','new_document_id='||v_link_id,v_link_evidence,v_time);
+    insert into public.audit_logs(id,actor,actor_user_id,action,target_type,target_id,detail,event_type,result,module_code,resource_type,resource_id,metadata_json,created_at)
+    values('AUD-'||v_link_log,v_actor_id,v_actor_id,'linked_application_created','official_documents',v_link_id,
+      'original_document_id='||v_doc_id,'create','success','official_documents','official_documents',v_link_id,
+      v_link_evidence::text,v_time);
+    return pg_catalog.jsonb_build_object('document_id',v_link_id,'original_document_id',v_doc_id,'idempotent',false);
+  end if;
+  select * into v_handover from public.official_document_handovers where id=v_id for update;
+  if v_handover.id is not null and v_handover.document_id is distinct from v_doc_id then
+    raise exception using errcode='PT409',message='handover_operation_conflict';
+  end if;
+  if v_action='propose' then
+    v_record:=p_request->'record';
+    if v_record->>'id' is distinct from v_id or v_record->>'document_id' is distinct from v_doc_id
+       or v_record->>'proposer_user_id' is distinct from v_actor_id
+       or v_record->>'company_id' is distinct from v_company.id
+       or v_record->>'finance_tenant_id' is distinct from v_company.finance_tenant_id
+       or coalesce(v_record->>'kind','') not in ('pending_approver','followup_owner')
+       or coalesce(v_record->>'request_sha256','') !~ '^[a-f0-9]{64}$'
+       or coalesce(pg_catalog.char_length(pg_catalog.btrim(v_record->>'reason')),0) not between 6 and 2000 then
+      raise exception using errcode='22023',message='handover_proposal_invalid';
+    end if;
+  else
+    if v_handover.id is null then raise exception using errcode='P0002',message='handover_request_not_found'; end if;
+    v_record:=v_handover.request_json;
+  end if;
+  perform id from public.users where id in (v_actor_id,v_document.applicant_id,v_record->>'proposer_user_id',v_record->>'former_user_id',v_record->>'successor_user_id') order by id for share;
+  select * into v_binding from public.official_document_followup_owners where document_id=v_doc_id for update;
+  select * into v_actor from public.users where id=v_actor_id;
+  select * into v_proposer from public.users where id=v_record->>'proposer_user_id';
+  select * into v_former from public.users where id=v_record->>'former_user_id';
+  select * into v_successor from public.users where id=v_record->>'successor_user_id';
+  if v_actor.id is null or v_actor.status is distinct from '啟用' or v_actor.account_source is distinct from 'finance'
+     or v_actor.company_id is distinct from v_company.id or v_actor.finance_tenant_id is distinct from v_company.finance_tenant_id
+     or (v_action='propose' and v_actor.role is distinct from '總務')
+     or (v_action<>'propose' and coalesce(v_actor.role,'') not in ('行政部主任','行政部門主任')) then
+    raise exception using errcode='42501',message='handover_manage_forbidden';
+  end if;
+  if v_action='propose' and v_handover.id is not null then
+    if v_handover.proposer_user_id is distinct from v_actor.id
+       or v_handover.request_sha256 is distinct from v_record->>'request_sha256'
+       or (v_handover.request_json-'status'-'confirmer_user_id'-'confirmed_at'-'updated_at'-'created_at')
+          is distinct from (v_record-'status'-'confirmer_user_id'-'confirmed_at'-'updated_at'-'created_at') then
+      raise exception using errcode='PT409',message='handover_operation_conflict';
+    end if;
+    return pg_catalog.jsonb_build_object('request',v_handover.request_json,'idempotent',true);
+  end if;
+  if v_action<>'propose' and v_handover.status<>'pending' then
+    if v_handover.confirmer_user_id=v_actor.id and v_handover.status=(case when v_action='confirm' then 'approved' else 'rejected' end) then
+      if v_action='reject' and v_handover.request_json->>'rejection_reason' is distinct from pg_catalog.btrim(p_request->>'reason') then
+        raise exception using errcode='PT409',message='handover_operation_conflict';
+      end if;
+      return v_handover.result_json||pg_catalog.jsonb_build_object('idempotent',true);
+    end if;
+    raise exception using errcode='PT409',message='handover_request_already_resolved';
+  end if;
+  if v_actor.id in (v_record->>'former_user_id',v_record->>'successor_user_id',v_document.applicant_id)
+     or (v_action<>'propose' and v_actor.id=v_record->>'proposer_user_id')
+     or (v_action<>'reject' and (v_proposer.id is null or v_proposer.role is distinct from '總務'
+       or v_proposer.status is distinct from '啟用' or v_proposer.id in (v_former.id,v_successor.id,v_document.applicant_id))) then
+    raise exception using errcode='42501',message='handover_two_person_required';
+  end if;
+  -- Rejection removes no assignments and needs no still-active successor.
+  if v_action='reject' then
+    if coalesce(pg_catalog.char_length(pg_catalog.btrim(p_request->>'reason')),0) not between 2 and 2000 then
+      raise exception using errcode='22023',message='handover_rejection_reason_required';
+    end if;
+    v_result:=pg_catalog.jsonb_build_object('document_id',v_doc_id,'handover_id',v_id,'status','rejected','idempotent',false);
+    update public.official_document_handovers set status='rejected',confirmer_user_id=v_actor.id,
+      updated_at=v_time,result_json=v_result,request_json=request_json||pg_catalog.jsonb_build_object('status','rejected',
+        'confirmer_user_id',v_actor.id,'rejection_reason',pg_catalog.btrim(p_request->>'reason'),'updated_at',v_time) where id=v_id;
+  else
+    if v_former.id is null or v_successor.id is null or v_former.status='啟用'
+       or v_successor.status is distinct from '啟用' or v_former.id=v_successor.id
+       or exists(select 1 from public.users u where u.id in (v_proposer.id,v_former.id,v_successor.id) and
+          (u.account_source is distinct from 'finance' or u.company_id is distinct from v_company.id or u.finance_tenant_id is distinct from v_company.finance_tenant_id)) then
+      raise exception using errcode='42501',message='handover_finance_scope_forbidden';
+    end if;
+    perform id from public.official_document_approval_steps where document_id=v_doc_id order by workflow_generation,step_order,id for update;
+    select * into v_stamp from public.official_document_stamp_requests where document_id=v_doc_id order by created_at desc,id desc limit 1 for update;
+    select max(workflow_generation) into v_generation from public.official_document_approval_steps where document_id=v_doc_id;
+    v_snapshot:=edoc_private.official_handover_snapshot(v_doc_id);
+    if (v_action='propose' and v_snapshot is distinct from p_request->'expected_snapshot')
+       or (v_action='confirm' and v_snapshot is distinct from v_handover.expected_snapshot) then
+      raise exception using errcode='PT409',message='handover_version_conflict';
+    end if;
+    if v_record->>'kind'='followup_owner' then
+      if v_former.id is distinct from coalesce(v_binding.process_owner_user_id,v_document.applicant_id)
+         or v_successor.id=v_document.applicant_id then
+        raise exception using errcode='42501',message='handover_not_current_followup_owner';
+      end if;
+      v_targets:='[]'::jsonb;
+      if v_record->>'previous_handover_id' is distinct from v_binding.handover_id
+         or (v_binding.document_id is not null and edoc_private.official_followup_lineage(v_doc_id) is null) then
+        raise exception using errcode='PT409',message='handover_followup_lineage_invalid';
+      end if;
+    else
+      select * into v_current from public.official_document_approval_steps where document_id=v_doc_id
+        and workflow_generation=v_generation and status='pending' order by step_order limit 1;
+      select coalesce(pg_catalog.jsonb_agg(id order by step_order),'[]'::jsonb) into v_targets
+        from public.official_document_approval_steps where document_id=v_doc_id and workflow_generation=v_generation
+        and status='pending' and approver_user_id=v_former.id and step_key<>'applicant_confirm';
+      if v_current.id is null or v_current.step_key is distinct from v_document.current_step
+         or v_current.step_key='applicant_confirm'
+         or v_document.current_status is distinct from edoc_private.official_workflow_step_status(v_current.step_key)
+         or nullif(v_document.stamped_file_id,'') is not null or nullif(v_stamp.claim_token,'') is not null
+         or nullif(v_stamp.stamped_file_id,'') is not null or v_stamp.status in ('stamping','stamped','completed')
+         or v_targets='[]'::jsonb or exists(select 1 from public.official_document_approval_steps
+           where document_id=v_doc_id and workflow_generation=v_generation and status not in ('approved','pending')) then
+        raise exception using errcode='PT409',message='handover_workflow_irreversible';
+      end if;
+      if v_successor.id=v_document.applicant_id or nullif(v_former.role,'') is null
+         or v_successor.role is distinct from v_former.role
+         or exists(select 1 from public.official_document_approval_steps where document_id=v_doc_id
+           and workflow_generation=v_generation and approver_user_id=v_successor.id) then
+        raise exception using errcode='42501',message='handover_successor_role_forbidden';
+      end if;
+    end if;
+    if v_targets is distinct from v_record->'step_ids' then raise exception using errcode='PT409',message='handover_assignment_conflict'; end if;
+    if v_action='propose' then
+      if exists(select 1 from public.official_document_handovers where document_id=v_doc_id and kind=v_record->>'kind'
+        and former_user_id=v_former.id and status='pending') then
+        raise exception using errcode='PT409',message='handover_pending_request_exists';
+      end if;
+      v_record:=v_record||pg_catalog.jsonb_build_object('status','pending','confirmer_user_id',null,'confirmed_at',null,'created_at',v_time,'updated_at',v_time);
+      insert into public.official_document_handovers(id,document_id,company_id,finance_tenant_id,kind,former_user_id,
+        successor_user_id,proposer_user_id,status,request_sha256,request_json,expected_snapshot,created_at,updated_at)
+      values(v_id,v_doc_id,v_company.id,v_company.finance_tenant_id,v_record->>'kind',v_former.id,v_successor.id,
+        v_proposer.id,'pending',v_record->>'request_sha256',v_record,v_snapshot,v_time,v_time);
+      v_result:=pg_catalog.jsonb_build_object('request',v_record,'idempotent',false);
+    else
+      if v_record->>'kind'='followup_owner' then
+        if v_binding.document_id is null then
+          insert into public.official_document_followup_owners(document_id,original_applicant_id,process_owner_user_id,handover_id,
+            company_id,finance_tenant_id,correction_policy,updated_at)
+          values(v_doc_id,v_document.applicant_id,v_successor.id,v_id,v_company.id,v_company.finance_tenant_id,'linked_new_application',v_time);
+        else
+          update public.official_document_followup_owners set process_owner_user_id=v_successor.id,handover_id=v_id,updated_at=v_time
+            where document_id=v_doc_id and handover_id=v_binding.handover_id and process_owner_user_id=v_former.id;
+          if not found then raise exception using errcode='PT409',message='handover_version_conflict'; end if;
+        end if;
+      else
+        for v_step in select * from public.official_document_approval_steps where document_id=v_doc_id
+            and workflow_generation=v_generation order by step_order loop
+          v_new:=v_step;
+          v_new.id:='HSTEP-'||pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_id||':'||v_step.id||':'||(v_generation+1)::text,'UTF8')),'hex'),40);
+          v_new.workflow_generation:=v_generation+1;
+          v_new.created_at:=v_time;v_new.updated_at:=v_time;
+          if v_step.status='pending' then
+            v_new.comment:='';v_new.approved_at:=null;v_new.review_started_at:=case when v_step.id=v_current.id then v_time else null end;
+            v_new.decision_actor_user_id:=null;
+            v_new.decision_evidence_json:=pg_catalog.jsonb_build_object('copied_from_step_id',v_step.id,'added_by_operation_id',v_id);
+            if v_step.approver_user_id=v_former.id and v_step.step_key<>'applicant_confirm' then
+              v_new.approver_user_id:=v_successor.id;v_new.approver_name:=v_successor.name;
+            end if;
+          else
+            v_new.decision_evidence_json:=coalesce(v_step.decision_evidence_json,'{}'::jsonb)||pg_catalog.jsonb_build_object('copied_from_step_id',v_step.id);
+          end if;
+          insert into public.official_document_approval_steps select (v_new).*;
+          insert into public.approval_step_actor_snapshots(id,source_type,source_id,step_no,step_name,approver_role,
+            approver_user_id,approver_name,approver_email,status,comment,acted_at,snapshot_json,created_at,updated_at)
+          values('ODAPSN-'||pg_catalog.upper(pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to('official_document:'||v_doc_id||':'||v_new.id,'UTF8')),'hex'),32)),
+            'official_document',v_doc_id,v_new.step_order,v_new.step_name,v_new.approver_role,v_new.approver_user_id,
+            v_new.approver_name,'','已鎖定','','',pg_catalog.jsonb_build_object('step_id',v_new.id,'step_key',v_new.step_key),v_time,v_time);
+        end loop;
+        update public.official_document_approval_steps set status='skipped',updated_at=v_time
+          where document_id=v_doc_id and workflow_generation=v_generation and status='pending';
+        update public.official_documents set updated_at=v_time where id=v_doc_id;
+      end if;
+      v_result:=pg_catalog.jsonb_build_object('document_id',v_doc_id,'handover_id',v_id,'kind',v_record->>'kind',
+        'status','approved','idempotent',false,'workflow_generation',case when v_record->>'kind'='pending_approver' then v_generation+1 else null end);
+      update public.official_document_handovers set status='approved',confirmer_user_id=v_actor.id,
+        updated_at=v_time,result_json=v_result,request_json=request_json||pg_catalog.jsonb_build_object('status','approved',
+          'confirmer_user_id',v_actor.id,'confirmed_at',v_time,'updated_at',v_time) where id=v_id;
+      insert into public.official_document_approval_logs(id,document_id,actor_id,actor_name,action,comment,decision_evidence_json,created_at)
+      values('HLOG-'||v_id,v_doc_id,v_actor.id,v_actor.name,'handover_confirmed',v_record->>'reason',
+        pg_catalog.jsonb_build_object('handover_id',v_id,'former_user_id',v_former.id,'successor_user_id',v_successor.id,
+          'proposer_user_id',v_proposer.id,'confirmer_user_id',v_actor.id,'kind',v_record->>'kind','request_sha256',v_record->>'request_sha256'),v_time);
+      for v_recipient in select distinct value from pg_catalog.unnest(array[v_proposer.id,v_successor.id,
+        case when v_record->>'kind'='pending_approver' then case when v_current.approver_user_id=v_former.id then v_successor.id else v_current.approver_user_id end else null end]) value where value is not null loop
+        insert into public.notifications(id,type,title,target_role,target_user_id,target_company_id,target_email,channel,status,priority,source,action_url,body,created_at)
+        select 'HN-'||v_id||'-'||u.id,'案件交接','交接已確認',u.role,u.id,u.company_id,u.email,'系統通知','未讀','中',
+          v_doc_id,'/#approvalLog?document='||v_doc_id,'請至簽核紀錄查看交接案件。',pg_catalog.clock_timestamp()
+        from public.users u where u.id=v_recipient and u.status='啟用' and u.account_source='finance'
+          and u.company_id=v_company.id and u.finance_tenant_id=v_company.finance_tenant_id;
+        if not found then raise exception using errcode='42501',message='notification_exact_target_required'; end if;
+      end loop;
+    end if;
+  end if;
+  insert into public.audit_logs(id,actor,actor_user_id,action,target_type,target_id,detail,event_type,result,module_code,resource_type,resource_id,metadata_json,created_at)
+  values('AUD-HANDOVER-'||v_action||'-'||v_id,v_actor.id,v_actor.id,'handover_'||v_action,'official_documents',v_doc_id,
+    'handover_id='||v_id,'assign','success','official_documents','official_documents',v_doc_id,
+    pg_catalog.jsonb_build_object('handover_id',v_id,'request_sha256',v_record->>'request_sha256')::text,v_time);
+  return v_result;
+end $function$;
+revoke all on function public.edoc_manage_official_handover(jsonb) from public,anon,authenticated;
+grant execute on function public.edoc_manage_official_handover(jsonb) to service_role;
+
+-- A confirmed responsibility is separate from the original applicant and
+-- remains valid only while the exact Finance owner/company are active.
+create or replace function edoc_private.official_followup_lineage(p_document_id text)
+returns jsonb language plpgsql stable security invoker set search_path='' as $lineage$
+declare
+  v_doc public.official_documents%rowtype;
+  v_binding public.official_document_followup_owners%rowtype;
+  v_company public.companies%rowtype;
+  v_h public.official_document_handovers%rowtype;
+  v_id text; v_successor text; v_seen text[]:='{}'::text[];
+begin
+  select * into v_doc from public.official_documents where id=p_document_id;
+  select * into v_binding from public.official_document_followup_owners where document_id=p_document_id;
+  select * into v_company from public.companies where id=v_doc.company_id;
+  if v_binding.document_id is null or v_binding.original_applicant_id is distinct from v_doc.applicant_id
+     or v_binding.company_id is distinct from v_company.id or v_binding.finance_tenant_id is distinct from v_company.finance_tenant_id
+     or v_binding.correction_policy is distinct from 'linked_new_application'
+     or v_company.status is distinct from 'active' or v_company.source_system is distinct from 'finance'
+     or nullif(v_company.finance_tenant_id,'') is null
+     or not exists(select 1 from public.users u where u.id=v_doc.applicant_id and u.status<>'啟用'
+       and u.account_source='finance' and u.company_id=v_company.id and u.finance_tenant_id=v_company.finance_tenant_id)
+     or not exists(select 1 from public.users u where u.id=v_binding.process_owner_user_id
+       and u.account_source='finance' and u.company_id=v_company.id and u.finance_tenant_id=v_company.finance_tenant_id) then
+    return null;
+  end if;
+  v_id:=v_binding.handover_id; v_successor:=v_binding.process_owner_user_id;
+  loop
+    if v_id=any(v_seen) or pg_catalog.cardinality(v_seen)>=100 then return null; end if;
+    v_seen:=pg_catalog.array_append(v_seen,v_id);
+    select * into v_h from public.official_document_handovers where id=v_id;
+    if not found or v_h.status is distinct from 'approved' or v_h.kind is distinct from 'followup_owner'
+       or v_h.document_id is distinct from v_doc.id or v_h.company_id is distinct from v_company.id
+       or v_h.finance_tenant_id is distinct from v_company.finance_tenant_id
+       or v_h.successor_user_id is distinct from v_successor or v_h.confirmer_user_id is null
+       or v_h.confirmer_user_id in(v_h.proposer_user_id,v_h.former_user_id,v_h.successor_user_id,v_doc.applicant_id)
+       or v_h.request_json->>'status' is distinct from 'approved'
+       or v_h.request_json->>'confirmed_at' is null
+       or v_h.request_json->>'confirmer_user_id' is distinct from v_h.confirmer_user_id
+       or v_h.request_json->>'former_user_id' is distinct from v_h.former_user_id
+       or v_h.request_json->>'successor_user_id' is distinct from v_h.successor_user_id then return null; end if;
+    v_id:=nullif(v_h.request_json->>'previous_handover_id','');
+    if v_id is null then
+      if v_h.former_user_id is distinct from v_doc.applicant_id then return null; end if;
+      return pg_catalog.jsonb_build_object('handover_id',v_binding.handover_id,'original_applicant_id',v_doc.applicant_id,
+        'process_owner_user_id',v_binding.process_owner_user_id,'company_id',v_company.id,'finance_tenant_id',v_company.finance_tenant_id);
+    end if;
+    v_successor:=v_h.former_user_id;
+  end loop;
+end
+$lineage$;
+revoke all on function edoc_private.official_followup_lineage(text) from public,anon,authenticated;
+grant execute on function edoc_private.official_followup_lineage(text) to service_role;
+
+create or replace function edoc_private.official_followup_owner(p_document_id text,p_actor_id text)
+returns jsonb language sql stable security invoker set search_path='' as $followup$
+  select proof from (select edoc_private.official_followup_lineage(p_document_id) as proof) p
+  join public.users u on u.id=p_actor_id and u.status='啟用' and u.account_source='finance'
+    and u.id=p.proof->>'process_owner_user_id' and u.company_id=p.proof->>'company_id'
+    and u.finance_tenant_id=p.proof->>'finance_tenant_id'
+$followup$;
+revoke all on function edoc_private.official_followup_owner(text,text) from public,anon,authenticated;
+grant execute on function edoc_private.official_followup_owner(text,text) to service_role;
+
+do $receipt_followup$
+declare v_sql text; v_old text; v_new text;
+begin
+  v_sql:=pg_catalog.pg_get_functiondef('public.edoc_confirm_official_document(jsonb)'::regprocedure);
+  v_old:='  v_evidence jsonb;';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_receipt_declaration_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,E'  v_evidence jsonb;\n  v_followup jsonb;');
+  v_old:=E'  if not found or v_document.applicant_id is distinct from v_actor_id then\n    raise exception using errcode=\'42501\',message=\'only_applicant_can_confirm\';\n  end if;';
+  v_new:=E'  if not found then raise exception using errcode=\'42501\',message=\'only_applicant_can_confirm\'; end if;\n  if v_document.applicant_id is distinct from v_actor_id then\n    v_followup:=edoc_private.official_followup_owner(v_document.id,v_actor_id);\n    if v_followup is null or v_followup->>\'handover_id\' is distinct from p_request->>\'followup_handover_id\' then\n      raise exception using errcode=\'42501\',message=\'only_applicant_can_confirm\';\n    end if;\n  end if;';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_receipt_actor_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,v_new);
+  v_old:='v_step.approver_user_id is distinct from v_actor_id';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_receipt_principal_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,'v_step.approver_user_id is distinct from v_document.applicant_id');
+  v_sql:=pg_catalog.replace(v_sql,'v_dispatch.dispatch_owner_user_id is distinct from v_actor_id',
+    'v_dispatch.dispatch_owner_user_id is distinct from v_document.applicant_id');
+  v_sql:=pg_catalog.replace(v_sql,'''principal_actor_id'',v_actor_id','''principal_actor_id'',v_document.applicant_id');
+  v_old:='v_actor_id),v_actor_id,';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_receipt_log_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,'v_actor_id),v_document.applicant_id,');
+  v_old:=E'  update public.official_document_approval_steps set status=\'approved\'';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_receipt_evidence_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,E'  if v_followup is not null then v_evidence:=v_evidence||pg_catalog.jsonb_build_object(\'followup_handover_id\',v_followup->>\'handover_id\'); end if;\n'||v_old);
+  execute v_sql;
+end $receipt_followup$;
+
+-- Keep the immutable dispatch owner/principal; only a live confirmed owner
+-- may perform the applicant dispatch action. No broader role fallback.
+do $dispatch_followup$
+declare v_sql text; v_old text;
+begin
+  v_sql:=pg_catalog.pg_get_functiondef('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'::regprocedure);
+  v_old:='or v_record.dispatch_owner_user_id is distinct from v_actor.id';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_dispatch_actor_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,
+    'or (v_record.dispatch_owner_user_id is distinct from v_actor.id and not (v_record.dispatch_owner_type=''applicant'' and v_record.dispatch_owner_user_id=v_document.applicant_id and edoc_private.official_followup_owner(v_document.id,v_actor.id) is not null))');
+  v_old:='app_user.id = v_document.applicant_id';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_dispatch_notice_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,
+    'app_user.id = coalesce((select f.process_owner_user_id from public.official_document_followup_owners f where f.document_id=v_document.id and edoc_private.official_followup_owner(v_document.id,f.process_owner_user_id) is not null),v_document.applicant_id)');
+  v_old:='''dispatch_record_id'', v_record.id,';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_dispatch_evidence_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,
+    '''principal_actor_id'',v_record.dispatch_owner_user_id,''followup_handover_id'',edoc_private.official_followup_owner(v_document.id,v_actor.id)->>''handover_id'','||v_old);
+  execute v_sql;
+end $dispatch_followup$;
+
+do $list_followup$
+declare v_sql text; v_old text;
+begin
+  v_sql:=pg_catalog.pg_get_functiondef('public.edoc_list_official_document_candidates(jsonb)'::regprocedure);
+  v_old:='d.applicant_id=v_actor_id';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_list_scope_drift'; end if;
+  -- Do not change scope=mine: the original is still somebody else's case.
+  v_sql:=pg_catalog.replace(v_sql,E'        d.applicant_id=v_actor_id',
+    E'        (d.applicant_id=v_actor_id or edoc_private.official_followup_owner(d.id,v_actor_id) is not null)');
+  v_old:='''document'',pg_catalog.to_jsonb(d),';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_list_bundle_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,v_old||'''followup_binding'',edoc_private.official_followup_owner(d.id,v_actor_id),');
+  execute v_sql;
+end $list_followup$;
+
+do $notice_followup$
+declare v_sql text; v_target text; v_old text;
+begin
+  v_target:='coalesce((select f.process_owner_user_id from public.official_document_followup_owners f where f.document_id=v_document.id and edoc_private.official_followup_owner(v_document.id,f.process_owner_user_id) is not null),v_document.applicant_id)';
+  v_sql:=pg_catalog.pg_get_functiondef('public.edoc_claim_official_document_rejection_v2(text,text,text,text,text,jsonb)'::regprocedure);
+  if pg_catalog.strpos(v_sql,'applicant.id = v_document.applicant_id')=0 then raise exception 'handover_reject_notice_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,'applicant.id = v_document.applicant_id','applicant.id = '||v_target);
+  v_sql:=pg_catalog.replace(v_sql,'u.id = v_document.applicant_id','u.id = '||v_target);
+  v_old:=E'      v_document.applicant_id,\n';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_reject_recipient_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,v_old,'      '||v_target||E',\n');
+  execute v_sql;
+  v_sql:=pg_catalog.pg_get_functiondef('public.edoc_decline_official_document(jsonb)'::regprocedure);
+  if pg_catalog.strpos(v_sql,'u.id=v_document.applicant_id')=0 then raise exception 'handover_decline_notice_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,'u.id=v_document.applicant_id','u.id='||v_target);
+  execute v_sql;
+  v_sql:=pg_catalog.pg_get_functiondef('public.edoc_mutate_official_workflow(jsonb)'::regprocedure);
+  if pg_catalog.strpos(v_sql,'u.id=v_target')=0 then raise exception 'handover_workflow_notice_drift'; end if;
+  v_sql:=pg_catalog.replace(v_sql,'u.id=v_target','u.id=case when v_target=v_document.applicant_id then '||v_target||' else v_target end');
+  execute v_sql;
+end $notice_followup$;
+
+-- Stamp completion previously produced the dispatch case without a private
+-- recipient notice. The notice shares its transaction and is deduplicated.
+do $stamp_notice$
+declare v_sql text; v_old text; v_notice text;
+begin
+  v_sql:=pg_catalog.pg_get_functiondef('public.edoc_complete_official_document_stamp(text,text,text,text)'::regprocedure);
+  v_old:=E'  return jsonb_build_object(\n    \'completed\', true,';
+  if pg_catalog.strpos(v_sql,v_old)=0 then raise exception 'handover_stamp_notice_drift'; end if;
+  v_notice:=$notice$
+  insert into public.notifications(id,type,title,target_role,target_user_id,target_company_id,target_email,
+    channel,status,priority,source,action_url,body,created_at)
+  select 'NTF-STAMP-READY-'||v_request.id,'發文待辦',v_document.title||' 已完成用印',u.role,u.id,u.company_id,u.email,
+    '系統通知','未讀','高',v_document.id,'/#approvalLog?document='||v_document.id,
+    case when v_dispatch_owner_type='general_affairs' then '請完成寄發並回填證明。'
+      when v_dispatch_owner_type='applicant' then '請完成自行寄發並回填證明。' else '請確認收件並結案。' end,
+    pg_catalog.clock_timestamp()
+  from public.users u where u.id=case when v_dispatch_owner_type='general_affairs' then v_dispatch_owner_user_id
+    else coalesce((select f.process_owner_user_id from public.official_document_followup_owners f
+      where f.document_id=v_document.id and edoc_private.official_followup_owner(v_document.id,f.process_owner_user_id) is not null),v_document.applicant_id) end
+    and u.status='啟用' and nullif(pg_catalog.btrim(u.email),'') is not null
+  on conflict(id) do nothing;
+  if not found and not exists(select 1 from public.notifications where id='NTF-STAMP-READY-'||v_request.id) then
+    raise exception using errcode='42501',message='notification_exact_target_required';
+  end if;
+$notice$;
+  execute pg_catalog.replace(v_sql,v_old,v_notice||v_old);
+end $stamp_notice$;
+notify pgrst,'reload schema';
+commit;
