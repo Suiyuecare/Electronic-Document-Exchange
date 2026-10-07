@@ -31942,7 +31942,30 @@ def unresolved_notification_failure_count(deliveries: List[Dict[str, Any]]) -> i
     for row in sorted(deliveries, key=notification_delivery_order, reverse=True):
         key = (str(row.get("notification_id") or row.get("id") or ""), str(row.get("channel") or ""))
         latest.setdefault(key, row)
-    return sum(row.get("status") in {"失敗", "未設定", "憑證異常", "重試中"} for row in latest.values())
+    unresolved = {key for key, row in latest.items() if row.get("status") in {"失敗", "未設定", "憑證異常", "重試中"}}
+    for guard in deliveries:
+        if not str(guard.get("id") or "").startswith("NDEL-MONINITIAL-") or guard.get("channel") != "Email 保留":
+            continue
+        notification_id = str(guard.get("notification_id") or "")
+        expected_id = "NDEL-MONINITIAL-" + stable_json_hash({"notificationId": notification_id, "channel": "Email"})[:40]
+        verified = False
+        if guard.get("id") == expected_id and guard.get("status") == "已保留" and guard.get("attempt_count") == 0:
+            for outcome in deliveries:
+                if (outcome.get("notification_id") != notification_id or outcome.get("channel") != "Email"
+                        or outcome.get("target") != guard.get("target") or not outcome.get("created_at")
+                        or str(outcome.get("created_at")) < str(guard.get("created_at") or "")):
+                    continue
+                receipt = outcome.get("receipt")
+                accepted = outcome.get("status") == "成功" and isinstance(receipt, str) and bool(receipt) and len(receipt) <= 256 and not re.search(r"[\s\x00-\x1f\x7f]", receipt)
+                rejected = not receipt and notification_failure_definitely_unsent("Email", str(outcome.get("status") or ""), str(outcome.get("error") or ""))
+                if accepted or rejected:
+                    verified = True
+                    break
+        if not verified:
+            # One logical Email failure, not an extra "reservation channel"
+            # failure. A lost initial outcome remains operationally visible.
+            unresolved.add((notification_id, "Email"))
+    return len(unresolved)
 
 
 def monitoring_alert_recipients(users: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

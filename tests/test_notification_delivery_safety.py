@@ -163,6 +163,7 @@ class NotificationDeliverySafetyTests(unittest.TestCase):
         self.assertEqual(first["results"][0]["error"], "notification_delivery_outcome_unknown")
         self.assertFalse(second.get("attempted"))
         self.assertTrue(any(key.startswith("NDEL-MONINITIAL-") for key in self.store["notification_deliveries"]))
+        self.assertEqual(backend.unresolved_notification_failure_count(list(self.store["notification_deliveries"].values())), 1)
 
     def test_fixed_initial_sqlite_lost_outcome_has_durable_guard(self):
         notice = backend.create_notification(self.conn, {**self.notice, "id": "NTF-MONTEST-ISOLATED", "channel": "Email"})
@@ -173,6 +174,21 @@ class NotificationDeliverySafetyTests(unittest.TestCase):
         self.email.assert_called_once()
         self.assertFalse(self.conn.in_transaction)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notification_deliveries WHERE id LIKE 'NDEL-MONINITIAL-%'").fetchone()[0], 1)
+        self.assertEqual(backend.unresolved_notification_failure_count([dict(row) for row in self.conn.execute("SELECT * FROM notification_deliveries")]), 1)
+
+    def test_fixed_initial_monitoring_guard_resolves_only_verified_exact_outcome(self):
+        notice_id = "NTF-MONTEST-PENDING"
+        guard = {"id": "NDEL-MONINITIAL-" + backend.stable_json_hash({"notificationId": notice_id, "channel": "Email"})[:40], "notification_id": notice_id, "channel": "Email 保留", "target": self.user["email"], "status": "已保留", "attempt_count": 0, "created_at": "2026-10-08 12:00:00"}
+        accepted = {"id": "INITIAL-OUTCOME", "notification_id": notice_id, "channel": "Email", "target": self.user["email"], "status": "成功", "receipt": "provider-accepted", "error": "", "attempt_count": 1, "created_at": "2026-10-08 12:00:00"}
+        self.assertEqual(backend.unresolved_notification_failure_count([guard]), 1)
+        self.assertEqual(backend.unresolved_notification_failure_count([guard, accepted]), 0)
+        rejected = {**accepted, "status": "失敗", "receipt": "", "error": "Resend HTTP 400"}
+        self.assertEqual(backend.unresolved_notification_failure_count([guard, rejected]), 1)  # Existing failed Email, no double count.
+        for patch in ({"target": "other@example.invalid"}, {"receipt": ""}, {"receipt": {"bad": True}}, {"created_at": "2026-10-08 11:59:59"}, {"notification_id": "OTHER"}):
+            with self.subTest(patch=patch):
+                self.assertEqual(backend.unresolved_notification_failure_count([guard, {**accepted, **patch}]), 1)
+        unknown = {**accepted, "status": "失敗", "receipt": "", "error": "notification_delivery_outcome_unknown"}
+        self.assertEqual(backend.unresolved_notification_failure_count([guard, unknown]), 1)
 
     def test_local_postcommit_worker_can_send_after_blocked_business_notice_commits(self):
         self.conn.isolation_level = ""

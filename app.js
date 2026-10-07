@@ -608,6 +608,7 @@ const backupRestoreDrills = [];
 let latestBackupDrill = null;
 let backupRestoreDrillPending = false;
 let notificationCreatePending = false;
+let notificationCreateAttempt = null;
 let latestComplianceAttestation = null;
 let selectedComplianceDocId = "DOC-COMP-001";
 let complianceLastReview = "";
@@ -20872,6 +20873,7 @@ function notificationPayload(item, forceChannel = item.channel) {
     status: item.status || "未讀",
     priority: item.priority || "中",
     source: item.source || "",
+    action_url: item.actionUrl || "",
     body: item.body || "請確認公文收發電子用印系統待辦事項。"
   };
 }
@@ -21472,22 +21474,46 @@ async function addNotificationFromForm() {
   // The backend resolves this explicit address to one active immutable identity.
   // A role is never used to guess the first person in that role.
   const target = "指定收件人";
-  const item = { id: `NTF-${crypto.randomUUID()}`, type, title: `${type}手動通知`, target, targetEmail, channel, status: "未讀", priority: "中", source: "MANUAL", body };
+  const scope = frontendSessionScope();
+  const payloadKey = JSON.stringify({ type, targetEmail, channel, body });
+  if (notificationCreateAttempt?.scope !== scope) notificationCreateAttempt = null;
+  if (notificationCreateAttempt?.unknown && notificationCreateAttempt.payloadKey !== payloadKey) {
+    return showToast("上次通知結果尚待確認，請以原內容重試或重新整理後查詢通知紀錄。");
+  }
+  if (!notificationCreateAttempt) notificationCreateAttempt = { scope, payloadKey, id: `NTF-${crypto.randomUUID()}`, unknown: false };
+  const attempt = notificationCreateAttempt;
+  const item = { id: attempt.id, type, title: `${type}手動通知`, target, targetEmail, channel, status: "未讀", priority: "中", source: "MANUAL", body };
   const button = document.querySelector("#notificationAddBtn");
+  let createdId = "";
   notificationCreatePending = true;
   if (button) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
   try {
     const created = await backendRequest("/notifications", { method: "POST", body: JSON.stringify(notificationPayload(item)) });
+    if (frontendSessionScope() !== scope) return;
+    if (created?.id !== attempt.id) throw Object.assign(new Error("notification_create_response_unconfirmed"), { outcomeUnknown: true });
+    createdId = created.id;
+    notificationCreateAttempt = null;
     selectedNotificationId = created.id;
     await syncNotificationsFromBackend(true);
     addNotificationAudit("新增通知", `${type} 已新增至後端佇列給 ${target}，通道：${channel}。`);
     showToast("通知已新增至後端佇列。");
   } catch (error) {
-    addNotificationAudit("新增通知失敗", "未建立通知；請確認收件人是唯一有效的正式帳號。");
-    showToast("通知未建立，請確認收件人的正式帳號。");
+    if (frontendSessionScope() !== scope) return;
+    if (createdId) {
+      addNotificationAudit("通知已建立", "通知已保存；畫面同步未完成，請重新整理查詢。");
+      showToast("通知已建立，請重新整理查看紀錄。");
+    } else if (error.outcomeUnknown || Number(error.status) >= 500 || !Number.isFinite(Number(error.status))) {
+      attempt.unknown = true;
+      addNotificationAudit("通知建立結果待確認", "尚未確認後端是否建立；重試將沿用同一筆編號，不另建通知。");
+      showToast("通知建立結果尚待確認；重試會沿用同一筆編號。");
+    } else {
+      notificationCreateAttempt = null;
+      addNotificationAudit("新增通知失敗", "未建立通知；請確認收件人是唯一有效的正式帳號。");
+      showToast("通知未建立，請確認收件人的正式帳號。");
+    }
   } finally {
     notificationCreatePending = false;
-    if (button) { button.disabled = false; button.removeAttribute("aria-busy"); }
+    if (button) { button.disabled = false; button.removeAttribute("aria-busy"); button.textContent = notificationCreateAttempt?.unknown ? "確認上次通知" : "新增"; }
   }
 }
 

@@ -44,11 +44,13 @@ test('immutable identity survives readback and resend without role guessing', ()
   vm.createContext(context);
   vm.runInContext(shipping('mapBackendNotification') + '\n' + shipping('notificationPayload'), context);
   const item = context.mapBackendNotification({ id: 'NTF-1', target_role: '主管',
-    target_user_id: 'U-2', target_company_id: 'CO-2', target_email: 'exact@example.invalid' });
+    target_user_id: 'U-2', target_company_id: 'CO-2', target_email: 'exact@example.invalid',
+    action_url: '/#inbound?document=INB-1&reminder_source=inbound_documents' });
   const payload = context.notificationPayload(item);
   assert.equal(payload.target_user_id, 'U-2');
   assert.equal(payload.target_company_id, 'CO-2');
   assert.equal(payload.target_email, 'exact@example.invalid');
+  assert.equal(payload.action_url, '/#inbound?document=INB-1&reminder_source=inbound_documents');
   assert.doesNotMatch(source, /function roleEmail\(/);
 });
 test('inbound reminders resolve only matching internal case references', () => {
@@ -66,7 +68,7 @@ test('manual notice creation names an exact recipient and blocks duplicate activ
   const button = { disabled: false, setAttribute() {}, removeAttribute() {} };
   const inputs = { '#notificationType': { value: '收文' }, '#notificationTarget': { value: 'exact@example.invalid' },
     '#notificationChannel': { value: '系統通知' }, '#notificationBody': { value: 'Synthetic notice' }, '#notificationAddBtn': button };
-  const context = { notificationCreatePending: false, selectedNotificationId: '', crypto: { randomUUID: () => 'synthetic-uuid' },
+  const context = { notificationCreatePending: false, notificationCreateAttempt: null, frontendSessionScope: () => 'synthetic-scope', selectedNotificationId: '', crypto: { randomUUID: () => 'synthetic-uuid' },
     document: { querySelector: id => inputs[id] }, backendRequest: (_path, options) => {
       calls.push(JSON.parse(options.body)); return new Promise(resolve => { finish = resolve; });
     }, syncNotificationsFromBackend: async () => {}, addNotificationAudit() {}, showToast() {} };
@@ -81,4 +83,26 @@ test('manual notice creation names an exact recipient and blocks duplicate activ
   finish({ id: 'NTF-synthetic-uuid' }); await first;
   assert.equal(button.disabled, false);
   assert.equal(context.notificationCreatePending, false);
+});
+test('unknown create outcome retains its immutable operation ID and forbids changed-content retry', async () => {
+  let nextId = 0;
+  const calls = [], toasts = [];
+  const button = { disabled: false, setAttribute() {}, removeAttribute() {} };
+  const inputs = { '#notificationType': { value: '收文' }, '#notificationTarget': { value: 'exact@example.invalid' },
+    '#notificationChannel': { value: '系統通知' }, '#notificationBody': { value: 'Synthetic notice' }, '#notificationAddBtn': button };
+  const context = { notificationCreatePending: false, notificationCreateAttempt: null, frontendSessionScope: () => 'synthetic-scope',
+    crypto: { randomUUID: () => String(++nextId) }, document: { querySelector: id => inputs[id] }, backendRequest: async (_path, options) => {
+      calls.push(JSON.parse(options.body));
+      if (calls.length === 1) throw Object.assign(new Error('timeout'), { outcomeUnknown: true });
+      if (calls.length === 2) throw Object.assign(new Error('server error'), { status: 503 });
+      throw new TypeError('network failure');
+    }, addNotificationAudit() {}, showToast: text => toasts.push(text) };
+  vm.createContext(context);
+  vm.runInContext(shipping('notificationPayload') + '\n' + shipping('addNotificationFromForm'), context);
+  await context.addNotificationFromForm(); await context.addNotificationFromForm(); await context.addNotificationFromForm();
+  assert.equal(calls.length, 3); assert.equal(calls[0].id, calls[1].id); assert.equal(calls[1].id, calls[2].id); assert.equal(nextId, 1);
+  assert.equal(button.textContent, '確認上次通知');
+  assert.doesNotMatch(toasts.join(' '), /通知未建立/);
+  inputs['#notificationBody'].value = 'Changed content'; await context.addNotificationFromForm();
+  assert.equal(calls.length, 3);
 });
