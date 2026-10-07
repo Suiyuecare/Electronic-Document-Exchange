@@ -206,7 +206,7 @@ begin
          or p_request#>'{editor_state,elements}' is distinct from '[]'::jsonb
          or p_request#>>'{editor_state,revisionNo}' is distinct from '1'
          or p_request#>>'{editor_state,schemaVersion}' is distinct from '2'
-         or coalesce(p_request#>>'{editor_state,manifestSha256}','') !~ '^[a-f0-9]{64}$'
+         or coalesce(p_request#>>'{editor_state,manifestSha256}','') !~ '^[a-fA-F0-9]{64}$'
          or nullif(p_request->>'renderer_version','') is null then
         raise exception using errcode='22023',message='handover_linked_editor_invalid';
       end if;

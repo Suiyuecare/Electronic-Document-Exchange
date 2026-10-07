@@ -4,6 +4,7 @@ import json
 import unittest
 import uuid
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 import official_handover as policy
@@ -30,6 +31,20 @@ class HandoverPostgresTest(fixture.ConfigurableWorkflowPostgresTest):
         finally:
             cls.pg.rollback()
             cls.pg.execute("RESET ROLE")
+        # This reduced fixture omits the historical table-grant reset. Mirror
+        # only the listing read dependencies already present in the immutable
+        # baseline 20260827063824 grant matrix; shared bootstrap transforms
+        # the same grants to edoc/edoc_backend. Do not elevate the RPC or grant
+        # any browser capabilities to make this fixture pass.
+        grant_source = (ROOT / "supabase/migrations/20260827063824_lock_runtime_table_data_api_grants.sql").read_text()
+        baseline_reads = re.search(r"grant select on table\s+(.*?)\s+to service_role;", grant_source, re.S).group(1)
+        listing_tables = ("users", "official_document_approval_steps", "approval_step_actor_snapshots",
+                          "official_document_dispatch_records", "official_document_stamp_requests",
+                          "official_document_approval_logs", "official_workflow_delegations", "official_document_files")
+        for table in listing_tables:
+            if not re.search(r"\bpublic\." + re.escape(table) + r"\b", baseline_reads):
+                raise AssertionError("listing fixture grant is absent from the immutable baseline")
+        cls.pg.execute("GRANT SELECT ON " + ",".join(f"{cls.namespace}.{table}" for table in listing_tables) + f" TO {cls.backend_role}")
         for actor, role in (("GAHANDOVER", "總務"), ("ADHANDOVER", "行政部主任"), ("NEWHANDOVER", "主任")):
             cls.pg.execute("INSERT INTO users(id,name,email,role,status,account_source,company_id,finance_tenant_id) VALUES (%s,%s,%s,%s,'啟用','finance','CO-SECOND',%s)", (actor, actor, actor.lower()+"@example.invalid", role, cls.tenant))
 
@@ -101,6 +116,7 @@ class HandoverPostgresTest(fixture.ConfigurableWorkflowPostgresTest):
         stamp = self.pg.execute("SELECT to_jsonb(s) FROM official_document_stamp_requests s WHERE document_id=%s", (doc,)).fetchone()[0]
         state = backend.validate_editor_state({"schemaVersion": 2, "revisionNo": 1, "sourceFiles": [], "pages": [], "elements": [], "manifestSha256": ""})
         state["manifestSha256"] = backend.canonical_editor_manifest(state)
+        self.assertRegex(state["manifestSha256"], r"^[A-F0-9]{64}$")
         binding = self.pg.execute("SELECT to_jsonb(f) FROM official_document_followup_owners f WHERE document_id=%s", (doc,)).fetchone()[0]
         payload = {"action": "linked_create", "actor_id": "NEWHANDOVER", "document_id": doc,
             "handover_id": request["handover_id"], "operation_id": "LINKED-PG-"+uuid.uuid4().hex,
@@ -108,6 +124,15 @@ class HandoverPostgresTest(fixture.ConfigurableWorkflowPostgresTest):
             "expected_fingerprint": policy.handover_fingerprint(before, self.rows(doc), stamp, binding),
             "department": {"id": "SYNTHETIC", "name": "Synthetic unit"},
             "editor_state": state, "renderer_version": backend.EDOC_EDITOR_RENDERER_VERSION}
+        for invalid_digest in ("", "A" * 63, "A" * 65, "g" * 64, "A" * 64 + " "):
+            with self.subTest(invalid_manifest=invalid_digest), self.pg.transaction(force_rollback=True):
+                invalid_state = {**state, "manifestSha256": invalid_digest}
+                with self.assertRaisesRegex(self.psycopg.Error, "handover_linked_editor_invalid"):
+                    self.handover({**payload, "editor_state": invalid_state})
+        with self.subTest(manifest_case="lowercase"), self.pg.transaction(force_rollback=True):
+            lowercase_state = {**state, "manifestSha256": state["manifestSha256"].lower()}
+            lowercase_result = self.handover({**payload, "editor_state": lowercase_state})
+            self.assertFalse(lowercase_result["idempotent"])
         with self.pg.transaction(force_rollback=True):
             with self.assertRaises(self.psycopg.Error): self.handover({**payload, "actor_id": "NEXT"})
         with self.pg.transaction(force_rollback=True):
@@ -121,7 +146,13 @@ class HandoverPostgresTest(fixture.ConfigurableWorkflowPostgresTest):
         self.assertEqual([], self.rows(linked["id"]))
         self.assertEqual(0, self.pg.execute("SELECT count(*) FROM official_document_files WHERE document_id=%s", (linked["id"],)).fetchone()[0])
         revision = self.pg.execute("SELECT editor_state_json FROM official_document_editor_revisions WHERE document_id=%s", (linked["id"],)).fetchone()
-        self.assertEqual([], revision[0]["pages"])
+        # The historical editor_state_json column is text in both baselines.
+        # Decode the stored document before checking that no old pages/seals
+        # were carried into the fresh linked application.
+        revision_state = json.loads(revision[0]) if isinstance(revision[0], str) else revision[0]
+        self.assertEqual([], revision_state["pages"])
+        self.assertEqual([], revision_state["elements"])
+        self.assertEqual(state["manifestSha256"], revision_state["manifestSha256"])
         with self.pg.transaction(force_rollback=True):
             with self.assertRaises(self.psycopg.Error): self.handover({**payload, "expected_fingerprint": "f"*64})
 
@@ -315,6 +346,10 @@ class SharedHandoverPostgresTest(HandoverPostgresTest):
 def load_tests(loader, standard_tests, pattern):
     # Parent fixtures supply setup/helpers. Their other flows have independent
     # suites; avoid claiming repeated inherited tests as new handover coverage.
+    # Include EVERY test declared by this candidate, not just names beginning
+    # test_handover_: receipt, linked-case, lineage and ACL tests count too.
+    names = sorted(name for name, value in HandoverPostgresTest.__dict__.items()
+                   if name.startswith("test_") and callable(value))
     return unittest.TestSuite(loader.loadTestsFromName(cls.__name__+"."+name, module=__import__(__name__, fromlist=["*"]))
         for cls in (HandoverPostgresTest, SharedHandoverPostgresTest)
-        for name in loader.getTestCaseNames(cls) if name.startswith("test_handover_"))
+        for name in names)

@@ -15,7 +15,7 @@ begin
     raise exception 'shared_offboarding_handover_preflight_failed';
   end if;
   if exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261007004716_offboarding_handover.sql'
-    and (source_sha256 is distinct from '397f370ed9087afc1baf7ac103e9bd318e2bda205ea40fac17acf8f1afc8b068' or transformed_sha256 is distinct from '14503a4f8dfb862e357d461c1ec2e5ee4eba5b28ffc03ca883d78b0269c11baa')) then
+    and (source_sha256 is distinct from '871caa42fbd37c8fb651f459a9780ee5ddcd8af4947d03a01d0b458bd7718100' or transformed_sha256 is distinct from '97643258ab49f21cfc1d0d05c1ceb3cb2393271f21e4e42bb5d1b0297e215701')) then
     raise exception 'shared_offboarding_handover_source_hash_mismatch';
   end if;
   if not exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261007004716_offboarding_handover.sql') then
@@ -227,7 +227,7 @@ begin
          or p_request#>'{editor_state,elements}' is distinct from '[]'::jsonb
          or p_request#>>'{editor_state,revisionNo}' is distinct from '1'
          or p_request#>>'{editor_state,schemaVersion}' is distinct from '2'
-         or coalesce(p_request#>>'{editor_state,manifestSha256}','') !~ '^[a-f0-9]{64}$'
+         or coalesce(p_request#>>'{editor_state,manifestSha256}','') !~ '^[a-fA-F0-9]{64}$'
          or nullif(p_request->>'renderer_version','') is null then
         raise exception using errcode='22023',message='handover_linked_editor_invalid';
       end if;
@@ -627,7 +627,7 @@ end $stamp_notice$;
 notify pgrst,'reload schema';
 $handover_source$;
     insert into edoc_private.shared_project_migration_ledger(file_name,source_sha256,transformed_sha256,bundle_version)
-      values('20261007004716_offboarding_handover.sql','397f370ed9087afc1baf7ac103e9bd318e2bda205ea40fac17acf8f1afc8b068','14503a4f8dfb862e357d461c1ec2e5ee4eba5b28ffc03ca883d78b0269c11baa','shared-project-schema-v1');
+      values('20261007004716_offboarding_handover.sql','871caa42fbd37c8fb651f459a9780ee5ddcd8af4947d03a01d0b458bd7718100','97643258ab49f21cfc1d0d05c1ceb3cb2393271f21e4e42bb5d1b0297e215701','shared-project-schema-v1');
   end if;
 end $handover_forward$;
 notify pgrst,'reload schema';
