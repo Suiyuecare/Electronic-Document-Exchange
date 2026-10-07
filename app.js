@@ -9008,31 +9008,6 @@ function applyComposeContactDefaults(force = false) {
   renderDraftPreview();
 }
 
-function renderComposeContactSummary() {
-  const fields = document.querySelector("#composeContactFields");
-  const toggle = document.querySelector("#composeContactToggleBtn");
-  const summary = document.querySelector("#composeContactSummaryText");
-  if (!fields || !toggle || !summary) return;
-  const value = selector => document.querySelector(selector)?.value.trim() || "";
-  const owner = value("#contactOwner"), address = value("#contactAddress"), email = value("#contactEmail");
-  const hasMissing = !owner || !address || !email || document.querySelector("#contactEmail")?.validity?.typeMismatch === true;
-  const hasError = [...fields.querySelectorAll("input")].some(input => input.id !== "contactPhone" && input.getAttribute("aria-invalid") === "true");
-  const expanded = toggle.getAttribute("aria-expanded") === "true" || hasMissing || hasError;
-  toggle.setAttribute("aria-expanded", String(expanded));
-  toggle.textContent = expanded ? "收合寄件資訊" : "修改寄件資訊";
-  summary.textContent = [owner, email, address].filter(Boolean).join(" · ") || "請補齊寄件資訊。";
-  fields.querySelectorAll("label").forEach(label => {
-    label.hidden = !expanded && !label.classList.contains("compose-contact-required");
-  });
-}
-
-function toggleComposeContactSummary() {
-  const toggle = document.querySelector("#composeContactToggleBtn");
-  if (!toggle) return;
-  toggle.setAttribute("aria-expanded", String(toggle.getAttribute("aria-expanded") !== "true"));
-  renderComposeContactSummary();
-}
-
 function setAiDraftStatus(text, tone = "") {
   const status = document.querySelector("#aiDraftStatus");
   if (!status) return;
@@ -9668,10 +9643,6 @@ function renderComposeValidationSummary(invalid = []) {
 function focusComposeValidationField(selector) {
   const element = document.querySelector(selector);
   if (!element) return;
-  if (element.closest("#composeContactFields")) {
-    document.querySelector("#composeContactToggleBtn")?.setAttribute("aria-expanded", "true");
-    renderComposeContactSummary();
-  }
   element.scrollIntoView({ behavior: "smooth", block: "center" });
   if (typeof element.focus === "function") element.focus({ preventScroll: true });
   element.classList.add("attention-pulse");
@@ -9905,7 +9876,6 @@ function renderComposeStepper() {
   const action = document.querySelector("#composeNextAction");
   if (!stepper) return;
   renderComposeFieldHints();
-  renderComposeContactSummary();
   const steps = composeStepState();
   const activeIndex = composeStepIndex();
   if (!stepper.dataset.tabsInitialized) {
@@ -33716,7 +33686,6 @@ document.querySelector("#composeCloudRefreshBtn")?.addEventListener("click", () 
 document.querySelector("#composeCloudLoadBtn")?.addEventListener("click", () => { void loadComposeCloudDraft(); });
 document.querySelector("#composeResumeDraftBtn")?.addEventListener("click", () => { void resumeComposeDraft(); });
 document.querySelector("#composeStartFreshBtn")?.addEventListener("click", dismissComposeRecovery);
-document.querySelector("#composeContactToggleBtn")?.addEventListener("click", toggleComposeContactSummary);
 document.querySelector("#composeAiApplyBtn")?.addEventListener("click", applyComposeAiSuggestion);
 document.querySelector("#composeAiDiscardBtn")?.addEventListener("click", discardComposeAiSuggestion);
 document.querySelector("#composeAiUndoBtn")?.addEventListener("click", undoComposeAiSuggestion);
