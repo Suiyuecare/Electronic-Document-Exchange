@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import plistlib
@@ -132,11 +133,15 @@ def safe_error(exc):
 
 def validate_success(report, config):
     """A returned success is insufficient without durable, matching evidence."""
+    if not isinstance(report, dict) or type(report.get("schema_version")) is not int or report["schema_version"] != 1:
+        raise runner.DrillError("backup_receipt_schema_invalid")
     if report.get("ok") is not True or report.get("target_type") != "isolated_local_postgresql" or report.get("target_isolated") is not True:
         raise runner.DrillError("backup_validation_failed")
     if report.get("source_project_ref") != config["sourceProjectRef"]:
         raise runner.DrillError("backup_source_project_mismatch")
     database, storage, backup = (report.get(name, {}) for name in ("database", "storage", "backup"))
+    if not all(isinstance(item, dict) for item in (database, storage, backup)):
+        raise runner.DrillError("backup_receipt_schema_invalid")
     if not all(database.get(name) is True for name in ("restored", "integrity", "counts_match", "row_hashes_match", "permissions_match")):
         raise runner.DrillError("database_validation_failed")
     if database.get("schemas") != list(runner.SCHEMAS):
@@ -145,6 +150,28 @@ def validate_success(report, config):
         raise runner.DrillError("storage_validation_failed")
     if backup.get("encrypted") is not True or backup.get("algorithm") != "AES-256-GCM":
         raise runner.DrillError("backup_encryption_unverified")
+    try:
+        created_at = parse_time(report["created_at"])
+        snapshot_at = parse_time(backup["snapshot_at"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise runner.DrillError("backup_receipt_time_invalid") from None
+    snapshot_age_seconds = (created_at - snapshot_at).total_seconds()
+    if snapshot_age_seconds < 0 or (created_at - utc_now()).total_seconds() > 60:
+        raise runner.DrillError("backup_receipt_time_invalid")
+    duration = report.get("duration_seconds")
+    rto, rpo = report.get("rto_minutes"), report.get("rpo_minutes")
+    if (type(duration) not in (int, float) or (type(duration) is float and not math.isfinite(duration)) or duration < 0
+            or type(rto) is not int or rto < 1 or type(rpo) is not int or rpo < 0):
+        raise runner.DrillError("backup_receipt_timing_invalid")
+    if duration > config["rtoTargetMinutes"] * 60:
+        raise runner.DrillError("backup_recovery_time_or_age_target_exceeded")
+    # save_receipt rounds upwards. Its created_at is taken immediately after
+    # the RPO measurement, so allow at most one second of boundary drift.
+    if rto < max(1, math.ceil(duration / 60)) or rpo * 60 < snapshot_age_seconds - 1:
+        raise runner.DrillError("backup_receipt_timing_inconsistent")
+    if (rto > config["rtoTargetMinutes"] or rpo > config["rpoTargetMinutes"]
+            or snapshot_age_seconds > config["rpoTargetMinutes"] * 60 + 1):
+        raise runner.DrillError("backup_recovery_time_or_age_target_exceeded")
     receipt_id = report.get("receipt_id", "")
     if not re.fullmatch(r"DRILL-\d{8}-\d{6}-[a-f0-9]{8}", receipt_id) or backup.get("file") != receipt_id + ".tar.aesgcm":
         raise runner.DrillError("backup_evidence_id_invalid")
@@ -157,7 +184,7 @@ def validate_success(report, config):
         raise runner.DrillError("backup_receipt_hash_mismatch")
     if backup.get("bytes") != encrypted.stat().st_size or backup.get("sha256") != runner.digest_file(encrypted):
         raise runner.DrillError("backup_archive_hash_mismatch")
-    return {"receiptId": receipt_id, "snapshotAt": parse_time(backup["snapshot_at"]).isoformat(), "archiveSha256": backup["sha256"], "archiveBytes": backup["bytes"], "receiptFileSha256": runner.digest_file(receipt), "canonicalReceiptSha256": claimed, "tableCount": database["table_count"], "rowCount": database["row_count"], "policyCount": database["policy_count"], "storageObjectCount": storage["object_count"], "storageEmpty": storage["empty_source"], "durationSeconds": report["duration_seconds"]}
+    return {"receiptId": receipt_id, "snapshotAt": snapshot_at.isoformat(), "archiveSha256": backup["sha256"], "archiveBytes": backup["bytes"], "receiptFileSha256": runner.digest_file(receipt), "canonicalReceiptSha256": claimed, "tableCount": database["table_count"], "rowCount": database["row_count"], "policyCount": database["policy_count"], "storageObjectCount": storage["object_count"], "storageEmpty": storage["empty_source"], "durationSeconds": duration}
 
 
 def record_attempt(config, attempt):
@@ -219,17 +246,22 @@ def run_once(config):
 
 def health(config, *, now=None):
     """No writes, key reads, network or credential refresh on a health query."""
-    result = {"schemaVersion": 1, "checkedAt": (now or utc_now()).isoformat(), "status": "missing", "lastSuccessPreserved": False, "maximumSnapshotAgeMinutes": config["maximumSnapshotAgeMinutes"], "unattendedCloudDR": False, "offsiteValidation": "not_verified_by_host_runner", "errorCodes": []}
+    checked_at = now or utc_now()
+    result = {"schemaVersion": 1, "checkedAt": checked_at.isoformat(), "status": "missing", "lastSuccessPreserved": False, "maximumSnapshotAgeMinutes": config["maximumSnapshotAgeMinutes"], "rpoTargetMinutes": config["rpoTargetMinutes"], "snapshotWithinRpoTarget": False, "unattendedCloudDR": False, "offsiteValidation": "not_verified_by_host_runner", "errorCodes": []}
     state = Path(config["stateDir"])
     try:
         success = json.loads(private_file(state / "last-success.json").read_bytes())
+        if not isinstance(success, dict):
+            raise ValueError("success_state_object_required")
     except FileNotFoundError:
+        success = None
         result["errorCodes"] = ["host_backup_success_missing"]
-        return result
     except (ValueError, OSError, runner.DrillError):
         result["status"], result["errorCodes"] = "invalid", ["host_backup_state_invalid"]
         return result
     try:
+        if success is None:
+            raise FileNotFoundError("no_success_yet")
         evidence = success["evidence"]
         if success.get("ok") is not True:
             raise ValueError("success_required")
@@ -241,32 +273,49 @@ def health(config, *, now=None):
         checked = validate_success(report, config)
         if checked != evidence:
             raise ValueError("state_evidence_changed")
-        age = ((now or utc_now()) - parse_time(evidence["snapshotAt"])).total_seconds() / 60
+        age = (checked_at - parse_time(evidence["snapshotAt"])).total_seconds() / 60
         if age < -1:
             raise ValueError("future_snapshot")
-        result.update({"status": "stale" if age > config["maximumSnapshotAgeMinutes"] else "healthy", "snapshotAgeMinutes": max(0, int(age)), "lastSuccessPreserved": True, "receiptId": receipt_id})
+        within_rpo = age <= config["rpoTargetMinutes"]
+        result.update({"status": "stale" if age > config["maximumSnapshotAgeMinutes"] else ("healthy" if within_rpo else "degraded"), "snapshotAgeMinutes": max(0, int(age)), "snapshotWithinRpoTarget": within_rpo, "lastSuccessPreserved": True, "receiptId": receipt_id})
         if result["status"] == "stale":
             result["errorCodes"].append("host_backup_snapshot_expired")
+        if not within_rpo:
+            result["errorCodes"].append("host_backup_snapshot_rpo_target_exceeded")
+    except FileNotFoundError:
+        if success is not None:
+            result["status"], result["errorCodes"] = "invalid", ["host_backup_evidence_invalid"]
+            return result
     except (KeyError, TypeError, ValueError, OSError, runner.DrillError):
         result["status"], result["errorCodes"] = "invalid", ["host_backup_evidence_invalid"]
         return result
     try:
         latest = json.loads(private_file(state / "last-attempt.json").read_bytes())
+        if (not isinstance(latest, dict) or latest.get("phase") not in {"running", "finished"}
+                or type(latest.get("ok")) is not bool):
+            raise ValueError("latest_attempt_state_invalid")
+        started_at = parse_time(latest["startedAt"])
         if latest.get("phase") == "running":
-            elapsed = ((now or utc_now()) - parse_time(latest["startedAt"])).total_seconds()
+            if latest["ok"] is not False:
+                raise ValueError("running_attempt_cannot_be_successful")
+            elapsed = (checked_at - started_at).total_seconds()
             code = "host_backup_operation_in_progress" if 0 <= elapsed <= config["timeoutSeconds"] + 30 else "host_backup_interrupted_or_unconfirmed"
             result["errorCodes"].append(code)
-            if result["status"] == "healthy":
+            if result["status"] in {"healthy", "missing"}:
                 result["status"] = "running" if code.endswith("in_progress") else "degraded"
-        elif latest.get("ok") is False:
-            result["errorCodes"].append("host_backup_latest_attempt_failed")
-            if result["status"] == "healthy":
-                result["status"] = "degraded"
+        else:
+            finished_at = parse_time(latest["finishedAt"])
+            if finished_at < started_at or (finished_at - checked_at).total_seconds() > 60:
+                raise ValueError("latest_attempt_time_invalid")
+            if latest["ok"] is False:
+                result["errorCodes"].append("host_backup_latest_attempt_failed")
+                if result["status"] in {"healthy", "missing"}:
+                    result["status"] = "degraded"
     except FileNotFoundError:
         pass
     except (KeyError, TypeError, ValueError, OSError, runner.DrillError):
         result["errorCodes"].append("host_backup_latest_attempt_invalid")
-        result["status"] = "degraded" if result["status"] == "healthy" else result["status"]
+        result["status"] = "degraded" if result["status"] in {"healthy", "missing"} else result["status"]
     return result
 
 

@@ -606,6 +606,9 @@ const complianceAuditLog = [
 
 const backupRestoreDrills = [];
 let latestBackupDrill = null;
+let backupRestoreDrillPending = false;
+let notificationCreatePending = false;
+let notificationCreateAttempt = null;
 let latestComplianceAttestation = null;
 let selectedComplianceDocId = "DOC-COMP-001";
 let complianceLastReview = "";
@@ -5415,7 +5418,6 @@ function applyEdocRoleOptions() {
     "#roleSelect",
     "#workflowRoleSelect",
     "#accountRoleSelect",
-    "#notificationTarget",
     "#jobNotifyInput",
     "#securityRoleSelect",
     "#workflowActionTarget",
@@ -20407,14 +20409,18 @@ function addComplianceAudit(title, body) {
 function renderComplianceSummary() {
   const complete = complianceControls.filter((item) => item.status === "已落地").length;
   const percent = Math.round((complete / complianceControls.length) * 100);
-  document.querySelector("#complianceMapStatus").textContent = `${percent}%`;
-  document.querySelector("#complianceMapNote").textContent = `${complete}/${complianceControls.length} 項控制已落地`;
+  // The shipped control list is an operator template, not production proof.
+  document.querySelector("#complianceMapStatus").textContent = explicitFrontendFixturesEnabled()
+    ? `${percent}%` : latestComplianceAttestation?.status || "待驗收";
+  document.querySelector("#complianceMapNote").textContent = explicitFrontendFixturesEnabled()
+    ? `${complete}/${complianceControls.length} 項範本控制` : "以實際簽核與演練證據為準";
   document.querySelector("#complianceDocStatus").textContent = `${complianceDocuments.length} 份`;
   document.querySelector("#complianceDocNote").textContent = "法遵 / SOP / 稽核 / 上線";
   document.querySelector("#complianceReviewStatus").textContent = complianceLastReview || "未簽核";
   document.querySelector("#complianceReviewNote").textContent = complianceLastReview ? "季檢簽核已留存" : "等待季檢";
-  document.querySelector("#complianceDrillStatus").textContent = complianceLastDrill || "未演練";
-  document.querySelector("#complianceDrillNote").textContent = complianceLastDrill ? "演練紀錄已建立" : "建議上線前完成";
+  document.querySelector("#complianceDrillStatus").textContent = latestBackupDrill?.result || complianceLastDrill || "未演練";
+  document.querySelector("#complianceDrillNote").textContent = latestBackupDrill && !latestBackupDrill.passed
+    ? `上次通過：${complianceLastDrill || "尚無"}` : complianceLastDrill ? "隔離演練通過；異地驗收另計" : "建議上線前完成";
 }
 
 function renderComplianceAttestation() {
@@ -20527,27 +20533,27 @@ function renderBackupDrillPanel() {
   const summary = [
     ["最近演練", drill?.id || "尚未演練"],
     ["結果", drill?.result || "待執行"],
-    ["RTO / 目標", drill ? `${drill.rtoMinutes} / ${drill.rtoTarget} 分` : "待執行"],
-    ["RPO / 目標", drill ? `${drill.rpoMinutes} / ${drill.rpoTarget} 分` : "待執行"]
+    ["RTO / 目標", drill ? `${drill.rtoMinutes ?? "未量測"} / ${drill.rtoTarget} 分` : "待執行"],
+    ["RPO / 目標", drill ? `${drill.rpoMinutes ?? "未量測"} / ${drill.rpoTarget} 分` : "待執行"]
   ];
   document.querySelector("#backupDrillSummaryGrid").innerHTML = summary.map(([label, value]) => `
     <article class="archive-card">
       <span>${label}</span>
-      <strong>${value}</strong>
+      <strong>${escapeHtml(value)}</strong>
     </article>
   `).join("");
   document.querySelector("#backupDrillStepList").innerHTML = backupDrillSteps(drill).map(([label, status], index) => `
-    <article class="backup-drill-step ${/完成|通過|達標/.test(status) ? "ok" : /失敗|超標/.test(status) ? "issue" : ""}">
+    <article class="backup-drill-step ${drill?.passed ? "ok" : drill ? "issue" : ""}">
       <span>${String(index + 1).padStart(2, "0")}</span>
       <strong>${label}</strong>
-      <p>${status}</p>
+      <p>${escapeHtml(status)}</p>
     </article>
   `).join("");
   document.querySelector("#backupDrillRecordList").innerHTML = backupRestoreDrills.slice(0, 5).map((item) => `
     <article class="address-card">
-      <strong>${item.id} · ${item.result}</strong>
-      <p>${item.createdAt} · ${item.scope} · ${item.targetEnv}</p>
-      <small>RTO ${item.rtoMinutes}/${item.rtoTarget} 分 · RPO ${item.rpoMinutes}/${item.rpoTarget} 分 · ${item.backupHash}</small>
+      <strong>${escapeHtml(item.id)} · ${escapeHtml(item.result)}</strong>
+      <p>${escapeHtml(item.createdAt)} · ${escapeHtml(item.scope)} · ${escapeHtml(item.targetEnv)}</p>
+      <small>RTO ${item.rtoMinutes ?? "未量測"}/${item.rtoTarget} 分 · RPO ${item.rpoMinutes ?? "未量測"}/${item.rpoTarget} 分 · ${escapeHtml(item.backupHash)}</small>
     </article>
   `).join("") || `<article class="address-card"><strong>尚無演練紀錄</strong><p>點選「備份還原演練」建立第一筆紀錄。</p></article>`;
 }
@@ -20604,7 +20610,7 @@ function exportCompliancePackage() {
 
 async function attestComplianceReview() {
   const signer = document.querySelector("#complianceOwnerSelect").value;
-  if (!latestBackupDrill && !confirmOperation("尚未完成備份還原演練", "目前沒有本次工作階段的備份還原演練紀錄。仍可簽核，但驗收結果可能會列為待補。")) return;
+  if (!latestBackupDrill?.passed && !confirmOperation("尚未通過備份還原演練", "目前沒有本次工作階段通過的備份還原演練紀錄。仍可簽核，但驗收結果可能會列為待補。")) return;
   if (!requireTypedConfirm("確認法遵驗收與內控簽核", `${signer} 即將簽署本季法遵驗收與內控制度紀錄。此動作會寫入 audit log 與不可否認簽核紀錄。`, "確認簽核")) return;
   try {
     const result = await backendRequest("/compliance/attest", {
@@ -20637,55 +20643,128 @@ function recordComplianceDrill() {
 }
 
 function normalizeBackupDrill(result, fallback = {}) {
+  const checks = result.checks || {};
+  const blocked = result.blocked === true || result.result === "blocked";
+  const localVerified = ["integrity", "counts_match", "hash_match", "storage_restored", "pdf_open_sample", "rto_ok", "rpo_ok"].every((key) => checks[key] === true);
+  const isolatedVerified = ["database_restored", "storage_restored", "hash_match", "target_isolated", "receipt_valid", "rto_ok", "rpo_ok"].every((key) => checks[key] === true);
+  const passed = result.ok === true && !blocked && (localVerified || isolatedVerified);
+  const measuredMinutes = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  const rtoMinutes = measuredMinutes(result.rto_minutes ?? result.rtoMinutes);
+  const rpoMinutes = measuredMinutes(result.rpo_minutes ?? result.rpoMinutes);
+  const rtoTarget = result.rto_target_minutes || fallback.rtoTarget || 30;
+  const rpoTarget = result.rpo_target_minutes || fallback.rpoTarget || 15;
+  const backupId = result.backup?.backup || result.backup?.file || result.backupId || "";
+  const backupHash = result.backup?.sha256 || result.backupHash || "";
+  const backupCreated = !blocked && Boolean(backupId) && /^[a-f0-9]{64}$/i.test(backupHash);
+  const incomplete = blocked ? "未執行，演練已阻擋" : "尚未取得通過證據";
   return {
     id: result.id,
     createdAt: result.created_at || new Date().toLocaleString("zh-TW", { hour12: false }),
     owner: document.querySelector("#complianceOwnerSelect")?.value || "行政部主任",
     scope: result.scope || fallback.scope || "全部資料表",
     targetEnv: result.target_env || fallback.targetEnv || "測試沙盒",
-    backupId: result.backup?.backup || result.backupId || "未記錄",
-    backupHash: result.backup?.sha256 || result.backupHash || "未記錄",
+    backupId: backupId || "未記錄",
+    backupHash: backupHash || "未記錄",
+    backupCreated,
+    passed,
+    blocked,
     restoreHash: result.sandbox?.sha256 || result.restoreHash || "未記錄",
     rowCount: result.row_count || result.rowCount || 0,
     tableCounts: result.source_counts || result.tableCounts || {},
-    rtoMinutes: result.rto_minutes || result.rtoMinutes || 0,
-    rtoTarget: result.rto_target_minutes || fallback.rtoTarget || 30,
-    rpoMinutes: result.rpo_minutes || result.rpoMinutes || 0,
-    rpoTarget: result.rpo_target_minutes || fallback.rpoTarget || 15,
-    result: result.result || (result.ok ? "通過" : "需改善"),
+    rtoMinutes,
+    rtoTarget,
+    rpoMinutes,
+    rpoTarget,
+    result: passed ? "通過" : blocked ? "已阻擋／未執行" : "需改善",
     steps: {
-      snapshot: result.steps?.snapshot || "備份快照已建立",
-      sourceHash: result.steps?.sourceHash || `${result.backup?.sha256 || "未記錄"} 已產生`,
-      sandboxRestore: result.steps?.sandboxRestore || `${result.target_env || fallback.targetEnv || "測試沙盒"} 還原完成`,
-      verify: result.steps?.verify || (result.checks?.counts_match && result.checks?.hash_match ? "筆數與雜湊比對通過" : "筆數或雜湊不一致"),
-      rtoRpo: result.steps?.rtoRpo || `RTO ${result.rto_minutes || 0}/${fallback.rtoTarget || 30} 分，RPO ${result.rpo_minutes || 0}/${fallback.rpoTarget || 15} 分`
+      snapshot: blocked ? incomplete : result.steps?.snapshot || (backupCreated ? "備份快照已建立" : "快照證據未提供"),
+      sourceHash: blocked ? incomplete : result.steps?.sourceHash || (backupCreated ? `${backupHash} 已產生` : "來源雜湊未提供"),
+      sandboxRestore: blocked ? incomplete : result.steps?.sandboxRestore || (isolatedVerified ? `${result.target_env || fallback.targetEnv || "測試沙盒"} 隔離還原證據已驗證` : incomplete),
+      verify: blocked ? incomplete : result.steps?.verify || (passed ? "筆數與雜湊比對通過" : incomplete),
+      rtoRpo: `RTO ${rtoMinutes ?? "未量測"}/${rtoTarget} 分，RPO ${rpoMinutes ?? "未量測"}/${rpoTarget} 分`
     },
     report: result
   };
 }
 
+function requestWorkspaceTypedConfirmation(title, body, phrase) {
+  const modal = document.querySelector("#workspaceTypedConfirmModal");
+  if (!modal || !modal.classList.contains("hidden") || visibleWorkspaceModals().length) return Promise.resolve(false);
+  const input = document.querySelector("#workspaceTypedConfirmInput");
+  const confirm = document.querySelector("#workspaceTypedConfirmSubmitBtn");
+  const cancel = document.querySelector("#workspaceTypedConfirmCancelBtn");
+  document.querySelector("#workspaceTypedConfirmTitle").textContent = title;
+  document.querySelector("#workspaceTypedConfirmDescription").textContent = body;
+  document.querySelector("#workspaceTypedConfirmLabel").textContent = `請輸入「${phrase}」以繼續`;
+  input.value = "";
+  confirm.disabled = true;
+  return new Promise((resolve) => {
+    let composing = false;
+    const update = () => { confirm.disabled = composing || input.value !== phrase; };
+    const compositionStart = () => { composing = true; update(); };
+    const compositionEnd = () => { composing = false; update(); };
+    const finish = (accepted) => {
+      input.removeEventListener("input", update);
+      input.removeEventListener("compositionstart", compositionStart);
+      input.removeEventListener("compositionend", compositionEnd);
+      confirm.removeEventListener("click", accept);
+      cancel.removeEventListener("click", dismiss);
+      modal.removeEventListener("keydown", keydown);
+      hideWorkspaceModal(modal);
+      resolve(accepted);
+    };
+    const accept = () => { if (!confirm.disabled && !composing && input.value === phrase) finish(true); };
+    const dismiss = () => finish(false);
+    const keydown = (event) => {
+      trapWorkspaceModalFocus(event, modal);
+      if (event.key === "Escape" && !event.isComposing && !composing) {
+        event.preventDefault(); event.stopPropagation(); dismiss();
+      }
+    };
+    input.addEventListener("input", update);
+    input.addEventListener("compositionstart", compositionStart);
+    input.addEventListener("compositionend", compositionEnd);
+    confirm.addEventListener("click", accept);
+    cancel.addEventListener("click", dismiss);
+    modal.addEventListener("keydown", keydown);
+    showWorkspaceModal(modal);
+    cancel.focus({ preventScroll: true });
+  });
+}
+
 async function runBackupRestoreDrill() {
+  if (backupRestoreDrillPending) return;
   const scope = document.querySelector("#backupDrillScope").value;
   const targetEnv = document.querySelector("#backupDrillTarget").value;
   const rtoTarget = Number(document.querySelector("#backupDrillRtoTarget").value || 30);
   const rpoTarget = Number(document.querySelector("#backupDrillRpoTarget").value || 15);
   if (/正式|production|prod/i.test(targetEnv)) return blockOperation("備份還原演練只能還原到測試沙盒，不可指定正式環境。", addComplianceAudit, "備份演練防呆");
   if (rtoTarget < 1 || rpoTarget < 1) return blockOperation("RTO / RPO 目標需大於 0 分鐘。", addComplianceAudit, "備份演練防呆");
-  if (!requireTypedConfirm("確認執行備份還原演練", `即將建立 ${scope} 的備份快照並還原至「${targetEnv}」，系統會比對筆數與雜湊。`, "確認演練")) return;
+  backupRestoreDrillPending = true;
+  const triggers = ["#backupDrillRunBtn", "#complianceDrillBtn"].map((selector) => document.querySelector(selector)).filter(Boolean);
+  const returnFocus = triggers.includes(document.activeElement) ? document.activeElement : null;
+  triggers.forEach((button) => { button.disabled = true; button.setAttribute("aria-busy", "true"); });
   try {
+    if (!await requestWorkspaceTypedConfirmation("確認執行備份還原演練", `即將建立 ${scope} 的備份快照並還原至「${targetEnv}」，系統會比對筆數與雜湊。`, "確認演練")) return;
     const result = await backendRequest("/backup/restore-drill", {
       method: "POST",
+      timeoutMs: 120000,
       body: JSON.stringify({
         scope,
         target_env: targetEnv,
         rto_target_minutes: rtoTarget,
         rpo_target_minutes: rpoTarget
       })
+    }).catch((error) => {
+      // A hosted runner deliberately returns 503 when the drill is blocked.
+      // Keep that safe structured attempt, without treating it as HTTP success.
+      if (error.status === 503 && error.operationReport?.blocked === true && error.operationReport?.ok === false) return error.operationReport;
+      throw error;
     });
     const drill = normalizeBackupDrill(result, { scope, targetEnv, rtoTarget, rpoTarget });
     latestBackupDrill = drill;
     backupRestoreDrills.unshift(drill);
-    opsBackups.unshift({
+    if (drill.backupCreated) opsBackups.unshift({
       id: drill.backupId,
       createdAt: drill.createdAt,
       env: opsState.environment,
@@ -20695,15 +20774,24 @@ async function runBackupRestoreDrill() {
       tableCounts: drill.tableCounts,
       data: {}
     });
-    complianceLastDrill = new Date().toLocaleDateString("zh-TW");
+    if (drill.passed) complianceLastDrill = new Date().toLocaleDateString("zh-TW");
     renderOps();
     renderComplianceOps();
-    addOpsAudit("備份還原演練", `${drill.id} ${drill.result}，備份 ${drill.backupId} 還原至${targetEnv}，RTO ${drill.rtoMinutes} 分，RPO ${drill.rpoMinutes} 分。`);
+    addOpsAudit("備份還原演練", `${drill.id} ${drill.result}，${drill.steps.sandboxRestore}，${drill.steps.rtoRpo}。`);
     addComplianceAudit("備份還原演練", `${drill.id} ${drill.result}：${drill.steps.verify}，${drill.steps.rtoRpo}。`);
-    showToast(drill.result === "通過" ? "備份還原演練通過。" : "備份還原演練完成，請查看改善項目。");
+    showToast(drill.passed ? "備份還原演練通過。" : drill.blocked ? "備份還原演練已阻擋，未完成還原。" : "備份還原演練未通過，請查看改善項目。");
   } catch (error) {
     addComplianceAudit("備份還原演練失敗", error.message);
-    showToast("備份還原演練失敗。");
+    showToast(error.outcomeUnknown ? "尚未確認演練結果，請先查詢維運紀錄，勿重複執行。" : "備份還原演練失敗。");
+  } finally {
+    backupRestoreDrillPending = false;
+    triggers.forEach((button) => { button.disabled = false; button.removeAttribute("aria-busy"); });
+    const confirmation = document.querySelector("#workspaceTypedConfirmModal");
+    if (confirmation?.classList.contains("hidden")) {
+      const focusTarget = returnFocus?.isConnected && returnFocus.getClientRects().length ? returnFocus
+        : triggers.find((button) => button.isConnected && button.getClientRects().length);
+      focusTarget?.focus({ preventScroll: true });
+    }
   }
 }
 
@@ -20762,11 +20850,6 @@ function notificationChannels(channel) {
   return channels.length ? channels : [normalized];
 }
 
-function roleEmail(role) {
-  const found = userAccounts.find((account) => account.role === role && account.status === "啟用");
-  return found?.email || `${role}@suiyuecare.local`;
-}
-
 function pushSystemInbox(item) {
   systemInboxItems.unshift({
     id: `INBOX-${Date.now().toString().slice(-5)}-${systemInboxItems.length + 1}`,
@@ -20783,11 +20866,14 @@ function notificationPayload(item, forceChannel = item.channel) {
     type: item.type,
     title: item.title,
     target_role: item.target,
+    target_user_id: item.targetUserId || "",
+    target_company_id: item.targetCompanyId || "",
     target_email: item.targetEmail || "",
     channel: forceChannel || item.channel,
     status: item.status || "未讀",
     priority: item.priority || "中",
     source: item.source || "",
+    action_url: item.actionUrl || "",
     body: item.body || "請確認公文收發電子用印系統待辦事項。"
   };
 }
@@ -20797,13 +20883,28 @@ function applyNotificationDeliveryResult(result) {
   if (item) {
     item.status = result.status;
     item.sentAt = new Date().toLocaleString("zh-TW", { hour12: false });
-    item.deliveryReceipt = result.receipt || result.error || "";
+    item.deliveryReceipt = notificationReceiptLabel(result.receipt || result.error || "");
   }
   (result.results || []).forEach((delivery) => {
     if (delivery.channel === "Email") notificationGatewayState.emailStatus = delivery.status;
     if (delivery.channel === "Line 工作群組") notificationGatewayState.lineStatus = delivery.status;
     if (delivery.channel === "系統站內通知") notificationGatewayState.inboxStatus = delivery.status === "成功" ? "已推送" : delivery.status;
   });
+}
+
+function notificationReceiptLabel(value) {
+  const receipt = String(value || "");
+  const labels = {
+    notification_target_inactive: "收件人已停用",
+    notification_target_identity_changed: "收件資料已變更",
+    notification_delivery_evidence_unknown: "需確認上次寄送結果，暫不重送",
+    notification_retry_limit_reached: "已達重試上限",
+    notification_identity_conflict: "通知收件資料衝突，未寄送",
+    notification_postcommit_worker_required: "站內通知已保留，外部寄送等待安全派送程序",
+    overdue_reminder_target_unresolved: "案件未設定唯一承辦人，暫不提醒",
+    overdue_reminder_target_changed: "案件承辦或權限已變更，暫不提醒"
+  };
+  return labels[receipt] || receipt;
 }
 
 async function deliverNotification(item, forceChannel = item.channel) {
@@ -20870,23 +20971,23 @@ function renderNotificationTestReport() {
     return;
   }
   grid.innerHTML = [
-    ["實測結果", report.ok ? "全部送達" : "需補正"],
-    ["成功通道", `${report.success || 0} / ${report.total || 0}`],
+    ["實測結果", report.ok === true ? "通道已接受" : "需補正"],
+    ["接受通道", `${report.success || 0} / ${report.total || 0}`],
     ["測試時間", report.checked_at || "未記錄"],
     ["測試對象", report.target_email || report.target_role || "未記錄"]
   ].map(([label, value]) => `
     <article class="archive-card">
-      <span>${label}</span>
-      <strong>${value}</strong>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
     </article>
   `).join("");
   detail.innerHTML = (report.results || []).map((item) => `
     <article class="address-card">
-      <strong>${item.channel} · ${item.status}</strong>
-      <p>${item.target} · ${item.duration_ms ?? 0} ms</p>
-      <small>${item.receipt || item.error || "沒有回條"}</small>
+      <strong>${escapeHtml(item.channel)} · ${escapeHtml(item.status)}</strong>
+      <p>${escapeHtml(item.target)} · ${escapeHtml(item.duration_ms ?? 0)} ms</p>
+      <small>${escapeHtml(notificationReceiptLabel(item.receipt || item.error || "沒有回條"))}</small>
     </article>
-  `).join("") || `<article class="address-card"><strong>沒有派送紀錄</strong><p>請重新測試通道。</p></article>`;
+  `).join("") || `<article class="address-card"><strong>沒有派送紀錄</strong><p>請先檢查通道狀態。</p></article>`;
 }
 
 async function refreshNotificationGatewayStatus(silent = false) {
@@ -20968,6 +21069,8 @@ function currentNotification() {
 
 function notificationSourceReference(item = {}) {
   const actionUrl = String(item.actionUrl || "");
+  const reminderQuery = /^\/#(?:inbound|tracking)\?/.test(actionUrl)
+    ? new URLSearchParams(actionUrl.split("?")[1]) : null;
   const officialMatch = actionUrl.match(/official-documents\/([^/?#]+)/);
   const rawSourceId = officialMatch?.[1] || item.sourceId || item.source || "";
   let sourceId = String(rawSourceId);
@@ -20976,7 +21079,11 @@ function notificationSourceReference(item = {}) {
   } catch (_error) {
     // Keep the opaque source id; malformed percent escapes must not break the notification center.
   }
-  const sourceType = item.sourceType || (sourceId.startsWith("OD-") ? "official_document" : "");
+  const reminderType = reminderQuery?.get("reminder_source");
+  const reminderId = reminderQuery?.get("document");
+  const validReminder = ["inbound_documents", "documents"].includes(reminderType)
+    && reminderId && reminderId === sourceId;
+  const sourceType = item.sourceType || (validReminder ? reminderType : sourceId.startsWith("OD-") ? "official_document" : "");
   return { sourceId, sourceType };
 }
 
@@ -21000,6 +21107,20 @@ async function openNotificationSource(item = currentNotification()) {
       return;
     } catch (error) {
       return showToast(`案件載入失敗：${error.message}`);
+    }
+  }
+  if (sourceType === "inbound_documents") {
+    if (!isRouteAllowed("inbound")) return showToast("目前沒有檢視這筆收文的權限。");
+    try {
+      const detail = await backendRequest(`/inbound-documents/${encodeURIComponent(sourceId)}`);
+      if (String(detail?.id || "") !== sourceId) return showToast("收文來源不一致，請重新整理通知。");
+      setInboundSection("records");
+      setView("inbound");
+      upsertInboundDocFromBackend(detail);
+      openInboundModal(sourceId);
+      return;
+    } catch (_error) {
+      return showToast("這筆收文目前無法開啟，可能已變更派發或權限。");
     }
   }
   const flow = buildUnifiedDocumentFlows().find((entry) => (
@@ -21066,11 +21187,11 @@ function reminderItems(category) {
   const unread = notificationItems.filter((item) => item.status !== "已讀");
   const flowReminders = visibleUnifiedDocumentFlows().filter(isUnifiedFlowTodo);
   const today = [
-    ...unread.filter((item) => ["收文", "待清稿", "逾期查核"].includes(item.type)),
+    ...unread.filter((item) => ["收文", "待清稿", "逾期查核", "逾期稽催"].includes(item.type)),
     ...flowReminders.filter((flow) => !flow.isIssue).map((flow) => unifiedFlowReminder(flow, "文件待辦"))
   ];
   const dueSoon = [
-    ...unread.filter((item) => ["逾期查核", "Token 到期"].includes(item.type)),
+    ...unread.filter((item) => ["逾期查核", "逾期稽催", "Token 到期"].includes(item.type)),
     ...flowReminders.filter((flow) => /待確認|待用印|待簽核|待審核|待分派/.test(flow.status)).map((flow) => unifiedFlowReminder(flow, "即將到期")),
     ...trackingCases.filter((item) => ["逾期提醒", "未收確認"].includes(item.status)).map((item) => ({
       id: `REM-${item.id}`,
@@ -21344,23 +21465,55 @@ async function runNotificationAction(action, ids) {
 }
 
 async function addNotificationFromForm() {
+  if (notificationCreatePending) return;
   const type = document.querySelector("#notificationType").value;
-  const target = document.querySelector("#notificationTarget").value;
+  const targetEmail = document.querySelector("#notificationTarget").value.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) return showToast("請填寫收件人的正式 Email。");
   const channel = document.querySelector("#notificationChannel").value;
   const body = document.querySelector("#notificationBody").value.trim();
-  const item = { id: `NTF-${Date.now().toString().slice(-6)}`, type, title: `${type}手動通知`, target, channel, status: "未讀", priority: "中", source: "MANUAL", body };
+  // The backend resolves this explicit address to one active immutable identity.
+  // A role is never used to guess the first person in that role.
+  const target = "指定收件人";
+  const scope = frontendSessionScope();
+  const payloadKey = JSON.stringify({ type, targetEmail, channel, body });
+  if (notificationCreateAttempt?.scope !== scope) notificationCreateAttempt = null;
+  if (notificationCreateAttempt?.unknown && notificationCreateAttempt.payloadKey !== payloadKey) {
+    return showToast("上次通知結果尚待確認，請以原內容重試或重新整理後查詢通知紀錄。");
+  }
+  if (!notificationCreateAttempt) notificationCreateAttempt = { scope, payloadKey, id: `NTF-${crypto.randomUUID()}`, unknown: false };
+  const attempt = notificationCreateAttempt;
+  const item = { id: attempt.id, type, title: `${type}手動通知`, target, targetEmail, channel, status: "未讀", priority: "中", source: "MANUAL", body };
+  const button = document.querySelector("#notificationAddBtn");
+  let createdId = "";
+  notificationCreatePending = true;
+  if (button) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
   try {
     const created = await backendRequest("/notifications", { method: "POST", body: JSON.stringify(notificationPayload(item)) });
+    if (frontendSessionScope() !== scope) return;
+    if (created?.id !== attempt.id) throw Object.assign(new Error("notification_create_response_unconfirmed"), { outcomeUnknown: true });
+    createdId = created.id;
+    notificationCreateAttempt = null;
     selectedNotificationId = created.id;
     await syncNotificationsFromBackend(true);
     addNotificationAudit("新增通知", `${type} 已新增至後端佇列給 ${target}，通道：${channel}。`);
     showToast("通知已新增至後端佇列。");
   } catch (error) {
-    notificationItems.unshift(item);
-    selectedNotificationId = item.id;
-    renderNotifications();
-    addNotificationAudit("新增通知失敗", `${error.message}；已暫存在畫面。`);
-    showToast("後端新增通知失敗，已暫存在畫面。");
+    if (frontendSessionScope() !== scope) return;
+    if (createdId) {
+      addNotificationAudit("通知已建立", "通知已保存；畫面同步未完成，請重新整理查詢。");
+      showToast("通知已建立，請重新整理查看紀錄。");
+    } else if (error.outcomeUnknown || Number(error.status) >= 500 || !Number.isFinite(Number(error.status))) {
+      attempt.unknown = true;
+      addNotificationAudit("通知建立結果待確認", "尚未確認後端是否建立；重試將沿用同一筆編號，不另建通知。");
+      showToast("通知建立結果尚待確認；重試會沿用同一筆編號。");
+    } else {
+      notificationCreateAttempt = null;
+      addNotificationAudit("新增通知失敗", "未建立通知；請確認收件人是唯一有效的正式帳號。");
+      showToast("通知未建立，請確認收件人的正式帳號。");
+    }
+  } finally {
+    notificationCreatePending = false;
+    if (button) { button.disabled = false; button.removeAttribute("aria-busy"); button.textContent = notificationCreateAttempt?.unknown ? "確認上次通知" : "新增"; }
   }
 }
 
@@ -21844,6 +21997,7 @@ async function backendRequest(path, options = {}, prefetchedResponse = null) {
     error.detail = data.detail || "";
     error.rawMessage = rawMessage;
     error.retryable = data.retryable === true;
+    if (path === "/backup/restore-drill" && response.status === 503 && data?.blocked === true && data?.ok === false) error.operationReport = data;
     throw error;
   }
   return data;
@@ -22527,6 +22681,8 @@ function mapBackendNotification(row) {
     type: row.type,
     title: row.title,
     target: row.target_role,
+    targetUserId: row.target_user_id || "",
+    targetCompanyId: row.target_company_id || "",
     targetEmail: row.target_email,
     channel: row.channel,
     status: row.status,

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Exercise a real private editor draft with verified existing Finance users.
+"""Explicitly authorized signed-identity editor probe, NOT human SSO acceptance.
 
 Only synthetic A4 data is uploaded. No submission, stamp, notification, account
 creation or direct database write is performed. Existing immutable draft/file
 retention has no public delete API, so the report records the retained draft ID.
 Secrets are supplied through the environment and never included in the report.
+Normal invocation stops before reading any secret or real account inventory.
+Storage capabilities are sent only to the exact project configured by
+EDOC_STORAGE_SUPABASE_URL (or SUPABASE_URL); intent URLs cannot expand that
+allowlist. Credentialed HTTP requests never follow redirects.
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 import random
 import re
 import sys
@@ -39,6 +44,13 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def raw_request(url: str, method: str = "GET", *, headers: dict | None = None,
                 data: bytes | None = None) -> tuple[int, dict, bytes]:
+    origins = {ORIGIN}
+    storage_name = "EDOC_STORAGE_SUPABASE_URL" if os.environ.get("EDOC_STORAGE_SUPABASE_URL") else "SUPABASE_URL"
+    if os.environ.get(storage_name):
+        storage_origin = sso.configured_supabase_origin(storage_name)
+        storage_host = urllib.parse.urlsplit(storage_origin).hostname
+        origins.add(f"https://{storage_host.split('.')[0]}.storage.supabase.co")
+    sso.require_allowed_https_url(url, frozenset(origins))
     request = urllib.request.Request(url, method=method, data=data, headers={
         "User-Agent": "edoc-editor-live-acceptance/1", **(headers or {}),
     })
@@ -73,9 +85,7 @@ def api(token: str, method: str, path: str, expected: int, body: dict | None = N
     except (UnicodeDecodeError, json.JSONDecodeError):
         payload = {}
     if status != expected:
-        code = str(payload.get("detail") or payload.get("error") or "") if isinstance(payload, dict) else ""
-        safe_code = code if re.fullmatch(r"(?:editor|official|company|pdf)_[a-z0-9_]{1,80}", code) else "unexpected_status"
-        raise sso.AcceptanceError(f"editor_acceptance_http_{status}_{safe_code}")
+        raise sso.AcceptanceError(f"editor_acceptance_http_{status}")
     if not isinstance(payload, dict):
         raise sso.AcceptanceError("editor_acceptance_json_invalid")
     return payload
@@ -201,9 +211,11 @@ def run_editor_checks(token: str, user: dict, other_company_token: str, report: 
     upload_id = str(intent["upload_id"])
     finalized = api(token, "POST", root + f"/editor-uploads/{upload_id}/finalize", 200, {"sha256": digest, "size_bytes": len(source)})
     asset = finalized.get("asset") or {}
-    if asset.get("scanStatus") != "passed" or asset.get("preflightStatus") != "passed" or str(asset.get("sha256") or "").upper() != digest:
-        raise sso.AcceptanceError("editor_acceptance_scan_or_hash_failed")
-    report["checks"]["virusScanAndPdfPreflightPassed"] = True
+    if asset.get("scanStatus") != "not_scanned" or asset.get("preflightStatus") != "passed" or str(asset.get("sha256") or "").upper() != digest:
+        raise sso.AcceptanceError("editor_acceptance_pdf_policy_preflight_or_hash_failed")
+    report["checks"]["pdfPreflightAndHashPassed"] = True
+    report["checks"]["pdfAntivirusStepRemoved"] = True
+    report["pdfAntivirusPerformed"] = False
     revision = finalized["editor_revision"]
     replay = api(token, "POST", root + f"/editor-uploads/{upload_id}/finalize", 200, {"sha256": digest})
     if replay["editor_revision"]["id"] != revision["id"]:
@@ -258,6 +270,8 @@ def main() -> int:
               "draftCleanup": "retained_immutable_record_no_delete_api"}
     issued_tokens: list[str] = []
     try:
+        if os.getenv("EDOC_ALLOW_SIGNED_IDENTITY_PROBE") != "1":
+            raise sso.AcceptanceError("signed_identity_probe_requires_explicit_authorization_not_human_sso")
         secret = sso.required_environment("PORTAL_HANDOFF_SIGNING_SECRET")
         if len(secret.encode("utf-8")) < 32:
             raise sso.AcceptanceError("portal_handoff_secret_too_short")
@@ -286,18 +300,21 @@ def main() -> int:
             raise sso.AcceptanceError("editor_acceptance_no_eligible_applicant")
         run_editor_checks(owner[0], owner[1], other[0] if other else "", report)
     except sso.AcceptanceError as error:
-        report["failureCodes"].append(str(error))
+        report["failureCodes"].append(sso.safe_failure_code(error, fallback="editor_acceptance_unexpected_failure"))
     except Exception:
         report["failureCodes"].append("editor_acceptance_unexpected_failure")
     finally:
         revoked = 0
         for token in issued_tokens:
-            headers = {"Authorization": f"Bearer {token}"}
-            status, payload = sso.request_json(f"{ORIGIN}/api/auth/logout", method="POST", data=b"", headers=headers)
-            me_status, _ = sso.request_json(f"{ORIGIN}/api/auth/me", headers=headers)
-            if status == 200 and payload.get("ok") and me_status == 401:
-                revoked += 1
-            else:
+            try:
+                headers = {"Authorization": f"Bearer {token}"}
+                status, payload = sso.request_json(f"{ORIGIN}/api/auth/logout", method="POST", data=b"", headers=headers)
+                me_status, _ = sso.request_json(f"{ORIGIN}/api/auth/me", headers=headers)
+                if status == 200 and payload.get("ok") is True and me_status == 401:
+                    revoked += 1
+                else:
+                    report["failureCodes"].append("editor_acceptance_session_cleanup_failed")
+            except Exception:
                 report["failureCodes"].append("editor_acceptance_session_cleanup_failed")
         report["sessionsRevoked"] = revoked
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))

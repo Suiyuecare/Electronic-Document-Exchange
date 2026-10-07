@@ -15,7 +15,7 @@ import backend
 
 class NotificationLaunchOperationsTests(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(backend.SCHEMA)
         self.addCleanup(self.conn.close)
@@ -152,7 +152,7 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
         def patch(table, row_id, payload):
             # Mirrors the deployed backend role: deliveries allow INSERT only.
             self.assertEqual(table, "notifications")
-        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", return_value=notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_patch", side_effect=patch), mock.patch.object(backend, "supabase_update_many", return_value=[notice]), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
+        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", side_effect=lambda table, row_id: user if table == "users" else notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_patch", side_effect=patch), mock.patch.object(backend, "supabase_update_many", return_value=[notice]), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
             first = backend.retry_monitoring_delivery_test()
             second = backend.retry_monitoring_delivery_test()
         send.assert_called_once()
@@ -222,6 +222,18 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
         rows = [dict(row) for row in self.conn.execute("SELECT * FROM notification_deliveries")]
         self.assertEqual(backend.unresolved_notification_failure_count(rows), 1)
 
+    def test_fixed_retry_rechecks_departure_after_durable_claim_before_provider(self):
+        user = self.user()
+        self.conn.execute("INSERT INTO users (id,name,email,role,status,company_id,account_source,logging_role_key,created_at) VALUES (:id,:name,:email,:role,:status,:company_id,:account_source,:logging_role_key,'2026-09-07')", user)
+        with mock.patch.object(backend, "send_email_notification", return_value={"status": "失敗", "receipt": "", "error": "Resend HTTP 400"}):
+            backend.execute_monitoring_mode("deliveryTest", self.conn)
+        self.conn.executescript("CREATE TRIGGER depart_before_mon_retry AFTER INSERT ON notification_deliveries WHEN NEW.id LIKE 'NDEL-MONRETRY-%' BEGIN UPDATE users SET status='停用' WHERE id='OPS-1'; END;")
+        with mock.patch.object(backend, "send_resend_email_notification") as send:
+            result = backend.retry_monitoring_delivery_test(self.conn)
+            send.assert_not_called()
+        self.assertEqual(result["attempted"], 0)
+        self.assertEqual(result["skipped"][0]["reason"], "notification_target_inactive")
+
     def test_outcome_persists_when_notification_summary_update_fails(self):
         user = self.user()
         notice = {**backend.monitoring_alert_notification_payload({"deliveryTest": True}, user), "created_at": backend.now()}
@@ -237,7 +249,7 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
         def patch(table, *args):
             self.assertEqual(table, "notifications")
             raise RuntimeError("summary unavailable")
-        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", return_value=notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_update_many", side_effect=patch), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
+        with mock.patch.object(backend, "supabase_filter_rows", side_effect=query), mock.patch.object(backend, "supabase_get", side_effect=lambda table, row_id: user if table == "users" else notice), mock.patch.object(backend, "supabase_insert", side_effect=insert), mock.patch.object(backend, "supabase_update_many", side_effect=patch), mock.patch.object(backend, "send_resend_email_notification", return_value={"status": "成功", "receipt": "accepted", "error": ""}) as send:
             first = backend.retry_monitoring_delivery_test()
             second = backend.retry_monitoring_delivery_test()
         send.assert_called_once()
@@ -496,7 +508,10 @@ class NotificationLaunchOperationsTests(unittest.TestCase):
         self.assertEqual(second["deduplicated"], 1)
         send.assert_called_once()
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM system_inbox").fetchone()[0], 1)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notification_deliveries").fetchone()[0], 2)
+        # Each generic channel records an immutable ownership claim plus its
+        # outcome. This is two sends, not four provider attempts.
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM notification_deliveries").fetchone()[0], 4)
+        self.assertEqual(self.conn.execute("SELECT SUM(attempt_count) FROM notification_deliveries").fetchone()[0], 2)
 
     def test_supabase_monitoring_deduplicates_before_send(self):
         with mock.patch.object(backend, "supabase_filter_rows", return_value=[self.user()]), mock.patch.object(backend, "supabase_get", return_value={"id": "already-created"}), mock.patch.object(backend, "supabase_create_and_deliver_notification") as send:

@@ -1,5 +1,8 @@
 # 備份與隔離還原演練
 
+更新：2026-10-08。本輪六項改善中的備份／復原與操作手冊項目；本文件不是正式 DR 完成證明。
+政府正式電子公文交換仍維持 Mock／停用。真人 SSO、實體手機、異地金鑰保管與連續 7 日備份證據仍待驗收，交接狀態見 `docs/go-live-operating-checklist.md`。
+
 ## 本次可執行的流程
 
 `scripts/backup_restore_drill.py` 是維運人員執行的工具，會真正執行 PostgreSQL 還原。
@@ -60,12 +63,13 @@ python scripts/backup_restore_drill.py \
 
 ## 通過標準
 
-- `ok: true`，且有 `receipt_id`、`receipt_sha256`。
+- `ok: true` 必須是真正布林值，且有完整 `receipt_id`、`receipt_sha256` 與可重新計算的原始 receipt。
 - `target_type: isolated_local_postgresql`、`target_isolated: true`。
 - `database.restored/integrity/counts_match/row_hashes_match/permissions_match` 全為 `true`。
 - `storage.restored/hash_match/counts_match/private` 全為 `true`。
 - `backup.encrypted: true`，receipt 中保留加密檔 hash 與大小。
 - `rto_minutes` 不超過設定目標，預設 30 分鐘。
+- `rpo_minutes` 不超過設定目標，預設 15 分鐘；同時核對有限、非負的 `duration_seconds`、來源 `backup.snapshot_at` 與 `created_at`，不能只看自述分鐘數。
 - 來源沒有檔案時，必須明示 `storage.empty_source: true`，不能宣稱完成正式 PDF 或章檔抽樣。
 
 receipt 僅包含 schema 名稱、總表數、總筆數、物件總數、hash、時間與固定錯誤碼。
@@ -165,18 +169,20 @@ plutil -lint "$EDOC_HOST_STATE/pending/com.suiyuecare.edoc.backup-host.plist"
 4. 完成異地檔案 bytes 取回、取回副本還原及異地金鑰保管，分別保留證據；不能拿本機 archive 代替雲端取回檔。
 5. 由維運人員另外安裝並啟用候選 plist；本工具不執行此動作。
 
-`last-success.json` 是最後完成的本機驗證證據，`last-attempt.json` 是最近一次執行状态，`history/` 為不可覆蓋的每次開始與結束紀錄。沒有成功的排程執行時，狀態必須是 `missing`，不能把先前手動 receipt 匯入冒充排程成功。所有狀態明確標記 `unattendedCloudDR: false`；異地狀態仍是未驗證／本 worker 未執行。
+`last-success.json` 是最後完成的本機驗證證據，`last-attempt.json` 是最近一次執行狀態，`history/` 為不可覆蓋的每次開始與結束紀錄。沒有任何執行證據時回報 `missing`；首次執行中仍須回報 `running`，首次失敗或未確認的中斷須回報 `degraded`，不能因尚無前次成功而隱藏失敗。手動 CLI receipt 不能冒充排程成功。
+
+`status` 的 `rpoTargetMinutes` 與 `snapshotWithinRpoTarget` 依設定及快照實際年齡判定。超過 RPO 目標即為 `degraded`；再超過 `maximumSnapshotAgeMinutes` 才為 `stale`。範例中的 90 分鐘是另一個過期告警界線，不能拿來取代 15 分鐘 RPO。receipt 時間、完整性或加密檔核對失敗時須保留異常；前次成功不能掩蓋最近一次失敗。所有狀態明確標記 `unattendedCloudDR: false`；異地狀態仍是未驗證／本 worker 未執行。
 
 一般 SIGTERM、SIGINT 或整體逾時會終止外部命令的 process group、停止本機 PostgreSQL 並清除本次私密暫存。若被 SIGKILL 或斷電，應先確定沒有執行中工作，再由維運人員檢查本次 `edoc-restore-*` 私密目錄與孤兒 PostgreSQL；不可自動大量刪除未知暫存或隱藏中斷。備份與 receipt 沒有自動清除功能，因此保留政策尚需另行核准。
 
 ## 測試
 
 ```sh
-EDOC_TEST_PG_BIN="$EDOC_PG_BIN_DIR" python -m unittest tests.test_backup_restore_runner tests.test_backup_host -v
+EDOC_TEST_PG_BIN="$EDOC_PG_BIN_DIR" python -m unittest tests.test_backup_restore_runner tests.test_backup_host tests.test_backup_runner_evidence -v
 ```
 
-涵蓋真正 PostgreSQL dump/restore、RLS/ACL、AES-GCM 往返與竄改拒絕、Storage bytes 還原、空 bucket 明示、金鑰權限和 archive 路徑攻擊，以及跨程序互斥、整體逾時清理、不可覆蓋 receipt、前次成功保留、過期／中斷／竄改狀態、唯讀健康檢查和未啟用的候選 plist。
-測試只使用去識別化 fixture，不連正式交換 provider。
+涵蓋真正 PostgreSQL dump/restore、RLS/ACL、AES-GCM 往返與竄改拒絕、Storage bytes 還原、空 bucket 明示、金鑰權限和 archive 路徑攻擊，以及跨程序互斥、整體逾時清理、不可覆蓋 receipt、前次成功保留、首次失敗、過期／中斷／竄改狀態、唯讀健康檢查和未啟用的候選 plist。遠端證據測試使用實際 `save_receipt()` 的輸出格式，覆蓋雜湊重算、請求綁定、錯誤來源／目標、字串假布林、非有限時間與過期快照拒絕。
+測試只使用去識別化 fixture，不連正式交換 provider。PostgreSQL 工具不可用而跳過測試時，必須記錄未驗證，不得標為真正還原通過；隔離測試通過也不代表正式排程或異地副本已驗收。
 
 ## 與系統上還原按鈕的差別
 
@@ -184,7 +190,21 @@ EDOC_TEST_PG_BIN="$EDOC_PG_BIN_DIR" python -m unittest tests.test_backup_restore
 未設定 `EDOC_RESTORE_DRILL_ENDPOINT`／`EDOC_RESTORE_DRILL_TOKEN` 時必須回傳 blocked，
 不能把本機 receipt 偽裝成線上 runner 成功。
 
-維運人員可先執行上述 CLI 演練。若系統要顯示結果，需透過經管理者驗證的 receipt 匯入功能，保留 target type、範圍與限制。
+線上 adapter 必須回傳 `scripts/backup_restore_drill.py` 的 `save_receipt()` 所產生的完整 JSON，不能只回傳 `ok`、一串 hash 或摘要。adapter 需把本次請求 body 的 `drill_id` 原值傳給 `save_receipt()` 的 `drill_id` 參數，使回覆的 `receipt_id` 完全相同。這是現有函式參數，不是新增 CLI 選項；獨立 CLI 產生的歷史 receipt 不能替代當次線上請求。
+
+後端逐項驗證：
+
+- `schema_version: 1`；`ok` 與所有必要成功旗標須為布林 `true`，不是字串或數字。
+- `source_project_ref` 等於當次來源；`receipt_id` 等於當次請求 `drill_id`；`target_type: isolated_local_postgresql`、`target_isolated: true`，且 `target_project_ref` 是本次隔離 `local-postgres-` 識別而非來源。
+- `database.schemas` 為 `edoc`、`edoc_private`；還原、資料完整性、筆數、逐列 hash、權限全通過，總表數為正整數，其他數量為非負整數。
+- `storage` 的還原、hash、數量、private 全通過；目標為 `private_local_filesystem`，物件數與 bytes 為非負整數，`empty_source` 與實際空清冊一致。
+- `backup` 明確為 AES-256-GCM 加密，具有合法 archive 名稱、SHA-256、bytes 與具時區的來源快照時間。只傳 hash 而沒有 receipt payload 時不能驗證。
+- 重新計算移除 `receipt_sha256` 後的 canonical JSON SHA-256：`sort_keys=True`、`separators=(",", ":")`、`ensure_ascii=False`、UTF-8；拒絕 NaN／Infinity。此值不是整份 JSON 檔案 bytes hash，也不是第三方簽章。
+- `created_at` 必須具時區、與本次請求時間相符，且不得早於快照。`duration_seconds` 必須有限且非負；RTO/RPO 須為整數並與實際耗時／快照年齡及當次目標一致。預設仍為 RTO 30 分鐘、RPO 15 分鐘，不能用放寬目標掩飾超時。
+
+缺少原始 receipt 必要欄位、canonical hash 不符、錯誤來源／請求／隔離目標關聯或只提供 hash 時，回傳 `receipt_verification: unverified`、`ok: false`、`blocked: true`，不得產生成功稽核。`receipt_verification: canonical_hash_and_request_matched` 只表示完整性及請求關聯已驗證；資料／檔案還原或時間目標仍可能失敗，須同時核對 `ok` 和 `checks`，不能將該標籤單獨視為全通過。
+
+線上報告也保留 `unattendedCloudDR: false`、`offsiteValidation: not_verified_by_restore_receipt` 與 `pdfSampleValidation: not_performed_by_restore_receipt`。既有 runner 未測試 PDF 開啟，也未驗證異地下載或新平台 Storage API；這些必須另外實測並留存證據。未核准 adapter 前，維運人員可先執行上述 CLI 演練，但系統按鈕仍維持 blocked；不存在可免除驗證的 receipt 匯入捷徑。
 
 ## 保證範圍與尚需交接項目
 
@@ -194,6 +214,7 @@ EDOC_TEST_PG_BIN="$EDOC_PG_BIN_DIR" python -m unittest tests.test_backup_restore
 - `rpo_minutes` 依來源快照的實際年齡計算，仍不能證明例行排程、異地備份或持續達成 15 分鐘 RPO。
 - 加密備份需另存到組織核准的異機位置，金鑰另存公司密碼保管庫。兩者只留同台電腦仍無法應付設備遺失。
 - 未完成排程、異地保存與金鑰交接時須保留待辦，不能因一次演練通過而標為全部備援措施完成。
+- 連續 7 日例行備份、快照時效、逾時／失敗告警與補跑證據仍待完成。每天一次人工查看、一次還原、主機準備完成或成功上傳，均不能證明持續 RPO ≤ 15 分鐘／RTO ≤ 30 分鐘。
 
 ## 官方參考
 
