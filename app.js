@@ -1,4 +1,5 @@
 // The interface webfont must not block the initial module loading screen.
+var officialHandoverController = null;
 // The official-document EduKai font is configured separately and unchanged.
 const interfaceFontStylesheet = document.querySelector("#interfaceFontStylesheet");
 if (interfaceFontStylesheet) {
@@ -3821,7 +3822,7 @@ function officialDocumentIsApplicant(item = {}) {
 }
 
 function officialDocumentCanConfirm(item = {}) {
-  return item.can_confirm === true && officialDocumentIsApplicant(item)
+  return item.can_confirm === true && (officialDocumentIsApplicant(item) || Boolean(item.followup_handover_id))
     && item.current_step === "applicant_confirm"
     && ["stamped", "dispatched", "sent_by_applicant"].includes(item.current_status);
 }
@@ -3844,17 +3845,18 @@ function officialDocumentNeedsUserAttention(item = {}) {
   const status = item.current_status || "";
   const applicant = officialDocumentIsApplicant(item);
   if (item.can_retry_stamp === true) return true;
-  if (["rejected", "draft"].includes(status)) return applicant;
+  if (["rejected", "draft"].includes(status)) return applicant || item.can_create_linked_application === true;
   if (status === "stamping_failed") return false;
   if (status === "pending_general_affairs_dispatch") return item.can_manage_dispatch === true;
   if (status === "returned_to_applicant_for_send") return applicant || item.can_manage_dispatch;
-  if (["dispatched", "sent_by_applicant", "stamped"].includes(status) && item.current_step === "applicant_confirm") return applicant;
+  if (["dispatched", "sent_by_applicant", "stamped"].includes(status) && item.current_step === "applicant_confirm") return applicant || item.can_confirm === true;
   if (status.startsWith("pending_")) return officialDocumentPendingStepMatchesRole(item);
   return false;
 }
 
 function officialDocumentActionLabel(item = {}) {
   const status = item.current_status || "";
+  if (item.can_create_linked_application === true) return "建立關聯新案";
   if (status === "pending_general_affairs_dispatch") return "完成寄發";
   if (status === "returned_to_applicant_for_send") return "回填寄出";
   if (["dispatched", "sent_by_applicant", "stamped"].includes(status) && item.current_step === "applicant_confirm") return "申請人確認";
@@ -23979,11 +23981,12 @@ function approvalProgressCategory({ task, currentStep, officialDocument } = {}) 
     const isDelegatedApproval = Boolean(officialDocument.can_act && officialDocument.delegation_id && officialDocument.acting_for_user_id);
     const isMyDispatch = Boolean(dispatch.dispatch_status === "pending" && officialDocument.can_manage_dispatch === true);
     const isMyRetry = officialDocument.can_retry_stamp === true;
-    const isReturnedToMe = status === "rejected" && officialDocument.applicant_id === authState?.user?.id;
+    const isFollowup = officialDocument.can_create_linked_application === true || officialDocument.can_confirm === true;
+    const isReturnedToMe = status === "rejected" && (officialDocument.applicant_id === authState?.user?.id || isFollowup);
     const record = { task, currentStep, officialDocument };
-    if ((isMyApproval || isDelegatedApproval || isMyDispatch || isMyRetry || isReturnedToMe) && approvalRecordIsOverdue(record)) return "overdue";
+    if ((isMyApproval || isDelegatedApproval || isMyDispatch || isMyRetry || isReturnedToMe || isFollowup) && approvalRecordIsOverdue(record)) return "overdue";
     if (isDelegatedApproval) return "delegated";
-    if (isMyApproval || isMyDispatch || isMyRetry || isReturnedToMe || (status === "draft" && officialDocument.applicant_id === authState?.user?.id)) return "my_pending";
+    if (isMyApproval || isMyDispatch || isMyRetry || isReturnedToMe || isFollowup || (status === "draft" && officialDocument.applicant_id === authState?.user?.id)) return "my_pending";
     return "processed";
   }
   const status = `${task?.status || ""} ${currentStep?.status || ""}`;
@@ -24032,6 +24035,7 @@ function closeApprovalLogMobileDetail() {
 }
 
 function renderApprovalLog() {
+  officialHandoverController?.sync();
   const list = document.querySelector("#approvalLogList");
   const detail = document.querySelector("#approvalLogDetail");
   if (!list || !detail) return;
@@ -24145,6 +24149,7 @@ function renderApprovalLog() {
       ${officialDocument && officialDetailReady ? `<div class="official-action-bar approval-review-decisions">${renderOfficialWorkflowActionButtons(officialDocument, "approvalLog")}</div>` : ""}
       ${officialDocument && officialDetailReady && officialDocumentCanConfirm(officialDocument) ? `<div class="official-action-bar"><button class="primary-button" type="button" data-approval-log-confirm="${escapeHtml(officialDocument.id)}">確認收件並結案</button></div>` : ""}
       ${canCorrectOfficial ? `<div class="official-action-bar approval-review-decisions"><button class="primary-button" type="button" data-correct-official-id="${escapeHtml(officialDocument.id)}">${officialDocument.current_status === "rejected" ? "補正並重新送簽" : "繼續編輯草稿"}</button></div>` : ""}
+      ${officialDocument && officialDetailReady && officialDocument.can_create_linked_application ? `<div class="official-action-bar"><button class="primary-button" type="button" data-linked-official-id="${escapeHtml(officialDocument.id)}">建立關聯新案</button></div>` : ""}
     `);
     if (officialDocument && !officialDetailReady && !officialDocumentDetailRequests.has(officialDocument.id)) {
       void ensureOfficialDocumentDetail(officialDocument.id)
@@ -24190,6 +24195,12 @@ function renderApprovalLog() {
     bindWorkflowActionOnce(button, () => {
       const item = officialWorkflowItems.find((entry) => entry.id === button.dataset.correctOfficialId);
       if (item) void beginOfficialCorrection(item);
+    });
+  });
+  detail.querySelectorAll("[data-linked-official-id]").forEach((button) => {
+    bindWorkflowActionOnce(button, () => {
+      const item = officialWorkflowItems.find((entry) => entry.id === button.dataset.linkedOfficialId);
+      if (item) void officialHandoverController?.createLinked(item);
     });
   });
 }
@@ -31828,7 +31839,8 @@ function uploadedSealApplicationPatch(draft = editorDraftPayload()) {
     description: draft.description || "", request_reason: draft.request_reason || "",
     handler_name: draft.handler_name || "", dispatch_unit: draft.dispatch_unit || "",
     applicant_department_id: draft.applicant_department_id || "",
-    applicant_department_name: draft.applicant_department_name || draft.dispatch_unit || ""
+    applicant_department_name: draft.applicant_department_name || draft.dispatch_unit || "",
+    document_category: draft.document_category || ""
   };
 }
 
@@ -31982,6 +31994,11 @@ async function syncUploadedSealApplicationDraft() {
     throw new Error(uploadedSealApplicationRuntime.error);
   }
   const patch = uploadedSealApplicationPatch();
+  if (!approvalSelectionForSelect("#uploadedSealApprovalCategorySelect").documentCategory) {
+    uploadedSealApplicationRuntime.error = "請選擇用印文件類型後再保存";
+    renderUploadedSealApplicationSaveStatus();
+    throw new Error(uploadedSealApplicationRuntime.error);
+  }
   const savedKey = JSON.stringify(patch);
   const contentRevision = Number(uploadedSealApplicationRuntime.contentRevision ?? 0);
   if (!Number.isInteger(contentRevision) || contentRevision < 0) throw new Error("申請資訊版本無效，請保留內容並重新開啟案件。");
@@ -33574,6 +33591,17 @@ document.querySelector("#internalDispatchDocumentSelect")?.addEventListener("cha
   if (title && !title.value.trim()) title.value = inbound.subject || "內部公文派發";
   if (body && !body.value.trim()) body.value = inbound.note || "請依派發要求辦理。";
 });
+officialHandoverController = window.EdocHandoverUI?.create({
+  request: backendRequest, scope: frontendSessionScope,
+  role: () => authState?.user?.role || "", authenticated: hasAuthenticatedBackendSession,
+  isolate: syncWorkspaceOverlayIsolation, trap: trapWorkspaceModalFocus, toast: showToast,
+  openLinkedDraft: async (id) => {
+    const item = await ensureOfficialDocumentDetail(id);
+    await loadApprovalProgressFromBackend({ throwOnError: true });
+    if (item.source_type === "uploaded_pdf") await openOfficialDocumentEditorReview(id);
+    else await beginOfficialCorrection(item);
+  }
+}) || null;
 document.querySelector("#approvalLogSearch").addEventListener("input", (event) => {
   approvalLogSearchTerm = event.target.value;
   scheduleOfficialWorkflowSearch(() => void loadApprovalProgressFromBackend());
@@ -34112,6 +34140,7 @@ document.querySelector("#uploadedSealApprovalCategorySelect")?.addEventListener(
     selection.approvalRouteCode ? `已自動判定 ${selection.approvalRouteName}。` : "請選擇文件細項。"
   );
   void refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true });
+  scheduleUploadedSealApplicationSave();
 });
 document.querySelectorAll("button[data-editor-mode]").forEach((button) => button.addEventListener("click", () => setUploadedEditorMode(button.dataset.editorMode)));
 document.querySelectorAll("[data-editor-tool]").forEach((button) => button.addEventListener("click", () => chooseUploadedEditorTool(button.dataset.editorTool)));

@@ -66,6 +66,9 @@ Keep the existing responsive shell, application/editor split and mobile action
 layout. New opening feedback belongs directly before the existing editor. It
 wraps on narrow screens; optional preview canvases fit their panel. Preserve
 44px minimum touch targets and the existing 16px mobile field sizing.
+The shared runtime `--action-hit-size` owns the 44px minimum for action buttons,
+including desktop/tablet touchscreens. Larger navigation targets remain intact;
+this does not change the Finance palette or introduce a new button variant.
 
 ## Elevation & Depth
 

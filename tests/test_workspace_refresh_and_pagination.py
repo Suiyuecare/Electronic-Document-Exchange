@@ -123,6 +123,24 @@ for(const status of ['stamping_failed','general_affairs_approved']) {
 }
 """)
 
+    def test_confirmed_followup_work_is_visible_without_impersonating_original(self):
+        self.run_js(["officialDocumentNeedsUserAttention", "approvalProgressCategory", "approvalRecordIsOverdue", "approvalRecordDueTimestamp", "officialDocumentActionLabel"], r"""
+const c={console,Date,authState:{user:{id:'synthetic-owner'}},officialDocumentIsApplicant:()=>false,officialDocumentPendingStepMatchesRole:()=>false};
+vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
+for(const status of ['draft','rejected']) {
+ const item={current_status:status,applicant_id:'departed-original',can_create_linked_application:true};
+ assert.equal(c.officialDocumentNeedsUserAttention(item),true);
+ assert.equal(c.approvalProgressCategory({officialDocument:item}),'my_pending');
+ assert.equal(c.officialDocumentActionLabel(item),'建立關聯新案');
+ assert.equal(c.officialDocumentNeedsUserAttention({...item,can_create_linked_application:false}),false);
+ assert.equal(c.approvalProgressCategory({officialDocument:{...item,can_create_linked_application:false}}),'processed');
+}
+const receipt={current_status:'stamped',current_step:'applicant_confirm',applicant_id:'departed-original',can_confirm:true};
+assert.equal(c.officialDocumentNeedsUserAttention(receipt),true);
+assert.equal(c.approvalProgressCategory({officialDocument:receipt}),'my_pending');
+assert.equal(c.officialDocumentNeedsUserAttention({...receipt,can_confirm:'true'}),false);
+""")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13260,3 +13260,36 @@ body[data-session-state="revalidating"] .workspace::after {
   color: #fff;
   background: #a52620;
 }
+/* Offboarding reuses Finance panels, controls and dialog layers. */
+#officialHandoverPanel .form-actions { flex-wrap: wrap; }
+#officialHandoverPanel button,
+#officialHandoverModal button { min-height: 44px; }
+.official-handover-detail { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 1rem; min-width: 0; }
+.official-handover-detail .address-card { margin-top: 1rem; }
+#officialHandoverPanel textarea,
+#officialHandoverModal textarea { resize: none; width: 100%; }
+#officialHandoverPanel input,
+#officialHandoverPanel select,
+#officialHandoverPanel textarea,
+#officialHandoverModal textarea { font-size: 16px; }
+#officialHandoverPanel p,
+#officialHandoverModalSummary p { overflow-wrap: anywhere; }
+@media (max-width: 767px) {
+  #officialHandoverPanel input,
+  #officialHandoverPanel select,
+  #officialHandoverPanel textarea,
+  #officialHandoverModal textarea { font-size: 16px; min-width: 0; }
+}
+
+/* Shared action hit areas also apply on desktop/tablet touchscreens. Keep the
+   existing Finance colors and the larger navigation targets unchanged. */
+:root { --action-hit-size: 44px; }
+#appShell button:not(.nav-item) {
+  min-width: var(--action-hit-size);
+  min-height: var(--action-hit-size);
+}
+#appShell .text-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}

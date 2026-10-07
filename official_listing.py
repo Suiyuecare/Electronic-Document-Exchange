@@ -97,14 +97,14 @@ def category(api, item, user):
     mine = bool(item.get("can_act") and not item.get("delegation_id"))
     retry_mine = bool(item.get("can_retry_stamp"))
     dispatch_mine = dispatch.get("dispatch_status") == "pending" and item.get("can_manage_dispatch")
-    returned = status == "rejected" and item.get("applicant_id") == user.get("id")
+    returned = status == "rejected" and (item.get("applicant_id") == user.get("id") or item.get("can_create_linked_application"))
     pending = next((s for s in item["approval_steps"] if s.get("step_key") == item.get("current_step") and s.get("status") == "pending"), {})
     due = api.parse_date_value(str(pending.get("due_at") or item.get("correction_due_at") or item.get("correction_due_date") or item.get("due_at") or ""))
     if (mine or delegated or dispatch_mine or returned or retry_mine) and due and due < datetime.now() and status not in {"closed", "cancelled"}:
         return "overdue"
     if delegated:
         return "delegated"
-    if mine or dispatch_mine or returned or retry_mine or (status == "draft" and item.get("applicant_id") == user.get("id")):
+    if mine or dispatch_mine or returned or retry_mine or item.get("can_confirm") or (status == "draft" and (item.get("applicant_id") == user.get("id") or item.get("can_create_linked_application"))):
         return "my_pending"
     return "processed"
 
@@ -117,6 +117,14 @@ def project(api, bundle, config, user, session):
     current_ids = {s["id"] for s in steps}
     display_steps = [s for s in api.official_step_decision_display(all_steps, bundle.get("decision_logs") or []) if s["id"] in current_ids]
     participant = user["id"] in api.official_document_participant_ids(item, all_steps, bundle.get("snapshots") or [])
+    # Adapters supply only a server-validated live binding. Never accept this
+    # proof from an HTTP request or infer it from a shared company/role.
+    followup = bundle.get("followup_binding")
+    if followup and (followup.get("process_owner_user_id") != user["id"]
+            or followup.get("original_applicant_id") != item.get("applicant_id")
+            or followup.get("company_id") != item.get("company_id")
+            or not followup.get("handover_id")):
+        raise RuntimeError("official_list_followup_invalid_response")
     # Independent defense even if a storage adapter returns an overbroad page.
     company = str(user.get("company_id") or "")
     if company and item.get("company_id") != company and not participant:
@@ -128,7 +136,7 @@ def project(api, bundle, config, user, session):
     if scope == "mine" and item.get("applicant_id") != user["id"]:
         return None
     delegation = active_delegation(api, item, steps, user, bundle)
-    if scope not in {"mine", "todo"} and not participant and not delegation and not (company and config["company_wide"]):
+    if scope not in {"mine", "todo"} and not participant and not delegation and not followup and not (company and config["company_wide"]):
         return None
     pending = next((s for s in steps if s.get("status") == "pending" and s.get("step_key") == item.get("current_step")), None)
     dispatch = bundle.get("dispatch_record")
@@ -146,14 +154,16 @@ def project(api, bundle, config, user, session):
                 approval_steps=display_steps,
                 stamp_request=api.official_application_package(item, [], [], [], stamp).get("stamp_request"),
                 dispatch_record=dispatch, current_step_name=next((s.get("step_name", "") for s in steps if s.get("step_key") == item.get("current_step")), ""),
-                can_download=bool(participant or delegation),
-                can_manage_dispatch=bool(api.official_dispatch_record_editable(dispatch) and api.can_manage_official_dispatch(user, item, dispatch, session, steps)),
+                can_download=bool(participant or delegation or followup),
+                followup_handover_id=(followup or {}).get("handover_id") or "",
+                can_create_linked_application=bool(followup and item.get("current_status") in {"draft", "rejected"}),
+                can_manage_dispatch=bool(api.official_dispatch_record_editable(dispatch) and api.can_manage_official_dispatch(user, item, dispatch, session, steps, followup_binding=followup)),
                 can_retry_stamp=bool(api.official_stamp_recoverable(item, stamp) and api.can_retry_official_stamp(user, steps)),
-                can_confirm=bool(item.get("applicant_id") == user["id"] and item.get("current_step") == "applicant_confirm" and item.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
+                can_confirm=bool((item.get("applicant_id") == user["id"] or followup) and item.get("current_step") == "applicant_confirm" and item.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
                 can_act=bool(pending and (pending.get("approver_user_id") == user["id"] or delegation)),
                 acting_for_user_id=pending.get("approver_user_id") if pending and delegation else "",
                 delegation_id=delegation.get("id") if delegation else "")
-    if scope == "todo" and not (item["can_act"] or item["can_retry_stamp"] or (dispatch and dispatch.get("dispatch_status") == "pending" and dispatch.get("dispatch_owner_user_id") == user["id"])):
+    if scope == "todo" and not (item["can_act"] or item["can_retry_stamp"] or item["can_confirm"] or item["can_create_linked_application"] or item["can_manage_dispatch"]):
         return None
     if config["view"]:
         current_category = category(api, item, user)
@@ -218,8 +228,9 @@ def list_sqlite(api, conn, query, session):
         where.append("""(d.applicant_id = ? OR (d.company_id = ? AND ?)
           OR EXISTS(SELECT 1 FROM official_document_approval_steps s WHERE s.document_id=d.id AND (s.approver_user_id=? OR s.decision_actor_user_id=?))
           OR EXISTS(SELECT 1 FROM approval_step_actor_snapshots a WHERE a.source_id=d.id AND a.source_type IN ('official_document','official_documents','official_document_application') AND a.approver_user_id=?)
-          OR EXISTS(SELECT 1 FROM official_workflow_delegations x JOIN official_document_approval_steps s ON s.document_id=d.id AND s.approver_user_id=x.principal_user_id AND s.step_key=d.current_step AND s.status='pending' WHERE x.company_id=d.company_id AND x.delegate_user_id=? AND x.status='active'))""")
-        params.extend([user["id"], user.get("company_id") or "", bool(config["company_wide"] and user.get("company_id")), user["id"], user["id"], user["id"], user["id"]])
+          OR EXISTS(SELECT 1 FROM official_workflow_delegations x JOIN official_document_approval_steps s ON s.document_id=d.id AND s.approver_user_id=x.principal_user_id AND s.step_key=d.current_step AND s.status='pending' WHERE x.company_id=d.company_id AND x.delegate_user_id=? AND x.status='active')
+          OR EXISTS(SELECT 1 FROM official_document_followup_owners f WHERE f.document_id=d.id AND f.process_owner_user_id=?))""")
+        params.extend([user["id"], user.get("company_id") or "", bool(config["company_wide"] and user.get("company_id")), user["id"], user["id"], user["id"], user["id"], user["id"]])
         if after:
             where.append("(d.created_at, d.id) < (?, ?)")
             params.extend(after)
@@ -247,6 +258,7 @@ def list_sqlite(api, conn, query, session):
             identity = d["id"]
             dispatch = next(iter(dispatches[identity]), None)
             result.append({"document": d, "steps": steps[identity],
+                           "followup_binding": api.official_document_followup_binding(d, user, conn=conn),
                            "snapshots": [s for s in snapshots[identity] if s.get("source_type") in api.OFFICIAL_DOCUMENT_ACTOR_SNAPSHOT_SOURCE_TYPES],
                            "dispatch_record": dispatch, "stamp_request": next(iter(stamps[identity]), None), "decision_logs": logs[identity],
                            "delegations": delegations, "delegation_users": list(actors.values()),

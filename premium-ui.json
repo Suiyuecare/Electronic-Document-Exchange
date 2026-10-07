@@ -1,0 +1,9 @@
+{
+  "profile": "product-admin",
+  "canonicalMap": "UX-CONTRACT.md",
+  "sourceRoots": ["."],
+  "ownership": {
+    "Select/Listbox": "native",
+    "Date": "native"
+  }
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -9,6 +10,15 @@ from tools import live_five_account_sso_acceptance as acceptance
 
 
 class LaunchAccountTruthfulnessTest(unittest.TestCase):
+    def test_identity_probe_is_not_run_as_human_sso_and_fails_before_secret_or_account_reads(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(acceptance, "required_environment") as secret, \
+             mock.patch.object(acceptance, "portal_google_accounts") as accounts:
+            with self.assertRaisesRegex(acceptance.AcceptanceError, "not_human_sso"):
+                acceptance.main()
+        secret.assert_not_called()
+        accounts.assert_not_called()
+
     def package(self, roles):
         report = {"launchSmokeReport": {"accessReadiness": {
             "counts": {"activeUserCount": len(roles), "demoAccountsDisabled": True,

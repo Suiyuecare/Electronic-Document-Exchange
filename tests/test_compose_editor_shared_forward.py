@@ -34,6 +34,6 @@ class ComposeEditorSharedForwardTest(unittest.TestCase):
         self.assertEqual(re.search(pattern, shared, re.S).group(0), expected_shared)
         manifest = json.loads((ROOT / "supabase/verification/migration_manifest.json").read_text())
         self.assertIn(f"migration_ledger) = {len(manifest['migrations']) + 1}", shared)
-        self.assertIn("('r','p','v','m')) = 96", shared)
+        self.assertIn("('r','p','v','m')) = 98", shared)
         for name in SOURCES:
             self.assertIn(f"file_name='{name}'", shared)

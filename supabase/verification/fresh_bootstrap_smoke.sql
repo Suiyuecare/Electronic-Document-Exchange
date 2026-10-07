@@ -105,7 +105,7 @@ declare
   v_rpc text;
   v_role text;
 begin
-  foreach v_rpc in array array['edoc_save_official_workflow_config(jsonb)','edoc_mutate_official_workflow(jsonb)','edoc_decline_official_document(jsonb)'] loop
+  foreach v_rpc in array array['edoc_save_official_workflow_config(jsonb)','edoc_mutate_official_workflow(jsonb)','edoc_decline_official_document(jsonb)','edoc_manage_official_handover(jsonb)'] loop
     select * into v_proc from pg_catalog.pg_proc
       where oid=pg_catalog.to_regprocedure(v_schema || '.' || v_rpc);
     if not found then raise exception 'configurable_workflow_rpc_missing'; end if;

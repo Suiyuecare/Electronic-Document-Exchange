@@ -434,7 +434,21 @@
               <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="processed">其他紀錄</button>
             </div>
             <label class="toolbar-search compact">搜尋<input id="approvalLogSearch" type="search" placeholder="文號、主旨、角色、狀態" /></label>
+            <button class="secondary-button" id="officialHandoverOpenBtn" type="button" hidden aria-expanded="false" aria-controls="officialHandoverPanel">離職案件交接</button>
           </div>
+
+          <section class="panel" id="officialHandoverPanel" hidden aria-labelledby="officialHandoverTitle">
+            <div class="panel-heading"><h3 id="officialHandoverTitle">離職案件交接</h3><button class="text-button" id="officialHandoverCloseBtn" type="button">收合</button></div>
+            <div class="form-actions" aria-label="交接清單">
+              <button class="secondary-button" type="button" data-handover-view="needs" aria-pressed="true">待交接</button>
+              <button class="secondary-button" type="button" data-handover-view="pending" aria-pressed="false">待確認</button>
+              <button class="secondary-button" type="button" data-handover-view="history" aria-pressed="false">交接紀錄</button>
+            </div>
+            <p id="officialHandoverStatus" role="status" aria-live="polite"></p>
+            <div id="officialHandoverList" class="address-results"></div>
+            <div class="form-actions"><button class="secondary-button" id="officialHandoverPreviousBtn" type="button" disabled>上一頁</button><span id="officialHandoverPage">第 1 頁</span><button class="secondary-button" id="officialHandoverNextBtn" type="button" disabled>下一頁</button><button class="text-button" id="officialHandoverRetryBtn" type="button">重新整理</button></div>
+            <section id="officialHandoverDetail" class="official-handover-detail" hidden aria-label="交接案件"></section>
+          </section>
 
           <div class="approval-log-layout">
             <section class="panel approval-log-list-panel">
@@ -4299,9 +4313,22 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div class="modal-backdrop hidden" id="officialHandoverModal" role="dialog" aria-modal="true" aria-labelledby="officialHandoverModalTitle" tabindex="-1">
+      <section class="contract-modal-card official-decision-modal-card">
+        <div class="contract-modal-header"><h3 id="officialHandoverModalTitle">交接確認</h3><button class="secondary-button" id="officialHandoverModalCancel" type="button">取消</button></div>
+        <form id="officialHandoverModalForm" class="official-decision-form" novalidate>
+          <div id="officialHandoverModalSummary" class="official-decision-summary"></div>
+          <label id="officialHandoverRejectLabel" hidden>不採用原因<textarea id="officialHandoverRejectReason" rows="3" maxlength="2000" aria-describedby="officialHandoverModalError"></textarea></label>
+          <label class="decision-check"><input id="officialHandoverAcknowledgement" type="checkbox" aria-describedby="officialHandoverModalError" /><span id="officialHandoverAcknowledgementText">我確認僅交接待辦責任，不代表文件已簽核通過。</span></label>
+          <p id="officialHandoverModalError" class="official-decision-error" role="alert" hidden></p>
+          <div class="form-actions"><button class="primary-button" id="officialHandoverModalSubmit" type="submit">確認交接</button></div>
+        </form>
+      </section>
+    </div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260928-library-recovery-r1"></script>
     <script src="editor-seam.js?v=20260911-r1"></script>
     <script src="editor-a4.js?v=20260911-r1"></script>
+    <script src="official-handover-ui.js?v=20261007-handover-r1"></script>
     <script src="app.js?v=20260928-compose-submit-r1"></script>
   </body>
 </html>

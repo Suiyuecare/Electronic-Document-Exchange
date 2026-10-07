@@ -66,6 +66,8 @@ begin
       ('official_document_editor_revisions', 'SI'),
       ('official_document_editor_storage_jobs', 'SIU'),
       ('official_document_files', 'SI'),
+      ('official_document_handovers', 'S'),
+      ('official_document_followup_owners', 'S'),
       ('official_document_number_counters', 'SIU'),
       ('official_document_number_allocations', 'SI'),
       ('official_document_stamp_positions', 'SIUD'),
@@ -177,6 +179,7 @@ begin
           ('official_document_dispatch_records'), ('official_document_editor_assets'),
           ('official_document_editor_storage_jobs'),
           ('official_document_editor_revisions'), ('official_document_files'),
+          ('official_document_handovers'), ('official_document_followup_owners'),
           ('official_document_number_counters'), ('official_document_number_allocations'),
           ('official_document_stamp_positions'), ('official_document_stamp_requests'),
           ('official_document_text_overlays'), ('official_documents'),
@@ -260,6 +263,7 @@ begin
       ('public.edoc_save_official_workflow_config(jsonb)'),
       ('public.edoc_mutate_official_workflow(jsonb)'),
       ('public.edoc_decline_official_document(jsonb)'),
+      ('public.edoc_manage_official_handover(jsonb)'),
       ('public.edoc_confirm_official_document(jsonb)'),
       ('public.edoc_list_official_document_candidates(jsonb)'),
       ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),
@@ -322,6 +326,7 @@ begin
         ('public.edoc_save_official_workflow_config(jsonb)'),
         ('public.edoc_mutate_official_workflow(jsonb)'),
         ('public.edoc_decline_official_document(jsonb)'),
+        ('public.edoc_manage_official_handover(jsonb)'),
         ('public.edoc_confirm_official_document(jsonb)'),
         ('public.edoc_list_official_document_candidates(jsonb)'),
         ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),
@@ -401,6 +406,8 @@ begin
     and procedure_row.oid not in (
       'edoc_private.audit_log_hash_payload(text,text,text,text,text,text,text,text,text,text)'::pg_catalog.regprocedure,
       'edoc_private.is_electronic_compose(public.official_documents)'::pg_catalog.regprocedure
+      , 'edoc_private.official_followup_owner(text,text)'::pg_catalog.regprocedure
+      , 'edoc_private.official_followup_lineage(text)'::pg_catalog.regprocedure
     );
   if v_unexpected <> 0 then
     raise exception 'service_role_unexpected_private_function_grant:%', v_unexpected;

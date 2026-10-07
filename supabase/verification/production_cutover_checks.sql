@@ -152,6 +152,7 @@ with backend_tables(table_name) as (
     'official_document_editor_revisions', 'official_document_compose_drafts',
     'official_document_editor_storage_jobs', 'official_document_files',
     'official_document_number_counters', 'official_document_number_allocations',
+    'official_document_handovers', 'official_document_followup_owners',
     'official_document_stamp_positions', 'official_document_stamp_requests',
     'official_document_text_overlays', 'official_documents',
     'official_workflow_delegations', 'pdf_versions', 'permissions',
@@ -292,6 +293,7 @@ with required_rpcs(signature) as (
     ('public.edoc_save_official_workflow_config(jsonb)'),
     ('public.edoc_mutate_official_workflow(jsonb)'),
     ('public.edoc_decline_official_document(jsonb)'),
+    ('public.edoc_manage_official_handover(jsonb)'),
     ('public.edoc_confirm_official_document(jsonb)'),
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
@@ -342,6 +344,7 @@ with required_rpcs(signature) as (
     ('public.edoc_save_official_workflow_config(jsonb)'),
     ('public.edoc_mutate_official_workflow(jsonb)'),
     ('public.edoc_decline_official_document(jsonb)'),
+    ('public.edoc_manage_official_handover(jsonb)'),
     ('public.edoc_confirm_official_document(jsonb)'),
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
@@ -380,6 +383,7 @@ with allowed(signature) as (
     ('public.edoc_save_official_workflow_config(jsonb)'),
     ('public.edoc_mutate_official_workflow(jsonb)'),
     ('public.edoc_decline_official_document(jsonb)'),
+    ('public.edoc_manage_official_handover(jsonb)'),
     ('public.edoc_confirm_official_document(jsonb)'),
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),

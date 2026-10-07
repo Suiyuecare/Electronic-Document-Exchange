@@ -30,6 +30,15 @@ class ConfigurableWorkflowPostgresTest(fixture.EditorCrossCompanyWorkflowPostgre
                 cls.pg.execute(render_shared_forward())
             from tools.terminal_decline_shared_forward import SOURCE as terminal_source, render_shared_forward as terminal_forward
             cls.pg.execute((ROOT / "supabase/migrations" / terminal_source).read_text() if cls.namespace == "public" else terminal_forward())
+            # The release gate is the complete candidate RPC/ACL inventory.
+            # Apply its appended migration rather than dropping the new RPC
+            # from the production gate to make a historical fixture pass.
+            from tools.offboarding_handover_shared_forward import SOURCE as handover_source, render_shared_forward as handover_forward
+            from tools.receipt_confirmation_shared_forward import SOURCE as receipt_source, render_shared_forward as receipt_forward
+            from tools.official_listing_shared_forward import SOURCE as listing_source, render_shared_forward as listing_forward
+            cls.pg.execute((ROOT / "supabase/migrations" / receipt_source).read_text() if cls.namespace == "public" else receipt_forward())
+            cls.pg.execute((ROOT / "supabase/migrations" / listing_source).read_text() if cls.namespace == "public" else listing_forward())
+            cls.pg.execute((ROOT / "supabase/migrations" / handover_source).read_text() if cls.namespace == "public" else handover_forward())
         finally:
             cls.pg.execute("RESET ROLE")
         for actor, role in (("EXTRA", "員工"), ("CONFIGADMIN", "執行長")):
