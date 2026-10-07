@@ -27,6 +27,26 @@ def revision() -> dict:
 
 
 class LiveEditorLaunchAcceptanceTest(unittest.TestCase):
+    def test_normal_invocation_never_reads_secrets_accounts_or_network(self) -> None:
+        for opt_in in ("", "0", "true"):
+            with self.subTest(opt_in=opt_in):
+                output = io.StringIO()
+                with (
+                    patch.dict(os.environ, {"EDOC_ALLOW_SIGNED_IDENTITY_PROBE": opt_in}),
+                    patch.object(acceptance.sso, "required_environment") as secret,
+                    patch.object(acceptance.sso, "portal_google_accounts") as inventory,
+                    patch.object(acceptance.sso, "request_json") as sso_request,
+                    patch.object(acceptance, "raw_request") as request,
+                    contextlib.redirect_stdout(output),
+                ):
+                    self.assertEqual(acceptance.main(), 1)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["failureCodes"], ["signed_identity_probe_requires_explicit_authorization_not_human_sso"])
+                self.assertFalse(report["humanGoogleLoginExercised"])
+                self.assertEqual(report["sessionsRevoked"], 0)
+                for operation in (secret, inventory, sso_request, request):
+                    operation.assert_not_called()
+
     def test_fixture_is_two_a4_orientations_and_contains_no_personal_data(self) -> None:
         data = acceptance.synthetic_a4_pdf()
         pdf = PdfReader(io.BytesIO(data), strict=True)
@@ -70,7 +90,7 @@ class LiveEditorLaunchAcceptanceTest(unittest.TestCase):
             with self.subTest(secret_present=bool(secret)):
                 output = io.StringIO()
                 with (
-                    patch.dict(os.environ, {"PORTAL_HANDOFF_SIGNING_SECRET": secret}),
+                    patch.dict(os.environ, {"PORTAL_HANDOFF_SIGNING_SECRET": secret, "EDOC_ALLOW_SIGNED_IDENTITY_PROBE": "1"}),
                     patch.object(acceptance.sso, "portal_google_accounts") as inventory,
                     patch.object(acceptance, "raw_request") as request,
                     contextlib.redirect_stdout(output),
@@ -112,7 +132,7 @@ class LiveEditorLaunchAcceptanceTest(unittest.TestCase):
             if path.endswith("/editor-uploads"):
                 return {"upload_id": "ASSET-TEST", "protocol": "tus"}
             if path.endswith("/finalize"):
-                return {"asset": {"scanStatus": "passed", "preflightStatus": "passed", "sha256": source_hash, "officialFileId": "FILE-SOURCE"}, "editor_revision": initial}
+                return {"asset": {"scanStatus": "not_scanned", "preflightStatus": "passed", "sha256": source_hash, "officialFileId": "FILE-SOURCE"}, "editor_revision": initial}
             if path.endswith("/editor-state"):
                 return saved if expected == 200 else {"error": "conflict_or_forbidden"}
             if path.endswith("/editor-preflight"):
@@ -133,6 +153,10 @@ class LiveEditorLaunchAcceptanceTest(unittest.TestCase):
         self.assertTrue(report["checks"]["remainsUnsubmittedDraft"])
         self.assertTrue(report["checks"]["crossCompanyReadAndDownloadDenied"])
         self.assertTrue(report["checks"]["originalSourceHashPreserved"])
+        self.assertTrue(report["checks"]["pdfPreflightAndHashPassed"])
+        self.assertTrue(report["checks"]["pdfAntivirusStepRemoved"])
+        self.assertFalse(report["pdfAntivirusPerformed"])
+        self.assertNotIn("virusScanAndPdfPreflightPassed", report["checks"])
         self.assertTrue(any(call[3] == 409 and call[1] == "PUT" for call in calls))
 
 

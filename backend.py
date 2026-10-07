@@ -31412,6 +31412,142 @@ def scalar_int(conn: sqlite3.Connection, sql: str, params: Tuple[Any, ...] = ())
     return int(conn.execute(sql, params).fetchone()[0])
 
 
+OVERDUE_REMINDER_PREFIX = "NTF-OVERDUE-"
+OVERDUE_REMINDER_TERMINAL_STATES = {"closed", "archived", "cancelled", "已結案", "已完成", "已歸檔", "已作廢", "已撤回", "完成"}
+OVERDUE_REMINDER_SAFE_ERRORS = {
+    "case_due_at_invalid", "overdue_reminder_relationship_changed", "overdue_reminder_exact_assignee_required",
+    "overdue_reminder_scope_forbidden", "overdue_reminder_legacy_scope_unverifiable", "overdue_reminder_binding_invalid",
+    "overdue_reminder_case_no_longer_due", "overdue_reminder_scope_unavailable", "overdue_reminder_persist_failed",
+    "overdue_reminder_inbox_unconfirmed", "notification_exact_target_required", "notification_target_inactive",
+    "notification_target_company_forbidden", "notification_target_company_changed", "notification_target_identity_changed",
+    "notification_target_identity_mismatch", "notification_identity_conflict", "notification_delivery_evidence_unknown",
+    "notification_delivery_claim_unavailable", "notification_delivery_outcome_unknown", "notification_retry_limit_reached",
+    "notification_inbox_target_mismatch", "notification_credential_unavailable",
+}
+
+
+def overdue_reminder_due(document: Dict[str, Any], source_type: str) -> str:
+    if document.get("closed_at") or str(document.get("status") or "").strip() in OVERDUE_REMINDER_TERMINAL_STATES:
+        return ""
+    due = normalized_case_due_at(document.get("due_at" if source_type == "inbound_documents" else "due_date"))
+    if not due:
+        return ""
+    # A date-only deadline expires after that whole local calendar day.
+    cutoff = now()[:10] if len(due) == 10 else now()
+    return due if due < cutoff else ""
+
+
+def overdue_reminder_identity(document: Dict[str, Any], source_type: str, conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    metadata = parse_json_field(document.get("metadata_json"))
+    if source_type == "inbound_documents":
+        user_id = roster_text(document.get("assignee_user_id"))
+        company_id = roster_text(document.get("company_id"))
+    else:
+        # Legacy owner is a display name/role. It is never a routing key.
+        user_id = roster_text(metadata.get("assignee_user_id") or metadata.get("owner_user_id"))
+        company_id = roster_text(metadata.get("company_id") or metadata.get("notification_target_company_id") or metadata.get("target_company_id"))
+        bound_id = roster_text(metadata.get("notification_target_user_id") or metadata.get("target_user_id"))
+        if bound_id and bound_id != user_id:
+            raise PermissionError("overdue_reminder_relationship_changed")
+    if not user_id or not company_id:
+        raise ValueError("overdue_reminder_exact_assignee_required")
+    user = active_user_by_id(conn, user_id) if conn is not None else supabase_user_by_id(user_id)
+    if not user or user.get("status") != "啟用":
+        raise PermissionError("notification_target_inactive")
+    exact_notification_target_payload(user, company_id)
+    if source_type == "inbound_documents":
+        if conn is None:
+            company = supabase_get("companies", company_id) or {}
+            if (company.get("status") != "active" or company.get("source_system") != "finance"
+                    or not company.get("finance_tenant_id") or company.get("finance_tenant_id") != user.get("finance_tenant_id")):
+                raise PermissionError("overdue_reminder_scope_forbidden")
+        allowed = can_access_inbound_document(conn, document, {"user": user, "permissions": []}) if conn is not None else supabase_can_access_inbound_document(document, {"user": user, "permissions": []})
+        if not allowed:
+            raise PermissionError("overdue_reminder_scope_forbidden")
+    elif conn is not None:
+        clause, params = document_scope_clause(user)
+        allowed = conn.execute("SELECT 1 FROM documents WHERE id=?" + (" AND (" + clause + ")" if clause else ""), [document["id"], *params]).fetchone()
+        if not allowed:
+            raise PermissionError("overdue_reminder_scope_forbidden")
+    else:
+        # The legacy Supabase rows have no authoritative company/assignee
+        # columns or scoped access API. Keep them blocked, never guess by name.
+        raise PermissionError("overdue_reminder_legacy_scope_unverifiable")
+    return user
+
+
+def notification_delivery_context_error(item: Dict[str, Any], conn: sqlite3.Connection | None = None) -> str:
+    if not str(item.get("id") or "").startswith(OVERDUE_REMINDER_PREFIX):
+        return ""
+    try:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(str(item.get("action_url") or "").replace("/#", "/")).query)
+        source_type = query.get("reminder_source", [""])[0]
+        expected_due = query.get("reminder_due", [""])[0]
+        if source_type not in {"documents", "inbound_documents"} or not expected_due:
+            return "overdue_reminder_binding_invalid"
+        row = conn.execute(f"SELECT * FROM {source_type} WHERE id=?", (item.get("source"),)).fetchone() if conn is not None else supabase_get(source_type, str(item.get("source") or ""))
+        document = row_to_dict(row) if isinstance(row, sqlite3.Row) else row
+        if not document or overdue_reminder_due(document, source_type) != expected_due:
+            return "overdue_reminder_case_no_longer_due"
+        user = overdue_reminder_identity(document, source_type, conn)
+        if roster_text(user.get("id")) != roster_text(item.get("target_user_id")):
+            return "overdue_reminder_relationship_changed"
+        return notification_delivery_target_error(item, user)
+    except (ValueError, PermissionError) as exc:
+        return str(exc)
+    except Exception:
+        return "overdue_reminder_scope_unavailable"
+
+
+def execute_overdue_reminders(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    payload = {"overdue": 0, "created": 0, "reminded": 0, "deduplicated": 0, "blocked": 0, "errors": [], "externalAttempted": 0}
+    for source_type in ("documents", "inbound_documents"):
+        documents = [row_to_dict(row) for row in conn.execute(f"SELECT * FROM {source_type}")] if conn is not None else supabase_list(source_type, {})
+        if conn is None and len(documents) >= 500:
+            payload["blocked"] += 1
+            payload["errors"].append({"sourceType": source_type, "code": "overdue_reminder_scan_incomplete"})
+        for document in documents:
+            try:
+                due = overdue_reminder_due(document, source_type)
+                if not due:
+                    continue
+                payload["overdue"] += 1
+                user = overdue_reminder_identity(document, source_type, conn)
+                target = exact_notification_target_payload(user)
+                notice_id = OVERDUE_REMINDER_PREFIX + stable_json_hash({"day": now()[:10], "sourceType": source_type, "sourceId": document["id"], "due": due, "userId": target["target_user_id"], "companyId": target["target_company_id"]})[:40]
+                action_url = "/#" + ("inbound" if source_type == "inbound_documents" else "tracking") + "?" + urllib.parse.urlencode({"document": document["id"], "reminder_source": source_type, "reminder_due": due})
+                notice_payload = {"id": notice_id, "type": "逾期稽催", "title": "公文逾期待處理", "body": "您承辦的公文已逾期，請登入系統查看並處理。", "channel": "系統通知", "priority": "高", "source": document["id"], "action_url": action_url, **target}
+                existing_row = conn.execute("SELECT * FROM notifications WHERE id=?", (notice_id,)).fetchone() if conn is not None else None
+                existing = (row_to_dict(existing_row) if existing_row else None) if conn is not None else supabase_get("notifications", notice_id)
+                try:
+                    notice = create_notification(conn, notice_payload) if conn is not None else supabase_create_notification(notice_payload)
+                except Exception:
+                    notice_row = conn.execute("SELECT * FROM notifications WHERE id=?", (notice_id,)).fetchone() if conn is not None else None
+                    notice = (row_to_dict(notice_row) if notice_row else None) if conn is not None else supabase_get("notifications", notice_id)
+                    if not notice:
+                        raise RuntimeError("overdue_reminder_persist_failed") from None
+                require_notification_immutable_binding(notice, notice_payload)
+                delivery = deliver_notification(conn, notice_id, "系統通知") if conn is not None else supabase_deliver_notification(notice_id, "系統通知")
+                if delivery.get("success") != 1 or delivery.get("total") != 1:
+                    errors = delivery.get("results") or []
+                    raise RuntimeError(delivery.get("error") or (errors[0].get("error") if errors else "") or "overdue_reminder_inbox_unconfirmed")
+                payload["reminded"] += 1
+                payload["created"] += int(not existing)
+                payload["deduplicated"] += int(bool(existing) and not delivery.get("attempted"))
+            except Exception as exc:
+                payload["blocked"] += 1
+                # Persist safe machine codes only, never personal case text.
+                code = str(exc) if str(exc) in OVERDUE_REMINDER_SAFE_ERRORS else "overdue_reminder_processing_failed"
+                payload["errors"].append({"sourceType": source_type, "sourceId": document.get("id"), "code": code})
+                detail = json.dumps({"code": code}, ensure_ascii=False)
+                if conn is not None:
+                    log_audit(conn, "Scheduler", "逾期稽催阻擋", source_type, document.get("id") or "", detail)
+                else:
+                    supabase_insert("audit_logs", {"id": "AUD-" + secrets.token_hex(12).upper(), "actor": "Scheduler", "action": "逾期稽催阻擋", "target_type": source_type, "target_id": document.get("id") or "", "detail": detail})
+    status = "待處理" if payload["blocked"] else "成功"
+    return {"status": status, "message": f"{status}：站內提醒 {payload['reminded']} 件，新增 {payload['created']} 件，去重 {payload['deduplicated']} 件，阻擋 {payload['blocked']} 件", "payload": payload}
+
+
 def execute_job_logic(conn: sqlite3.Connection, job: Dict[str, Any]) -> Dict[str, Any]:
     job_type = job["job_type"]
     if job_type == "pullInbound":
@@ -31449,10 +31585,7 @@ def execute_job_logic(conn: sqlite3.Connection, job: Dict[str, Any]) -> Dict[str
         return {"message": f"成功：有效 session {active_sessions}，1 小時內到期 {expiring}", "payload": {"active_sessions": active_sessions, "expiring": expiring}}
 
     if job_type == "overdueReminder":
-        overdue_docs = conn.execute("SELECT * FROM documents WHERE due_date IS NOT NULL AND due_date <> '' AND due_date < ? AND status NOT LIKE '%完成%'", (datetime.now().strftime("%Y-%m-%d"),)).fetchall()
-        for doc in overdue_docs:
-            log_audit(conn, "Scheduler", "逾期稽催", "documents", doc["id"], f"{doc['doc_no']} / {doc['owner']} / {doc['due_date']}")
-        return {"message": f"成功：產生 {len(overdue_docs)} 筆逾期稽催紀錄", "payload": {"overdue": len(overdue_docs)}}
+        return execute_overdue_reminders(conn)
 
     if job_type == "contractRenewalCheck":
         rows = conn.execute("SELECT * FROM contracts WHERE end_date IS NOT NULL AND end_date <> '' AND status NOT IN ('已終止','已作廢')").fetchall()
@@ -31543,7 +31676,7 @@ def run_background_job(conn: sqlite3.Connection, job_id: str) -> Dict[str, Any]:
     run_id = f"RUN-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     try:
         result = execute_job_logic(conn, job)
-        status = "成功"
+        status = result.get("status", "成功") if job["job_type"] == "overdueReminder" else "成功"
         message = result["message"]
         payload = result.get("payload", {})
     except Exception as exc:
@@ -31732,12 +31865,13 @@ def notification_credential_display_metadata(credential: Dict[str, Any]) -> Dict
     return result
 
 
-def notification_delivery_order(row: Dict[str, Any]) -> Tuple[str, int]:
+def notification_delivery_order(row: Dict[str, Any]) -> Tuple[str, int, int]:
     # A retry claim and its append-only outcome can share a timestamp. The
     # outcome resolves that claim without changing or deleting the audit row.
     row_id = str(row.get("id") or "")
-    phase = 2 if row_id.startswith("NDEL-MONRESULT-") else 1 if row_id.startswith("NDEL-MONRETRY-") else 0
-    return str(row.get("created_at") or ""), phase
+    phase = 2 if row_id.startswith(("NDEL-MONRESULT-", "NDEL-NOTIFY-RESULT-")) else 1 if row_id.startswith(("NDEL-MONRETRY-", "NDEL-NOTIFY-CLAIM-")) else 0
+    ordinal = re.match(r"NDEL-NOTIFY-(?:CLAIM|RESULT)-(\d{2})-", row_id)
+    return str(row.get("created_at") or ""), int(ordinal.group(1)) if ordinal else 0, phase
 
 
 def notification_runtime_readiness(deliveries: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
@@ -31973,8 +32107,10 @@ def append_monitoring_retry_outcome(claim: Dict[str, Any], outcome: Dict[str, An
     if claim.get("id") != "NDEL-MONRETRY-" + fingerprint or claim.get("status") != "重試中" or claim.get("channel") != "Email":
         raise RuntimeError("monitoring_retry_claim_invalid")
     status = outcome.get("status")
-    receipt = str(outcome.get("receipt") or "")
-    if status not in {"成功", "失敗", "未設定", "憑證異常"} or (status == "成功") != bool(receipt):
+    raw_receipt = outcome.get("receipt")
+    receipt = raw_receipt if isinstance(raw_receipt, str) else ""
+    if (status not in {"成功", "失敗", "未設定", "憑證異常"} or (status == "成功") != bool(receipt)
+            or (status == "成功" and (len(receipt) > 256 or re.search(r"[\s\x00-\x1f\x7f]", receipt)))):
         raise RuntimeError("monitoring_retry_outcome_invalid")
     row = {
         **claim, "id": "NDEL-MONRESULT-" + fingerprint,
@@ -31986,7 +32122,6 @@ def append_monitoring_retry_outcome(claim: Dict[str, Any], outcome: Dict[str, An
     try:
         if conn is not None:
             conn.execute("INSERT INTO notification_deliveries (id,notification_id,channel,target,status,receipt,error,attempt_count,created_at) VALUES (:id,:notification_id,:channel,:target,:status,:receipt,:error,:attempt_count,:created_at)", row)
-            conn.commit()  # Preserve the outcome even if the summary update fails.
         else:
             supabase_insert("notification_deliveries", row)
     except Exception:
@@ -32069,7 +32204,6 @@ def reconcile_monitoring_summary_snapshot(notice: Dict[str, Any], deliveries: Li
             assignments = ",".join(f"{key}=?" for key in patch)
             predicate = " AND ".join(f"{key} IS ?" for key in before)
             changed = conn.execute(f"UPDATE notifications SET {assignments} WHERE {predicate}", (*patch.values(), *before.values())).rowcount
-            conn.commit()
         else:
             changed = len(supabase_update_many("notifications", {key: "__is_null__" if value is None else value for key, value in before.items()}, patch))
         if changed == 1:
@@ -32151,16 +32285,28 @@ def retry_monitoring_delivery_test(conn: sqlite3.Connection | None = None) -> Di
         if not monitoring_test_retry_eligible(notice, attempts, expected):
             result["skipped"].append({"notificationId": notification_id, "reason": "fixed_test_retry_not_eligible"})
             continue
+        if conn is not None and not sqlite_notification_external_delivery_allowed(conn):
+            result["skipped"].append({"notificationId": notification_id, "reason": "notification_postcommit_worker_required"})
+            continue
+        current_target = active_user_by_id(conn, notice["target_user_id"]) if conn is not None else supabase_user_by_id(notice["target_user_id"])
+        target_error = notification_delivery_target_error(notice, current_target)
+        if target_error:
+            result["skipped"].append({"notificationId": notification_id, "reason": target_error})
+            continue
         claim_id = "NDEL-MONRETRY-" + stable_json_hash({"notificationId": notification_id})[:32]
         claim = {"id": claim_id, "notification_id": notification_id, "channel": "Email", "target": notice["target_email"], "status": "重試中", "receipt": "", "error": "", "attempt_count": 1, "created_at": now()}
         try:
             if conn is not None:
                 conn.execute("INSERT INTO notification_deliveries (id,notification_id,channel,target,status,receipt,error,attempt_count,created_at) VALUES (:id,:notification_id,:channel,:target,:status,:receipt,:error,:attempt_count,:created_at)", claim)
-                conn.commit()  # Reserve the only retry before any external action.
             else:
                 supabase_insert("notification_deliveries", claim)  # Plain INSERT: unique PK is the cross-worker lock.
         except Exception:
             result["skipped"].append({"notificationId": notification_id, "reason": "retry_claim_unavailable"})
+            continue
+        current_target = active_user_by_id(conn, notice["target_user_id"]) if conn is not None else supabase_user_by_id(notice["target_user_id"])
+        target_error = notification_delivery_target_error(notice, current_target)
+        if target_error:
+            result["skipped"].append({"notificationId": notification_id, "reason": target_error})
             continue
         try:
             outcome = send_resend_email_notification(notice["target_email"], notice["title"], notice["body"], notice["id"])
@@ -32304,9 +32450,9 @@ def notification_target_email(conn: sqlite3.Connection, role: str, explicit: str
 
 def notification_target_user_id(conn: sqlite3.Connection, role: str, explicit_email: str = "") -> str:
     if explicit_email:
-        row = conn.execute("SELECT id FROM users WHERE lower(email) = lower(?) AND status = '啟用' ORDER BY rowid LIMIT 1", (explicit_email,)).fetchone()
-        if row:
-            return row["id"]
+        rows = conn.execute("SELECT id FROM users WHERE lower(email) = lower(?) AND status = '啟用' LIMIT 2", (explicit_email,)).fetchall()
+        if len(rows) == 1:
+            return rows[0]["id"]
     return ""
 
 
@@ -32460,7 +32606,15 @@ def create_notification(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Di
         """,
         item,
     )
-    return row_to_dict(conn.execute("SELECT * FROM notifications WHERE id = ?", (item["id"],)).fetchone())
+    stored = row_to_dict(conn.execute("SELECT * FROM notifications WHERE id = ?", (item["id"],)).fetchone())
+    require_notification_immutable_binding(stored, item)
+    return stored
+
+
+def require_notification_immutable_binding(stored: Dict[str, Any], requested: Dict[str, Any]) -> None:
+    fields = ("id", "type", "title", "target_user_id", "target_company_id", "target_email", "channel", "priority", "source", "action_url", "body")
+    if any(str(stored.get(field) or "") != str(requested.get(field) or "") for field in fields):
+        raise ValueError("notification_identity_conflict")
 
 
 def record_notification_delivery(
@@ -32588,9 +32742,9 @@ def send_resend_email_notification(to_email: str, subject: str, body: str, notif
     try:
         with _urlopen_no_redirect(request, timeout=20) as response:
             result = json.loads(response.read().decode("utf-8", "replace") or "{}")
-            receipt = str(result.get("id") or response.headers.get("X-Request-Id") or "")
-            if not receipt:
-                return {"status": "失敗", "receipt": "", "error": "Resend 未回傳寄送識別碼"}
+            receipt = result.get("id") if isinstance(result, dict) else None
+            if not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 256 or re.search(r"[\s\x00-\x1f\x7f]", receipt):
+                return {"status": "失敗", "receipt": "", "error": "notification_delivery_outcome_unknown"}
             return {"status": "成功", "receipt": receipt, "error": ""}
     except urllib.error.HTTPError as exc:
         return {"status": "失敗", "receipt": "", "error": resend_safe_http_error(exc)}
@@ -32677,19 +32831,21 @@ def send_line_notification(message: str) -> Dict[str, str]:
 
 
 def push_system_notification(conn: sqlite3.Connection, item: Dict[str, Any]) -> Dict[str, str]:
+    target_user_id = str(item.get("target_user_id") or "").strip()
+    if not target_user_id:
+        raise ValueError("notification_exact_target_required")
     existing = conn.execute(
-        "SELECT id FROM system_inbox WHERE notification_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT id,target_user_id FROM system_inbox WHERE notification_id = ? ORDER BY created_at DESC LIMIT 1",
         (item["id"],),
     ).fetchone()
     if existing:
+        if str(existing["target_user_id"] or "").strip() != target_user_id:
+            raise RuntimeError("notification_inbox_target_mismatch")
         return {"status": "成功", "receipt": existing["id"], "error": ""}
     inbox_id = f"INBOX-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     # The notification row is the addressing authority. Resolving by role a
     # second time can silently deliver to a different co-worker when several
     # enabled users share the same role.
-    target_user_id = str(item.get("target_user_id") or "").strip()
-    if not target_user_id:
-        raise ValueError("notification_exact_target_required")
     conn.execute(
         """
         INSERT INTO system_inbox (id, notification_id, target_role, target_user_id, title, body, status, created_at)
@@ -32730,6 +32886,237 @@ def notification_delivery_report(notification: Dict[str, Any], delivery: Dict[st
     }
 
 
+NOTIFICATION_MAX_DELIVERY_ATTEMPTS = 3
+NOTIFICATION_CLAIM_PREFIX = "NDEL-NOTIFY-CLAIM-"
+NOTIFICATION_RESULT_PREFIX = "NDEL-NOTIFY-RESULT-"
+
+
+def sqlite_notification_external_delivery_allowed(conn: sqlite3.Connection) -> bool:
+    # A provider request must not escape a transaction whose claim can roll
+    # back. Only an explicit post-commit autocommit worker has durable INSERTs.
+    # Do not commit the caller's document/workflow transaction here.
+    return conn.isolation_level is None and not conn.in_transaction
+
+
+def notification_failure_definitely_unsent(channel: str, status: str, error: str) -> bool:
+    """Only known preflight failures / explicit rejections authorize retry."""
+    if status == "未設定":
+        return error in {"RESEND_API_KEY 或 MAIL_FROM 未設定", "RESEND_API_KEY 與 MAIL_FROM 未設定", "SMTP_HOST 未設定", "LINE_WEBHOOK_URL 或 LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID 未設定"}
+    if status == "憑證異常":
+        return error == "notification_credential_unavailable"
+    if status != "失敗":
+        return False
+    if error in {"通知收件 Email 無效", "notification_target_inactive", "notification_target_company_changed", "notification_target_identity_changed"}:
+        return True  # Checked before a provider call, with identity rechecked on retry.
+    if channel == "Email":
+        match = re.fullmatch(r"(?:Resend HTTP (\d{3})(?: \[[a-z_]+(?::[a-z_]+)?\])?|smtp_response_(\d{3}))", error)
+        return bool(match and int(match.group(1) or match.group(2)) in {400, 401, 403, 404, 405, 413, 415, 422, 429, 550, 551, 552, 553, 554})
+    if channel == "Line 工作群組":
+        return error in {f"HTTP {code}" for code in (400, 401, 403, 404, 405, 413, 415, 422, 429)}
+    return False
+
+
+def notification_delivery_target_error(item: Dict[str, Any], user: Dict[str, Any] | None) -> str:
+    """Revalidate the queued identity; never silently forward an old notice."""
+    user = user or {}
+    expected = str(item.get("target_user_id") or "").strip()
+    company = str(item.get("target_company_id") or "").strip()
+    email = str(item.get("target_email") or "").strip().lower()
+    if not expected or not company or not email:
+        return "notification_exact_target_required"
+    if not user or user.get("status") != "啟用" or str(user.get("id") or "").strip() != expected:
+        return "notification_target_inactive"
+    if str(user.get("company_id") or "").strip() != company:
+        return "notification_target_company_changed"
+    if str(user.get("email") or "").strip().lower() != email:
+        return "notification_target_identity_changed"
+    return ""
+
+
+def notification_channel_target(item: Dict[str, Any], channel: str) -> str:
+    if channel == "Email":
+        return str(item.get("target_email") or "").strip()
+    if channel == "系統站內通知":
+        return str(item.get("target_user_id") or "").strip()
+    return "公文收發電子用印系統 LINE 工作群組"
+
+
+def notification_channel_delivery_plan(item: Dict[str, Any], channel: str, deliveries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Accept legacy receipts, but unresolved or malformed evidence cannot retry."""
+    rows = [row for row in deliveries if row.get("channel") == channel]
+    target = notification_channel_target(item, channel)
+    accepted_targets = {target.lower()} if channel == "Email" else {target}
+    if channel == "系統站內通知":
+        accepted_targets.add(str(item.get("target_role") or ""))  # Legacy inbox ledger used its display role.
+    if channel not in {"Email", "Line 工作群組", "系統站內通知"}:
+        return {"error": "notification_channel_unsupported"}
+    if len(deliveries) >= 1000:
+        return {"error": "notification_delivery_evidence_unknown"}  # Never retry from a truncated ledger.
+    if not rows:
+        if f"{channel}:失敗/notification_postcommit_worker_required" in str(item.get("delivery_receipt") or "").split("；"):
+            return {"attempt": 1}  # Explicitly blocked before claiming or contacting a provider.
+        if item.get("delivery_receipt") or item.get("sent_at"):
+            return {"error": "notification_delivery_evidence_unknown"}
+        return {"attempt": 1}
+    attempts = 0
+    outcomes = {str(row.get("id") or "")[len(NOTIFICATION_RESULT_PREFIX):]: row for row in rows if str(row.get("id") or "").startswith(NOTIFICATION_RESULT_PREFIX)}
+    accepted = None
+    unknown = False
+    for row in rows:
+        row_id = str(row.get("id") or "")
+        row_target = str(row.get("target") or "").strip()
+        if channel == "Email":
+            row_target = row_target.lower()
+        try:
+            count = int(row.get("attempt_count", 1))
+        except (ValueError, TypeError):
+            count = -1
+        is_claim = row_id.startswith(NOTIFICATION_CLAIM_PREFIX)
+        is_outcome = row_id.startswith(NOTIFICATION_RESULT_PREFIX)
+        if row_target not in accepted_targets or row.get("notification_id") != item.get("id") or count < 0 or (is_outcome and count != 0) or (not is_outcome and count < 1):
+            unknown = True
+            continue
+        attempts += count
+        status = row.get("status")
+        raw_receipt = row.get("receipt")
+        receipt = raw_receipt if isinstance(raw_receipt, str) else ""
+        if is_claim:
+            outcome = outcomes.get(row_id[len(NOTIFICATION_CLAIM_PREFIX):])
+            if status != "重試中" or count != 1 or not outcome or outcome.get("target") != row.get("target"):
+                unknown = True
+            continue
+        if is_outcome and not any(str(claim.get("id") or "") == NOTIFICATION_CLAIM_PREFIX + row_id[len(NOTIFICATION_RESULT_PREFIX):] for claim in rows):
+            unknown = True
+            continue
+        if status == "成功" and receipt and len(receipt) <= 256 and not re.search(r"[\s\x00-\x1f\x7f]", receipt):
+            accepted = row
+        elif status not in {"失敗", "未設定", "憑證異常"} or receipt:
+            unknown = True
+        elif not notification_failure_definitely_unsent(channel, status, str(row.get("error") or "")):
+            unknown = True  # Unknown adapter errors / 5xx / missing 2xx receipt never imply rejection.
+    if accepted:
+        return {"accepted": accepted, "attempts": attempts}
+    if unknown:
+        return {"error": "notification_delivery_evidence_unknown", "attempts": attempts}
+    if attempts >= NOTIFICATION_MAX_DELIVERY_ATTEMPTS:
+        return {"error": "notification_retry_limit_reached", "attempts": attempts}
+    return {"attempt": attempts + 1, "attempts": attempts}
+
+
+def notification_delivery_claim(item: Dict[str, Any], channel: str, attempt: int) -> Dict[str, Any]:
+    fingerprint = stable_json_hash({"notificationId": item["id"], "channel": channel, "attempt": attempt})[:40]
+    return {"id": NOTIFICATION_CLAIM_PREFIX + f"{attempt:02d}-" + fingerprint, "notification_id": item["id"], "channel": channel,
+            "target": notification_channel_target(item, channel), "status": "重試中", "receipt": "", "error": "",
+            "attempt_count": 1, "created_at": now()}
+
+
+def insert_notification_delivery_claim(claim: Dict[str, Any], conn: sqlite3.Connection | None = None) -> bool:
+    try:
+        if conn is not None:
+            conn.execute("INSERT INTO notification_deliveries (id,notification_id,channel,target,status,receipt,error,attempt_count,created_at) VALUES (:id,:notification_id,:channel,:target,:status,:receipt,:error,:attempt_count,:created_at)", claim)
+        else:
+            supabase_insert("notification_deliveries", claim)
+    except Exception:
+        # Even a matching committed row with a lost acknowledgement is not our
+        # ownership proof. A later call must stop on the unresolved claim.
+        return False
+    return True
+
+
+def append_notification_delivery_outcome(claim: Dict[str, Any], result: Dict[str, str], conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    match = re.fullmatch(r"NDEL-NOTIFY-CLAIM-(\d{2})-([0-9A-F]{40})", str(claim.get("id") or ""))
+    if (not match or not 1 <= int(match.group(1)) <= NOTIFICATION_MAX_DELIVERY_ATTEMPTS
+            or claim.get("status") != "重試中" or claim.get("attempt_count") != 1
+            or match.group(2) != stable_json_hash({"notificationId": claim.get("notification_id"), "channel": claim.get("channel"), "attempt": int(match.group(1))})[:40]):
+        raise RuntimeError("notification_delivery_claim_invalid")
+    status, raw_receipt = result.get("status"), result.get("receipt")
+    receipt = raw_receipt if isinstance(raw_receipt, str) else ""
+    if (status not in {"成功", "失敗", "未設定", "憑證異常"} or (status == "成功") != bool(receipt)
+            or (status == "成功" and (len(receipt) > 256 or re.search(r"[\s\x00-\x1f\x7f]", receipt)))):
+        raise RuntimeError("notification_delivery_outcome_unknown")
+    row = {**claim, "id": NOTIFICATION_RESULT_PREFIX + claim["id"][len(NOTIFICATION_CLAIM_PREFIX):],
+           "status": status, "receipt": receipt, "error": redact_text(str(result.get("error") or ""))[:300],
+           "attempt_count": 0, "created_at": now()}
+    try:
+        if conn is not None:
+            conn.execute("INSERT INTO notification_deliveries (id,notification_id,channel,target,status,receipt,error,attempt_count,created_at) VALUES (:id,:notification_id,:channel,:target,:status,:receipt,:error,:attempt_count,:created_at)", row)
+        else:
+            supabase_insert("notification_deliveries", row)
+    except Exception:
+        try:
+            existing = row_to_dict(conn.execute("SELECT * FROM notification_deliveries WHERE id=?", (row["id"],)).fetchone()) if conn is not None else supabase_get("notification_deliveries", row["id"])
+        except Exception:
+            existing = None
+        fields = ("id", "notification_id", "channel", "target", "status", "receipt", "error", "attempt_count")
+        if not existing or any(existing.get(field) != row.get(field) for field in fields):
+            raise RuntimeError("notification_delivery_outcome_unknown") from None
+    return row
+
+
+def _deliver_notification_channels(item: Dict[str, Any], force_channel: str, load_target, load_deliveries, credential_for, inbox_push, conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    error = notification_delivery_target_error(item, load_target()) or notification_delivery_context_error(item, conn)
+    if error:
+        return {"id": item["id"], "status": "派送失敗", "success": 0, "total": 0, "attempted": 0, "receipt": error, "error": error, "results": []}
+    deliveries = load_deliveries()
+    results, attempted = [], 0
+    fixed_test = str(item["id"]).startswith("NTF-MONTEST-")
+    for channel in notification_channels(force_channel or item["channel"]):
+        target = notification_channel_target(item, channel)
+        plan = notification_channel_delivery_plan(item, channel, deliveries)
+        if plan.get("accepted"):
+            row = plan["accepted"]
+            results.append({"channel": channel, "target": target, "status": "成功", "receipt": row["receipt"], "error": "", "reused": True, "duration_ms": 0})
+            continue
+        error = plan.get("error") or notification_delivery_target_error(item, load_target()) or notification_delivery_context_error(item, conn)
+        if not error and channel != "系統站內通知" and conn is not None and not sqlite_notification_external_delivery_allowed(conn):
+            error = "notification_postcommit_worker_required"
+        claim = notification_delivery_claim(item, channel, plan.get("attempt", 1))
+        if not error:
+            if fixed_test and channel != "系統站內通知":
+                # Preserve the fixed test's original Email row and dedicated
+                # one-retry proof, while durably reserving its initial send.
+                guard = {**claim, "id": "NDEL-MONINITIAL-" + stable_json_hash({"notificationId": item["id"], "channel": channel})[:40], "channel": channel + " 保留", "status": "已保留", "attempt_count": 0}
+                if not insert_notification_delivery_claim(guard, conn):
+                    error = "notification_delivery_claim_unavailable"
+            elif not fixed_test and not insert_notification_delivery_claim(claim, conn):
+                error = "notification_delivery_claim_unavailable"
+        if error:
+            results.append({"channel": channel, "target": target, "status": "失敗", "receipt": "", "error": error, "duration_ms": 0})
+            continue
+        attempted += 1
+        started = time.time()
+        try:
+            credential = credential_for(channel)
+            target_error = notification_delivery_target_error(item, load_target()) or notification_delivery_context_error(item, conn)
+            if target_error:
+                result = {"status": "失敗", "receipt": "", "error": target_error}
+            elif channel != "系統站內通知" and credential["status"] not in {"有效", "即將到期"}:
+                result = {"status": "憑證異常", "receipt": "", "error": "notification_credential_unavailable"}
+            elif channel == "Email":
+                result = send_email_notification(target, item["title"], item["body"], item["id"])
+            elif channel == "Line 工作群組":
+                # A group is not the exact employee's private inbox. Never send
+                # document titles, personal details or the notice body there.
+                result = send_line_notification("公文系統有待處理通知，請登入系統依權限查看。")
+            else:
+                result = inbox_push(item)
+            if fixed_test:
+                if conn is not None:
+                    record_notification_delivery(conn, item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
+                else:
+                    supabase_record_notification_delivery(item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
+            else:
+                append_notification_delivery_outcome(claim, result, conn)
+        except Exception:
+            result = {"status": "失敗", "receipt": "", "error": "notification_delivery_outcome_unknown"}
+        results.append(notification_attempt_result(channel, target, result, started))
+    success = sum(row["status"] == "成功" for row in results)
+    receipt = "；".join(f"{row['channel']}:{row['status']}{('/' + row['receipt']) if row.get('receipt') else ''}{('/' + row['error']) if row.get('error') else ''}" for row in results)
+    return {"id": item["id"], "status": "已派送" if results and success == len(results) else "部分派送" if success else "派送失敗",
+            "success": success, "total": len(results), "attempted": attempted, "receipt": receipt, "results": results,
+            "humanReceiptConfirmed": False}
+
+
 def deliver_notification(conn: sqlite3.Connection, notification_id: str, force_channel: str = "") -> Dict[str, Any]:
     if str(notification_id).startswith("NTF-MONTEST-") and conn.execute("SELECT 1 FROM notification_deliveries WHERE notification_id=? AND channel='Email' LIMIT 1", (notification_id,)).fetchone():
         return {"id": notification_id, "status": "失敗", "error": "fixed_test_retry_only", "results": []}
@@ -32737,42 +33124,15 @@ def deliver_notification(conn: sqlite3.Connection, notification_id: str, force_c
     if not row:
         return {"id": notification_id, "status": "失敗", "error": "notification_not_found", "results": []}
     item = row_to_dict(row)
-    channels = notification_channels(force_channel or item["channel"])
-    target_email = notification_target_email(conn, item["target_role"], item.get("target_email") or "")
-    results: List[Dict[str, str]] = []
-    for channel in channels:
-        credential = notification_credential_status_for_channel(conn, channel)
-        if channel != "系統站內通知" and credential["status"] not in {"有效", "即將到期"}:
-            result = {"status": "憑證異常", "receipt": "", "error": f"{channel} 正式憑證{credential['status']}，請先完成憑證驗證或更新。"}
-            target = target_email if channel == "Email" else "公文收發電子用印系統 LINE 工作群組"
-            record_notification_delivery(conn, item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
-            results.append({"channel": channel, "target": target, **result, "attempted_at": now(), "duration_ms": 0})
-            continue
-        started = time.time()
-        if channel == "Email":
-            result = send_email_notification(target_email, item["title"], item["body"], item["id"])
-            target = target_email
-        elif channel == "Line 工作群組":
-            result = send_line_notification(f"{item['title']}\n{item['body']}")
-            target = "公文收發電子用印系統 LINE 工作群組"
-        else:
-            result = push_system_notification(conn, item)
-            target = item["target_role"]
-        record_notification_delivery(conn, item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
-        results.append(notification_attempt_result(channel, target, result, started))
-
-    success_count = len([item for item in results if item["status"] == "成功"])
-    receipt_text = "；".join(
-        f"{result['channel']}->{result['target']}:{result['status']}{('/' + result['receipt']) if result.get('receipt') else ''}{(' / ' + result['error']) if result.get('error') else ''}"
-        for result in results
-    )
-    status = "已派送" if success_count == len(results) else "部分派送" if success_count else "派送失敗"
+    delivery = _deliver_notification_channels(item, force_channel, lambda: active_user_by_id(conn, item.get("target_user_id") or ""),
+        lambda: [row_to_dict(row) for row in conn.execute("SELECT * FROM notification_deliveries WHERE notification_id=?", (item["id"],))],
+        lambda channel: notification_credential_status_for_channel(conn, channel), lambda notice: push_system_notification(conn, notice), conn)
     conn.execute(
         "UPDATE notifications SET status = ?, sent_at = ?, delivery_receipt = ? WHERE id = ?",
-        (status, now(), receipt_text, item["id"]),
+        (delivery["status"], now() if delivery["attempted"] else item.get("sent_at"), delivery["receipt"], item["id"]),
     )
-    log_audit(conn, "Notify Worker", "通知派送", "notifications", item["id"], receipt_text)
-    return {"id": item["id"], "status": status, "success": success_count, "total": len(results), "receipt": receipt_text, "results": results}
+    log_audit(conn, "Notify Worker", "通知派送", "notifications", item["id"], delivery["receipt"])
+    return delivery
 
 
 def create_and_deliver_notification(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -33096,8 +33456,13 @@ def sync_notifications_from_business_state(conn: sqlite3.Connection) -> Dict[str
 
 def retry_failed_notifications(conn: sqlite3.Connection) -> Dict[str, Any]:
     rows = conn.execute("SELECT id FROM notifications WHERE status IN ('派送失敗','部分派送') OR delivery_receipt IS NULL OR delivery_receipt = ''").fetchall()
-    results = [deliver_notification(conn, row["id"]) for row in rows if not str(row["id"]).startswith("NTF-MONTEST-")]
-    return {"count": len(results), "results": results}
+    results, skipped = [], []
+    for row in rows:
+        if str(row["id"]).startswith("NTF-MONTEST-"):
+            continue
+        result = deliver_notification(conn, row["id"])
+        (results if result.get("attempted") else skipped).append(result)
+    return {"count": len(results), "results": results, "skipped": skipped}
 
 
 def notification_visible_to_user(notification: Dict[str, Any], user: Dict[str, Any]) -> bool:
@@ -44769,21 +45134,7 @@ def supabase_execute_job_logic(job: Dict[str, Any]) -> Dict[str, Any]:
             })
         return {"message": f"成功：同步 {len(gateway_results)} 筆新介接層狀態，保留 {len(tasks)} 筆舊交換事件", "payload": {"synced": len(gateway_results), "results": gateway_results, "legacyEvents": len(tasks)}}
     if job_type == "overdueReminder":
-        documents = supabase_list("documents", {})
-        today = datetime.now().strftime("%Y-%m-%d")
-        overdue = [item for item in documents if item.get("due_date") and item.get("due_date") < today and "完成" not in item.get("status", "")]
-        for doc in overdue:
-            supabase_insert("audit_logs", {
-                "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
-                "actor": "Vercel Cron",
-                "action": "逾期稽催",
-                "target_type": "documents",
-                "target_id": doc["id"],
-                "ip": "vercel",
-                "device": "cron",
-                "detail": f"{doc.get('doc_no')} / {doc.get('owner')} / {doc.get('due_date')}",
-            })
-        return {"message": f"成功：產生 {len(overdue)} 筆逾期稽催紀錄", "payload": {"overdue": len(overdue)}}
+        return execute_overdue_reminders()
     if job_type == "contractRenewalCheck":
         contracts = supabase_list("contracts", {})
         today = datetime.now().date()
@@ -44861,7 +45212,7 @@ def supabase_run_background_job(job_id: str) -> Dict[str, Any]:
     run_id = f"RUN-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     try:
         result = supabase_execute_job_logic(job)
-        status = "成功"
+        status = result.get("status", "成功") if job["job_type"] == "overdueReminder" else "成功"
         message = result["message"]
         payload = result.get("payload", {})
     except Exception as exc:
@@ -45194,17 +45545,194 @@ def create_compliance_attestation(conn: sqlite3.Connection, payload: Dict[str, A
     return attestation
 
 
+def validate_backup_restore_runner_evidence(
+    evidence: Any,
+    *,
+    drill_id: str,
+    source_ref: str,
+    rto_target: int,
+    rpo_target: int,
+    request_started_at: float,
+    checked_at: datetime | None = None,
+) -> Dict[str, Any]:
+    """Validate the actual backup_restore_drill.save_receipt JSON, not a hash label.
+
+    The authorized remote adapter must pass the request's drill_id to
+    save_receipt. A prior CLI receipt or a partial summary cannot stand in for
+    this request. Canonical SHA-256 is integrity evidence, not a third-party
+    signature or proof of offsite/platform disaster recovery.
+    """
+    checks = {
+        "database_restored": False, "storage_restored": False,
+        "hash_match": False, "counts_match": False, "permissions_match": False,
+        "target_isolated": False, "source_match": False,
+        "receipt_hash_match": False, "receipt_correlated": False,
+        "receipt_valid": False, "rto_ok": False, "rpo_ok": False,
+    }
+    result: Dict[str, Any] = {
+        "ok": False, "blocked": True, "result": "blocked", "checks": checks,
+        "receipt_verification": "unverified", "unattendedCloudDR": False,
+        "offsiteValidation": "not_verified_by_restore_receipt",
+        "pdfSampleValidation": "not_performed_by_restore_receipt",
+        "database": {}, "storage": {}, "backup": {},
+        "error_code": "restore_runner_receipt_unverified",
+    }
+    if (not isinstance(source_ref, str) or re.fullmatch(r"[a-z0-9]{20}", source_ref) is None
+            or not isinstance(drill_id, str)
+            or re.fullmatch(r"DRILL-[0-9]{8}-[0-9]{6}-[0-9A-Fa-f]{6,8}", drill_id) is None):
+        result["error_code"] = "restore_runner_request_context_invalid"
+        return result
+    if (type(rto_target) is not int or not 1 <= rto_target <= 120
+            or type(rpo_target) is not int or not 1 <= rpo_target <= 1440):
+        result["error_code"] = "restore_runner_targets_invalid"
+        return result
+    required = {
+        "schema_version", "receipt_id", "ok", "created_at", "source_project_ref",
+        "target_project_ref", "target_type", "target_isolated", "database",
+        "storage", "backup", "rto_minutes", "rpo_minutes", "duration_seconds",
+        "receipt_sha256",
+    }
+    if (not isinstance(evidence, dict) or not required.issubset(evidence)
+            or type(evidence.get("schema_version")) is not int or evidence["schema_version"] != 1):
+        return result
+    claimed_hash = evidence.get("receipt_sha256")
+    if not isinstance(claimed_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", claimed_hash):
+        return result
+    try:
+        receipt_payload = {key: value for key, value in evidence.items() if key != "receipt_sha256"}
+        actual_hash = hashlib.sha256(json.dumps(
+            receipt_payload, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return result
+    if not hmac.compare_digest(claimed_hash, actual_hash):
+        result["error_code"] = "restore_runner_receipt_hash_mismatch"
+        return result
+    checks["receipt_hash_match"] = True
+    checks["receipt_correlated"] = evidence["receipt_id"] == drill_id
+    checks["source_match"] = evidence["source_project_ref"] == source_ref
+    target_ref = evidence["target_project_ref"]
+    checks["target_isolated"] = (
+        evidence["target_isolated"] is True
+        and evidence["target_type"] == "isolated_local_postgresql"
+        and isinstance(target_ref, str)
+        and re.fullmatch(r"local-postgres-[0-9a-f]{16}", target_ref) is not None
+        and target_ref != source_ref
+    )
+    if not checks["receipt_correlated"] or not checks["source_match"] or not checks["target_isolated"]:
+        result["error_code"] = "restore_runner_receipt_context_mismatch"
+        return result
+    checks["receipt_valid"] = True
+    result.update({
+        "receipt_verification": "canonical_hash_and_request_matched",
+        "receipt_id": drill_id, "receipt_sha256": claimed_hash,
+        "source_project_ref": source_ref, "target_project_ref": target_ref,
+        "target_type": "isolated_local_postgresql", "target_isolated": True,
+    })
+
+    database, storage, backup = (evidence[name] for name in ("database", "storage", "backup"))
+    if not all(isinstance(item, dict) for item in (database, storage, backup)):
+        result["error_code"] = "restore_runner_receipt_schema_invalid"
+        return result
+    database_names = ("restored", "integrity", "counts_match", "row_hashes_match", "permissions_match")
+    storage_names = ("restored", "hash_match", "counts_match", "private")
+    database_counts = ("table_count", "row_count", "policy_count")
+    storage_counts = ("object_count", "bytes")
+    database_ok = (
+        all(database.get(name) is True for name in database_names)
+        and database.get("schemas") == ["edoc", "edoc_private"]
+        and all(type(database.get(name)) is int and database[name] >= 0 for name in database_counts)
+        and database["table_count"] > 0
+    )
+    storage_ok = (
+        all(storage.get(name) is True for name in storage_names)
+        and storage.get("target_type") == "private_local_filesystem"
+        and all(type(storage.get(name)) is int and storage[name] >= 0 for name in storage_counts)
+        and type(storage.get("empty_source")) is bool
+        and storage["empty_source"] == (storage["object_count"] == 0)
+        and (storage["object_count"] != 0 or storage["bytes"] == 0)
+    )
+    checks.update({
+        "database_restored": database_ok, "storage_restored": storage_ok,
+        "hash_match": database_ok and storage_ok,
+        "counts_match": database_ok and storage_ok,
+        "permissions_match": database_ok and storage_ok,
+    })
+    archive_name, archive_hash = backup.get("file"), backup.get("sha256")
+    backup_ok = (
+        backup.get("encrypted") is True and backup.get("algorithm") == "AES-256-GCM"
+        and isinstance(archive_name, str)
+        and re.fullmatch(r"(?:DRILL|RESTORE)-[0-9]{8}-[0-9]{6}-[0-9A-Fa-f]{6,8}\.tar\.aesgcm", archive_name) is not None
+        and isinstance(archive_hash, str) and re.fullmatch(r"[0-9a-f]{64}", archive_hash) is not None
+        and type(backup.get("bytes")) is int and backup["bytes"] > 36
+    )
+    if not database_ok or not storage_ok or not backup_ok:
+        result["error_code"] = "restore_runner_integrity_evidence_incomplete"
+        return result
+    # Return aggregate fields only; provider extras must not leak rows, paths,
+    # object names, credentials or shared identity data through UI/audit logs.
+    result["database"] = {name: database[name] for name in (*database_names, *database_counts, "schemas")}
+    result["storage"] = {name: storage[name] for name in (*storage_names, *storage_counts, "empty_source", "target_type")}
+    # A provider-controlled timestamp is not safe output until parsed. Even a
+    # blocked receipt must never echo malformed values into UI or audit data.
+    result["backup"] = {name: backup.get(name) for name in ("encrypted", "algorithm", "file", "sha256", "bytes")}
+    result["row_count"] = database["row_count"]
+    result["storage_object_count"] = storage["object_count"]
+
+    duration = evidence["duration_seconds"]
+    rto, rpo = evidence["rto_minutes"], evidence["rpo_minutes"]
+    if (type(duration) not in (int, float) or (type(duration) is float and not math.isfinite(duration))
+            or duration < 0 or type(rto) is not int or rto < 1 or type(rpo) is not int or rpo < 0):
+        result["error_code"] = "restore_runner_timing_evidence_invalid"
+        return result
+    try:
+        created_at = datetime.fromisoformat(str(evidence["created_at"]).replace("Z", "+00:00"))
+        snapshot_at = datetime.fromisoformat(str(backup["snapshot_at"]).replace("Z", "+00:00"))
+        if created_at.tzinfo is None or snapshot_at.tzinfo is None:
+            raise ValueError("receipt_timezone_required")
+        checked_at = checked_at or datetime.now(ZoneInfo("UTC"))
+        started_at = datetime.fromtimestamp(request_started_at, ZoneInfo("UTC"))
+        snapshot_age_seconds = (created_at - snapshot_at).total_seconds()
+        if (snapshot_age_seconds < 0 or (created_at - checked_at).total_seconds() > 60
+                or (started_at - created_at).total_seconds() > 60):
+            raise ValueError("receipt_time_context_invalid")
+    except (KeyError, TypeError, ValueError, OverflowError):
+        result["error_code"] = "restore_runner_timestamp_evidence_invalid"
+        return result
+    result["backup"]["snapshot_at"] = snapshot_at.isoformat()
+    checks["rto_ok"] = duration <= rto_target * 60 and 1 <= rto <= rto_target and duration <= rto * 60
+    # save_receipt records created_at just after its RPO calculation; the
+    # one-second boundary allowance is rounding drift, not a relaxed RPO.
+    checks["rpo_ok"] = 0 <= rpo <= rpo_target and snapshot_age_seconds <= rpo_target * 60 + 1 and rpo * 60 >= snapshot_age_seconds - 1
+    result.update({
+        "rto_minutes": rto, "rpo_minutes": rpo, "duration_seconds": duration,
+        "snapshot_age_seconds_at_receipt": max(0, snapshot_age_seconds),
+        "receipt_created_at": created_at.isoformat(),
+    })
+    if evidence["ok"] is not True or not checks["rto_ok"] or not checks["rpo_ok"]:
+        result["error_code"] = "restore_runner_recovery_target_not_met"
+        return result
+    result.update({"ok": True, "blocked": False, "result": "通過"})
+    result.pop("error_code")
+    return result
+
+
 def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
     started = time.time()
     scope = str(payload.get("scope") or "全部資料表")
     target_env = str(payload.get("target_env") or payload.get("target") or "隔離還原專案")
-    rto_target = int(payload.get("rto_target_minutes") or payload.get("rtoTarget") or 30)
-    rpo_target = int(payload.get("rpo_target_minutes") or payload.get("rpoTarget") or 15)
+    rto_target = payload.get("rto_target_minutes", payload.get("rtoTarget", 30))
+    rpo_target = payload.get("rpo_target_minutes", payload.get("rpoTarget", 15))
     drill_id = f"DRILL-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3).upper()}"
     source_ref = urllib.parse.urlparse(SUPABASE_URL).hostname or ""
     source_ref = source_ref.split(".", 1)[0] if source_ref else ""
 
     def record(report: Dict[str, Any]) -> Dict[str, Any]:
+        report.setdefault("receipt_verification", "unverified")
+        report.setdefault("unattendedCloudDR", False)
+        report.setdefault("offsiteValidation", "not_verified_by_restore_receipt")
+        report.setdefault("pdfSampleValidation", "not_performed_by_restore_receipt")
         supabase_insert("audit_logs", {
             "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
             "actor": "Ops Drill", "action": "備份還原演練",
@@ -45216,11 +45744,20 @@ def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "database_restored": (report.get("database") or {}).get("restored", False),
                 "storage_restored": (report.get("storage") or {}).get("restored", False),
             }, ensure_ascii=False),
-            "event_type": "sensitive_access", "result": "success" if report.get("ok") else "failed",
+            "event_type": "sensitive_access", "result": "success" if report.get("ok") is True else "failed",
             "module_code": "backup_restore", "resource_type": "backup_restore_drill",
             "resource_id": drill_id, "request_id": f"req_{secrets.token_hex(8)}", "created_at": now(),
         })
         return report
+
+    if (type(rto_target) is not int or not 1 <= rto_target <= 120
+            or type(rpo_target) is not int or not 1 <= rpo_target <= 1440):
+        return record({
+            "id": drill_id, "ok": False, "blocked": True, "result": "blocked",
+            "created_at": now(), "scope": scope, "target_env": target_env,
+            "detail": "restore_runner_targets_invalid", "error_code": "restore_runner_targets_invalid",
+            "checks": {"receipt_valid": False, "rto_ok": False, "rpo_ok": False},
+        })
 
     missing = [
         name for name, value in {
@@ -45241,7 +45778,7 @@ def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
     request_payload = {
         "drill_id": drill_id, "source_project_ref": source_ref, "scope": scope,
         "target_environment": target_env, "rto_target_minutes": rto_target, "rpo_target_minutes": rpo_target,
-        "required_checks": ["database_restore", "storage_restore", "row_counts", "object_hashes", "permissions", "pdf_open_sample"],
+        "required_checks": ["database_restore", "storage_restore", "row_counts", "object_hashes", "permissions"],
     }
     request = urllib.request.Request(
         EDOC_RESTORE_DRILL_ENDPOINT,
@@ -45254,7 +45791,10 @@ def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     try:
         with _urlopen_no_redirect(request, timeout=EDOC_RESTORE_DRILL_TIMEOUT_SECONDS) as response:
-            evidence = json.loads(response.read().decode("utf-8") or "{}")
+            raw_evidence = response.read(65537)
+            if len(raw_evidence) > 65536:
+                raise ValueError("restore_runner_receipt_too_large")
+            evidence = json.loads(raw_evidence.decode("utf-8") or "{}")
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
         error_code = type(exc).__name__
         if isinstance(exc, urllib.error.HTTPError):
@@ -45275,34 +45815,16 @@ def supabase_backup_restore_drill(payload: Dict[str, Any]) -> Dict[str, Any]:
             "checks": {"database_restored": False, "storage_restored": False, "hash_match": False, "target_isolated": False},
         })
 
-    database = evidence.get("database") if isinstance(evidence.get("database"), dict) else {}
-    storage = evidence.get("storage") if isinstance(evidence.get("storage"), dict) else {}
-    target_ref = str(evidence.get("target_project_ref") or "")
-    receipt_id = str(evidence.get("receipt_id") or "")
-    receipt_sha256 = str(evidence.get("receipt_sha256") or "").lower()
-    target_isolated = bool(evidence.get("target_isolated")) and bool(target_ref) and target_ref != source_ref
-    database_ok = bool(database.get("restored") and database.get("integrity") and database.get("counts_match"))
-    storage_ok = bool(storage.get("restored") and storage.get("hash_match") and storage.get("counts_match"))
-    receipt_ok = bool(receipt_id and re.fullmatch(r"[0-9a-f]{64}", receipt_sha256))
-    rto_minutes = int(evidence.get("rto_minutes") or 0)
-    rpo_minutes = int(evidence.get("rpo_minutes") or 0)
-    rto_ok = 0 < rto_minutes <= rto_target
-    rpo_ok = 0 <= rpo_minutes <= rpo_target
-    ok = bool(evidence.get("ok")) and target_isolated and database_ok and storage_ok and receipt_ok and rto_ok and rpo_ok
+    validation = validate_backup_restore_runner_evidence(
+        evidence, drill_id=drill_id, source_ref=source_ref,
+        rto_target=rto_target, rpo_target=rpo_target, request_started_at=started,
+    )
     return record({
-        "id": drill_id, "ok": ok, "blocked": not ok, "result": "通過" if ok else "blocked",
+        **validation, "id": drill_id,
         "created_at": now(), "scope": scope, "target_env": target_env,
-        "target_project_ref": target_ref, "target_isolated": target_isolated,
-        "database": database, "storage": storage, "receipt_id": receipt_id, "receipt_sha256": receipt_sha256,
-        "rto_minutes": rto_minutes, "rto_target_minutes": rto_target,
-        "rpo_minutes": rpo_minutes, "rpo_target_minutes": rpo_target,
+        "rto_target_minutes": rto_target, "rpo_target_minutes": rpo_target,
         "duration_ms": int((time.time() - started) * 1000),
-        "checks": {
-            "database_restored": database_ok, "storage_restored": storage_ok,
-            "hash_match": bool(storage.get("hash_match")), "target_isolated": target_isolated,
-            "receipt_valid": receipt_ok, "rto_ok": rto_ok, "rpo_ok": rpo_ok,
-        },
-        "improvements": [] if ok else ["還原證據不完整或未達 RTO/RPO；不得宣稱演練通過。"],
+        "improvements": [] if validation["ok"] else ["完整 receipt、請求關聯、還原完整性或 RTO/RPO 尚未驗證；不得宣稱演練通過。"],
     })
 
 
@@ -45383,7 +45905,7 @@ def supabase_create_notification(payload: Dict[str, Any]) -> Dict[str, Any]:
         "sent_at": payload.get("sent_at") or None,
     }
     target_user = supabase_user_by_id(item["target_user_id"]) if item["target_user_id"] else None
-    if not target_user and item["target_email"]:
+    if not item["target_user_id"] and item["target_email"]:
         item["target_user_id"] = supabase_notification_target_user_id(item["target_role"], item["target_email"])
         target_user = supabase_user_by_id(item["target_user_id"]) if item["target_user_id"] else None
     if not target_user or target_user.get("status") != "啟用":
@@ -45397,6 +45919,7 @@ def supabase_create_notification(payload: Dict[str, Any]) -> Dict[str, Any]:
     item["target_role"] = str(target_user.get("role") or "員工")
     existing = supabase_get("notifications", item["id"])
     if existing:
+        require_notification_immutable_binding(existing, item)
         return existing
     return supabase_insert("notifications", item)
 
@@ -45407,21 +45930,24 @@ def supabase_notification_target_email(role: str, explicit: str = "") -> str:
 
 def supabase_notification_target_user_id(role: str, explicit_email: str = "") -> str:
     if explicit_email:
-        qs = urllib.parse.urlencode({"select": "id", "email": f"eq.{explicit_email}", "status": "eq.啟用", "limit": "1"})
+        pattern = explicit_email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        qs = urllib.parse.urlencode({"select": "id,email", "email": f"ilike.{pattern}", "status": "eq.啟用", "limit": "2"})
         rows = supabase_request("GET", f"users?{qs}")
-        if rows:
+        if len(rows or []) == 1 and str(rows[0].get("email") or "").lower() == explicit_email.lower():
             return rows[0]["id"]
     return ""
 
 
 def supabase_push_system_notification(item: Dict[str, Any]) -> Dict[str, str]:
-    existing = supabase_filter_rows("system_inbox", {"notification_id": item["id"]}, order="created_at.desc", limit=1)
-    if existing:
-        return {"status": "成功", "receipt": existing[0]["id"], "error": ""}
-    inbox_id = f"INBOX-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     target_user_id = str(item.get("target_user_id") or "").strip()
     if not target_user_id:
         raise ValueError("notification_exact_target_required")
+    existing = supabase_filter_rows("system_inbox", {"notification_id": item["id"]}, order="created_at.desc", limit=1)
+    if existing:
+        if str(existing[0].get("target_user_id") or "").strip() != target_user_id:
+            raise RuntimeError("notification_inbox_target_mismatch")
+        return {"status": "成功", "receipt": existing[0]["id"], "error": ""}
+    inbox_id = f"INBOX-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     supabase_insert("system_inbox", {
         "id": inbox_id,
         "notification_id": item["id"],
@@ -45453,37 +45979,16 @@ def supabase_deliver_notification(notification_id: str, force_channel: str = "")
     item = supabase_get("notifications", notification_id)
     if not item:
         return {"id": notification_id, "status": "失敗", "error": "notification_not_found", "results": []}
-    channels = notification_channels(force_channel or item["channel"])
-    target_email = supabase_notification_target_email(item["target_role"], item.get("target_email") or "")
-    results: List[Dict[str, str]] = []
-    credential_rows = supabase_list("notification_channel_credentials", {}) if "notification_channel_credentials" in TABLES else []
-    for channel in channels:
-        credential = supabase_notification_credential_status(channel, credential_rows)
-        if channel != "系統站內通知" and credential["status"] not in {"有效", "即將到期"}:
-            result = {"status": "憑證異常", "receipt": "", "error": f"{channel} 正式憑證{credential['status']}，請先完成憑證驗證或更新。"}
-            target = target_email if channel == "Email" else "公文收發電子用印系統 LINE 工作群組"
-            supabase_record_notification_delivery(item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
-            results.append({"channel": channel, "target": target, **result, "attempted_at": now(), "duration_ms": 0})
-            continue
-        started = time.time()
-        if channel == "Email":
-            result = send_email_notification(target_email, item["title"], item["body"], item["id"])
-            target = target_email
-        elif channel == "Line 工作群組":
-            result = send_line_notification(f"{item['title']}\n{item['body']}")
-            target = "公文收發電子用印系統 LINE 工作群組"
-        else:
-            result = supabase_push_system_notification(item)
-            target = item["target_role"]
-        supabase_record_notification_delivery(item["id"], channel, target, result["status"], result.get("receipt", ""), result.get("error", ""))
-        results.append(notification_attempt_result(channel, target, result, started))
-    success_count = len([entry for entry in results if entry["status"] == "成功"])
-    receipt_text = "；".join(
-        f"{entry['channel']}->{entry['target']}:{entry['status']}{('/' + entry['receipt']) if entry.get('receipt') else ''}{(' / ' + entry['error']) if entry.get('error') else ''}"
-        for entry in results
-    )
-    status = "已派送" if success_count == len(results) else "部分派送" if success_count else "派送失敗"
-    supabase_patch("notifications", item["id"], {"status": status, "sent_at": now(), "delivery_receipt": receipt_text})
+    credential_rows = []
+    def credential_for(channel):
+        nonlocal credential_rows
+        if not credential_rows and "notification_channel_credentials" in TABLES:
+            credential_rows = supabase_list("notification_channel_credentials", {})
+        return supabase_notification_credential_status(channel, credential_rows)
+    delivery = _deliver_notification_channels(item, force_channel, lambda: supabase_user_by_id(item.get("target_user_id") or ""),
+        lambda: supabase_filter_rows("notification_deliveries", {"notification_id": item["id"]}, order="created_at.desc", limit=1000),
+        credential_for, supabase_push_system_notification)
+    supabase_patch("notifications", item["id"], {"status": delivery["status"], "sent_at": now() if delivery["attempted"] else item.get("sent_at"), "delivery_receipt": delivery["receipt"]})
     supabase_insert("audit_logs", {
         "id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
         "actor": "Notify Worker",
@@ -45492,9 +45997,9 @@ def supabase_deliver_notification(notification_id: str, force_channel: str = "")
         "target_id": item["id"],
         "ip": "vercel",
         "device": "serverless",
-        "detail": receipt_text,
+        "detail": delivery["receipt"],
     })
-    return {"id": item["id"], "status": status, "success": success_count, "total": len(results), "receipt": receipt_text, "results": results}
+    return delivery
 
 
 def supabase_create_and_deliver_notification(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -45582,8 +46087,11 @@ def supabase_retry_failed_notifications() -> Dict[str, Any]:
         item for item in supabase_list("notifications", {})
         if not str(item.get("id") or "").startswith("NTF-MONTEST-") and (item.get("status") in {"派送失敗", "部分派送"} or not item.get("delivery_receipt"))
     ]
-    results = [supabase_deliver_notification(row["id"]) for row in rows]
-    return {"count": len(results), "results": results}
+    results, skipped = [], []
+    for row in rows:
+        result = supabase_deliver_notification(row["id"])
+        (results if result.get("attempted") else skipped).append(result)
+    return {"count": len(results), "results": results, "skipped": skipped}
 
 
 def _archive_entry_name(file_meta: Dict[str, Any]) -> str:

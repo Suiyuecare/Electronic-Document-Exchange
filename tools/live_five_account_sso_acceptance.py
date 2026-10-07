@@ -36,26 +36,87 @@ PORTAL_ORIGIN = "https://login.suiyuecare.com"
 SAMPLE_SIZE = 5
 TIMEOUT_SECONDS = 30
 
+SAFE_FAILURE_CODES = frozenset({
+    "signed_identity_probe_requires_explicit_authorization_not_human_sso",
+    "portal_handoff_secret_too_short", "eligible_portal_finance_accounts_below_five",
+    "supabase_linked_inventory_failed", "supabase_linked_inventory_invalid",
+    "handoff_cookie_missing", "handoff_redirect_invalid", "handoff_exchange_token_invalid",
+    "handoff_exchange_account_source_invalid", "finance_directory_company_missing",
+    "finance_directory_departments_missing", "acceptance_session_cleanup_failed",
+    "acceptance_session_not_revoked", "acceptance_network_unavailable",
+    "acceptance_origin_invalid", "acceptance_unexpected_failure",
+    "missing_environment_portal_handoff_signing_secret", "missing_environment_supabase_url",
+    "missing_environment_supabase_service_role_key", "missing_environment_finance_source_supabase_url",
+    "missing_environment_finance_source_secret_key", "missing_environment_edoc_storage_supabase_url",
+    "editor_acceptance_network_unavailable", "editor_acceptance_download_url_invalid",
+    "editor_acceptance_json_invalid", "editor_acceptance_tus_endpoint_invalid",
+    "editor_acceptance_tus_credentials_invalid", "editor_acceptance_tus_metadata_missing",
+    "editor_acceptance_tus_location_invalid", "editor_acceptance_page_count_invalid",
+    "editor_acceptance_a4_geometry_invalid", "editor_acceptance_page_orientation_invalid",
+    "editor_acceptance_draft_id_invalid", "editor_acceptance_pdf_policy_preflight_or_hash_failed",
+    "editor_acceptance_finalize_not_idempotent", "editor_acceptance_saved_content_changed",
+    "editor_acceptance_prepared_hash_mismatch", "editor_acceptance_prepared_text_missing",
+    "editor_acceptance_original_changed", "editor_acceptance_change_summary_invalid",
+    "editor_acceptance_draft_unexpectedly_submitted", "editor_acceptance_session_invalid",
+    "editor_acceptance_no_eligible_applicant", "editor_acceptance_unexpected_failure",
+    "editor_acceptance_session_cleanup_failed",
+})
+HTTP_FAILURE_PREFIXES = (
+    "portal_auth_inventory_http", "finance_inventory_http", "handoff_http",
+    "handoff_exchange_http", "auth_me_http", "finance_directory_http",
+    "editor_acceptance_http", "editor_acceptance_tus_create_http",
+    "editor_acceptance_tus_patch_http", "editor_acceptance_tus_head_http",
+    "editor_acceptance_download_http",
+)
+
 
 class AcceptanceError(RuntimeError):
     """Machine-readable acceptance failure without account data."""
 
 
-class RecordingRedirect(urllib.request.HTTPRedirectHandler):
-    def __init__(self) -> None:
-        super().__init__()
-        self.statuses: list[int] = []
-
+class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, file_pointer, code, message, headers, new_url):
-        self.statuses.append(int(code))
-        return super().redirect_request(
-            request,
-            file_pointer,
-            code,
-            message,
-            headers,
-            new_url,
-        )
+        return None
+
+
+def safe_failure_code(error: Exception | str, *, fallback: str = "acceptance_unexpected_failure") -> str:
+    """Only literal local codes and bounded HTTP status codes may enter reports."""
+    value = str(error)
+    if value in SAFE_FAILURE_CODES:
+        return value
+    if any(re.fullmatch(re.escape(prefix) + r"_[1-5][0-9]{2}", value) for prefix in HTTP_FAILURE_PREFIXES):
+        return value
+    return fallback if fallback in SAFE_FAILURE_CODES else "acceptance_unexpected_failure"
+
+
+def configured_supabase_origin(name: str) -> str:
+    """An exact operator-configured project, never a wildcard provider domain."""
+    origin = required_environment(name).rstrip("/")
+    if re.fullmatch(r"https://[a-z0-9]{20}\.supabase\.co", origin) is None:
+        raise AcceptanceError("acceptance_origin_invalid")
+    return origin
+
+
+def json_request_origins() -> frozenset[str]:
+    origins = {EDOC_ORIGIN, PORTAL_ORIGIN}
+    for name in ("SUPABASE_URL", "FINANCE_SOURCE_SUPABASE_URL"):
+        if os.environ.get(name):
+            origins.add(configured_supabase_origin(name))
+    return frozenset(origins)
+
+
+def require_allowed_https_url(url: str, origins: frozenset[str]) -> None:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        valid = (parsed.scheme == "https" and origin in origins
+                 and parsed.username is None and parsed.password is None
+                 and not parsed.fragment and "\\" not in url
+                 and not any(ord(character) < 32 or ord(character) == 127 for character in url))
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise AcceptanceError("acceptance_origin_invalid")
 
 
 def required_environment(name: str) -> str:
@@ -65,14 +126,15 @@ def required_environment(name: str) -> str:
     return value
 
 
-def request_json(
+def request_bytes(
     url: str,
     *,
     headers: dict[str, str] | None = None,
     method: str = "GET",
     data: bytes | None = None,
-    opener: urllib.request.OpenerDirector | None = None,
-) -> tuple[int, dict]:
+    cookie_jar: http.cookiejar.CookieJar | None = None,
+) -> tuple[int, dict, bytes]:
+    require_allowed_https_url(url, json_request_origins())
     request = urllib.request.Request(
         url,
         data=data,
@@ -83,16 +145,22 @@ def request_json(
             **(headers or {}),
         },
     )
+    handlers = [NoRedirect()]
+    if cookie_jar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(cookie_jar))
     try:
-        response = (opener or urllib.request.build_opener()).open(
-            request,
-            timeout=TIMEOUT_SECONDS,
-        )
-        status = int(response.status)
-        body = response.read()
+        with urllib.request.build_opener(*handlers).open(request, timeout=TIMEOUT_SECONDS) as response:
+            return int(response.status), dict(response.headers), response.read()
     except urllib.error.HTTPError as error:
-        status = int(error.code)
-        body = error.read()
+        return int(error.code), dict(error.headers), error.read()
+    except (urllib.error.URLError, TimeoutError):
+        raise AcceptanceError("acceptance_network_unavailable") from None
+
+
+def request_json(url: str, *, headers: dict[str, str] | None = None,
+                 method: str = "GET", data: bytes | None = None,
+                 cookie_jar: http.cookiejar.CookieJar | None = None) -> tuple[int, dict]:
+    status, _headers, body = request_bytes(url, headers=headers, method=method, data=data, cookie_jar=cookie_jar)
     try:
         payload = json.loads(body.decode("utf-8")) if body else {}
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -123,8 +191,8 @@ def linked_query_rows(workdir: str, sql: str) -> list[dict]:
     start = result.stdout.find("{")
     try:
         payload = json.loads(result.stdout[start:]) if start >= 0 else {}
-    except json.JSONDecodeError as error:
-        raise AcceptanceError("supabase_linked_inventory_invalid") from error
+    except json.JSONDecodeError:
+        raise AcceptanceError("supabase_linked_inventory_invalid") from None
     rows = payload.get("rows")
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise AcceptanceError("supabase_linked_inventory_invalid")
@@ -158,7 +226,7 @@ def portal_google_accounts() -> dict[str, str]:
             if str(row.get("email") or "").strip() and str(row.get("id") or "").strip()
         }
 
-    portal_url = required_environment("SUPABASE_URL").rstrip("/")
+    portal_url = configured_supabase_origin("SUPABASE_URL")
     service_key = required_environment("SUPABASE_SERVICE_ROLE_KEY")
     status, payload = request_json(
         f"{portal_url}/auth/v1/admin/users?page=1&per_page=1000",
@@ -212,7 +280,7 @@ def active_finance_emails() -> set[str]:
             if str(row.get("email") or "").strip()
         }
 
-    finance_url = required_environment("FINANCE_SOURCE_SUPABASE_URL").rstrip("/")
+    finance_url = configured_supabase_origin("FINANCE_SOURCE_SUPABASE_URL")
     finance_key = required_environment("FINANCE_SOURCE_SECRET_KEY")
     query = urllib.parse.urlencode(
         {
@@ -223,7 +291,7 @@ def active_finance_emails() -> set[str]:
             "limit": "1000",
         }
     )
-    request = urllib.request.Request(
+    status, _headers, body = request_bytes(
         f"{finance_url}/rest/v1/finance_users?{query}",
         headers={
             "Accept": "application/json",
@@ -231,13 +299,6 @@ def active_finance_emails() -> set[str]:
             "User-Agent": "edoc-live-acceptance/1",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            status = int(response.status)
-            body = response.read()
-    except urllib.error.HTTPError as error:
-        status = int(error.code)
-        body = error.read()
     try:
         rows = json.loads(body.decode("utf-8")) if body else []
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -278,37 +339,31 @@ def signed_handoff(email: str, auth_user_id: str, secret: str, ordinal: int) -> 
 
 def _acceptance_for_account(email: str, auth_user_id: str, secret: str, ordinal: int, issued_tokens: list[str]) -> dict[str, int]:
     jar = http.cookiejar.CookieJar()
-    redirect = RecordingRedirect()
-    handoff_opener = urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(jar),
-        redirect,
-    )
     form = urllib.parse.urlencode(
         {"token": signed_handoff(email, auth_user_id, secret, ordinal)}
     ).encode("ascii")
-    request = urllib.request.Request(
+    final_status, response_headers, _body = request_bytes(
         f"{EDOC_ORIGIN}/api/auth/handoff",
         data=form,
         method="POST",
-        headers={
+        cookie_jar=jar, headers={
             "Content-Type": "application/x-www-form-urlencoded",
             "Origin": PORTAL_ORIGIN,
             "User-Agent": "edoc-live-acceptance/1",
         },
     )
-    try:
-        response = handoff_opener.open(request, timeout=TIMEOUT_SECONDS)
-        final_status = int(response.status)
-        response.read()
-    except urllib.error.HTTPError as error:
-        final_status = int(error.code)
-        error.read()
-    if 303 not in redirect.statuses or final_status != 200:
+    if final_status != 303:
         raise AcceptanceError(f"handoff_http_{final_status}")
+    # A successful handoff returns a same-origin root location. Inspect it,
+    # never replay the signed POST or automatically follow a credentialed hop.
+    location = next((str(value) for key, value in response_headers.items() if key.lower() == "location"), "")
+    target = urllib.parse.urljoin(EDOC_ORIGIN, location)
+    require_allowed_https_url(target, frozenset({EDOC_ORIGIN}))
+    if not location or target != EDOC_ORIGIN + "/":
+        raise AcceptanceError("handoff_redirect_invalid")
     if not list(jar):
         raise AcceptanceError("handoff_cookie_missing")
 
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     exchange_status, exchange = request_json(
         f"{EDOC_ORIGIN}/api/auth/handoff-session",
         method="POST",
@@ -319,11 +374,10 @@ def _acceptance_for_account(email: str, auth_user_id: str, secret: str, ordinal:
             "X-EDOC-Handoff-Exchange": "1",
             "Sec-Fetch-Site": "same-origin",
         },
-        opener=opener,
+        cookie_jar=jar,
     )
     if exchange_status != 200:
-        code = re.sub(r"[^a-z0-9_]+", "_", str(exchange.get("error") or "unknown").lower())
-        raise AcceptanceError(f"handoff_exchange_http_{exchange_status}_{code[:80]}")
+        raise AcceptanceError(f"handoff_exchange_http_{exchange_status}")
     token = str(exchange.get("token") or "")
     user = exchange.get("user") or {}
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
@@ -408,7 +462,9 @@ def main() -> int:
                 )
             )
         except AcceptanceError as error:
-            failures[str(error)] += 1
+            failures[safe_failure_code(error)] += 1
+        except Exception:
+            failures["acceptance_unexpected_failure"] += 1
 
     result = {
         "eligibleAccounts": len(eligible),
@@ -427,7 +483,7 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except AcceptanceError as error:
+    except Exception as error:
         print(
             json.dumps(
                 {
@@ -435,8 +491,9 @@ if __name__ == "__main__":
                     "sampledAccounts": 0,
                     "passedAccounts": 0,
                     "checks": {},
-                    "failureCodes": {str(error): 1},
+                    "failureCodes": {safe_failure_code(error): 1},
                     "piiPrinted": False,
+                    "humanGoogleLoginExercised": False,
                 },
                 sort_keys=True,
                 separators=(",", ":"),

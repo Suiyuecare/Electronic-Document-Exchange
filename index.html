@@ -3692,7 +3692,7 @@
               <button class="text-button" id="backupDrillExportBtn" type="button">匯出演練報告</button>
             </div>
             <div class="backup-drill-layout">
-              <form class="compact-form backup-drill-form" id="backupDrillForm">
+              <form class="compact-form backup-drill-form" id="backupDrillForm" novalidate>
                 <label>演練範圍<select id="backupDrillScope"><option>全部資料表</option><option>公文與附件</option><option>交換事件與 audit log</option></select></label>
                 <label>還原目標<select id="backupDrillTarget"><option>測試沙盒</option><option>測試環境</option></select></label>
                 <label>RTO 目標<input id="backupDrillRtoTarget" type="number" value="30" min="1" /> 分鐘</label>
@@ -4092,9 +4092,9 @@
                   <h3>新增通知</h3>
                   <button class="text-button" id="notificationAddBtn" type="button">新增</button>
                 </div>
-                <form class="compact-form" id="notificationForm">
+                <form class="compact-form" id="notificationForm" novalidate>
                   <label>通知類型<select id="notificationType"><option>收文</option><option>待清稿</option><option>交換失敗</option><option>Token 到期</option><option>逾期查核</option></select></label>
-                  <label>通知對象<select id="notificationTarget"><option>總務</option><option>行政部主任</option><option>業務助理</option><option>執行長</option></select></label>
+                  <label>收件人 Email<input id="notificationTarget" type="email" autocomplete="off" placeholder="請填寫正式帳號 Email" /></label>
                   <label>通知通道<select id="notificationChannel"><option>系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
                   <label>通知內容<textarea id="notificationBody" rows="3">請確認公文收發電子用印系統待辦事項。</textarea></label>
                 </form>
@@ -4218,6 +4218,25 @@
           <button class="secondary-button" id="inboundModalCloseBtn" type="button">關閉</button>
         </div>
         <div id="inboundModalBody"></div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop hidden" id="workspaceTypedConfirmModal" role="dialog" aria-modal="true" aria-labelledby="workspaceTypedConfirmTitle" aria-describedby="workspaceTypedConfirmDescription" tabindex="-1">
+      <section class="contract-modal-card compose-submit-modal-card">
+        <div class="contract-modal-header">
+          <div>
+            <h3 id="workspaceTypedConfirmTitle"></h3>
+            <p id="workspaceTypedConfirmDescription"></p>
+          </div>
+        </div>
+        <div class="compact-form">
+          <label for="workspaceTypedConfirmInput" id="workspaceTypedConfirmLabel"></label>
+          <input id="workspaceTypedConfirmInput" type="text" autocomplete="off" aria-describedby="workspaceTypedConfirmLabel" />
+        </div>
+        <div class="compose-submit-modal-actions">
+          <button class="secondary-button" id="workspaceTypedConfirmCancelBtn" type="button">取消</button>
+          <button class="primary-button" id="workspaceTypedConfirmSubmitBtn" type="button" disabled>執行演練</button>
+        </div>
       </section>
     </div>
 

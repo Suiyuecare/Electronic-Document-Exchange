@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
+from types import SimpleNamespace
 
 SPEC = importlib.util.spec_from_file_location("backup_host", Path(__file__).resolve().parents[1] / "scripts/backup_host.py")
 host = importlib.util.module_from_spec(SPEC)
@@ -31,8 +32,13 @@ class BackupHostTests(unittest.TestCase):
         encrypted = self.output / (receipt_id + ".tar.aesgcm")
         encrypted.write_bytes(b"EDOCBK01 synthetic encrypted fixture")
         encrypted.chmod(0o600)
-        report = {"ok": True, "receipt_id": receipt_id, "source_project_ref": "a" * 20, "target_type": "isolated_local_postgresql", "target_isolated": True, "database": {"schemas": ["edoc", "edoc_private"], "restored": True, "integrity": True, "counts_match": True, "row_hashes_match": True, "permissions_match": True, "table_count": 2, "row_count": 3, "policy_count": 1}, "storage": {"restored": True, "hash_match": True, "counts_match": True, "private": True, "object_count": 0, "empty_source": True}, "backup": {"encrypted": True, "algorithm": "AES-256-GCM", "file": encrypted.name, "sha256": host.runner.digest_file(encrypted), "bytes": encrypted.stat().st_size, "snapshot_at": (snapshot or self.now).isoformat()}, "duration_seconds": 2}
+        report = {"schema_version": 1, "ok": True, "receipt_id": receipt_id, "created_at": (self.now + timedelta(seconds=2)).isoformat(), "source_project_ref": "a" * 20, "target_type": "isolated_local_postgresql", "target_isolated": True, "database": {"schemas": ["edoc", "edoc_private"], "restored": True, "integrity": True, "counts_match": True, "row_hashes_match": True, "permissions_match": True, "table_count": 2, "row_count": 3, "policy_count": 1}, "storage": {"restored": True, "hash_match": True, "counts_match": True, "private": True, "object_count": 0, "empty_source": True}, "backup": {"encrypted": True, "algorithm": "AES-256-GCM", "file": encrypted.name, "sha256": host.runner.digest_file(encrypted), "bytes": encrypted.stat().st_size, "snapshot_at": (snapshot or self.now).isoformat()}, "duration_seconds": 2, "rto_minutes": 1, "rpo_minutes": 1}
+        return self.publish_receipt(report)
+
+    def publish_receipt(self, report):
+        report = {key: value for key, value in report.items() if key != "receipt_sha256"}
         report["receipt_sha256"] = hashlib.sha256(host.runner.canonical(report)).hexdigest()
+        receipt_id = report["receipt_id"]
         receipt = self.output / (receipt_id + ".receipt.json")
         receipt.write_bytes(host.runner.canonical(report))
         receipt.chmod(0o600)
@@ -68,6 +74,116 @@ class BackupHostTests(unittest.TestCase):
         self.assertFalse(result["unattendedCloudDR"])
         credentials.assert_not_called(); key.assert_not_called(); execute.assert_not_called()
         self.assertEqual(before, {path: path.read_bytes() for path in self.state.rglob("*") if path.is_file()})
+
+    def test_first_run_status_and_interruption_do_not_require_prior_success(self):
+        host.record_started(self.config, {"attemptId": "HOST-fixture-first", "startedAt": self.now.isoformat(), "ok": False})
+        before = {path: path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
+        with mock.patch.object(host.runner, "linked_source_environment") as credentials, mock.patch.object(host.runner, "load_key") as key, mock.patch.object(host.runner, "execute") as execute:
+            active = host.health(self.config, now=self.now + timedelta(seconds=1))
+            interrupted = host.health(self.config, now=self.now + timedelta(seconds=650))
+        self.assertEqual(active["status"], "running")
+        self.assertIn("host_backup_success_missing", active["errorCodes"])
+        self.assertIn("host_backup_operation_in_progress", active["errorCodes"])
+        self.assertEqual(interrupted["status"], "degraded")
+        self.assertIn("host_backup_interrupted_or_unconfirmed", interrupted["errorCodes"])
+        self.assertFalse(active["lastSuccessPreserved"])
+        self.assertFalse(interrupted["lastSuccessPreserved"])
+        self.assertFalse((self.state / "last-success.json").exists())
+        self.assertEqual(before, {path: path.read_bytes() for path in self.state.rglob("*") if path.is_file()})
+        credentials.assert_not_called(); key.assert_not_called(); execute.assert_not_called()
+
+    def test_first_failure_remains_visible_without_fabricating_success(self):
+        self.assertFalse(self.run_mock(RuntimeError("synthetic-failure"))["ok"])
+        result = host.health(self.config, now=self.now + timedelta(seconds=3))
+        self.assertEqual(result["status"], "degraded")
+        self.assertIn("host_backup_latest_attempt_failed", result["errorCodes"])
+        self.assertIn("host_backup_success_missing", result["errorCodes"])
+        self.assertFalse(result["lastSuccessPreserved"])
+
+    def test_first_invalid_attempt_is_not_hidden_by_missing_success(self):
+        for data in (None, {}, {"phase": "running", "startedAt": "invalid", "ok": False}, {"phase": "running", "startedAt": self.now.isoformat(), "ok": True}, {"phase": "finished", "startedAt": self.now.isoformat(), "ok": False}):
+            with self.subTest(data=data):
+                host.runner.atomic_private_json(self.state / "last-attempt.json", data)
+                result = host.health(self.config)
+                self.assertEqual(result["status"], "degraded")
+                self.assertIn("host_backup_latest_attempt_invalid", result["errorCodes"])
+                self.assertFalse(result["lastSuccessPreserved"])
+
+    def test_non_object_success_state_is_invalid_not_missing(self):
+        for data in (None, [], "synthetic-invalid"):
+            with self.subTest(data=data):
+                host.runner.atomic_private_json(self.state / "last-success.json", data)
+                result = host.health(self.config)
+                self.assertEqual(result["status"], "invalid")
+                self.assertIn("host_backup_state_invalid", result["errorCodes"])
+                self.assertFalse(result["lastSuccessPreserved"])
+
+    def test_rpo_target_breach_is_visible_before_maximum_snapshot_expiry(self):
+        self.run_mock(self.report)
+        result = host.health(self.config, now=self.now + timedelta(minutes=16))
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["maximumSnapshotAgeMinutes"], 90)
+        self.assertEqual(result["rpoTargetMinutes"], 15)
+        self.assertFalse(result["snapshotWithinRpoTarget"])
+        self.assertTrue(result["lastSuccessPreserved"])
+        self.assertIn("host_backup_snapshot_rpo_target_exceeded", result["errorCodes"])
+        self.assertNotIn("host_backup_snapshot_expired", result["errorCodes"])
+
+    def test_actual_runner_receipt_schema_is_accepted(self):
+        encrypted = self.output / self.report["backup"]["file"]
+        (self.output / (self.report["receipt_id"] + ".receipt.json")).unlink()
+        manifest = {"source_snapshot_at": self.now.isoformat(), "created_at": self.now.isoformat(), "source_project_ref": "a" * 20, "database": {"tables": [{"rows": 1}, {"rows": 2}], "policies": ["synthetic-policy"]}}
+        report = host.runner.save_receipt(manifest, encrypted, self.report["storage"], 2, self.report["receipt_id"], SimpleNamespace(rto_target_minutes=30, rpo_target_minutes=15), self.output)
+        self.assertEqual(host.validate_success(report, self.config)["receiptId"], report["receipt_id"])
+
+    def test_missing_time_evidence_cannot_publish_success(self):
+        for field in ("schema_version", "created_at", "duration_seconds", "rto_minutes", "rpo_minutes"):
+            with self.subTest(field=field):
+                report = dict(self.report)
+                report.pop(field)
+                report = self.publish_receipt(report)
+                self.assertFalse(self.run_mock(report)["ok"])
+                self.assertFalse((self.state / "last-success.json").exists())
+
+    def test_receipt_rejects_invalid_types_nonfinite_and_underreported_times(self):
+        cases = [
+            ("schema_version", True), ("schema_version", 2),
+            ("duration_seconds", True), ("duration_seconds", -1),
+            ("duration_seconds", float("nan")), ("duration_seconds", float("inf")),
+            ("duration_seconds", 10 ** 1000),
+            ("rto_minutes", True), ("rto_minutes", "1"), ("rto_minutes", 0),
+            ("rpo_minutes", False), ("rpo_minutes", "1"), ("rpo_minutes", -1),
+            ("duration_seconds", 61),
+        ]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                report = self.publish_receipt(dict(self.report, **{field: value}))
+                with self.assertRaises(host.runner.DrillError):
+                    host.validate_success(report, self.config)
+        report = dict(self.report, created_at=(self.now + timedelta(minutes=2)).isoformat(), rpo_minutes=1)
+        with mock.patch.object(host, "utc_now", return_value=self.now + timedelta(minutes=2)):
+            with self.assertRaisesRegex(host.runner.DrillError, "timing_inconsistent"):
+                host.validate_success(self.publish_receipt(report), self.config)
+
+    def test_receipt_rejects_bad_or_future_timestamps(self):
+        for value in (None, "not-a-time", self.now.replace(tzinfo=None).isoformat(), (self.now + timedelta(minutes=2)).isoformat()):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(host.runner.DrillError, "time_invalid"):
+                    host.validate_success(self.publish_receipt(dict(self.report, created_at=value)), self.config)
+        report = dict(self.report, backup={**self.report["backup"], "snapshot_at": (self.now + timedelta(seconds=3)).isoformat()})
+        with self.assertRaisesRegex(host.runner.DrillError, "time_invalid"):
+            host.validate_success(self.publish_receipt(report), self.config)
+
+    def test_target_breach_does_not_replace_previous_success(self):
+        self.run_mock(self.report)
+        previous = (self.state / "last-success.json").read_bytes()
+        for patch in ({"rto_minutes": 31, "duration_seconds": 1801}, {"rpo_minutes": 16}):
+            with self.subTest(patch=patch):
+                report = self.publish_receipt(dict(self.report, **patch))
+                failure = self.run_mock(report)
+                self.assertFalse(failure["ok"])
+                self.assertEqual(failure["errorCode"], "backup_recovery_time_or_age_target_exceeded")
+                self.assertEqual(previous, (self.state / "last-success.json").read_bytes())
 
     def test_corrupt_archive_cannot_be_reported_healthy_or_replace_success(self):
         self.run_mock(self.report)
