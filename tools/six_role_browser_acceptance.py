@@ -95,6 +95,17 @@ def editor_case(browser, fixture, auth, role, device, output):
         saved = fixture._expect_json("GET", f"/api/official-documents/{document_id}/editor-state", 200, token=auth["token"])
         state = saved.get("state") or saved.get("editor_state") or saved.get("editor_revision", {}).get("state", {})
         result["readbackTextMatched"] = any(element.get("properties", {}).get("text") == "六角色隔離驗收文字" for element in state.get("elements", []))
+        # Exercise the real native category control and shipping autosave,
+        # then read authorized server metadata rather than assuming UI success.
+        changed_category = browser.evaluate("[...document.querySelector('#uploadedSealApprovalCategorySelect').options].find(e=>e.textContent.includes('服務委託合約')).value")
+        browser.run("select", "#uploadedSealApprovalCategorySelect", changed_category)
+        expected_category = browser.evaluate("approvalSelectionForSelect('#uploadedSealApprovalCategorySelect').documentCategory")
+        browser.until("(()=>{const key=uploadedSealApplicationRuntime.savedKey;return !!key&&JSON.parse(key).document_category==="+json.dumps(expected_category)+"&&!uploadedSealApplicationRuntime.promise&&!uploadedSealApplicationHasUnsavedChanges()})()")
+        detail = fixture._expect_json("GET", f"/api/official-documents/{document_id}", 200, token=auth["token"])
+        metadata = detail.get("metadata_json") or {}
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        result["categoryAutosaveReadbackMatched"] = metadata.get("official_seal", {}).get("document_category") == expected_category
         stale = fixture._request("PUT", f"/api/official-documents/{document_id}/editor-state", token=auth["token"], json_body={"revisionNo": 0, "baseManifestSha256": "0" * 64, "state": state})
         result["staleSaveStatus"] = stale.status
         outsider = isolated_browser_session(fixture, "department_head", entity_id="E2" if auth["user"]["company_id"] == "CO-001" else "E1")
@@ -105,7 +116,7 @@ def editor_case(browser, fixture, auth, role, device, output):
         result["pageCount"] = len(state.get("pages", []))
         result["sealCount"] = sum(e.get("kind") == "seal" for e in state.get("elements", []))
         result["autosaveStatus"] = browser.evaluate("document.querySelector('#uploadedEditorSaveStatus').textContent")
-        result["status"] = "passed" if result["readbackTextMatched"] and denial.status == 403 and stale.status == 409 else "failed"
+        result["status"] = "passed" if result["readbackTextMatched"] and result["categoryAutosaveReadbackMatched"] and denial.status == 403 and stale.status == 409 else "failed"
         browser.run("screenshot", str(output / f"{role}-{device}-editor-saved.png"), "--full")
         result["layout"] = browser.evaluate(AUDIT_JS)
     except Exception as error:

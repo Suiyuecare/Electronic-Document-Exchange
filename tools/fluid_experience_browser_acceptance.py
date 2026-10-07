@@ -287,6 +287,7 @@ def main():
     failures=[]
     for row in report["pages"]:
         if row["overflow"] or row["errors"]:failures.append(row["device"]+":"+row["route"])
+        if row.get("shortTargets"):failures.append(row["device"]+":"+row["route"]+":action-hit-area")
     for check in report["checks"]:
         checks={"routeFocus":check["routeFocus"],"headerStable":check["headerStable"],"rapidFocus":check["rapidFocus"]}
         checks.update({"scroll:"+k:v for k,v in check["scroll"].items() if k!="expected"})

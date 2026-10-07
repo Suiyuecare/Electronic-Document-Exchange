@@ -13260,3 +13260,15 @@ body[data-session-state="revalidating"] .workspace::after {
   color: #fff;
   background: #a52620;
 }
+/* Shared action hit areas also apply on desktop/tablet touchscreens. Keep the
+   existing Finance colors and the larger navigation targets unchanged. */
+:root { --action-hit-size: 44px; }
+#appShell button:not(.nav-item) {
+  min-width: var(--action-hit-size);
+  min-height: var(--action-hit-size);
+}
+#appShell .text-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
