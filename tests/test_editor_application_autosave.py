@@ -52,7 +52,7 @@ const uploadedSealEditorRuntime={documentId:'OD-TEST',locked:false,saving:false,
 const uploadedSealEditorState={revisionNo:1,manifestSha256:'manifest-one'};
 const uploadedSealApplicationRuntime={documentId:'OD-TEST',savedKey:'',timer:0,promise:null,error:'',editable:true,retryCount:0,epoch:0,contentRevision:0,conflict:false};
 const officialWorkflowItems=[{id:'OD-TEST'}];
-const editorDraftPayload=()=>({...draft});
+const editorDraftPayload=()=>({...draft,document_category:category});
 function renderUploadedSealApplicationSaveStatus(){statusRenders++;}
 function renderUploadedEditorSubmissionActions(){}
 function finishUploadedEditorTextEdit(){return true;} // Inline lifecycle has its own behavioral tests.
@@ -61,7 +61,8 @@ function handleUploadedEditorConflict(error){uploadedSealEditorRuntime.conflict=
 function renderElectronicSealWorkQueue(){}
 async function saveUploadedEditorState(){savePdfCalls++;}
 const uploadedEditorV2FeatureEnabled=()=>true;
-const approvalSelectionForSelect=()=>({documentCategory:'test',approvalRouteCode:'A'});
+let category='test';
+const approvalSelectionForSelect=()=>({documentCategory:category,approvalRouteCode:'A'});
 function rememberUploadedEditorSavedSealBindings(){}
 function setUploadedEditorSaveStatus(){}
 let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(options.body)});return {id:'OD-TEST',...JSON.parse(options.body),content_revision:uploadedSealApplicationRuntime.contentRevision+1}};
@@ -74,7 +75,7 @@ let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(option
         self.run_javascript('''
 draft.title='Edited';await syncUploadedSealApplicationDraft();
 assert.equal(calls.length,1);assert.equal(calls[0].path,'/official-documents/OD-TEST');
-assert.deepEqual(Object.keys(calls[0].body),['title','subject','description','request_reason','handler_name','dispatch_unit','applicant_department_id','applicant_department_name','expected_content_revision']);
+assert.deepEqual(Object.keys(calls[0].body),['title','subject','description','request_reason','handler_name','dispatch_unit','applicant_department_id','applicant_department_name','document_category','expected_content_revision']);
 assert.equal(calls[0].body.expected_content_revision,0);assert.equal(uploadedSealApplicationRuntime.contentRevision,1);
 assert.equal(calls[0].body.title,'Edited');assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
 assert.equal(savePdfCalls,0);
@@ -88,6 +89,26 @@ draft.title='Latest change';release();await saving;
 assert.equal(calls.length,2);assert.equal(calls[0].title,'First change');assert.equal(calls[1].title,'Latest change');
 assert.equal(calls[0].expected_content_revision,0);assert.equal(calls[1].expected_content_revision,1);
 assert.equal(draft.title,'Latest change');assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
+''')
+
+    def test_missing_category_preserves_input_without_invalid_background_request(self):
+        self.run_javascript('''
+draft.title='Linked new draft';category='';
+await assert.rejects(syncUploadedSealApplicationDraft(),/用印文件類型/);
+assert.equal(calls.length,0);assert.equal(timers.size,0);
+assert.equal(draft.title,'Linked new draft');
+assert.equal(uploadedSealApplicationHasUnsavedChanges(),true);
+category='test';await syncUploadedSealApplicationDraft();
+assert.equal(calls.length,1);assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
+''')
+
+    def test_category_change_is_saved_and_is_part_of_unsaved_change_detection(self):
+        self.run_javascript('''
+category='new-category';
+assert.equal(uploadedSealApplicationHasUnsavedChanges(),true);
+await syncUploadedSealApplicationDraft();
+assert.equal(calls.length,1);assert.equal(calls[0].body.document_category,'new-category');
+assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
 ''')
 
     def test_metadata_conflict_keeps_local_input_and_never_replays_stale_patch(self):

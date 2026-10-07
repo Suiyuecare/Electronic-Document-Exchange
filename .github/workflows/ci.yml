@@ -32,10 +32,10 @@ jobs:
           # the isolated PostgREST/TUS gate is reproducible.
           version: 2.116.0
 
-      - name: Install PostgreSQL client
+      - name: Install PostgreSQL client and isolated restore runtime
         run: |
           sudo apt-get update
-          sudo apt-get install --yes postgresql-client
+          sudo apt-get install --yes postgresql-client postgresql
 
       - name: Set up Python for isolated Storage acceptance
         uses: actions/setup-python@v6
@@ -157,6 +157,19 @@ jobs:
               tests.test_official_dispatch_generation_postgres \
               tests.test_editor_storage_v2_paths_postgres
 
+          # Opt-in acceptance is executed, not counted from skipped tests.
+          PGPASSWORD=postgres createdb --host 127.0.0.1 --port 54322 \
+            --username postgres edoc_numbering_test_ci
+          numbering_status=0
+          EDOC_NUMBERING_TEST_PG_DSN='host=127.0.0.1 port=54322 user=postgres dbname=edoc_numbering_test_ci' \
+          PGPASSWORD=postgres \
+            python -m unittest -v tests.test_official_numbering_postgres || numbering_status=$?
+          PGPASSWORD=postgres dropdb --host 127.0.0.1 --port 54322 \
+            --username postgres edoc_numbering_test_ci
+          test "$numbering_status" = "0"
+          EDOC_TEST_PG_BIN="$(pg_config --bindir)" \
+            python -m unittest -v tests.test_backup_restore_runner.ActualPostgresRestoreTest
+
           eval "$(supabase status -o env)"
           test -n "${API_URL:-}"
           test -n "${ANON_KEY:-}"
@@ -253,6 +266,7 @@ jobs:
           node --check app.js
           node --check editor-a4.js
           node --check editor-seam.js
+          node --test tests/*.test.js
 
       - name: Replay five-account acceptance with alternate seed
         env:

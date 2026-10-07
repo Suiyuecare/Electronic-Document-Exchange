@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Run a PII-free five-account Portal -> eDoc production SSO acceptance.
+"""Privileged signed-identity probe, NOT human Google SSO acceptance.
 
 The tool receives Portal and Finance credentials only through the process
 environment (normally ``vercel env run -e production``).  It never prints
 tokens, secrets, account ids, names or email addresses.  Five accounts are
 sampled from the intersection of confirmed Portal Google identities and active
 Finance master rows, then exercised through the real eDoc handoff/session and
-directory endpoints.
+directory endpoints. This mints handoffs as sampled users and therefore requires
+separate explicit authorization. It must not be used for the named human SSO
+acceptance plan; normal invocation fails before reading secrets or accounts.
 """
 
 from __future__ import annotations
@@ -381,6 +383,8 @@ def acceptance_for_account(email: str, auth_user_id: str, secret: str, ordinal: 
 
 
 def main() -> int:
+    if os.getenv("EDOC_ALLOW_SIGNED_IDENTITY_PROBE") != "1":
+        raise AcceptanceError("signed_identity_probe_requires_explicit_authorization_not_human_sso")
     secret = required_environment("PORTAL_HANDOFF_SIGNING_SECRET")
     if len(secret.encode("utf-8")) < 32:
         raise AcceptanceError("portal_handoff_secret_too_short")

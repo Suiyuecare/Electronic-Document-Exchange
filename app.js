@@ -31828,7 +31828,8 @@ function uploadedSealApplicationPatch(draft = editorDraftPayload()) {
     description: draft.description || "", request_reason: draft.request_reason || "",
     handler_name: draft.handler_name || "", dispatch_unit: draft.dispatch_unit || "",
     applicant_department_id: draft.applicant_department_id || "",
-    applicant_department_name: draft.applicant_department_name || draft.dispatch_unit || ""
+    applicant_department_name: draft.applicant_department_name || draft.dispatch_unit || "",
+    document_category: draft.document_category || ""
   };
 }
 
@@ -31982,6 +31983,11 @@ async function syncUploadedSealApplicationDraft() {
     throw new Error(uploadedSealApplicationRuntime.error);
   }
   const patch = uploadedSealApplicationPatch();
+  if (!approvalSelectionForSelect("#uploadedSealApprovalCategorySelect").documentCategory) {
+    uploadedSealApplicationRuntime.error = "請選擇用印文件類型後再保存";
+    renderUploadedSealApplicationSaveStatus();
+    throw new Error(uploadedSealApplicationRuntime.error);
+  }
   const savedKey = JSON.stringify(patch);
   const contentRevision = Number(uploadedSealApplicationRuntime.contentRevision ?? 0);
   if (!Number.isInteger(contentRevision) || contentRevision < 0) throw new Error("申請資訊版本無效，請保留內容並重新開啟案件。");
@@ -34112,6 +34118,7 @@ document.querySelector("#uploadedSealApprovalCategorySelect")?.addEventListener(
     selection.approvalRouteCode ? `已自動判定 ${selection.approvalRouteName}。` : "請選擇文件細項。"
   );
   void refreshWorkflowReadinessForContext("uploadedSeal", { silent: true, force: true });
+  scheduleUploadedSealApplicationSave();
 });
 document.querySelectorAll("button[data-editor-mode]").forEach((button) => button.addEventListener("click", () => setUploadedEditorMode(button.dataset.editorMode)));
 document.querySelectorAll("[data-editor-tool]").forEach((button) => button.addEventListener("click", () => chooseUploadedEditorTool(button.dataset.editorTool)));
