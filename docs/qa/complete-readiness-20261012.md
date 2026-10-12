@@ -46,10 +46,12 @@ python -m tools.offboarding_handover_shared_forward --check
 
 完整角色隔離 runner：13 組、131 項、零失敗／零跳過；六種身分均實際建立、編輯、審閱、簽核、產出用印文件、下載及結案。原始檔、prepared 及 stamped hash 不同，鎖定／越權直接呼叫均拒絕。
 
-第一輪 PDF 瀏覽器：桌機、平板、手機尺寸各 30 次，共 90 次通過。暖 localhost 的 workspace p95 為 14／15／15 ms，本機 A4 編輯 p95 為 53／51／57 ms，雲端保存 p95 為 572／646／563 ms。**不是正式站、實體裝置或真實 SSO 的速度證明**；後續程式變更要重新綁定與驗收，不直接沿用此數字。
+凍結候選 `225d881919b9d8c81ca30c172c37d8c158c502d0` 的 PDF 瀏覽器：桌機、平板、手機尺寸各 30 次，共 90 次通過。暖 localhost 的 workspace p95 為 15／15／14 ms，兩頁約 1.9 KB 合成向量 A4 本機編輯 p95 為 56／46／82 ms，雲端保存 p95 為 558／794／607 ms。**不是正式站、實體裝置、冷啟動、掃描大檔或真實 SSO 的速度證明**；後續候選變更要重新綁定與驗收，不直接沿用此數字。
 
-目前完整 PostgreSQL 全套回歸為 1,895 項中的 1,894 項通過、1 項未執行；該項是本機未啟動完整 Supabase signed TUS stack，交由必要 CI 執行，不計入本機通過數。後續新增備援及 UI 守門的最終結果另行更新；首次全套的失敗與跳過已保留，不刪除以製造全通過。
+上述凍結候選的完整 PostgreSQL 全套回歸為 1,909 項中的 1,908 項通過、1 項未執行；該項是本機未啟動完整 Supabase signed TUS stack，不計入本機通過數。相同候選的 GitHub [run 38189391166](https://github.com/Suiyuecare/Electronic-Document-Exchange/actions/runs/38189391166) 兩項必要 CI 成功：真實 PostgREST／Storage／signed TUS／finalize 的七種檔案與重試情境通過，五個不同合成帳號的 A／B／C／D 流程上傳驗收零失敗、零跳過。這仍不是正式 Storage 或本人 OAuth 的證據。最終候選與新增測量工具回歸結果記在 [PR 40](https://github.com/Suiyuecare/Electronic-Document-Exchange/pull/40)，不刪除首次失敗與跳過紀錄。
 
-新確認／欄位驗證保留 Finance 視覺、原業務處理與伺服器守門。實際瀏覽器欄位驗證為 3 裝置尺寸 × 4 表單，共 12 項；錯誤／IME 不觸發業務請求，修正後僅一次進原處理。全 repo Premium 靜態工具仍有既有 vanilla-JS 綁定的 actionless-button 待解析，未將其標為零問題或宣稱完整靜態驗收通過。
+另追加 12 組合成 PDF：1／25／300 頁向量、約 9.98／39.92 MB 掃描重量、非 A4，各在桌機／手機尺寸操作。首輪測量工具得到 7 通過／5 逾時，完整保留原報告；實際加字及雲端讀回診斷確認六組大檔可用。原因是草稿與 LOCAL asset 換綁期間，已完成的同頁畫面仍可能回傳 `false`，舊測量工具只接受 `true` 因而漏掉。新探針等待真實 render task 完成、同頁／同 SHA／同 session／epoch／proxy／geometry、非空白 canvas 及下一畫格，不修改產品 render 回傳值；state 必須動態讀取，不能綁定載入前的空物件。修正後 12／12 完成 pointer 加字、同步釋放、伺服器讀回、頁數及無 LOCAL asset 保存檢查。非 A4 是轉換同意及轉換結果確認，不表示已送簽。這些單次大檔觀察不混入一般 A4 的 p95，也不提供任何真實網路兩秒保證。
+
+新確認／欄位驗證保留 Finance 視覺、原業務處理與伺服器守門。實際瀏覽器欄位驗證為 3 裝置尺寸 × 4 表單，共 12 項；錯誤／IME 不觸發業務請求，修正後僅一次進原處理。全 repo Premium 靜態工具仍有 414 項既有 vanilla-JS 綁定的 actionless-button 辨識結果，未清零或宣稱完整靜態驗收通過。另六角色 × 六路由的只讀動態觀察共 33 個可見角色／路由；補強 fieldset disabled、once／abort lifecycle 及 native popover 條件後，1,009 次啟用按鈕觀察有直接或表單 owner。該檢查不點擊批次變更、不讀取 handler 內容，也不把 delegated／once lifecycle 候選當成已證明業務功能。按鈕稽核工具會在啟動測試前拒絕 repo／symlink／hardlink／既有報告，使用私密目錄及持有目錄 fd 的原子寫入；十一項守門回歸及前後 source hash 比對通過。
 
 已唯讀核對現有正式 Vercel project 的 production env metadata：沒有 `EDOC_OFFBOARDING_HANDOVER_ENABLED` 設定，故未驗收交接不會由舊環境旗標意外開啟；此查核不會發布新程式或修改正式案件。
