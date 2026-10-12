@@ -109,7 +109,7 @@ vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 
     def test_authorized_stamp_retry_remains_actionable_without_pending_approval(self):
         self.run_js(["officialDocumentNeedsUserAttention", "approvalProgressCategory", "approvalRecordIsOverdue", "approvalRecordDueTimestamp"], r"""
-const c={console,Date,authState:{user:{id:'synthetic-reviewer'}},officialDocumentIsApplicant:()=>false,officialDocumentPendingStepMatchesRole:()=>false};
+const c={console,Date,authState:{user:{id:'synthetic-reviewer'}},officialHandoverFeatureEnabled:()=>false,officialDocumentIsApplicant:()=>false,officialDocumentPendingStepMatchesRole:()=>false};
 vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 for(const status of ['stamping_failed','general_affairs_approved']) {
  const item={current_status:status,can_act:false,can_manage_dispatch:false,can_retry_stamp:true,applicant_id:'synthetic-other'};

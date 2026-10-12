@@ -52,6 +52,9 @@ from runtime_observability import capture_runtime_error, error_tracking_status
 from edoc_numbering import SQLITE_NUMBERING_SQL, install_sqlite_numbering
 from compose_resilience import SQLITE_COMPOSE_DRAFT_SQL, draft_payload as compose_draft_payload, public_draft, save_sqlite_draft, attachment_id, require_content_revision
 from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position
+from workflow_readiness import LIST_MAX_ROWS, TAIPEI, inbound_list_options, inbound_page, timeliness_report
+import official_handover_service
+import official_handover_followup
 
 from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
 from finance_bridge import (
@@ -139,6 +142,7 @@ EDOC_AV_HTTP_INLINE_MAX_BYTES = min(8, max(1, int(os.getenv("EDOC_AV_HTTP_INLINE
 EDOC_AV_HMAC_MAX_AGE_SECONDS = 60
 EDOC_AV_SANDBOX_SNAPSHOT_ID = os.getenv("EDOC_AV_SANDBOX_SNAPSHOT_ID", "")
 EDOC_AV_SANDBOX_PROJECT_ID = os.getenv("EDOC_AV_SANDBOX_PROJECT_ID", "")
+EDOC_OFFBOARDING_HANDOVER_ENABLED = os.getenv("EDOC_OFFBOARDING_HANDOVER_ENABLED", "0") == "1"
 EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_apply_finance_organization_projection_v2",
     "edoc_apply_official_document_correction",
@@ -159,6 +163,8 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_finalize_editor_asset_v2",
     "edoc_finalize_official_document_resubmit",
     "edoc_list_official_document_candidates",
+    "edoc_list_inbound_candidates",
+    "edoc_timeliness_candidates",
     "edoc_mutate_inbound_document_v1",
     "edoc_mutate_official_workflow",
     "edoc_decline_official_document",
@@ -186,6 +192,9 @@ EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES = (
     "official_document_editor_revisions",
     "official_document_editor_storage_jobs",
 )
+if EDOC_OFFBOARDING_HANDOVER_ENABLED:
+    EDOC_READINESS_REQUIRED_RPC_NAMES += ("edoc_manage_official_handover",)
+    EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES += ("official_document_handovers", "official_document_followup_owners")
 EDOC_MAX_FILE_SIZE_MB = int(os.getenv("EDOC_MAX_FILE_SIZE_MB", "100"))
 EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB = min(3, max(1, int(os.getenv("EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB", "3"))))
 EDOC_ALLOWED_MIME_TYPES = os.getenv("EDOC_ALLOWED_MIME_TYPES", "application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream")
@@ -264,6 +273,17 @@ EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
 # immutable, non-sensitive business codes may cross the transport boundary as
 # application errors.  Everything else remains an opaque machine-code marker.
 POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
+    "handover_operation_conflict",
+    "handover_pending_request_exists",
+    "handover_request_already_resolved",
+    "handover_version_conflict",
+    "handover_assignment_conflict",
+    "handover_workflow_irreversible",
+    "handover_followup_lineage_invalid",
+    "handover_original_not_correctable",
+    "handover_current_step_conflict",
+    "handover_pending_assignment_missing",
+    "handover_corrupt_active_generation",
     "official_workflow_config_conflict",
     "official_workflow_config_version_conflict",
     "official_workflow_action_conflict",
@@ -2263,6 +2283,43 @@ CREATE TABLE IF NOT EXISTS official_document_approval_logs (
   FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE CASCADE,
   FOREIGN KEY(step_id) REFERENCES official_document_approval_steps(id) ON DELETE SET NULL,
   FOREIGN KEY(file_id) REFERENCES official_document_files(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_document_handovers (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES official_documents(id) ON DELETE RESTRICT,
+  company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+  finance_tenant_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('pending_approver','followup_owner')),
+  former_user_id TEXT NOT NULL,
+  successor_user_id TEXT NOT NULL,
+  proposer_user_id TEXT NOT NULL,
+  confirmer_user_id TEXT,
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+  request_sha256 TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  expected_snapshot TEXT NOT NULL,
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(former_user_id <> successor_user_id),
+  CHECK(proposer_user_id <> successor_user_id),
+  CHECK(confirmer_user_id IS NULL OR confirmer_user_id <> proposer_user_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS official_handover_pending_assignment
+  ON official_document_handovers(document_id,kind,former_user_id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS official_handover_queue
+  ON official_document_handovers(company_id,finance_tenant_id,status,created_at,id);
+
+CREATE TABLE IF NOT EXISTS official_document_followup_owners (
+  document_id TEXT PRIMARY KEY REFERENCES official_documents(id) ON DELETE RESTRICT,
+  original_applicant_id TEXT NOT NULL,
+  process_owner_user_id TEXT NOT NULL,
+  handover_id TEXT NOT NULL UNIQUE REFERENCES official_document_handovers(id) ON DELETE RESTRICT,
+  company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+  finance_tenant_id TEXT NOT NULL,
+  correction_policy TEXT NOT NULL CHECK(correction_policy='linked_new_application'),
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS official_document_stamp_requests (
@@ -14546,6 +14603,8 @@ def patch_row(conn: sqlite3.Connection, table: str, row_id: str, payload: Dict[s
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
     data = row_to_dict(row) if isinstance(row, sqlite3.Row) else dict(row)
     data.pop("password_hash", None)
+    # Server-owned gate; stale browser/user metadata cannot enable it.
+    data["feature_offboarding_handover"] = EDOC_OFFBOARDING_HANDOVER_ENABLED is True
     return data
 
 
@@ -15802,7 +15861,7 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
     return {
         "sessionId": row["session_id"],
         "expiresAt": row["expires_at"],
-        "user": user,
+        "user": public_user(user),
         "permissions": role_permission_codes(conn, user["role"]),
     }
 
@@ -15935,6 +15994,77 @@ def official_operational_report(
         if len(data) > OFFICIAL_OPERATIONAL_REPORT_MAX_ROWS:
             raise ValueError("operational_report_window_too_large")
     return official_operational_report_from_rows(data, period=period, period_start=period_start, unit=unit, agency=agency)
+
+
+def official_timeliness_report(session: Dict[str, Any] | None, *, conn: sqlite3.Connection | None = None,
+                              generated_at: datetime | None = None) -> Dict[str, Any]:
+    if not session_has_any_permission(session, ["reports.operational_view"]):
+        raise PermissionError("operational_report_forbidden")
+    user = official_session_user(session) if conn is not None else supabase_official_session_user(session)
+    scope = local_inbound_finance_user_scope(conn, user) if conn is not None else inbound_finance_user_scope(user)
+    rows, errors = [], []
+    complete = True
+    if conn is not None:
+        rows = [row_to_dict(row) for row in conn.execute("""
+          SELECT 'inbound' AS source,d.id,d.created_at AS entered_at,d.due_at FROM inbound_documents d
+          WHERE d.company_id=:company AND d.finance_tenant_id=:tenant AND coalesce(d.closed_at,'')=''
+           AND d.status NOT IN ('closed','archived','cancelled')
+          UNION ALL
+          SELECT 'reply',r.id,r.created_at,x.due_at FROM internal_dispatch_recipients r
+          JOIN internal_dispatches x ON x.id=r.dispatch_id
+          LEFT JOIN inbound_documents i ON i.id=x.inbound_document_id
+          LEFT JOIN official_documents o ON o.id=x.official_document_id
+          LEFT JOIN companies c ON c.id=o.company_id LEFT JOIN users sender ON sender.id=x.sender_user_id
+          WHERE r.action_required=1 AND coalesce(r.replied_at,'')='' AND coalesce(x.closed_at,'')=''
+           AND x.status NOT IN ('closed','archived','cancelled') AND
+           CASE WHEN coalesce(x.inbound_document_id,'')<>'' THEN i.company_id=:company AND i.finance_tenant_id=:tenant
+            WHEN coalesce(x.official_document_id,'')<>'' THEN o.company_id=:company AND c.finance_tenant_id=:tenant
+            ELSE sender.company_id=:company AND sender.finance_tenant_id=:tenant AND sender.status='啟用' END
+          UNION ALL
+          SELECT 'approval',s.id,CASE WHEN s.step_order=1 THEN s.created_at
+           WHEN (SELECT p.approved_at FROM official_document_approval_steps p WHERE p.document_id=o.id
+             AND p.workflow_generation=s.workflow_generation AND p.step_order<s.step_order ORDER BY p.step_order DESC LIMIT 1) IS NULL THEN ''
+           ELSE max(s.created_at,(SELECT p.approved_at FROM official_document_approval_steps p WHERE p.document_id=o.id
+             AND p.workflow_generation=s.workflow_generation AND p.step_order<s.step_order ORDER BY p.step_order DESC LIMIT 1)) END,''
+          FROM official_documents o JOIN companies c ON c.id=o.company_id
+          JOIN official_document_approval_steps s ON s.document_id=o.id AND s.step_key=o.current_step AND s.status='pending'
+          WHERE o.company_id=:company AND c.finance_tenant_id=:tenant AND s.step_key<>'applicant_confirm'
+           AND substr(o.current_status,1,8)='pending_'
+           AND s.workflow_generation=(SELECT max(g.workflow_generation) FROM official_document_approval_steps g WHERE g.document_id=o.id)
+          ORDER BY source,id LIMIT :maximum
+        """, {"company": scope["company_id"], "tenant": scope["finance_tenant_id"], "maximum": LIST_MAX_ROWS + 1})]
+        if len(rows) > LIST_MAX_ROWS:
+            rows = rows[:LIST_MAX_ROWS]
+            complete, errors = False, ["timeliness_scan_limit_reached"]
+    else:
+        after = None
+        seen = set()
+        try:
+            while True:
+                request = {**scope, "actor_id": user["id"], "limit": 501}
+                if after:
+                    request.update({"after_source": after[0], "after_id": after[1]})
+                response = supabase_request("POST", "rpc/edoc_timeliness_candidates", {"p_request": request})
+                if not isinstance(response, dict) or not isinstance(response.get("items"), list) or len(response["items"]) > 501:
+                    raise RuntimeError("timeliness_response_invalid")
+                batch = response["items"]
+                for row in batch[:500]:
+                    key = (row.get("source"), row.get("id")) if isinstance(row, dict) else (None, None)
+                    if key[0] not in {"inbound", "reply", "approval"} or not isinstance(key[1], str) or not key[1] or key in seen or (after and key <= after):
+                        raise RuntimeError("timeliness_response_invalid")
+                    if len(rows) >= LIST_MAX_ROWS:
+                        raise RuntimeError("timeliness_scan_limit_reached")
+                    rows.append(row)
+                    seen.add(key)
+                    after = key
+                if len(batch) <= 500:
+                    break
+        except Exception as exc:
+            complete = False
+            errors = [str(exc) if str(exc) == "timeliness_scan_limit_reached" else "timeliness_scan_incomplete"]
+    return timeliness_report(rows, generated_at=generated_at or datetime.now(TAIPEI),
+                             scope={"companyId": scope["company_id"], "financeTenantId": scope["finance_tenant_id"]},
+                             data_complete=complete, errors=errors, system_timezone=datetime.now().astimezone().tzinfo)
 
 
 def dashboard(conn: sqlite3.Connection, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -21142,7 +21272,7 @@ def official_dispatch_route_notification_payload(
             "body": f"{completed_version}，請完成寄發並回填寄送日期與證明。",
         }
     if owner_type == "applicant":
-        target = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+        target = official_followup_notification_actor(document, conn=conn)
         return {
             "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
             "type": "發文寄發待辦",
@@ -21153,7 +21283,7 @@ def official_dispatch_route_notification_payload(
             "priority": "高",
             "body": f"{completed_version}，請完成寄送並回填寄送日期與證明。",
         }
-    target = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+    target = official_followup_notification_actor(document, conn=conn)
     return {
         "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
         "type": "發文申請人確認",
@@ -21195,6 +21325,7 @@ def can_manage_official_dispatch(
     record: Dict[str, Any] | None,
     session: Dict[str, Any] | None = None,
     workflow_steps: Iterable[Dict[str, Any]] | None = None,
+    *, followup_binding: Dict[str, Any] | None = None,
 ) -> bool:
     if not user:
         return False
@@ -21211,8 +21342,28 @@ def can_manage_official_dispatch(
         return user_id == owner_id == workflow_owner_id
     if owner_type == "applicant":
         applicant_id = str(document.get("applicant_id") or "").strip()
-        return bool(applicant_id and user_id == applicant_id and owner_id == applicant_id)
+        return bool(applicant_id and owner_id == applicant_id and (user_id == applicant_id or (
+            followup_binding and followup_binding.get("document_id") == document.get("id")
+            and followup_binding.get("original_applicant_id") == applicant_id
+            and followup_binding.get("process_owner_user_id") == user_id)))
     return False
+
+
+def official_dispatch_actor_allowed(user, document, record, session, steps, *, conn=None):
+    binding = official_document_followup_binding(document, user, conn=conn)
+    return can_manage_official_dispatch(user, document, record, session, steps, followup_binding=binding)
+
+
+def official_followup_notification_actor(document, *, conn=None):
+    """Resolve responsibility without changing the original applicant identity."""
+    actor = (active_user_by_id(conn, document.get("applicant_id") or "") if conn is not None
+             else supabase_get("users", document.get("applicant_id") or ""))
+    if actor and actor.get("status") == "啟用":
+        return actor
+    binding = official_handover_followup.load(sys.modules[__name__], document, conn=conn)
+    if binding:
+        return binding["owner"]
+    raise ValueError("official_followup_handover_required")
 
 
 def official_dispatch_record_editable(record: Dict[str, Any] | None) -> bool:
@@ -21333,7 +21484,7 @@ def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, 
     document = official_document_row(conn, document_id)
     steps = official_document_steps(conn, document_id)
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_followup_binding(document, user, conn=conn) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
         raise PermissionError("official_dispatch_access_denied")
     record = official_dispatch_record(conn, document_id)
     if not record:
@@ -21345,10 +21496,10 @@ def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, 
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_update_forbidden")
         record = upsert_official_dispatch_record(conn, document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
         raise PermissionError("official_dispatch_update_forbidden")
     require_official_dispatch_record_editable(record)
     if "proof_file_id" in payload:
@@ -21389,7 +21540,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
                 "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
                 "dispatch_owner_user_id": owner.get("id") or "",
             }
-            if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+            if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
                 raise PermissionError("official_dispatch_complete_forbidden")
             record = upsert_official_dispatch_record(conn, document, method, user)
             enqueue_official_dispatch_route(
@@ -21399,7 +21550,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
                 user,
                 str(document.get("stamped_file_id") or ""),
             )
-        if not can_manage_official_dispatch(user, document, record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_complete_forbidden")
         if record.get("dispatch_owner_type") == "general_affairs" and document.get("current_status") != "pending_general_affairs_dispatch":
             raise ValueError("official_document_not_pending_general_affairs_dispatch")
@@ -21456,7 +21607,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
             ip_address=payload.get("ip_address") or "",
             user_agent=payload.get("user_agent") or "",
         )
-        applicant = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+        applicant = official_followup_notification_actor(document, conn=conn)
         create_notification(conn, {
             "id": f"NTF-DISPATCH-COMPLETE-{record['id']}",
             "type": "發文申請人確認",
@@ -21487,10 +21638,10 @@ def upload_official_dispatch_proof_file(conn: sqlite3.Connection, document_id: s
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_proof_upload_forbidden")
         record = upsert_official_dispatch_record(conn, document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
         raise PermissionError("official_dispatch_proof_upload_forbidden")
     require_official_dispatch_record_editable(record)
     content = payload.get("content_base64") or ""
@@ -22011,6 +22162,15 @@ def canDownloadOfficialDocument(
     return user_id in official_document_participant_ids(document, steps, actor_snapshots)
 
 
+def official_document_followup_binding(document, user, *, conn=None):
+    """Server-only confirmed responsibility; does not rewrite participation."""
+    if (not user or user.get("id") == document.get("applicant_id")
+            or user.get("account_source") != "finance"
+            or user.get("company_id") != document.get("company_id")):
+        return None
+    return official_handover_followup.load(sys.modules[__name__], document, conn=conn, actor_id=user.get("id"))
+
+
 def official_document_active_read_delegation(
     document: Dict[str, Any],
     steps: Iterable[Dict[str, Any]],
@@ -22171,12 +22331,13 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
     user = session.get("user") if session else None
     is_participant = bool(user and canDownloadOfficialDocument(user, document, all_steps, actor_snapshots))
+    followup_binding = official_document_followup_binding(document, user, conn=conn)
     current_step = next((
         step for step in steps
         if step.get("step_key") == document.get("current_step") and step.get("status") == "pending"
     ), None)
     active_delegation = official_document_active_read_delegation(document, all_steps, user, conn=conn)
-    if user and not is_participant and not active_delegation:
+    if user and not is_participant and not active_delegation and not followup_binding:
         if not official_document_user_same_company(user, document) or not str(user.get("company_id") or "").strip():
             raise PermissionError("official_document_company_forbidden")
         if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
@@ -22218,10 +22379,12 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         **official_workflow_action_capabilities(document, steps, user, active_delegation, stamp_request),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
-        "can_download": bool(is_participant or active_delegation),
-        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
+        "can_download": bool(is_participant or active_delegation or followup_binding),
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
+        "can_create_linked_application": bool(followup_binding and document.get("current_status") in {"draft", "rejected"}),
+        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps, followup_binding=followup_binding)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
-        "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
+        "can_confirm": bool(user and (user.get("id") == document.get("applicant_id") or followup_binding) and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
         "can_act": bool(user and current_step and current_step.get("status") == "pending" and (current_step.get("approver_user_id") == user.get("id") or active_delegation)),
         "acting_for_user_id": current_step.get("approver_user_id") if active_delegation and current_step else "",
         "delegation_id": active_delegation.get("id") if active_delegation else "",
@@ -24380,7 +24543,7 @@ def reject_official_document(conn: sqlite3.Connection, document_id: str, payload
         decision_evidence=rejection_evidence,
     )
     editor_revision = clone_official_editor_revision_after_reject(conn, document_id, user)
-    applicant = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+    applicant = official_followup_notification_actor(document, conn=conn)
     create_and_deliver_notification(conn, {
         "type": "發文退回",
         "title": f"{document['title']} 已駁回",
@@ -24571,7 +24734,8 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
     if action not in {"withdraw", "decline"}:
         next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
-        if not next_step or not active_user_by_id(conn, str(next_step.get("approver_user_id") or "")):
+        if not next_step or not (active_user_by_id(conn, str(next_step.get("approver_user_id") or ""))
+                or (next_step.get("step_key") == "applicant_confirm" and official_handover_followup.load(sys.modules[__name__], document, conn=conn))):
             raise ValueError("official_workflow_next_approver_inactive")
     savepoint = "workflow_mutation_" + secrets.token_hex(4)
     conn.execute(f"SAVEPOINT {savepoint}")
@@ -24596,7 +24760,9 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
                 insert_row(conn, "official_document_editor_revisions", {**clone, "editor_state_json": json.dumps(clone["editor_state_json"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
         insert_row(conn, "official_document_approval_logs", {**plan["approval_log"], "decision_evidence_json": json.dumps(plan["approval_log"]["decision_evidence_json"], ensure_ascii=False)})
         recipient_id = document["applicant_id"] if action in {"withdraw", "decline"} else next(row["approver_user_id"] for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"])
-        recipient = active_user_by_id(conn, recipient_id) or {}
+        recipient = (official_followup_notification_actor(document, conn=conn) if recipient_id == document["applicant_id"]
+                     else active_user_by_id(conn, recipient_id) or {})
+        recipient_id = recipient.get("id") or recipient_id
         create_notification(conn, {"id": "NTF-WORKFLOW-" + sha256_bytes(operation_id.encode())[:32], "type": "簽核流程異動", "title": "案件不通過，已終止" if action == "decline" else "簽核流程已更新", "target_user_id": recipient_id, "target_company_id": recipient.get("company_id") or "", "channel": "Email + 系統通知", "source": document_id, "body": plan["approval_log"]["comment"] if action == "decline" else "請至簽核紀錄查看待處理案件。", "created_at": plan["timestamp"]})
         log_audit(conn, actor["id"], action, "official_documents", document_id, f"generation={plan['workflow_generation']};operation_id={operation_id}", actor_user_id=actor["id"], request_id=operation_id, metadata={"request_sha256": request_hash, "workflow_generation": plan["workflow_generation"]})
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -24674,11 +24840,12 @@ def confirm_official_document(conn: sqlite3.Connection, document_id: str, payloa
     conn.execute(f"SAVEPOINT {savepoint}")
     try:
         document = official_document_row(conn, document_id)
-        if document["applicant_id"] != user["id"]:
+        followup_binding = official_document_followup_binding(document, user, conn=conn)
+        if document["applicant_id"] != user["id"] and not followup_binding:
             raise PermissionError("only_applicant_can_confirm")
         steps = current_official_document_steps(conn, document_id)
         receipts = [item for item in steps if item.get("step_key") == "applicant_confirm"]
-        if len(receipts) != 1 or receipts[0].get("approver_user_id") != user["id"]:
+        if len(receipts) != 1 or receipts[0].get("approver_user_id") != document["applicant_id"]:
             raise ValueError("official_document_receipt_step_conflict")
         step = receipts[0]
         existing = conn.execute(
@@ -24703,9 +24870,10 @@ def confirm_official_document(conn: sqlite3.Connection, document_id: str, payloa
             evidence = {**(parse_json_any(step.get("decision_evidence_json"), {}) or {}),
                         "schema_version": 1, "decision_type": "confirm", "expected_step_id": step["id"],
                         "workflow_generation": int(step.get("workflow_generation") or 1),
-                        "decision_actor_user_id": user["id"], "principal_actor_id": user["id"], "confirmed_at": timestamp}
+                        "decision_actor_user_id": user["id"], "principal_actor_id": document["applicant_id"], "confirmed_at": timestamp,
+                        **({"followup_handover_id": followup_binding["handover_id"]} if followup_binding else {})}
             log = insert_official_log(conn, document_id, "confirm", user, payload.get("comment") or "申請人確認已用印版本",
-                                     step_id=step["id"], principal_actor_id=user["id"], decision_evidence=evidence,
+                                     step_id=step["id"], principal_actor_id=document["applicant_id"], decision_evidence=evidence,
                                      ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
             evidence["confirmation_log_id"] = log["id"]
             changed = conn.execute(
@@ -25431,7 +25599,7 @@ def official_document_download_file(conn: sqlite3.Connection, document_id: str, 
     document = official_document_row(conn, document_id)
     steps = official_document_steps(conn, document_id)
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, conn=conn):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, conn=conn) and not official_document_followup_binding(document, user, conn=conn):
         raise PermissionError("official_document_download_forbidden")
     # A clean stamped derivative must not become a bypass for an unscanned or
     # later-quarantined original/attachment that remains part of the package.
@@ -26634,7 +26802,7 @@ def _editor_assert_document_access(
     else:
         steps = official_document_steps(conn, document["id"])
         actor_snapshots = official_document_actor_snapshots(conn, document["id"])
-        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots)
+        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots) or official_document_followup_binding(document, user, conn=conn)
         active_delegation = None if is_participant else official_document_active_read_delegation(document, steps, user, conn=conn)
         if not is_participant and not active_delegation:
             if (
@@ -28239,18 +28407,22 @@ def inbound_document_download_attachment(
 def list_inbound_documents(conn: sqlite3.Connection, query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = official_session_user(session)
     scope = local_inbound_finance_user_scope(conn, user)
+    company_wide = session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"])
+    options = inbound_list_options(query, {**scope, "actor_id": user["id"], "company_wide": company_wide})
     where: List[str] = []
     params: List[Any] = []
-    query = query or {}
-    if query.get("status"):
+    if options["status"]:
         where.append("status = ?")
-        params.append(query["status"][0])
-    if query.get("assignee_user_id"):
+        params.append(options["status"])
+    if options["assignee_user_id"]:
         where.append("assignee_user_id = ?")
-        params.append(query["assignee_user_id"][0])
+        params.append(options["assignee_user_id"])
+    if options["q"]:
+        where.append("instr(lower(coalesce(subject,'')||' '||coalesce(receive_no,'')||' '||coalesce(sender_name,'')),lower(?)) > 0")
+        params.append(options["q"])
     where.append("company_id = ? AND finance_tenant_id = ?")
     params.extend([scope["company_id"], scope["finance_tenant_id"]])
-    if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"]):
+    if not company_wide:
         where.append(
             """
             (
@@ -28267,11 +28439,17 @@ def list_inbound_documents(conn: sqlite3.Connection, query: Dict[str, List[str]]
             """
         )
         params.extend([user.get("id"), user.get("id"), user.get("id")])
-    sql = "SELECT * FROM inbound_documents"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY created_at DESC LIMIT 300"
-    return [inbound_document_detail(conn, row["id"]) for row in conn.execute(sql, params).fetchall()]
+    base = " FROM inbound_documents WHERE " + " AND ".join(where)
+    count = int(conn.execute("SELECT count(*)" + base, params).fetchone()[0])
+    if not options["paginated"] and count > LIST_MAX_ROWS:
+        raise ValueError("inbound_list_pagination_required")
+    if options["after"]:
+        base += " AND (created_at,id)<(?,?)"
+        params.extend(options["after"])
+    limit = options["page_size"] + 1 if options["paginated"] else LIST_MAX_ROWS
+    rows = conn.execute("SELECT id" + base + " ORDER BY created_at DESC,id DESC LIMIT ?", [*params, limit]).fetchall()
+    items = [inbound_document_detail(conn, row["id"]) for row in rows]
+    return inbound_page(items, count, options) if options["paginated"] else items
 
 
 def inbound_idempotency_key(payload: Dict[str, Any]) -> str:
@@ -31499,14 +31677,48 @@ def notification_delivery_context_error(item: Dict[str, Any], conn: sqlite3.Conn
         return "overdue_reminder_scope_unavailable"
 
 
+def supabase_scan_rows(table: str, *, page_size: int = 500) -> Iterable[Dict[str, Any]]:
+    """Backend-only stable keyset scan; never infer completeness from a 500 cap."""
+    if table not in {"documents", "inbound_documents", "exchange_tasks"} or not 1 <= page_size <= 500:
+        raise ValueError("workflow_scan_filter_invalid")
+    after = ""
+    scanned = 0
+    while True:
+        params = {"select": "*", "order": "id.asc", "limit": str(page_size)}
+        if after:
+            params["id"] = 'gt."' + after.replace('\\', '\\\\').replace('"', '\\"') + '"'
+        batch = supabase_request("GET", table + "?" + urllib.parse.urlencode(params))
+        if not isinstance(batch, list) or len(batch) > page_size:
+            raise RuntimeError("workflow_scan_response_invalid")
+        for row in batch:
+            row_id = roster_text(row.get("id")) if isinstance(row, dict) else ""
+            if not row_id or row_id <= after:
+                raise RuntimeError("workflow_scan_response_invalid")
+            if scanned >= LIST_MAX_ROWS:
+                raise RuntimeError("workflow_scan_limit_reached")
+            after, scanned = row_id, scanned + 1
+            yield row
+        if len(batch) < page_size:
+            return
+
+
+def overdue_scan_rows(source_type: str, payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    try:
+        yield from supabase_scan_rows(source_type)
+    except Exception:
+        # Partial work stays durable. A rerun rescans and immutable IDs dedupe
+        # already-delivered reminders; scan failure is never a successful job.
+        payload["blocked"] += 1
+        payload["dataComplete"] = False
+        payload["errors"].append({"sourceType": source_type, "code": "overdue_reminder_scan_incomplete"})
+
+
 def execute_overdue_reminders(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
-    payload = {"overdue": 0, "created": 0, "reminded": 0, "deduplicated": 0, "blocked": 0, "errors": [], "externalAttempted": 0}
+    payload = {"overdue": 0, "created": 0, "reminded": 0, "deduplicated": 0, "blocked": 0, "errors": [], "externalAttempted": 0, "scanned": 0, "dataComplete": True}
     for source_type in ("documents", "inbound_documents"):
-        documents = [row_to_dict(row) for row in conn.execute(f"SELECT * FROM {source_type}")] if conn is not None else supabase_list(source_type, {})
-        if conn is None and len(documents) >= 500:
-            payload["blocked"] += 1
-            payload["errors"].append({"sourceType": source_type, "code": "overdue_reminder_scan_incomplete"})
+        documents = (row_to_dict(row) for row in conn.execute(f"SELECT * FROM {source_type} ORDER BY id")) if conn is not None else overdue_scan_rows(source_type, payload)
         for document in documents:
+            payload["scanned"] += 1
             try:
                 due = overdue_reminder_due(document, source_type)
                 if not due:
@@ -31548,6 +31760,49 @@ def execute_overdue_reminders(conn: sqlite3.Connection | None = None) -> Dict[st
     return {"status": status, "message": f"{status}：站內提醒 {payload['reminded']} 件，新增 {payload['created']} 件，去重 {payload['deduplicated']} 件，阻擋 {payload['blocked']} 件", "payload": payload}
 
 
+def execute_legacy_next_day_check(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    """Read persisted gateway evidence only; never manufacture a government receipt.
+
+    RealExchangeProvider has no agency-approved receipt verifier yet. Even a
+    status string '已送達' or a mock receipt cannot establish formal receipt.
+    This job is deliberately fail-closed until that verifier is implemented.
+    """
+    checked, blocked, errors = 0, 0, []
+    tasks = (row_to_dict(r) for r in conn.execute("SELECT * FROM exchange_tasks WHERE direction='發文' ORDER BY id")) if conn is not None else supabase_scan_rows("exchange_tasks")
+    try:
+        for task in tasks:
+            if task.get("direction") != "發文":
+                continue
+            checked += 1
+            outbox_id = str(task.get("id") or "")[5:] if str(task.get("id") or "").startswith("TASK-") else ""
+            row = conn.execute("SELECT * FROM exchange_outbox WHERE id=?", (outbox_id,)).fetchone() if conn is not None and outbox_id else None
+            outbox = (row_to_dict(row) if row else None) if conn is not None else (supabase_get("exchange_outbox", outbox_id) if outbox_id else None)
+            code = "exchange_formal_receipt_unverified"
+            if outbox and outbox.get("document_id") == task.get("document_id") and outbox.get("package_id") == task.get("package_id"):
+                code = "exchange_sandbox_receipt_not_formal" if outbox.get("provider") != "real" or outbox.get("environment") != "production" else "exchange_formal_receipt_verifier_unavailable"
+            # Existing failure/return facts remain intact; unsupported legacy
+            # success labels become explicitly uncertain without erasing logs.
+            status = task.get("status") if task.get("status") in {"交換失敗", "退回補正", "失敗", "退文", "已達重送上限"} else "待查核"
+            event = {"id": f"EVT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", "task_id": task["id"],
+                     "document_id": task.get("document_id"), "event_type": "next_day_check_blocked",
+                     "message": "尚無可驗證正式收文回條，保留待查核或原失敗狀態。",
+                     "payload_json": json.dumps({"code": code, "receiptConfirmed": False, "externalAttempted": 0})}
+            update = {"status": status, "updated_at": now(), "next_check_at": compute_next_run_at("每日 09:00")}
+            if conn is not None:
+                conn.execute("UPDATE exchange_tasks SET status=:status,updated_at=:updated_at,next_check_at=:next_check_at WHERE id=:id", {**update, "id": task["id"]})
+                insert_row(conn, "exchange_events", {**event, "created_at": now()})
+            else:
+                supabase_patch("exchange_tasks", task["id"], update)
+                supabase_insert("exchange_events", {**event, "created_at": now()})
+            blocked += 1
+    except Exception:
+        blocked += 1
+        errors.append("exchange_next_day_check_incomplete")
+    state = "待處理" if blocked else "成功"
+    return {"status": state, "message": f"{state}：查核 {checked} 筆；正式收文確認 0 筆",
+            "payload": {"checked": checked, "confirmed": 0, "blocked": blocked, "errors": errors, "externalAttempted": 0}}
+
+
 def execute_job_logic(conn: sqlite3.Connection, job: Dict[str, Any]) -> Dict[str, Any]:
     job_type = job["job_type"]
     if job_type == "pullInbound":
@@ -31565,17 +31820,7 @@ def execute_job_logic(conn: sqlite3.Connection, job: Dict[str, Any]) -> Dict[str
         return {"message": f"成功：重送 {result['count']} 筆交換失敗公文", "payload": result}
 
     if job_type == "nextDayCheck":
-        rows = conn.execute("SELECT * FROM exchange_tasks WHERE direction = '發文'").fetchall()
-        checked = 0
-        for row in rows:
-            checked += 1
-            status = "已確認收文" if row["status"] not in {"交換失敗", "退回補正"} else row["status"]
-            conn.execute("UPDATE exchange_tasks SET status = ?, updated_at = ?, next_check_at = ? WHERE id = ?", (status, now(), compute_next_run_at("每日 09:00"), row["id"]))
-            conn.execute(
-                "INSERT INTO exchange_events (id, task_id, document_id, event_type, message, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (f"EVT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", row["id"], row["document_id"], "next_day_check", "背景任務完成發文翌日查核。", "{}", now()),
-            )
-        return {"message": f"成功：完成 {checked} 筆發文翌日查核", "payload": {"checked": checked}}
+        return execute_legacy_next_day_check(conn)
 
     if job_type == "tokenCheck":
         active_sessions = scalar_int(conn, "SELECT COUNT(*) FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > ?", (now(),))
@@ -33622,7 +33867,7 @@ def supabase_mark_notification_read(notification_id: str, session: Dict[str, Any
     return updated
 
 
-UI_USAGE_EVENT_TYPES = frozenset({"session_started", "route_view", "guidance_used", "search_result"})
+UI_USAGE_EVENT_TYPES = frozenset({"session_started", "route_view", "guidance_used", "search_result", "performance"})
 UI_USAGE_DEVICE_CLASSES = frozenset({"desktop", "tablet", "mobile"})
 UI_USAGE_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{12,80}$")
 UI_USAGE_ROUTE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
@@ -33656,7 +33901,7 @@ def normalize_ui_usage_payload(payload: Dict[str, Any], session: Dict[str, Any] 
         raise ValueError("ui_usage_result_count_invalid") from exc
     if result_count < 0 or result_count > 1000:
         raise ValueError("ui_usage_result_count_invalid")
-    return {
+    event = {
         "schemaVersion": 1,
         "eventType": event_type,
         "sessionId": session_id,
@@ -33667,6 +33912,26 @@ def normalize_ui_usage_payload(payload: Dict[str, Any], session: Dict[str, Any] 
         "companyId": company_id[:80],
         "privacySafe": True,
     }
+    if event_type == "performance":
+        if set(payload) - {"eventType", "sessionId", "deviceClass", "route", "resultCount", "resultEmpty", "performance"}:
+            raise ValueError("ui_performance_fields_invalid")
+        performance = payload.get("performance")
+        allowed = {
+            "stage": {"workspace_visible", "pdf_local_editable", "pdf_cloud_saved", "file_reopen", "file_download"},
+            "outcome": {"success", "failure", "timeout", "cancelled"},
+            "fileSizeBucket": {"none", "0_1mb", "1_10mb", "10_50mb"},
+            "pageCountBucket": {"none", "1", "2_25", "26_100", "101_300"},
+            "cacheState": {"warm", "cold", "unknown"},
+        }
+        if not isinstance(performance, dict) or set(performance) != {*allowed, "durationMs"}:
+            raise ValueError("ui_performance_fields_invalid")
+        if any(not isinstance(performance[key], str) or performance[key] not in values for key, values in allowed.items()):
+            raise ValueError("ui_performance_value_invalid")
+        duration = performance["durationMs"]
+        if isinstance(duration, bool) or not isinstance(duration, int) or not 0 <= duration <= 120000:
+            raise ValueError("ui_performance_duration_invalid")
+        event["performance"] = dict(performance)
+    return event
 
 
 def record_ui_usage(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -36841,10 +37106,10 @@ def supabase_update_official_dispatch_record(document_id: str, payload: Dict[str
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_update_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_update_forbidden")
     require_official_dispatch_record_editable(record)
     if "proof_file_id" in payload:
@@ -36873,10 +37138,10 @@ def supabase_complete_official_dispatch(document_id: str, payload: Dict[str, Any
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_complete_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_complete_forbidden")
     if record.get("dispatch_owner_type") == "general_affairs" and document.get("current_status") != "pending_general_affairs_dispatch":
         raise ValueError("official_document_not_pending_general_affairs_dispatch")
@@ -36924,10 +37189,10 @@ def supabase_upload_official_dispatch_proof_file(document_id: str, payload: Dict
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_proof_upload_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_proof_upload_forbidden")
     require_official_dispatch_record_editable(record)
     content = payload.get("content_base64") or ""
@@ -37497,12 +37762,13 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
     actor_snapshots = supabase_official_document_actor_snapshots(document_id)
     user = session.get("user") if session else None
     is_participant = bool(user and canDownloadOfficialDocument(user, document, all_steps, actor_snapshots))
+    followup_binding = official_document_followup_binding(document, user)
     current_step = next((
         step for step in steps
         if step.get("step_key") == document.get("current_step") and step.get("status") == "pending"
     ), None)
     active_delegation = official_document_active_read_delegation(document, all_steps, user, supabase_mode=True)
-    if user and not is_participant and not active_delegation:
+    if user and not is_participant and not active_delegation and not followup_binding:
         if not official_document_user_same_company(user, document) or not str(user.get("company_id") or "").strip():
             raise PermissionError("official_document_company_forbidden")
         if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
@@ -37545,10 +37811,12 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         **official_workflow_action_capabilities(document, steps, user, active_delegation, stamp_request),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
-        "can_download": bool(is_participant or active_delegation),
-        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
+        "can_download": bool(is_participant or active_delegation or followup_binding),
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
+        "can_create_linked_application": bool(followup_binding and document.get("current_status") in {"draft", "rejected"}),
+        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps, followup_binding=followup_binding)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
-        "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
+        "can_confirm": bool(user and (user.get("id") == document.get("applicant_id") or followup_binding) and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
         "can_act": bool(user and current_step and current_step.get("status") == "pending" and (current_step.get("approver_user_id") == user.get("id") or active_delegation)),
         "acting_for_user_id": current_step.get("approver_user_id") if active_delegation and current_step else "",
         "delegation_id": active_delegation.get("id") if active_delegation else "",
@@ -37582,7 +37850,7 @@ def _supabase_editor_assert_document_access(document: Dict[str, Any], session: D
     else:
         steps = supabase_official_document_steps(document["id"])
         actor_snapshots = supabase_official_document_actor_snapshots(document["id"])
-        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots)
+        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots) or official_document_followup_binding(document, user)
         active_delegation = None if is_participant else official_document_active_read_delegation(document, steps, user, supabase_mode=True)
         if not is_participant and not active_delegation:
             if (
@@ -40889,7 +41157,8 @@ def supabase_mutate_official_workflow(document_id: str, action: str, payload: Di
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
     if action not in {"withdraw", "decline"}:
         next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
-        if not next_step or not supabase_user_by_id(str(next_step.get("approver_user_id") or "")):
+        if not next_step or not (supabase_user_by_id(str(next_step.get("approver_user_id") or ""))
+                or (next_step.get("step_key") == "applicant_confirm" and official_handover_followup.load(sys.modules[__name__], document))):
             raise ValueError("official_workflow_next_approver_inactive")
     raw = supabase_request("POST", "rpc/edoc_decline_official_document" if action == "decline" else "rpc/edoc_mutate_official_workflow", {"p_request": plan})
     response = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
@@ -40925,7 +41194,8 @@ def supabase_cancel_official_document(document_id: str, payload: Dict[str, Any],
 def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
     document = supabase_official_document_row(document_id)
-    if document["applicant_id"] != user["id"]:
+    followup_binding = official_document_followup_binding(document, user)
+    if document["applicant_id"] != user["id"] and not followup_binding:
         raise PermissionError("only_applicant_can_confirm")
     all_steps = supabase_official_document_steps(document_id)
     generation = max((int(row.get("workflow_generation") or 1) for row in all_steps), default=0)
@@ -40937,6 +41207,7 @@ def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any]
     raw = supabase_request("POST", "rpc/edoc_confirm_official_document", {"p_request": {
         "document_id": document_id, "actor_id": user["id"], "expected_step_id": step["id"],
         "workflow_generation": generation, "comment": payload.get("comment") or "申請人確認已用印版本",
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
         "dispatch": {key: payload.get(key) for key in ("external_official_document_number", "dispatch_date", "recipient", "recipient_contact", "dispatch_note")},
         "ip_address": payload.get("ip_address") or "", "user_agent": (payload.get("user_agent") or "")[:180],
     }})
@@ -41260,7 +41531,7 @@ def supabase_official_document_download_file(document_id: str, file_id: str, ses
     document = supabase_official_document_row(document_id)
     steps = supabase_official_document_steps(document_id)
     actor_snapshots = supabase_official_document_actor_snapshots(document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, supabase_mode=True):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, supabase_mode=True) and not official_document_followup_binding(document, user):
         raise PermissionError("official_document_download_forbidden")
     supabase_assert_official_document_uploads_av_clean(document)
     rows = supabase_filter_rows("official_document_files", {"id": file_id, "document_id": document_id}, limit=1)
@@ -41458,43 +41729,43 @@ def supabase_inbound_related_rows(table: str, column: str, ids: List[str], *, se
 def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = supabase_official_session_user(session)
     scope = inbound_finance_user_scope(user)
-    rows = supabase_filter_rows(
-        "inbound_documents",
-        {
-            "company_id": scope["company_id"],
-            "finance_tenant_id": scope["finance_tenant_id"],
-        },
-        order="created_at.desc",
-        limit=300,
-    )
-    status = (query or {}).get("status", [""])[0] if query else ""
-    assignee_user_id = (query or {}).get("assignee_user_id", [""])[0] if query else ""
     company_wide = session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"])
-    linked_inbound_ids: set[str] = set()
-    if not company_wide:
-        recipient_rows = supabase_filter_rows(
-            "internal_dispatch_recipients",
-            {"recipient_user_id": user.get("id") or ""},
-            limit=1000,
-        )
-        for dispatch in supabase_inbound_related_rows("internal_dispatches", "id", [row.get("dispatch_id") or "" for row in recipient_rows]):
-            if dispatch.get("inbound_document_id"):
-                linked_inbound_ids.add(dispatch["inbound_document_id"])
+    options = inbound_list_options(query, {**scope, "actor_id": user["id"], "company_wide": company_wide})
+    request = {**scope, "actor_id": user["id"], "company_wide": company_wide,
+               "status": options["status"], "assignee_user_id": options["assignee_user_id"], "q": options["q"]}
+    after = options["after"]
     scoped: List[Dict[str, Any]] = []
-    for row in rows:
-        if (
-            roster_text(row.get("company_id")) != scope["company_id"]
-            or roster_text(row.get("finance_tenant_id")) != scope["finance_tenant_id"]
-        ):
-            continue
-        if status and row.get("status") != status:
-            continue
-        if assignee_user_id and row.get("assignee_user_id") != assignee_user_id:
-            continue
-        if not company_wide:
-            if row.get("assignee_user_id") != user.get("id") and row.get("created_by") != user.get("id") and row.get("id") not in linked_inbound_ids:
-                continue
-        scoped.append(dict(row))
+    seen: set[str] = set()
+    count = 0
+    while True:
+        size = options["page_size"] + 1 if options["paginated"] else 101
+        page_request = {**request, "limit": size}
+        if after:
+            page_request.update({"after_created_at": after[0], "after_id": after[1]})
+        response = supabase_request("POST", "rpc/edoc_list_inbound_candidates", {"p_request": page_request})
+        if not isinstance(response, dict) or not isinstance(response.get("items"), list) or isinstance(response.get("count"), bool) or not isinstance(response.get("count"), int) or response["count"] < 0:
+            raise RuntimeError("inbound_list_response_invalid")
+        count = response["count"]
+        if not options["paginated"] and count > LIST_MAX_ROWS:
+            raise ValueError("inbound_list_pagination_required")
+        batch = response["items"]
+        if len(batch) > size:
+            raise RuntimeError("inbound_list_response_invalid")
+        previous = after
+        for row in batch:
+            if not isinstance(row, dict) or not row.get("id") or not row.get("created_at"):
+                raise RuntimeError("inbound_list_response_invalid")
+            key = (str(row["created_at"]), str(row["id"]))
+            if row["id"] in seen or (previous and key >= previous) or row.get("company_id") != scope["company_id"] or row.get("finance_tenant_id") != scope["finance_tenant_id"]:
+                raise RuntimeError("inbound_list_response_invalid")
+            seen.add(row["id"])
+            previous = key
+            scoped.append(dict(row))
+        if options["paginated"] or len(batch) < size:
+            break
+        if len(scoped) > LIST_MAX_ROWS:
+            raise ValueError("inbound_list_pagination_required")
+        after = previous
     attachments = supabase_inbound_related_rows("inbound_document_attachments", "inbound_document_id", [row["id"] for row in scoped])
     assignees = {row["id"]: row for row in supabase_inbound_related_rows("users", "id", [row.get("assignee_user_id") or "" for row in scoped], select="id,status,company_id,finance_tenant_id")}
     by_document: Dict[str, List[Dict[str, Any]]] = {}
@@ -41504,7 +41775,7 @@ def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session:
         row["metadata"] = parse_json_any(row.get("metadata_json"), {}) or {}
         row["attachments"] = sorted(by_document.get(row["id"], []), key=lambda item: str(item.get("created_at") or ""), reverse=True)
         row["handover_required"] = inbound_handover_required(row, assignees.get(row.get("assignee_user_id") or ""))
-    return scoped
+    return inbound_page(scoped, count, options) if options["paginated"] else scoped
 
 
 def supabase_create_inbound_document(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -42374,7 +42645,7 @@ def supabase_create_finance_login_session(
     return {
         "token": token,
         "expiresAt": expires,
-        "user": bundle["user"],
+        "user": public_user(bundle["user"]),
         "permissions": bundle["permissions"],
     }
 
@@ -42513,7 +42784,7 @@ def supabase_authenticate(payload: Dict[str, Any], ip: str, device: str) -> Tupl
     supabase_patch("users", user["id"], {"last_login_at": now()})
     supabase_insert("login_events", {"id": f"LOGIN-{int(time.time() * 1000)}", "user_id": user["id"], "email": email, "provider": provider, "ip": ip, "device": device, "status": "成功", "reason": "帳密驗證通過"})
     user.pop("password_hash", None)
-    return {"token": token, "expiresAt": expires, "user": user, "permissions": supabase_role_permissions(user.get("role", ""))}, 200
+    return {"token": token, "expiresAt": expires, "user": public_user(user), "permissions": supabase_role_permissions(user.get("role", ""))}, 200
 
 
 def supabase_upsert_finance_manager_placeholder(
@@ -44722,7 +44993,7 @@ def supabase_authenticate_logging_bridge(payload: Dict[str, Any], ip: str, devic
         return {
             "token": token,
             "expiresAt": expires,
-            "user": user,
+            "user": public_user(user),
             "permissions": permissions,
             "bridge": {
                 "sourceSystem": "finance",
@@ -44841,7 +45112,7 @@ def supabase_current_session(token: str) -> Dict[str, Any] | None:
     return {
         "sessionId": session_row["id"],
         "expiresAt": session_row["expires_at"],
-        "user": user,
+        "user": public_user(user),
         "permissions": permissions,
     }
 
@@ -45126,21 +45397,7 @@ def supabase_execute_job_logic(job: Dict[str, Any]) -> Dict[str, Any]:
         expiring = [item for item in active if item.get("expires_at", "") <= expiring_before]
         return {"message": f"成功：有效 session {len(active)}，1 小時內到期 {len(expiring)}", "payload": {"active_sessions": len(active), "expiring": len(expiring)}}
     if job_type == "nextDayCheck":
-        tasks = supabase_list("exchange_tasks", {})
-        checked = 0
-        for task in [item for item in tasks if item.get("direction") == "發文"]:
-            checked += 1
-            status = task.get("status") if task.get("status") in {"交換失敗", "退回補正"} else "已確認收文"
-            supabase_patch("exchange_tasks", task["id"], {"status": status, "next_check_at": compute_next_run_at("每日 09:00")})
-            supabase_insert("exchange_events", {
-                "id": f"EVT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
-                "task_id": task["id"],
-                "document_id": task.get("document_id"),
-                "event_type": "next_day_check",
-                "message": "Vercel Cron 完成發文翌日查核。",
-                "payload_json": "{}",
-            })
-        return {"message": f"成功：完成 {checked} 筆發文翌日查核", "payload": {"checked": checked}}
+        return execute_legacy_next_day_check()
     if job_type == "exchangeSync":
         assert_formal_exchange_allowed({})
         sent_outboxes = supabase_list("exchange_outbox", {"status": ["已送出"]})
@@ -47758,6 +48015,44 @@ class Handler(SimpleHTTPRequestHandler):
         expected = f"Bearer {secret}"
         return len(provided) == len(expected) and hmac.compare_digest(provided, expected)
 
+    def handle_handover_api(self, method, parts, query, session, conn=None):
+        if len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "linked-application":
+            service = official_handover_followup.LinkedApplication(sys.modules[__name__], session, conn)
+            if method == "GET":
+                context, _, _ = service.context(parts[1])
+                result = {key: value for key, value in context.items() if key != "snapshot"}
+            elif method == "POST":
+                result = service.create(parts[1], self.read_json())
+                if conn is not None:
+                    conn.commit()
+            else:
+                self.send_json({"error": "method_not_allowed"}, 405)
+                return True
+            self.send_json(result)
+            return True
+        is_queue = parts == ["official-handovers"]
+        is_context = len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "handover-context"
+        is_proposal = len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "handovers"
+        is_resolution = len(parts) == 3 and parts[0] == "official-handovers" and parts[2] in {"confirm", "reject"}
+        if not (is_queue or is_context or is_proposal or is_resolution):
+            return False
+        service = official_handover_service.Service(sys.modules[__name__], session, conn)
+        if method == "GET" and is_queue:
+            result = service.queue(query)
+        elif method == "GET" and is_context:
+            result = service.context(parts[1], query)
+        elif method == "POST" and is_proposal:
+            result = service.propose(parts[1], self.read_json())
+        elif method == "POST" and is_resolution:
+            result = service.resolve(parts[1], parts[2], self.read_json())
+        else:
+            self.send_json({"error": "method_not_allowed"}, 405)
+            return True
+        if conn is not None and method == "POST":
+            conn.commit()
+        self.send_json(result)
+        return True
+
     def handle_api(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
         parts = [part for part in path.split("/") if part][1:]
         try:
@@ -47929,6 +48224,8 @@ class Handler(SimpleHTTPRequestHandler):
                         return
                 if method == "GET" and parts == ["finance-directory"]:
                     self.send_json(supabase_finance_directory(session))
+                    return
+                if parts and parts[0] != "cron" and self.handle_handover_api(method, parts, query, session):
                     return
                 if is_operations_maintenance_endpoint(method, parts):
                     session = supabase_current_session(self.bearer_token())
@@ -48152,6 +48449,10 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if method == "GET" and parts == ["dashboard"]:
                     self.send_json(supabase_dashboard())
+                    return
+                if method == "GET" and parts == ["reports", "timeliness"]:
+                    session = supabase_current_session(self.bearer_token())
+                    self.send_json(official_timeliness_report(session))
                     return
                 if method == "GET" and parts == ["reports", "operational-summary"]:
                     session = supabase_current_session(self.bearer_token())
@@ -48935,6 +49236,8 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["finance-directory"]:
                     self.send_json(local_finance_directory(conn, session))
                     return
+                if parts and parts[0] != "cron" and self.handle_handover_api(method, parts, query, session, conn):
+                    return
                 if is_operations_maintenance_endpoint(method, parts):
                     session = current_session(conn, self.bearer_token())
                     if not self.require_operations_maintenance_access(session):
@@ -49059,6 +49362,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["dashboard"]:
                     session = current_session(conn, self.bearer_token())
                     self.send_json(dashboard(conn, session))
+                    return
+                if method == "GET" and parts == ["reports", "timeliness"]:
+                    session = current_session(conn, self.bearer_token())
+                    self.send_json(official_timeliness_report(session, conn=conn))
                     return
                 if method == "GET" and parts == ["reports", "operational-summary"]:
                     session = current_session(conn, self.bearer_token())

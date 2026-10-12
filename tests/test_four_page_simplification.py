@@ -24,7 +24,7 @@ class FourPageSimplificationTests(unittest.TestCase):
         cls.css = (ROOT / "styles.css").read_text()
 
     def run_js(self, names, script):
-        source = "\n".join(function(self.js, name) for name in names)
+        source = "const officialHandoverController=null,officialHandoverFeatureEnabled=()=>false;\n" + "\n".join(function(self.js, name) for name in names)
         result = subprocess.run(["node", "-e", "const assert=require('node:assert/strict');\n" + source + "\n" + script], capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 

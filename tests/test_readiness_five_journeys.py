@@ -65,19 +65,21 @@ class HostedInboundPerformanceTests(unittest.TestCase):
     def test_list_batches_related_rows_and_preserves_company_acl(self):
         user = {"id": "GA", "status": "啟用", "account_source": "finance", "company_id": "CO-A", "finance_tenant_id": "TENANT-A", "unit": "總務"}
         session = {"user": user, "permissions": ["official_documents.receive"]}
-        rows = [{"id": f"IN-{index}", "company_id": "CO-A", "finance_tenant_id": "TENANT-A", "status": "assigned", "assignee_user_id": "STAFF", "metadata_json": {}} for index in range(40)]
-        rows.append({"id": "FOREIGN", "company_id": "CO-B", "finance_tenant_id": "TENANT-B"})
+        rows = [{"id": f"IN-{index:04}", "created_at": "2026-10-11T10:00:00+00:00", "company_id": "CO-A", "finance_tenant_id": "TENANT-A", "status": "assigned", "assignee_user_id": "STAFF", "metadata_json": {}} for index in reversed(range(40))]
         calls = []
         def request(method, path, *args, **kwargs):
             from urllib.parse import parse_qs, urlsplit
             calls.append(path)
             table = urlsplit(path).path
             params = parse_qs(urlsplit(path).query)
-            if table == "inbound_documents":
-                self.assertEqual(params["company_id"], ["eq.CO-A"])
-                return rows
+            if table == "rpc/edoc_list_inbound_candidates":
+                self.assertEqual(method, "POST")
+                self.assertEqual(args[0]["p_request"]["company_id"], "CO-A")
+                self.assertEqual(args[0]["p_request"]["finance_tenant_id"], "TENANT-A")
+                self.assertTrue(args[0]["p_request"]["company_wide"])
+                return {"items": rows, "count": len(rows)}
             if table == "inbound_document_attachments":
-                return [{"id": f"ATT-{index}", "inbound_document_id": f"IN-{index}"} for index in range(40)]
+                return [{"id": f"ATT-{index}", "inbound_document_id": f"IN-{index:04}"} for index in range(40)]
             if table == "users":
                 return [{"id": "STAFF", "status": "啟用", "company_id": "CO-A", "finance_tenant_id": "TENANT-A"}]
             raise AssertionError(path)

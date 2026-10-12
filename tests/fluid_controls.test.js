@@ -44,7 +44,7 @@ function harness() {
   for (const n of [...Object.values(nodes), ...routes, ...nav, document.body]) n.document = document;
   nodes.appShell.children = [nodes.primarySidebar, routes[0], nodes.mobileDrawerBackdrop];
   const timers = new Map(); let now = 0, timerId = 0;
-  const c = { document, Date: { now: () => now }, Map, Set, String, Boolean, HTMLElement: Node,
+  const c = { document, Date: { now: () => now }, performance: { now: () => now }, requestAnimationFrame: fn => fn(), recordUiPerformance() {}, renderWorkspaceQuickGuide() {}, Map, Set, String, Boolean, HTMLElement: Node,
     getComputedStyle: () => ({ visibility: 'visible' }),
     window: { setTimeout(fn, ms) { const id = ++timerId; timers.set(id, { fn, at: now + ms }); return id; }, clearTimeout: id => timers.delete(id), matchMedia: () => ({ matches: false }), requestAnimationFrame: fn => fn() },
     toastDismissTimer: null, toastDismissAt: 0, toastRemainingMs: 0,

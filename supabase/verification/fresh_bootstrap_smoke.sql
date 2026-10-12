@@ -77,10 +77,11 @@ declare
   v_rpc text;
   v_role text;
 begin
-  foreach v_rpc in array array['edoc_confirm_official_document(jsonb)','edoc_list_official_document_candidates(jsonb)'] loop
+  foreach v_rpc in array array['edoc_confirm_official_document(jsonb)','edoc_list_official_document_candidates(jsonb)','edoc_list_inbound_candidates(jsonb)','edoc_timeliness_candidates(jsonb)'] loop
     select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure('public.' || v_rpc);
     if not found then raise exception 'worklist_receipt_rpc_missing'; end if;
-    if v_proc.prosecdef or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+    if v_proc.prosecdef or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+       or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
        or not pg_catalog.has_function_privilege('service_role',v_proc.oid,'EXECUTE') then
       raise exception 'worklist_receipt_rpc_security_mismatch';
     end if;

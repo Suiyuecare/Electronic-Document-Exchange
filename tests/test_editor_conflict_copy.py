@@ -167,7 +167,8 @@ class EditorConflictCopyJavascriptTest(unittest.TestCase):
         harness = r'''
 const assert=require('node:assert/strict');let calls=[],messages=[],installs=0,scope='one',draft={title:'local'};
 const crypto=require('node:crypto');const cloneUploadedEditorValue=v=>JSON.parse(JSON.stringify(v));
-const document={querySelector:()=>({disabled:false,textContent:''})};const window={confirm:()=>true};
+const document={querySelector:()=>({disabled:false,textContent:''})};const window={};
+let confirmation=true;const requestWorkspaceConfirmation=async()=>confirmation;
 const uploadedSealEditorRuntime={documentId:'old',conflict:{requestId:'request-fixture-111'},dirtyGeneration:2};
 let uploadedSealEditorState={schemaVersion:2,revisionNo:1,pages:[],sourceFiles:[],elements:[]};
 const uploadedSealApplicationScopeSnapshot=()=>({scope,documentId:uploadedSealEditorRuntime.documentId});
@@ -194,7 +195,7 @@ async function installUploadedEditorRecovery(r,id,s){installs++;uploadedSealEdit
         self.run_case("let done;backendRequest=()=>new Promise(r=>done=r);let pending=copyUploadedEditorConflictVersion();await Promise.resolve();scope='two';done({document_id:'new'});await pending;assert.equal(installs,0);")
 
     def test_latest_cancel_does_not_fetch_or_lose_content(self):
-        self.run_case("window.confirm=()=>false;await reloadUploadedEditorServerState();assert.equal(calls.length,0);assert.equal(draft.title,'local');")
+        self.run_case("confirmation=false;await reloadUploadedEditorServerState();assert.equal(calls.length,0);assert.equal(draft.title,'local');")
 
     def test_latest_does_not_replace_edits_during_fetch(self):
         self.run_case("backendRequest=async()=>{uploadedSealEditorRuntime.dirtyGeneration++;return {state:{schemaVersion:2}}};await reloadUploadedEditorServerState();assert.equal(installs,0);")

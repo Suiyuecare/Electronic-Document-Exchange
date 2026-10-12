@@ -9,7 +9,7 @@ branding or a promise of zero network latency.
 
 | Capability | Canonical owner | Source of truth | Allowed variants | Verification |
 | --- | --- | --- | --- | --- |
-| Form | Existing application inputs and draft lifecycle in app.js | Authorized document detail and content revision | Native controls; existing inline text editor | Six-role browser and application-autosave tests |
+| Form | Shared workspace constraints owner plus existing draft lifecycle in app.js | Native validity constraints, authorized document detail and content revision | Native controls with app-owned inline errors; existing inline text editor | Invalid-submit zero-request, valid recovery, IME and six-role browser tests |
 | CRUD | backendRequest and scoped editor lifecycle | Backend revision, locked request and immutable assets | Explicit retry; no automatic mutation replay | Scope, reopen, download and transport resilience tests |
 | Toast | showToast plus persistent upload/opening status | The current scoped operation result | Toast is supplemental, never the only recovery surface | Browser failure/cancel/retry journeys |
 | Scrollbar | Browser viewport and existing styles.css overflow rules | Native scroll position | Existing PDF stage and queue scrolling | Desktop/tablet/mobile overflow checks |
@@ -23,8 +23,11 @@ branding or a promise of zero network latency.
 | --- | --- | --- |
 | Navigation | `setView` and six existing major routes | Immediate selected view; same-route operations preserve scroll/focus; returning restores route scroll only within the current in-memory session; a changed route focuses its title. Integrated sub-sections retain their intentional section navigation. |
 | Background reads | Scoped route loaders and official list transport | Share identical in-flight reads, not mutations; differing query/cursor/session remain separate. Preserve generation, permission and revision guards. Failure can be explicitly retried. |
+| Inbound paging | Scoped server cursor and existing inbound list | Apply company, actor and status before paging; opaque cursor stays in memory, not URL or cross-session storage. Changing actor, company or filters invalidates the cursor. Stable order and explicit more-results control preserve authorized older cases. |
+| Timeliness | Server timeliness report | Full authorized dataset aggregation, not loaded rows or status strings. Show missing timestamps as unknown, separate elapsed waiting from days until deadline, and distinguish incomplete data from zero. |
 | Initialization | `initializeDeferredWorkspace` | Ordered cooperative batches yield to interaction. Do not remove initialization or reorder dependency steps. Old-session work must stop. |
 | Form input | Existing compose/application lifecycle | During IME composition, hold preview/local/cloud autosave. Commit the final composition before saving; manual transitions cannot submit uncommitted input. Avoid rebuilding unchanged controls. |
+| Form validation | Shared capture-phase constraints owner | Product forms use novalidate to avoid browser popups, not to skip constraints. Check required, type, pattern, range, step and custom validity before handlers; invalid input stops submission, receives localized inline error/aria-invalid/describedby and focuses the first invalid field. Disabled and composition-pending input must not bypass guards. Clear only owned errors after correction; server validation remains authoritative. |
 | Compose distribution | `composePayload`, cloud draft snapshot and official PDF metadata | 正本 defaults to the current recipient; 副本 defaults to the selected sending company. Both are editable and must survive draft restore, correction and final PDF generation. Manual edits are preserved; changing the sending company only replaces its previous default when that default is still present. An explicitly cleared 副本 prints as 無. |
 | Compose submission | `handleComposeSubmitRequest` and `confirmComposeSubmission` | One visible 送出簽核 action opens an app-owned confirmation only after the Finance workflow-readiness check passes. Missing Finance approvers are explained beside that action; the button remains actionable for a fresh check, but no backend mutation bypasses the Finance gate. Cancel/Escape preserves the draft and returns focus. |
 | Lists | Existing authorized queue/log renderers | Preserve focused row action, scroll and stable nodes when content is unchanged. Do not restore focus into a different case, hidden control or new actor. |
@@ -33,6 +36,9 @@ branding or a promise of zero network latency.
 | Backup restore | `requestWorkspaceTypedConfirmation`, `normalizeBackupDrill` and existing backup panel | Reuse workspace modal isolation/focus; typed consent is IME-safe and defaults to Cancel. Prevent duplicate requests. Blocked or incomplete evidence is never success, never creates a fabricated snapshot or updates the last successful drill date. Missing timings show 未量測; uncertain transport outcome is not automatically replayed. |
 | Approval actions | Server `available_actions` and existing `officialDecisionModal` | Withdraw only while approval is pending and stamping has not been claimed. Return previous reopens the approved predecessor without applicant editing. Correction is resumable; decline is terminal. Shared review checkboxes start disabled, enable only after the corresponding successful view/download, and require manual acknowledgement for all approver decisions. Destructive decline initially focuses Cancel. Server errors preserve entered reason; conflicts refresh the case and require fresh review. |
 | Motion/layers | `styles.css` | Finance colors/frame unchanged. Shared dialog/toast layer tokens; toast above dialog on all widths. Reduced motion disables travel; no operation waits for animation. |
+| Editor confirmation | Shared workspace dialog | PDF replacement, page deletion, conflict reload and correction reason use app-owned dialogs; Cancel/Escape performs zero mutations. Recheck actor, document, revision and upload generation before committing. No missing browser-dialog API may imply consent. |
+| Optional help | Shared disclosure | Short guidance is folded by default; record guidance_used only when a person actually expands it. No help text, document data or identities enter telemetry. |
+| Performance | Scoped numeric event measurements | Measure actual workspace-interactive, local-editable and cloud-saved boundaries separately. A local provisional asset cannot be saved/submitted as an authoritative asset. No fabricated progress or completion. Cold/warm, device and network profiles stay separate in acceptance evidence. |
 
 ## Fluid interaction acceptance
 
@@ -59,6 +65,7 @@ branding or a promise of zero network latency.
 | Authenticated metadata | `backendRequest` / `fetchWithDeadline` | 20s read deadline; heavy PDF/server operations 120s. Body consumption is bounded. Mutation timeout means outcome unknown, never automatic duplicate submission. |
 | PDF transport | `performTusUpload` | Real byte progress, external cancellation, bounded chunk/HEAD requests. Same intent retries reuse the existing TUS resource and authoritative remote offset; immutable object storage is retained. |
 | Local A4 editing | `handleUploadedSealPdfChange` | Validated local A4 opens before transfer. No persistent sensitive local draft is introduced. Unsynced edits remain in memory; save/submit stays gated until finalization and state save succeed. |
+| Upload preparation | Local provisional asset and server intent promise | After validating the current application context, local A4 rendering and server draft/intent preparation run concurrently. Server failure leaves local work recoverable but unsaved; only a matching session/company/application/generation may replace the provisional asset. |
 | Cancel / recovery | Upload controller and pending intent | Abort only owned transfer. Keep text and PDF in this page. Explicit retry synchronizes the same intent. Do not cancel an uncertain server finalization. |
 | Preview library | `ensurePdfJsLibrary` | Failed promise is not cached permanently; bounded retry can recover without reloading the whole app. Concurrent requests share one load. |
 | Reopen existing case | `loadUploadedEditorState` | Old case remains active until all required authorized sources validate. Detail and state reads must match the exact locked revision. Two-file bounded concurrency; visible source first. |
@@ -67,8 +74,9 @@ branding or a promise of zero network latency.
 
 ## Acceptance gates
 
-1. Delaying real local transfer does not delay normal A4 local editing; real
-   selection-to-editor timing includes preparation and intent acquisition.
+1. Delaying real local draft/intent preparation or transfer does not delay
+   normal A4 local editing. Selection-to-editor timing includes all local work;
+   server intent acquisition and durable cloud save are separately measured.
 2. Editing while pending cannot submit; cancellation/retry retains those edits
    and only server-confirmed synchronization shows saved.
 3. A final chunk committed before a lost response resumes by HEAD at the same

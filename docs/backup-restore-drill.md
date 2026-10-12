@@ -1,6 +1,6 @@
 # 備份與隔離還原演練
 
-更新：2026-10-08。本輪六項改善中的備份／復原與操作手冊項目；本文件不是正式 DR 完成證明。
+更新：2026-10-12。本輪備份／復原與操作手冊項目；本文件不是正式 DR 完成證明。
 政府正式電子公文交換仍維持 Mock／停用。真人 SSO、實體手機、異地金鑰保管與連續 7 日備份證據仍待驗收，交接狀態見 `docs/go-live-operating-checklist.md`。
 
 ## 本次可執行的流程
@@ -74,6 +74,44 @@ python scripts/backup_restore_drill.py \
 
 receipt 僅包含 schema 名稱、總表數、總筆數、物件總數、hash、時間與固定錯誤碼。
 逐表和逐物件清冊只存在加密備份內。receipt hash 用來驗證完整性，不等同第三方簽章。
+
+## 持續 RPO 與排程驗收
+
+`scripts/backup_host.py check/status/prepare-launch-agent` 現在會核對
+`intervalSeconds + timeoutSeconds + 30 <= rpoTargetMinutes * 60`。
+排程間隔必須包含一次完整作業的上限與關閉緩衝，不能只看剛完成的快照。
+每小時一次、RPO 15 分鐘的設定會明確顯示 `scheduleCanMeetRpoTarget: false`，
+即使最近一次人工執行成功也不能顯示整體健康，且不能準備為合格排程。
+符合時效的候選設定仍只產生未啟用的 plist；沒有異地位置、保管人與人工核准，不啟用排程。
+
+`tools/backup_continuity_acceptance.py` 檢查已實際經過的至少 7 日完整時窗，
+不是只檢查 7 個成功日期。每次成功需原始還原 receipt、原始加密檔、
+由核准私密異地位置實際下載的另一份檔案、SHA-256 與大小；至少一次
+異地取回還原 receipt 須綁定下載檔名、來源快照與檔案 hash。
+每次失敗／中斷要有 5 分鐘內觀察到的告警及 RPO 時限內成功補跑。
+開頭、相鄰成功點與時窗結尾的最大資料年齡均不得超過 15 分鐘，
+孤立的每日成功紀錄不能通過。
+
+```sh
+python tools/backup_continuity_acceptance.py \
+  --record "$EDOC_REDACTED_CONTINUITY_RECORD" \
+  --evidence-root "$EDOC_PRIVATE_BACKUP_EVIDENCE_DIR" \
+  --source-project-ref-sha256 "$EDOC_APPROVED_SOURCE_PROJECT_REF_SHA256" \
+  --candidate-commit "$EDOC_CANDIDATE_COMMIT"
+```
+
+驗收清冊僅使用代碼、時間、hash 及相對路徑，不含網址、帳號或金鑰。
+原始 receipt 與 bytes 留在 repo 外的私密目錄（0700），記錄及檔案為 0600，
+使用無符號連結的 canonical 路徑，不接受硬連結替代下載副本；金鑰獨立保管。
+來源 project ref 只在私密原始 receipt 中，驗收清冊及命令以公司已核准的來源 hash 綁定，
+其他 project、過期時窗、空檔或僅自述加密／還原旗標均不得通過。
+`isolated_fixture` 即使覆蓋時窗與校驗通過，也不會取得正式異地驗收狀態。
+`operator_evidence_ready_for_review` 仍須人工審查私密權限與保管交接，
+不是第三方背書，也不會自動授權部署。
+
+若本機隔離 PostgreSQL 停機狀態無法確認，runner 不刪除該次完整私密工作目錄，
+會保留 `output/.recovery-work/` 下的資料與固定碼 marker（若能安全建立）。
+這是待維運檢查的失敗，不是成功清理；未核實停止前不得刪除或覆寫該目錄。
 
 ## 異地副本驗證
 

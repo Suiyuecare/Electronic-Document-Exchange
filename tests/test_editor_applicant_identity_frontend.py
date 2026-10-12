@@ -49,7 +49,7 @@ const uploadedSealEditorRuntime = {documentId:'',locked:false,companyChanging:fa
 const uploadedSealApplicationRuntime = {submissionBusy:false};
 const uploadedSealEditorState = {sourceFiles:[],pages:[],elements:[]};
 let calls=[],toasts=[],confirmResult=true,clears=0,flushFailure=null;
-const window={confirm:()=>confirmResult};
+const window={};const requestWorkspaceConfirmation=async()=>confirmResult;
 const officialWorkflowReadinessByRoute={clear(){}};
 const uploadedSealApplicationScopeSnapshot=()=>({scope:'one',epoch:0,documentId:uploadedSealEditorRuntime.documentId});
 const uploadedSealApplicationScopeIsCurrent=s=>s.documentId===uploadedSealEditorRuntime.documentId;

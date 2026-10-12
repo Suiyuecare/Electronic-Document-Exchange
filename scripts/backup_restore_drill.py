@@ -37,6 +37,33 @@ class DrillError(RuntimeError):
     """Messages are fixed error codes safe for operator logs."""
 
 
+RETENTION_MARKER = ".edoc-postgres-stop-unconfirmed.json"
+
+
+class PrivateScratch:
+    """Clean scratch only after isolated PostgreSQL shutdown is confirmed.
+
+    No TemporaryDirectory finalizer may erase a cluster whose shutdown failed.
+    Retained work remains in the operator's 0700 output directory for manual
+    stop verification and cleanup, never in a repository or public artifact.
+    """
+    def __init__(self, output, *, prefix):
+        self.parent = private_directory(Path(output) / ".recovery-work")
+        self.prefix, self.path, self.retained = prefix, None, False
+
+    def __enter__(self):
+        self.path = Path(tempfile.mkdtemp(prefix=self.prefix, dir=self.parent))
+        os.chmod(self.path, 0o700)
+        return self.path
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.retained = (self.path / RETENTION_MARKER).exists() or (
+            isinstance(exc, DrillError) and str(exc) == "isolated_postgres_stop_unconfirmed"
+        )
+        if not self.retained:
+            shutil.rmtree(self.path)
+
+
 class SourceLock:
     """One cooperative operator process per source, independent of output path.
 
@@ -483,7 +510,8 @@ def restore_storage(objects, source, target):
 class LocalPostgres:
     def __init__(self, bin_dir, work):
         self.bin = Path(bin_dir).resolve()
-        self.data = work / "postgres"
+        self.work = Path(work)
+        self.data = self.work / "postgres"
         # macOS Unix-domain sockets have a small path limit.
         self.socket = Path(tempfile.mkdtemp(prefix="edoc-pg-", dir="/tmp"))
         os.chmod(self.socket, 0o700)
@@ -499,11 +527,30 @@ class LocalPostgres:
         return self
 
     def __exit__(self, *exc):
-        try:
-            if (self.data / "postmaster.pid").exists():
+        if (self.data / "postmaster.pid").exists():
+            # initdb can be interrupted while its bootstrap server has already
+            # exited, leaving a stale PID file. A failed stop must not replace
+            # the original timeout unless the server is still live/unknown.
+            try:
                 checked_run([str(self.bin / "pg_ctl"), "-D", str(self.data), "-m", "immediate", "-w", "stop"], timeout=20, code="isolated_postgres_stop_failed")
-        finally:
-            shutil.rmtree(self.socket)
+            except BaseException:
+                try:
+                    status = subprocess.run([str(self.bin / "pg_ctl"), "-D", str(self.data), "status"],
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                    stopped = status.returncode == 3  # pg_ctl: no server running.
+                except BaseException:
+                    stopped = False
+                if not stopped:
+                    try:
+                        atomic_private_json(self.work / RETENTION_MARKER, {
+                            "schema_version": 1, "error_code": "isolated_postgres_stop_unconfirmed",
+                            "target_isolated": True, "private_scratch_retained": True,
+                        })
+                    except BaseException:
+                        pass  # The exception itself also prevents scratch cleanup.
+                    raise DrillError("isolated_postgres_stop_unconfirmed") from None
+        # Do not remove the only private socket while shutdown is unconfirmed.
+        shutil.rmtree(self.socket)
 
     def prepare(self, roles, extensions, dependencies=None):
         from psycopg import sql
@@ -588,8 +635,7 @@ def restore_existing_backup(args):
     output = private_directory(args.output_dir)
     key = load_key(args.encryption_key_file, require_existing=getattr(args, "require_existing_key", False))
     encrypted = Path(args.restore_backup).resolve()
-    with tempfile.TemporaryDirectory(prefix="edoc-restore-offline-") as temporary:
-        work = Path(temporary)
+    with PrivateScratch(output, prefix="edoc-restore-offline-") as work:
         decrypt_file(encrypted, work / "recovered.tar", key)
         recovered = work / "recovered"
         unpack_archive(work / "recovered.tar", recovered)
@@ -615,9 +661,7 @@ def run_drill(args):
         raise DrillError("source_project_link_mismatch")
     source_env = linked_source_environment(args.supabase_workdir)
     drill_id = "DRILL-" + time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(4)
-    with tempfile.TemporaryDirectory(prefix="edoc-restore-") as temporary:
-        work = Path(temporary)
-        os.chmod(work, 0o700)
+    with PrivateScratch(output, prefix="edoc-restore-") as work:
         bundle = work / "bundle"
         bundle.mkdir(mode=0o700)
         dump = bundle / "database.dump"

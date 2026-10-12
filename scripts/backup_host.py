@@ -119,6 +119,22 @@ def runtime_check(config):
     return sorted(set(codes))
 
 
+def schedule_check(config):
+    """Worst-case snapshot availability, not just the most recent fresh run.
+
+    The previous backup must cover the next interval plus a bounded operation
+    and shutdown margin. A once-an-hour job cannot satisfy a fifteen-minute
+    RPO even when one manual run just succeeded.
+    """
+    worst_case = config["intervalSeconds"] + config["timeoutSeconds"] + 30
+    target = config["rpoTargetMinutes"] * 60
+    return {
+        "scheduleCanMeetRpoTarget": worst_case <= target,
+        "maximumScheduledSnapshotAgeSeconds": worst_case,
+        "rpoTargetSeconds": target,
+    }
+
+
 def parse_time(value):
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -248,6 +264,7 @@ def health(config, *, now=None):
     """No writes, key reads, network or credential refresh on a health query."""
     checked_at = now or utc_now()
     result = {"schemaVersion": 1, "checkedAt": checked_at.isoformat(), "status": "missing", "lastSuccessPreserved": False, "maximumSnapshotAgeMinutes": config["maximumSnapshotAgeMinutes"], "rpoTargetMinutes": config["rpoTargetMinutes"], "snapshotWithinRpoTarget": False, "unattendedCloudDR": False, "offsiteValidation": "not_verified_by_host_runner", "errorCodes": []}
+    result.update(schedule_check(config))
     state = Path(config["stateDir"])
     try:
         success = json.loads(private_file(state / "last-success.json").read_bytes())
@@ -316,6 +333,10 @@ def health(config, *, now=None):
     except (KeyError, TypeError, ValueError, OSError, runner.DrillError):
         result["errorCodes"].append("host_backup_latest_attempt_invalid")
         result["status"] = "degraded" if result["status"] in {"healthy", "missing"} else result["status"]
+    if not result["scheduleCanMeetRpoTarget"]:
+        result["errorCodes"].append("host_backup_schedule_cannot_meet_rpo_target")
+        if result["status"] in {"healthy", "running", "missing"}:
+            result["status"] = "degraded"
     return result
 
 
@@ -323,6 +344,8 @@ def prepare_launch_agent(config):
     codes = runtime_check(config)
     if codes:
         raise runner.DrillError(codes[0])
+    if not schedule_check(config)["scheduleCanMeetRpoTarget"]:
+        raise runner.DrillError("host_backup_schedule_cannot_meet_rpo_target")
     pending = runner.private_directory(Path(config["stateDir"]) / "pending")
     logs = runner.private_directory(Path(config["stateDir"]) / "logs")
     # Intentionally outside ~/Library/LaunchAgents. No launchctl/load/bootstrap
@@ -346,7 +369,10 @@ def main():
         config = load_config(args.config)
         if args.mode == "check":
             codes = runtime_check(config)
-            result = {"ok": not codes, "errorCodes": codes, "writesPerformed": False, "credentialRefreshPerformed": False, "scheduleActivated": False}
+            schedule = schedule_check(config)
+            if not schedule["scheduleCanMeetRpoTarget"]:
+                codes.append("host_backup_schedule_cannot_meet_rpo_target")
+            result = {"ok": not codes, "errorCodes": codes, "writesPerformed": False, "credentialRefreshPerformed": False, "scheduleActivated": False, **schedule}
         elif args.mode == "status":
             result = health(config)
         elif args.mode == "prepare-launch-agent":

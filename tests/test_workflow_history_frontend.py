@@ -192,6 +192,7 @@ const task=loadOfficialDocumentDetail('A');session='logged-out';const newerPromi
     RECEIPT_SETUP = r'''
 let actor='owner',session='owner-session',allow=true,dialogs=0,toasts=[],posts=[],renders=0;
 const frontendSessionScope=()=>session,officialDocumentIsApplicant=item=>item.applicant_id===actor;
+const officialHandoverFeatureEnabled=()=>false;
 let selectedOfficialDocumentId='A',officialWorkflowItems=[{id:'A',applicant_id:'owner',can_confirm:true,current_step:'applicant_confirm',current_status:'stamped'}];
 const officialDocumentDetailReady=new Set(['A']),officialReceiptRequests=new Map();
 let ensureOfficialDocumentDetail=async(id)=>officialWorkflowItems.find(item=>item.id===id);

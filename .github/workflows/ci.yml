@@ -1,5 +1,9 @@
 name: eDoc CI
 
+# Validation never needs repository writes or deployment credentials.
+permissions:
+  contents: read
+
 on:
   pull_request:
   push:
@@ -19,7 +23,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install pinned Supabase CLI
         # setup-cli v3 installs the pinned CLI through npm and runs on the
@@ -38,12 +42,12 @@ jobs:
           sudo apt-get install --yes postgresql-client postgresql
 
       - name: Set up Python for isolated Storage acceptance
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
 
       - name: Set up Node for production TUS client acceptance
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "22"
           package-manager-cache: false
@@ -155,7 +159,9 @@ jobs:
               tests.test_official_receipt_confirmation_postgres \
               tests.test_official_listing_postgres \
               tests.test_official_dispatch_generation_postgres \
-              tests.test_editor_storage_v2_paths_postgres
+              tests.test_editor_storage_v2_paths_postgres \
+              tests.test_workflow_readiness_postgres \
+              tests.test_official_handover_postgres
 
           # Opt-in acceptance is executed, not counted from skipped tests.
           PGPASSWORD=postgres createdb --host 127.0.0.1 --port 54322 \
@@ -206,7 +212,7 @@ jobs:
 
       - name: Preserve isolated TUS acceptance evidence
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: local-supabase-tus-five-account-${{ github.run_id }}
           path: tests/.artifacts/five-account-acceptance/
@@ -215,7 +221,7 @@ jobs:
 
       - name: Preserve real Storage filename protocol evidence
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: local-supabase-filename-protocol-${{ github.run_id }}
           path: tests/.artifacts/editor-filename-protocol/
@@ -224,7 +230,7 @@ jobs:
 
       - name: Preserve real database and Storage upload pipeline evidence
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: local-supabase-upload-pipeline-${{ github.run_id }}
           path: tests/.artifacts/editor-upload-pipeline/
@@ -236,15 +242,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
 
       - name: Set up Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "24"
           package-manager-cache: false
@@ -256,7 +262,7 @@ jobs:
           python -m pip install --disable-pip-version-check pglast==7.14
 
       - name: Compile Python backend
-        run: python -m py_compile backend.py api/index.py compose_resilience.py editor_seam.py official_writing.py official_listing.py
+        run: python -m py_compile backend.py api/index.py compose_resilience.py editor_seam.py official_writing.py official_listing.py workflow_readiness.py official_handover.py official_handover_store.py official_handover_service.py official_handover_followup.py
 
       - name: Reject embedded private credentials without printing their values
         run: python tools/verify_no_embedded_credentials.py
@@ -264,9 +270,11 @@ jobs:
       - name: Check frontend JavaScript
         run: |
           node --check app.js
+          node --check official-handover-ui.js
           node --check editor-a4.js
           node --check editor-seam.js
           node --test tests/*.test.js
+          node tests/handover_feature_gate.js
 
       - name: Replay five-account acceptance with alternate seed
         env:
@@ -278,7 +286,7 @@ jobs:
 
       - name: Preserve deidentified five-account acceptance evidence
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: five-account-acceptance-${{ github.run_id }}
           path: tests/.artifacts/five-account-acceptance/

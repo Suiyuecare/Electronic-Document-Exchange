@@ -25,6 +25,7 @@ const scopedFunctions = [
   'handleUploadedEditorImportPdf', 'handleUploadedEditorImage', 'finishPendingEditorPdfFinalization',
   'runUploadedEditorPageAction',
   'transferPendingEditorPdf', 'cancelUploadedPdfTransfer',
+  'bindUploadedEditorLocalAsset', 'preparePendingEditorPdfIntent',
 ];
 const deferred = () => {
   let resolve, reject;
@@ -41,6 +42,7 @@ function harness() {
     uploading: false, locked: false, dirtyGeneration: 0, savedGeneration: 0,
     selectedIds: new Set(), pdfDocuments: new Map(), assetFiles: new Map(),
     pageProxies: new Map(), assetUrls: new Map(), imageUrls: new Map(),
+    undoStack: [], redoStack: [],
   };
   const context = {
     console, File, Blob, TextEncoder, Uint8Array, Map, Set, AbortController, crypto: require('node:crypto').webcrypto,
@@ -92,6 +94,7 @@ function harness() {
     addSealAudit: () => events.push(['audit']),
     rememberUploadedEditorSavedSealBindings: () => {},
     discardUploadedPdfPreparation: () => {},
+    recordUiPerformance: (...args) => events.push(['performance', ...args]),
     openUploadedPdfPicker() {},
     currentUploadedEditorPage: () => context.uploadedSealEditorState.pages[0],
     currentUploadedEditorPageIndex: () => context.uploadedSealEditorState.pages.findIndex(page => page.pageId === runtime.currentPageId),

@@ -16,6 +16,82 @@ SPEC.loader.exec_module(runner)
 
 
 class BackupRestoreRunnerTest(unittest.TestCase):
+    def test_uncertain_shutdown_preserves_entire_outer_scratch_and_marker(self):
+        import shutil
+        for status in (0, 4, subprocess.TimeoutExpired(["synthetic"], 20)):
+            with self.subTest(status=type(status).__name__ if isinstance(status, Exception) else status), tempfile.TemporaryDirectory() as directory:
+                scratch = runner.PrivateScratch(Path(directory).resolve(), prefix="synthetic-retained-")
+                response = mock.patch.object(runner.subprocess, "run", side_effect=status) if isinstance(status, Exception) else mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(returncode=status))
+                with self.assertRaisesRegex(runner.DrillError, "stop_unconfirmed"):
+                    with scratch as work:
+                        database = runner.LocalPostgres("/synthetic/pg", work)
+                        self.addCleanup(shutil.rmtree, database.socket, True)
+                        database.data.mkdir(); (database.data/"postmaster.pid").write_text("synthetic server state")
+                        with mock.patch.object(runner, "checked_run", side_effect=runner.DrillError("isolated_postgres_stop_failed")), response:
+                            database.__exit__()
+                self.assertTrue(scratch.retained)
+                self.assertTrue(database.data.exists())
+                self.assertTrue((database.data/"postmaster.pid").exists())
+                marker = work/runner.RETENTION_MARKER
+                self.assertEqual(0, marker.stat().st_mode & 0o077)
+                self.assertEqual("isolated_postgres_stop_unconfirmed", json.loads(marker.read_text())["error_code"])
+                self.assertTrue(database.socket.exists())
+
+    def test_failed_retention_marker_write_still_cannot_trigger_outer_cleanup(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = runner.PrivateScratch(Path(directory).resolve(), prefix="synthetic-marker-failure-")
+            with self.assertRaisesRegex(runner.DrillError, "stop_unconfirmed"):
+                with scratch as work:
+                    database = runner.LocalPostgres("/synthetic/pg", work)
+                    self.addCleanup(shutil.rmtree, database.socket, True)
+                    database.data.mkdir(); (database.data/"postmaster.pid").write_text("synthetic server state")
+                    with mock.patch.object(runner, "checked_run", side_effect=runner.DrillError("isolated_postgres_stop_failed")), \
+                            mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                            mock.patch.object(runner, "atomic_private_json", side_effect=OSError("synthetic write failure")):
+                        database.__exit__()
+            self.assertTrue(scratch.retained)
+            self.assertTrue(database.data.exists())
+
+    def test_confirmed_shutdown_allows_full_private_scratch_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = runner.PrivateScratch(Path(directory).resolve(), prefix="synthetic-cleanup-")
+            with scratch as work:
+                database = runner.LocalPostgres("/synthetic/pg", work)
+                database.data.mkdir(); (database.data/"postmaster.pid").write_text("synthetic stopped state")
+                with mock.patch.object(runner, "checked_run", side_effect=runner.DrillError("isolated_postgres_stop_failed")), \
+                        mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(returncode=3)):
+                    database.__exit__()
+            self.assertFalse(scratch.retained)
+            self.assertFalse(work.exists())
+            self.assertFalse(database.socket.exists())
+
+    def test_interrupted_initdb_stale_pid_preserves_timeout_after_confirmed_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = runner.LocalPostgres("/synthetic/pg", Path(directory))
+            database.data.mkdir()
+            (database.data / "postmaster.pid").write_text("synthetic stopped bootstrap")
+            with mock.patch.object(runner, "checked_run", side_effect=[runner.DrillError("backup_operation_timed_out"), runner.DrillError("isolated_postgres_stop_failed")]), \
+                    mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(returncode=3)) as status:
+                with self.assertRaisesRegex(runner.DrillError, "backup_operation_timed_out"):
+                    database.__enter__()
+            self.assertFalse(database.socket.exists())
+            self.assertEqual(status.call_args.args[0][-1], "status")
+
+    def test_unconfirmed_shutdown_cannot_remove_private_socket_or_claim_cleanup(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as directory:
+            database = runner.LocalPostgres("/synthetic/pg", Path(directory))
+            self.addCleanup(shutil.rmtree, database.socket, True)
+            database.data.mkdir()
+            (database.data / "postmaster.pid").write_text("synthetic uncertain server")
+            for code in (0, 4):
+                with self.subTest(status=code), mock.patch.object(runner, "checked_run", side_effect=runner.DrillError("isolated_postgres_stop_failed")), \
+                        mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(returncode=code)):
+                    with self.assertRaisesRegex(runner.DrillError, "stop_unconfirmed"):
+                        database.__exit__()
+                    self.assertTrue(database.socket.exists())
+
     def test_encrypted_archive_round_trip_and_tamper_rejection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -141,11 +217,13 @@ class ActualPostgresRestoreTest(unittest.TestCase):
     def test_timeout_stops_isolated_postgres_and_cleans_scratch(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            # Start the actual server before the two-second operation bound;
+            # otherwise a slow disk only tests initdb, not live server cleanup.
             with self.assertRaisesRegex(runner.DrillError, "backup_operation_timed_out"):
-                with runner.bounded_operation(2):
-                    with tempfile.TemporaryDirectory(dir=root) as private:
-                        with runner.LocalPostgres(os.environ["EDOC_TEST_PG_BIN"], Path(private)) as database:
-                            socket = database.socket
+                with tempfile.TemporaryDirectory(dir=root) as private:
+                    with runner.LocalPostgres(os.environ["EDOC_TEST_PG_BIN"], Path(private)) as database:
+                        socket = database.socket
+                        with runner.bounded_operation(2):
                             time.sleep(5)
             self.assertFalse(socket.exists())
             self.assertEqual(list(root.iterdir()), [])
