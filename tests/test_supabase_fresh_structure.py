@@ -588,6 +588,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "finance_organization_units",
             "official_document_rejection_jobs",
             "portal_handoff_nonces",
+            "company_seal_policies",
         }
         select_block = re.search(
             r"grant select on table\s+(.*?)\s+to service_role;",
@@ -601,6 +602,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             for table in backend_tables
             if f"grant select, insert, update on table public.{table}" in EDITOR_IMMUTABLE_PROMOTION.read_text(encoding="utf-8").lower()
         }
+        later_select.add("company_seal_policies")
         self.assertEqual(granted_select | later_select, backend_tables | extra_tables)
 
         matrix_smoke = SERVICE_ROLE_GRANT_SMOKE.read_text(encoding="utf-8").lower()
@@ -676,6 +678,10 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "edoc_list_official_document_candidates": "20260924154315_scoped_official_document_listing.sql",
             "edoc_list_inbound_candidates": "20261011140824_complete_workflow_readiness_queries.sql",
             "edoc_timeliness_candidates": "20261011140824_complete_workflow_readiness_queries.sql",
+            "edoc_set_company_seal_policy": "20261012114854_explicit_seal_owner_policy_and_continuous_geometry.sql",
+            "edoc_update_editor_application": "20261012115431_editor_application_final_snapshot.sql",
+            "edoc_save_editor_revision": "20261012115431_editor_application_final_snapshot.sql",
+            "edoc_commit_editor_preflight": "20261012115431_editor_application_final_snapshot.sql",
         }
         later_granted_rpc_names: set[str] = set()
         for rpc_name, migration_name in repair_rpcs.items():
@@ -702,12 +708,12 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                     r"grant execute on function public\.(edoc_[a-z0-9_]+)\([^;]*\)\s+to service_role;",
                     repair_sql,
                 ))
-        self.assertEqual(later_granted_rpc_names, set(repair_rpcs))
+        self.assertEqual(later_granted_rpc_names - {"edoc_company_seal_dimensions_are_valid", "edoc_create_company_seal_file_version", "edoc_set_current_company_seal_file", "edoc_commit_official_document_submission"}, set(repair_rpcs))
         self.assertEqual(
-            (granted_rpc_names - {"edoc_company_seal_dimensions_are_valid"}) | later_granted_rpc_names,
+            (granted_rpc_names | later_granted_rpc_names) - {"edoc_company_seal_dimensions_are_valid"},
             required_rpc_names,
         )
-        self.assertEqual(len(required_rpc_names), 32)
+        self.assertEqual(len(required_rpc_names), 36)
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
         fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
         self.assertIn("from information_schema.table_privileges", cutover)
@@ -773,6 +779,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "public.edoc_guard_official_number()",
             "public.edoc_guard_number_allocation()",
             "edoc_private.is_electronic_compose(public.official_documents)",
+            "edoc_private.assert_editor_application_scope(text,text,text,text,text)",
         }
         helper_block = smoke.split("-- these are exact invoker helpers", 1)[1].split(
             "if not pg_catalog.has_schema_privilege", 1

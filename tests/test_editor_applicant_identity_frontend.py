@@ -15,6 +15,7 @@ class EditorApplicantIdentityFrontendTest(unittest.TestCase):
         source = (ROOT / "app.js").read_text()
         names = ["uploadedSealApplicantDepartment", "renderUploadedSealDepartmentOptions", "renderUploadedSealCompanyOptions",
                  "uploadedSealDepartments", "uploadedSealApplicantSelectionBusy", "handleUploadedSealCompanyChange",
+                 "uploadedSealApplicationMetadataReadOnly", "uploadedSealApplicationCompanyReadOnly",
                  "uploadedSealApplicationPatch", "loadUploadedSealOptions",
                  "preferredFinanceDepartment", "editorDraftPayload", "uploadedSealCompanies",
                  "friendlyBackendErrorMessage"]
@@ -46,7 +47,7 @@ let uploadedSealMode = 'official_document';
 const PDF_EDITOR_SCHEMA_VERSION = 2, PDF_EDITOR_RENDERER_VERSION = 'test';
 const approvalSelectionForSelect = () => ({documentCategory:'合作意向書',approvalRouteCode:'A'});
 const uploadedSealEditorRuntime = {documentId:'',locked:false,companyChanging:false};
-const uploadedSealApplicationRuntime = {submissionBusy:false};
+const uploadedSealApplicationRuntime = {submissionBusy:false,metadataEditable:true,companyEditable:true,companyId:'TEST-CO'};
 const uploadedSealEditorState = {sourceFiles:[],pages:[],elements:[]};
 let calls=[],toasts=[],confirmResult=true,clears=0,flushFailure=null;
 const window={};const requestWorkspaceConfirmation=async()=>confirmResult;
@@ -60,6 +61,8 @@ const renderUploadedSealWorkbench=()=>{};
 const finishUploadedEditorTextEdit=()=>true; // No transient text edit in this identity fixture.
 const renderUploadedSealOptions=()=>{};
 const invalidateUploadedEditorSubmissionPreview=()=>{};
+const invalidateUploadedEditorApplicationReview=()=>{};
+const scheduleUploadedSealApplicationSave=()=>calls.push({operation:'queue',company:company.value});
 const refreshWorkflowReadinessForContext=async()=>{};
 const showToast=s=>toasts.push(s);
 let uploadedSealOptions=[],uploadedSealOptionsRequestNo=0;
@@ -184,37 +187,47 @@ await loadUploadedSealOptions('OTHER-CO');release([{id:'OLD-COMPANY-SEAL'}]);awa
 assert.deepEqual(uploadedSealOptions.map(s=>s.id),['NEW-COMPANY-SEAL']);
 ''')
 
-    def test_draft_department_stays_editable_but_submit_and_upload_lock_it(self):
+    def test_draft_metadata_stays_editable_during_upload_but_submission_locks_it(self):
         self.run_js('''
 uploadedSealEditorRuntime.documentId='OD-DRAFT';renderUploadedSealCompanyOptions();
 assert.equal(company.disabled,false);assert.equal(select.disabled,false);
 uploadedSealEditorRuntime.uploading=true;renderUploadedSealCompanyOptions();
-assert.equal(company.disabled,true);assert.equal(select.disabled,true);
+assert.equal(company.disabled,false);assert.equal(select.disabled,false);
 uploadedSealEditorRuntime.uploading=false;uploadedSealEditorRuntime.locked=true;renderUploadedSealCompanyOptions();
 assert.equal(company.disabled,true);assert.equal(select.disabled,true);
 ''')
 
-    def test_company_change_creates_blank_scope_after_preserving_old_draft(self):
+    def test_company_change_queues_same_pdf_scope_without_clearing_text_or_pages(self):
         self.run_js('''
 renderUploadedSealCompanyOptions();uploadedSealEditorRuntime.documentId='OLD';
 uploadedSealEditorState.pages=[{pageId:'old-page'}];
 company.value='OTHER-CO';await handleUploadedSealCompanyChange({currentTarget:company});
-assert.equal(calls[0].company,'TEST-CO');assert.equal(clears,1);
-assert.equal(uploadedSealEditorRuntime.documentId,'');assert.equal(company.value,'OTHER-CO');
+assert.equal(calls[0].operation,'queue');assert.equal(calls[0].company,'OTHER-CO');assert.equal(clears,0);
+assert.equal(uploadedSealEditorRuntime.documentId,'OLD');assert.equal(company.value,'OTHER-CO');
 assert.equal(select.value,'');assert.equal(fields['#uploadedSealReason'].value,'測試原因');
-assert.equal(uploadedSealEditorState.pages.length,0);assert.equal(uploadedSealEditorRuntime.companyChanging,false);
+assert.equal(uploadedSealEditorState.pages[0].pageId,'old-page');assert.equal(uploadedSealEditorRuntime.companyChanging,false);
 ''')
 
-    def test_cancel_or_failed_flush_preserves_original_company_and_pdf(self):
+    def test_cancel_keeps_original_and_catalogue_failure_never_destroys_pdf(self):
         self.run_js('''
 renderUploadedSealCompanyOptions();uploadedSealEditorRuntime.documentId='OLD';
 uploadedSealEditorState.pages=[{pageId:'old-page'}];
+uploadedSealEditorState.elements=[{id:'OLD-SEAL',kind:'seal'}];
 confirmResult=false;company.value='OTHER-CO';await handleUploadedSealCompanyChange({currentTarget:company});
 assert.equal(company.value,'TEST-CO');assert.equal(clears,0);assert.equal(calls.length,0);
-confirmResult=true;flushFailure=new Error('版本衝突');company.value='OTHER-CO';
+confirmResult=true;backendRequest=async()=>{throw new Error('版本衝突')};company.value='OTHER-CO';
 await handleUploadedSealCompanyChange({currentTarget:company});
-assert.equal(company.value,'TEST-CO');assert.equal(clears,0);assert.equal(uploadedSealEditorState.pages[0].pageId,'old-page');
+assert.equal(company.value,'OTHER-CO');assert.equal(clears,0);assert.equal(uploadedSealEditorRuntime.documentId,'OLD');assert.equal(uploadedSealEditorState.pages[0].pageId,'old-page');
 assert.match(toasts[0],/版本衝突/);assert.equal(uploadedSealEditorRuntime.companyChanging,false);
+''')
+
+    def test_correction_keeps_department_editable_but_company_history_immutable(self):
+        self.run_js('''
+uploadedSealEditorRuntime.documentId='RETURNED';uploadedSealApplicationRuntime.companyEditable=false;
+renderUploadedSealCompanyOptions();assert.equal(company.disabled,true);assert.equal(select.disabled,false);
+company.value='OTHER-CO';await handleUploadedSealCompanyChange({currentTarget:company});
+assert.equal(company.value,'TEST-CO');assert.equal(calls.length,0);
+uploadedSealApplicationRuntime.metadataEditable=false;renderUploadedSealCompanyOptions();assert.equal(select.disabled,true);
 ''')
 
     def test_department_errors_explain_identity_instead_of_generic_denial(self):

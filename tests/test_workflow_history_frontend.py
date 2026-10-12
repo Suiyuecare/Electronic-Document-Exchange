@@ -74,7 +74,7 @@ const defer=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve
 const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve()};
 const frontendSessionScope=()=>session,window={clearTimeout(){}};
 let uploadedSealMode='normal';
-const uploadedSealApplicationRuntime={epoch:1,submissionBusy:false,submissionOperation:null,submissionPreview:'valid',timer:0};
+const uploadedSealApplicationRuntime={epoch:1,submissionBusy:false,submissionOperation:null,submissionPreview:'valid',timer:0,contentRevision:7,queued:false};
 const uploadedSealEditorRuntime={documentId:'CASE-A',locked:false,revisionId:'REV',preparedFileId:'FILE',preparedSha256:'HASH',reviewMode:'prepared',preparedPdfDocument:{},dirtyGeneration:1,reviewGeneration:0};
 const uploadedSealEditorState={pages:[{pageId:'page1'}],elements:[{kind:'seal'}],manifestSha256:'MANIFEST',revisionNo:1};
 const fields={};const document={querySelector:s=>fields[s]||null};
@@ -85,6 +85,8 @@ let loadOfficialWorkflowReadiness=async()=>({ready:true});const workflowReadines
 const uploadedEditorSubmissionPreviewIsCurrent=()=>uploadedSealApplicationRuntime.submissionPreview==='valid';
 const uploadedEditorSubmissionFingerprint=()=>JSON.stringify({id:uploadedSealEditorRuntime.documentId,revision:uploadedSealEditorRuntime.revisionId});
 const invalidateUploadedEditorSubmissionPreview=()=>uploadedSealApplicationRuntime.submissionPreview=null;
+const uploadedSealApplicationHasUnsavedChanges=()=>false;
+const requestWorkspaceConfirmation=async()=>true,uploadedEditorSubmissionSummaryText=()=> 'Synthetic exact version';
 let syncUploadedSealApplicationDraft=async()=>{},preflightUploadedEditor=async()=>{},showUploadedEditorReview=async()=>{};
 let backendRequest=async(path,options)=>{calls.push(path);return {id:'CASE-A'}};
 let showSubmittedOfficialDocument=async(id)=>opened.push(id);
@@ -134,7 +136,8 @@ const task=submitUploadedSealApplication();await flush();assert.equal(stages.at(
 
     PREFLIGHT_SETUP = r'''
 let session='actor',calls=[],saveGate=null;const frontendSessionScope=()=>session;
-const uploadedSealApplicationRuntime={epoch:1};const uploadedSealEditorRuntime={documentId:'A',dirtyGeneration:1,revisionId:'R',preparedPdfDocument:null};const uploadedSealEditorState={pages:[{}],manifestSha256:'M'};
+const uploadedSealApplicationRuntime={epoch:1,contentRevision:7};const uploadedSealEditorRuntime={documentId:'A',dirtyGeneration:1,revisionId:'R',preparedPdfDocument:null};const uploadedSealEditorState={pages:[{}],manifestSha256:'M'};
+const uploadedSealApplicationKey=()=> 'Stable synthetic application';
 const document={querySelector:()=>null},finishUploadedEditorTextEdit=()=>true,ensureUploadedEditorPagesA4=()=>{};
 const defer=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve}};
 let saveUploadedEditorState=async()=>{},backendRequest=async(path)=>{calls.push(path);return {status:'prepared',preparedFileId:'P',preparedSha256:'H'}};

@@ -374,6 +374,7 @@ function uncertainUploadHarness() {
     backendRequest: async path => { calls.push(path); throw uncertain; }, hashBlob: async () => 'synthetic-sha',
     confirmUploadedPdfConversion: async () => ({ report: { valid: false }, sha256: 'synthetic-sha' }),
     saveUploadedEditorState: async () => {}, discardUploadedPdfPreparation() {},
+    uploadedSealApplicationHasUnsavedChanges: () => false,
     assertEditorUploadCurrent() {},
     renderUploadedSealWorkbench() {}, setUploadedPdfUploadProgress() {}, setUploadedPdfA4Status() {}, setUploadedEditorSaveStatus() {},
     showToast() {}, pdfA4UiErrorMessage: error => error.message,

@@ -31,7 +31,9 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
         self.session = self.fixture._session_for_user_id(self.fixture.applicant_ids[0])
         self.large = self.fixture.seal_id
         self.small = self._seal_id("establishment_seal", "small_seal")
-        self.bank = self._seal_id("bank_seal", "large_seal")
+        # Preserve the three-family/multiple-version fixture, but new frontline
+        # selection may not borrow bank seals as a company seal.
+        self.bank = self._seal_id("establishment_seal", "large_seal")
         self._upload(self.small, (0, 0, 190, 255))
         self._upload(self.bank, (180, 0, 180, 255))
 
@@ -146,6 +148,7 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
         stack.enter_context(mock.patch.object(backend, "supabase_filter_rows", side_effect=rows))
         stack.enter_context(mock.patch.object(backend, "supabase_get", side_effect=get))
         stack.enter_context(mock.patch.object(backend, "supabase_storage_download", side_effect=download))
+        stack.enter_context(mock.patch.object(backend, "supabase_seal_backing_exists", side_effect=backend.local_seal_backing_exists))
         return stack
 
     def _assert_rendered_placements(self, output, state):

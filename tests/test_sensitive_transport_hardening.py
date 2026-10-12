@@ -62,6 +62,7 @@ class SensitiveTransportHardeningTests(unittest.TestCase):
         "compose_content_revision_conflict",
         "editor_conflict_copy_request_conflict",
         "editor_locked_after_submit",
+        "editor_preflight_not_completed",
         "finance_member_sync_event_id_conflict",
         "finance_organization_revision_conflict",
         "editor_upload_new_intent_required",

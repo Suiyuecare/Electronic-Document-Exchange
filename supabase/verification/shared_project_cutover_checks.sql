@@ -1,6 +1,67 @@
 -- Read-only verification for the approved eDoc shared-project isolation mode.
 -- This file never reads HR row contents and performs no writes.
 
+do $editor_application_seal_policy_gate$
+declare
+  v_table regclass := pg_catalog.to_regclass('edoc.company_seal_policies');
+  v_proc record;
+  v_rpc text;
+  v_role text;
+begin
+  if v_table is null or not exists (
+    select 1 from pg_catalog.pg_class where oid=v_table and relrowsecurity
+      and pg_catalog.pg_get_userbyid(relowner)='postgres'
+  ) then raise exception 'editor_application_seal_policy_table_security_missing'; end if;
+  foreach v_role in array array['SELECT','INSERT','UPDATE'] loop
+    if not pg_catalog.has_table_privilege('edoc_backend',v_table,v_role) then
+      raise exception 'editor_application_seal_policy_table_grant_missing';
+    end if;
+  end loop;
+  if pg_catalog.has_table_privilege('edoc_backend',v_table,'DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'editor_application_seal_policy_table_extra_grant';
+  end if;
+  foreach v_role in array array['anon','authenticated','service_role','authenticator'] loop
+    if pg_catalog.has_table_privilege(v_role,v_table,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception 'editor_application_seal_policy_browser_table_grant';
+    end if;
+  end loop;
+  if exists(select 1 from pg_catalog.aclexplode(coalesce(
+      (select relacl from pg_catalog.pg_class where oid=v_table),
+      pg_catalog.acldefault('r','postgres'::regrole))) a where a.grantee=0) then
+    raise exception 'editor_application_seal_policy_public_table_grant';
+  end if;
+  foreach v_rpc in array array[
+    'edoc.edoc_set_company_seal_policy(text,text,text)',
+    'edoc.edoc_update_editor_application(jsonb)',
+    'edoc.edoc_save_editor_revision(jsonb)',
+    'edoc.edoc_commit_editor_preflight(jsonb)',
+    'edoc_private.assert_editor_application_scope(text,text,text,text,text)'
+  ] loop
+    select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_rpc);
+    if not found then raise exception 'editor_application_seal_policy_rpc_missing'; end if;
+    if v_proc.prosecdef or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+       or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+       or not pg_catalog.has_function_privilege('edoc_backend',v_proc.oid,'EXECUTE') then
+      raise exception 'editor_application_seal_policy_rpc_security_mismatch';
+    end if;
+    if v_rpc not like '%edoc_set_company_seal_policy(%'
+       and v_rpc not like '%assert_editor_application_scope(%'
+       and not coalesce(v_proc.proconfig @> array['lock_timeout=5s'],false) then
+      raise exception 'editor_application_rpc_lock_timeout_missing';
+    end if;
+    foreach v_role in array array['anon','authenticated','service_role','authenticator'] loop
+      if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+        raise exception 'editor_application_seal_policy_browser_rpc_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,
+        pg_catalog.acldefault('f',v_proc.proowner))) a where a.grantee=0 and a.privilege_type='EXECUTE') then
+      raise exception 'editor_application_seal_policy_public_rpc_grant';
+    end if;
+  end loop;
+end;
+$editor_application_seal_policy_gate$;
+
 do $compose_editor_resilience_gate$
 declare
   v_schema text := 'edoc';
@@ -214,7 +275,7 @@ checks(check_name, passed, observed) as (
       (select count(*) from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
-         and class_row.relkind in ('r','p','v','m')) = 96,
+         and class_row.relkind in ('r','p','v','m')) = 97,
       (select count(*)::text from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
@@ -222,7 +283,9 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 70
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 72
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261012114854_explicit_seal_owner_policy_and_continuous_geometry.sql')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261012115431_editor_application_final_snapshot.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133144_compose_resilience_drafts_revision.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133603_editor_conflict_copy_atomic.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260913055452_editor_applicant_selection_scope.sql')

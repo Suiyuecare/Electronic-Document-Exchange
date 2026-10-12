@@ -78,6 +78,7 @@ function harness() {
     applyEditorRevisionFromResponse: value => { events.push(['revision', value]); context.uploadedSealEditorState.revisionNo = value.editor_revision?.revisionNo || 3; },
     markUploadedEditorDirty: () => events.push(['dirty']),
     saveUploadedEditorState: async () => events.push(['save']),
+    uploadedSealApplicationHasUnsavedChanges: () => false,
     syncLegacyUploadedEditorCollections: () => events.push(['sync']),
     pushUploadedEditorHistory: () => events.push(['history']),
     clearUploadedEditorUploadError: () => events.push(['clearError']),

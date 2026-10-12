@@ -161,6 +161,8 @@ jobs:
               tests.test_official_dispatch_generation_postgres \
               tests.test_editor_storage_v2_paths_postgres \
               tests.test_workflow_readiness_postgres \
+              tests.test_explicit_seal_policy_postgres \
+              tests.test_editor_application_final_snapshot_postgres \
               tests.test_official_handover_postgres
 
           # Opt-in acceptance is executed, not counted from skipped tests.
@@ -262,7 +264,7 @@ jobs:
           python -m pip install --disable-pip-version-check pglast==7.14
 
       - name: Compile Python backend
-        run: python -m py_compile backend.py api/index.py compose_resilience.py editor_seam.py official_writing.py official_listing.py workflow_readiness.py official_handover.py official_handover_store.py official_handover_service.py official_handover_followup.py
+        run: python -m py_compile backend.py api/index.py compose_resilience.py editor_seam.py editor_application.py seal_policy.py official_writing.py official_listing.py workflow_readiness.py official_handover.py official_handover_store.py official_handover_service.py official_handover_followup.py
 
       - name: Reject embedded private credentials without printing their values
         run: python tools/verify_no_embedded_credentials.py

@@ -855,6 +855,26 @@ input[readonly].seal-dimension-locked {
   font-weight: 800;
 }
 
+.uploaded-editor-submission-summary {
+  width: 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+#workspaceTypedConfirmDescription {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.company-seal-policy {
+  align-items: end;
+  margin-bottom: 16px;
+}
+
 .pdf-editor-v2[data-editor-mode="general"] .advanced-only {
   display: none !important;
 }
@@ -11321,6 +11341,25 @@ textarea {
 
 .official-draft-preview .draft-seal-placeholder small {
   font-size: 1.38cqw;
+}
+
+/* The calibrated visual follows immutable physical dimensions. The owning
+   button keeps the shared 44px minimum hit target without stretching ink. */
+.official-draft-preview .draft-seal-placeholder.calibrated,
+.official-draft-preview .draft-seal-placeholder.calibrated:hover {
+  border: 0;
+  background: transparent;
+}
+
+.official-draft-preview .draft-seal-calibrated-mark {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-content: center;
+  border: 2px dashed rgba(185, 28, 28, 0.55);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
 }
 
 .official-draft-print-host {

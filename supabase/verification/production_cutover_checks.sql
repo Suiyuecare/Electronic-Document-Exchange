@@ -15,7 +15,7 @@ $postgres_version_check$;
 with required_tables(table_name) as (
   values
     ('audit_logs'), ('auth_sessions'), ('companies'), ('company_seal_files'),
-    ('company_seals'), ('file_download_tokens'), ('file_objects'),
+    ('company_seals'), ('company_seal_policies'), ('file_download_tokens'), ('file_objects'),
     ('finance_member_sync_nonces'), ('finance_member_sync_receipts'),
     ('inbound_document_attachments'), ('inbound_documents'),
     ('internal_dispatch_logs'), ('internal_dispatch_recipients'),
@@ -134,7 +134,7 @@ with backend_tables(table_name) as (
     'approval_step_actor_snapshots', 'attachment_security', 'attachments',
     'audit_logs', 'auth_sessions', 'background_jobs',
     'certificate_authorities', 'certificate_validation_events', 'companies',
-    'company_registry', 'company_seal_files', 'company_seals',
+    'company_registry', 'company_seal_files', 'company_seals', 'company_seal_policies',
     'compliance_attestations', 'contract_approvals', 'contract_parties',
     'contracts', 'department_registry', 'document_acl', 'document_acl_events',
     'documents', 'electronic_signatures', 'exchange_attachment',
@@ -170,7 +170,7 @@ with backend_tables(table_name) as (
   select unnest(array[
     'approval_step_actor_snapshots', 'audit_logs', 'auth_sessions',
     'certificate_validation_events', 'companies', 'company_registry',
-    'company_seals', 'compliance_attestations', 'documents', 'exchange_events',
+    'company_seals', 'company_seal_policies', 'compliance_attestations', 'documents', 'exchange_events',
     'exchange_inbox', 'exchange_log', 'exchange_outbox',
     'exchange_status_history', 'file_access_logs', 'file_objects',
     'inbound_document_attachments', 'inbound_documents',
@@ -193,7 +193,7 @@ with backend_tables(table_name) as (
   select unnest(array[
     'auth_sessions', 'background_jobs', 'companies', 'company_registry',
     'official_document_compose_drafts',
-    'company_seals', 'documents', 'exchange_inbox', 'exchange_outbox',
+    'company_seals', 'company_seal_policies', 'documents', 'exchange_inbox', 'exchange_outbox',
     'exchange_tasks', 'file_objects', 'inbound_documents',
     'internal_dispatch_recipients', 'internal_dispatches',
     'module_account_links', 'notification_channel_credentials',
@@ -296,6 +296,10 @@ with required_rpcs(signature) as (
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_list_inbound_candidates(jsonb)'),
     ('public.edoc_timeliness_candidates(jsonb)'),
+    ('public.edoc_set_company_seal_policy(text,text,text)'),
+    ('public.edoc_update_editor_application(jsonb)'),
+    ('public.edoc_save_editor_revision(jsonb)'),
+    ('public.edoc_commit_editor_preflight(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
 ), resolved as (
   select signature, pg_catalog.to_regprocedure(signature) as oid
@@ -348,6 +352,10 @@ with required_rpcs(signature) as (
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_list_inbound_candidates(jsonb)'),
     ('public.edoc_timeliness_candidates(jsonb)'),
+    ('public.edoc_set_company_seal_policy(text,text,text)'),
+    ('public.edoc_update_editor_application(jsonb)'),
+    ('public.edoc_save_editor_revision(jsonb)'),
+    ('public.edoc_commit_editor_preflight(jsonb)'),
     ('public.edoc_finalize_editor_asset_v2(jsonb)')
 ), resolved as (
   select signature, pg_catalog.to_regprocedure(signature) as oid
@@ -388,6 +396,10 @@ with allowed(signature) as (
     ('public.edoc_list_official_document_candidates(jsonb)'),
     ('public.edoc_list_inbound_candidates(jsonb)'),
     ('public.edoc_timeliness_candidates(jsonb)'),
+    ('public.edoc_set_company_seal_policy(text,text,text)'),
+    ('public.edoc_update_editor_application(jsonb)'),
+    ('public.edoc_save_editor_revision(jsonb)'),
+    ('public.edoc_commit_editor_preflight(jsonb)'),
     ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_complete_official_document_stamp(text,text,text,text)'),
     ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)'),
@@ -431,7 +443,8 @@ with compose_helpers(signature) as (
     ('public.edoc_record_official_number()'),
     ('public.edoc_guard_official_number()'),
     ('public.edoc_guard_number_allocation()'),
-    ('edoc_private.is_electronic_compose(public.official_documents)')
+    ('edoc_private.is_electronic_compose(public.official_documents)'),
+    ('edoc_private.assert_editor_application_scope(text,text,text,text,text)')
 ), resolved as (
   select signature, pg_catalog.to_regprocedure(signature) as oid from compose_helpers
 )

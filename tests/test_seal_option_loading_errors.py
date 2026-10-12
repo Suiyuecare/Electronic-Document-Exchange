@@ -17,7 +17,7 @@ function setup(kind){
  const c={Array,Promise,Error,scope:'actor-a:company-a',authenticated:true,requests:[],renders:[],toasts:[],
  officialSealOptions:[{id:'old'}],uploadedSealOptions:[{id:'old'}],uploadedSealOptionsRequestNo:0,
  financeDirectoryRefreshGeneration:0,departmentRegistry:[],resetRouteBackendData(){},renderFinanceDirectorySyncStatus(){},
- uploadedSealEditorRuntime:{sealOptionsLoading:false,documentId:'synthetic-doc',locked:false},uploadedSealEditorState:{},
+ uploadedSealEditorRuntime:{sealOptionsLoading:false,documentId:'synthetic-doc',locked:false},uploadedSealApplicationRuntime:{companyId:'A'},uploadedSealEditorState:{},
  nodes:{'#officialCompanySelect':{value:'A'},'#uploadedSealCompany':{value:'A',dataset:{},replaceChildren(){}}}};
  c.document={querySelector:s=>c.nodes[s]||null};c.frontendSessionScope=()=>c.scope;c.hasAuthenticatedBackendSession=()=>c.authenticated;
  c.renderOfficialSealOptions=()=>c.renders.push('official');c.renderUploadedSealOptions=()=>c.renders.push('uploaded');

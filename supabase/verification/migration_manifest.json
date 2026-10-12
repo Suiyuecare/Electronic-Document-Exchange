@@ -70,6 +70,8 @@
     "20260924155456_latest_generation_dispatch_owner.sql",
     "20260925044708_editor_pdf_uploads_skip_antivirus_preflight_required.sql",
     "20261006154028_terminal_official_decline.sql",
-    "20261011140824_complete_workflow_readiness_queries.sql"
+    "20261011140824_complete_workflow_readiness_queries.sql",
+    "20261012114854_explicit_seal_owner_policy_and_continuous_geometry.sql",
+    "20261012115431_editor_application_final_snapshot.sql"
   ]
 }

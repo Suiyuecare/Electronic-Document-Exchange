@@ -22,6 +22,7 @@ begin
       ('companies', 'SIU'),
       ('company_registry', 'SIU'),
       ('company_seal_files', 'S'),
+      ('company_seal_policies', 'SIU'),
       ('company_seals', 'SIU'),
       ('compliance_attestations', 'SI'),
       ('contract_approvals', 'S'),
@@ -159,7 +160,7 @@ begin
           ('audit_logs'), ('auth_sessions'), ('background_jobs'),
           ('certificate_authorities'), ('certificate_validation_events'),
           ('companies'), ('company_registry'), ('company_seal_files'),
-          ('company_seals'), ('compliance_attestations'), ('contract_approvals'),
+          ('company_seals'), ('company_seal_policies'), ('compliance_attestations'), ('contract_approvals'),
           ('contract_parties'), ('contracts'), ('department_registry'),
           ('document_acl'), ('document_acl_events'), ('documents'),
           ('electronic_signatures'), ('exchange_attachment'), ('exchange_events'),
@@ -264,6 +265,10 @@ begin
       ('public.edoc_list_official_document_candidates(jsonb)'),
       ('public.edoc_list_inbound_candidates(jsonb)'),
       ('public.edoc_timeliness_candidates(jsonb)'),
+      ('public.edoc_set_company_seal_policy(text,text,text)'),
+      ('public.edoc_update_editor_application(jsonb)'),
+      ('public.edoc_save_editor_revision(jsonb)'),
+      ('public.edoc_commit_editor_preflight(jsonb)'),
       ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),
       ('public.edoc_complete_official_document_stamp(text,text,text,text)'),
       ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)'),
@@ -328,6 +333,10 @@ begin
         ('public.edoc_list_official_document_candidates(jsonb)'),
         ('public.edoc_list_inbound_candidates(jsonb)'),
         ('public.edoc_timeliness_candidates(jsonb)'),
+        ('public.edoc_set_company_seal_policy(text,text,text)'),
+        ('public.edoc_update_editor_application(jsonb)'),
+        ('public.edoc_save_editor_revision(jsonb)'),
+        ('public.edoc_commit_editor_preflight(jsonb)'),
         ('public.edoc_complete_official_document_dispatch(text,text,text,text,text,text,text,text,text,text)'),
         ('public.edoc_complete_official_document_stamp(text,text,text,text)'),
         ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)'),
@@ -357,7 +366,7 @@ begin
   end if;
 
   -- These are exact invoker helpers, not new privileged RPC exceptions.
-  -- Keep owner, empty search path and browser denial explicit for all six.
+  -- Keep owner, empty search path and browser denial explicit for every helper.
   for v_signature in
     select signature from (values
       ('public.edoc_number_safe_metadata(text)'),
@@ -365,7 +374,8 @@ begin
       ('public.edoc_record_official_number()'),
       ('public.edoc_guard_official_number()'),
       ('public.edoc_guard_number_allocation()'),
-      ('edoc_private.is_electronic_compose(public.official_documents)')
+      ('edoc_private.is_electronic_compose(public.official_documents)'),
+      ('edoc_private.assert_editor_application_scope(text,text,text,text,text)')
     ) allowed(signature)
   loop
     v_oid := pg_catalog.to_regprocedure(v_signature);
@@ -404,7 +414,8 @@ begin
     and pg_catalog.has_function_privilege('service_role', procedure_row.oid, 'EXECUTE')
     and procedure_row.oid not in (
       'edoc_private.audit_log_hash_payload(text,text,text,text,text,text,text,text,text,text)'::pg_catalog.regprocedure,
-      'edoc_private.is_electronic_compose(public.official_documents)'::pg_catalog.regprocedure
+      'edoc_private.is_electronic_compose(public.official_documents)'::pg_catalog.regprocedure,
+      'edoc_private.assert_editor_application_scope(text,text,text,text,text)'::pg_catalog.regprocedure
     );
   if v_unexpected <> 0 then
     raise exception 'service_role_unexpected_private_function_grant:%', v_unexpected;

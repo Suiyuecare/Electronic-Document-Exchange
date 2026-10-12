@@ -21,7 +21,7 @@ class EditorSaveScopeTest(unittest.TestCase):
         ))
         harness = r'''
 const assert=require('node:assert/strict');
-let session='user-a:company-a',calls=[],statuses=[],conflicts=0,timers=new Map(),timerNo=0;
+let session='user-a:company-a',calls=[],statuses=[],submissionRenders=[],conflicts=0,timers=new Map(),timerNo=0;
 const frontendSessionScope=()=>session;
 const uploadedSealApplicationRuntime={epoch:0};
 const uploadedSealEditorRuntime={documentId:'DOC-A',locked:false,conflict:null,saving:false,savePromise:null,saveQueued:false,saveTimer:0,dirtyGeneration:1,savedGeneration:0,baseManifestSha256:'base-a'};
@@ -35,6 +35,7 @@ const syncLegacyUploadedEditorCollections=()=>{};
 const renderUploadedEditorSvgLayer=()=>{};
 const renderUploadedEditorProperties=()=>{};
 const renderUploadedSealWorkbench=()=>{};
+const renderUploadedEditorSubmissionActions=()=>submissionRenders.push({saving:uploadedSealEditorRuntime.saving,documentId:uploadedSealEditorRuntime.documentId});
 const setUploadedEditorSaveStatus=(...value)=>statuses.push(value);
 let calculateUploadedEditorManifest=async()=> 'hash-a';
 let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(options.body)});return {revisionNo:2,manifestSha256:'saved-a',state:{...uploadedSealEditorState,revisionNo:2}}};
@@ -59,6 +60,7 @@ await saveUploadedEditorState();
 assert.equal(calls.length,1);assert.equal(calls[0].path,'/official-documents/DOC-A/editor-state');
 assert.equal(uploadedSealEditorState.revisionNo,2);assert.equal(uploadedSealEditorRuntime.savedGeneration,1);
 assert.equal(uploadedSealEditorRuntime.saving,false);assert.equal(uploadedSealEditorRuntime.savePromise,null);
+assert.equal(submissionRenders.at(-1).saving,false,'submit controls must refresh after the save releases busy');
 ''')
 
     def test_late_success_cannot_replace_new_or_reopened_draft(self):

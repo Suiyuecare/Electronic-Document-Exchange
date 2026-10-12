@@ -1253,6 +1253,10 @@
                         <option value="無" selected>無</option>
                     </select>
                     </label>
+                    <label id="composeContinuousSealField" hidden>
+                      連續章（選填）
+                      <select id="continuousSealType"><option value="無" selected>無</option></select>
+                    </label>
                   </div>
                   <div class="compose-seal-availability" id="composeSealAvailabilityNotice" role="status" aria-live="polite" hidden>
                     <span id="composeSealAvailabilityHint"></span>
@@ -1624,7 +1628,7 @@
                     </label>
                   </div>
                   <label>部門<select id="uploadedSealDepartment" required></select></label>
-                  <label>用印公司<select id="uploadedSealCompany" required></select></label>
+                  <label>用印公司<select id="uploadedSealCompany" required aria-describedby="uploadedSealCompanyLockHint"></select><span class="field-hint" id="uploadedSealCompanyLockHint" hidden></span></label>
                   <label class="electronic-seal-application-wide">申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
                   <label class="electronic-seal-application-wide">用印原因<textarea class="resize-none" id="uploadedSealReason" rows="3" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
                 </div>
@@ -1720,7 +1724,7 @@
                 <div class="uploaded-seal-picker" id="uploadedSealPicker" role="group" aria-label="選擇用印款式與大小章">
                   <div class="uploaded-seal-picker-company"><span>用印公司：<strong id="uploadedSealPickerCompany"></strong></span><button class="text-button" id="uploadedSealCompanyFocusBtn" type="button">變更公司</button></div>
                   <label>用印款式<select id="uploadedSealCategorySelect" aria-describedby="uploadedSealPickerStatus"></select></label>
-                  <label>大小章<select id="uploadedSealSizeSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
+                  <label id="uploadedSealSizeLabel">大小章<select id="uploadedSealSizeSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
                   <label id="uploadedSealRecordLabel" hidden>印章名稱<select id="uploadedSealSealSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
                   <p id="uploadedSealPickerStatus" role="status" aria-live="polite"></p>
                 </div>
@@ -1880,6 +1884,7 @@
 
               <div class="uploaded-workspace-actions pdf-editor-footer-actions">
                 <span id="uploadedEditorPreflightStatus" class="pdf-editor-preflight-status">尚未產生送簽確認版</span>
+                <p id="uploadedEditorSubmissionSummary" class="uploaded-editor-submission-summary" hidden></p>
                 <div class="pdf-editor-submit-actions">
                   <button class="text-button" id="clearUploadedStampsBtn" type="button">清除全部編輯</button>
                   <button class="primary-button" id="submitUploadedSealBtn" type="button">確認編輯並送出簽核</button>
@@ -1967,12 +1972,16 @@
                   <label>印章類型
                     <select id="simpleSealCategorySelect" required></select>
                   </label>
-                  <label>大小章
+                  <label id="simpleSealSizeLabel">大小章
                     <select id="simpleSealSizeSelect" required></select>
                   </label>
-                  <label>印章實際尺寸（mm）
+                  <label>實際寬度（mm）
                     <input id="simpleSealRenderSizeMmInput" type="number" min="25" max="35" step="0.01" value="30.00" inputmode="decimal" aria-describedby="simpleSealCalibrationHint" required />
                     <small>請直接輸入實際量測邊長；系統會自動套用為相同寬、高。</small>
+                  </label>
+                  <label id="simpleSealRenderHeightLabel" hidden>實際高度（mm）
+                    <input id="simpleSealRenderHeightMmInput" type="number" min="1" max="200" step="0.01" inputmode="decimal" aria-describedby="simpleSealCalibrationHint" />
+                    <small>依實際量測填寫，圖檔必須符合此寬高比例。</small>
                   </label>
                   <label>顯示名稱
                     <input id="simpleSealNameInput" value="公司章" maxlength="100" required />
@@ -1987,8 +1996,8 @@
                   <div class="segmented-control" role="group" aria-label="常用印章類型">
                     <button class="segment active" type="button" data-simple-seal-category="establishment_seal">公司章</button>
                     <button class="segment" type="button" data-simple-seal-category="general_seal">便章</button>
-                    <button class="segment" type="button" data-simple-seal-category="official_seal">關防印</button>
-                    <button class="segment" type="button" data-simple-seal-category="bank_seal">銀行印鑑章</button>
+                    <button class="segment" type="button" data-simple-seal-category="official_seal">圖記章</button>
+                    <button class="segment" type="button" data-simple-seal-category="continuous_seal">連續章</button>
                   </div>
                 </fieldset>
                 <label class="simple-seal-file-field">印章圖檔
@@ -2032,6 +2041,13 @@
                 <button class="secondary-button" id="companySealReloadBtn" type="button">重新整理</button>
               </div>
             </div>
+            <form class="compact-form company-seal-policy" id="companySealPolicyForm" novalidate>
+              <label>印章分類<select id="companySealOwnerKind" required aria-describedby="companySealPolicyStatus">
+                <option value="unclassified">尚未分類</option><option value="company">公司</option><option value="institution">機構</option>
+              </select></label>
+              <button class="secondary-button" id="companySealPolicySaveBtn" type="submit">儲存分類</button>
+              <span class="field-hint" id="companySealPolicyStatus" role="status">只設定印章款式，不變更會計系統資料。</span>
+            </form>
             <section class="company-seal-readiness" id="companySealReadinessPanel">
               <div>
                 <p class="eyebrow">印章檔案完整性</p>
@@ -2082,19 +2098,21 @@
                 <div class="segmented-control" role="group" aria-label="常用印章類型">
                   <button class="segment" type="button" data-company-seal-preset="establishment_seal">公司章</button>
                   <button class="segment" type="button" data-company-seal-preset="general_seal">便章</button>
-                  <button class="segment" type="button" data-company-seal-preset="bank_seal">銀行印鑑章</button>
+                  <button class="segment" type="button" data-company-seal-preset="official_seal">圖記章</button>
+                  <button class="segment" type="button" data-company-seal-preset="continuous_seal">連續章</button>
                 </div>
                 <form class="compact-form" id="companySealCreateForm" novalidate>
                   <label>印章名稱<input id="companySealNameInput" value="公司便章－大章" /></label>
                   <label>印章類型<select id="companySealCategorySelect"></select></label>
-                  <label>大章/小章<select id="companySealSizeSelect"></select></label>
+                  <label id="companySealSizeLabel">大章/小章<select id="companySealSizeSelect"></select></label>
                   <label>用途說明<input id="companySealPurposeInput" value="一般公文、合約與行政文件用印" /></label>
                   <button class="secondary-button" id="companySealCreateBtn" type="button">新增印章</button>
                 </form>
                 <form class="compact-form" id="companySealUploadForm" novalidate>
                   <label>新版印章檔<input id="companySealFileInput" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" /><span class="field-hint">僅接受 PNG、JPEG、WebP，單檔上限 3 MB。</span></label>
                   <div class="inline-fields seal-calibration-fields">
-                    <label>印章實際尺寸（mm）<input id="companySealRenderSizeMmInput" type="number" min="25" max="35" step="0.01" value="30.00" inputmode="decimal" aria-describedby="companySealCalibrationHint" required /><span class="field-hint">請直接輸入實際量測邊長；寬、高會自動同步。</span></label>
+                    <label>實際寬度（mm）<input id="companySealRenderSizeMmInput" type="number" min="25" max="35" step="0.01" value="30.00" inputmode="decimal" aria-describedby="companySealCalibrationHint" required /><span class="field-hint">依實際量測填寫。</span></label>
+                    <label id="companySealRenderHeightLabel" hidden>實際高度（mm）<input id="companySealRenderHeightMmInput" type="number" min="1" max="200" step="0.01" inputmode="decimal" aria-describedby="companySealCalibrationHint" /><span class="field-hint">圖檔必須符合此寬高比例。</span></label>
                   </div>
                   <p class="field-hint seal-calibration-hint" id="companySealCalibrationHint">大章可直接輸入 25–35 mm；系統會鎖定為正方形，不會讓印章變形。</p>
                   <button class="primary-button" id="companySealUploadBtn" type="button">上傳新版</button>

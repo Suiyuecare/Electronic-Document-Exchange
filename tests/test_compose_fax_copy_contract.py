@@ -154,7 +154,7 @@ const composeAutosaveIdentity=()=>"u:c";
 let composeAutosaveRestoredForIdentity="";
 const refreshComposeCloudDrafts=()=>{};
 const renderApprovalCategorySelect=()=>{};
-const composeSealPlacements={large:{page:1,x:0,y:0},small:{page:1,x:0,y:0}};
+const composeSealPlacements={large:{page:1,x:0,y:0},small:{page:1,x:0,y:0},single:{page:1,x:58,y:80}};
 const clampComposePlacement=(value,fallback)=>fallback;
 const dispatchDocs=[];
 let currentComposeDraftId="",composeDraftRequestId="",composeCloudDraftId="",composeOfficialContentRevision=null;

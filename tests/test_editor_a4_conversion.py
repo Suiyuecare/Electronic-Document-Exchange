@@ -152,6 +152,7 @@ class EditorA4LocalFlowTests(unittest.TestCase):
         backend.ensure_allowed_edoc_users(self.conn)
         backend.seed_persistent_registries(self.conn)
         backend.seed_company_seal_module(self.conn)
+        self.conn.execute("INSERT OR REPLACE INTO company_seal_policies (id,company_id,owner_kind,updated_by,created_at,updated_at) SELECT id,id,'company','synthetic-fixture',?,? FROM companies", (backend.now(), backend.now()))
         self.conn.execute("UPDATE users SET company_id = 'CO-001'")
         user = self.conn.execute("SELECT * FROM users WHERE id = 'USR-008'").fetchone()
         self.session = {"user": backend.public_user(user), "permissions": backend.role_permission_codes(self.conn, user["role"])}
@@ -221,14 +222,15 @@ class EditorA4LocalFlowTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(backend, "_supabase_editor_assert_document_access", return_value=self.session["user"]))
             stack.enter_context(mock.patch.object(backend, "_supabase_editor_latest_revision", return_value=latest))
             stack.enter_context(mock.patch.object(backend, "validate_supabase_editor_seal_placements"))
-            insert = stack.enter_context(mock.patch.object(backend, "_supabase_insert_editor_revision", return_value=latest))
+            insert = stack.enter_context(mock.patch.object(backend, "_supabase_commit_editor_revision", return_value=latest))
             stack.enter_context(mock.patch.object(backend, "supabase_insert_official_log"))
             state = copy.deepcopy(converted["editor_state"])
             state["sourceFiles"][1].pop("a4Conversion")
             backend.supabase_save_official_editor_state(self.draft["id"], {
                 "revisionNo": latest["revision_no"], "baseManifestSha256": latest["manifest_sha256"], "state": state,
             }, self.session)
-            self.assertEqual(insert.call_args.args[1]["sourceFiles"][1]["a4Conversion"], converted["asset"]["a4Conversion"])
+            self.assertEqual(insert.call_args.args[2]["sourceFiles"][1]["a4Conversion"], converted["asset"]["a4Conversion"])
+            self.assertEqual(insert.call_args.args[4], backend.official_document_row(self.conn, self.draft["id"])["content_revision"])
             valid_hash = backend._supabase_editor_source_bundle_sha256(self.draft["id"], converted["editor_state"])
             self.assertEqual(valid_hash, backend._editor_source_bundle_sha256(self.conn, self.draft["id"], converted["editor_state"]))
             state["sourceFiles"].pop(0)

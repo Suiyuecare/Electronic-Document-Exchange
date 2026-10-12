@@ -22,6 +22,8 @@ function pointerRaceHarness() {
   h.state.elements = [{ id: 'seal', kind: 'seal', pageId: 'p1', x: 100, y: 100, width: 80, height: 80, properties: {} }];
   h.runtime.selectedIds.add('seal');
   Object.assign(h.c, {
+    uploadedSealApplicationRuntime: { promise: null, contentRevision: 0 },
+    renderUploadedEditorSubmissionActions() {},
     performance, PDF_EDITOR_SCHEMA_VERSION: 2,
     editorElementById: id => h.c.uploadedSealEditorState.elements.find(element => element.id === id),
     uploadedEditorClientPoint: (x, y) => ({ x, y }),

@@ -66,6 +66,10 @@ branding or a promise of zero network latency.
 | PDF transport | `performTusUpload` | Real byte progress, external cancellation, bounded chunk/HEAD requests. Same intent retries reuse the existing TUS resource and authoritative remote offset; immutable object storage is retained. |
 | Local A4 editing | `handleUploadedSealPdfChange` | Validated local A4 opens before transfer. No persistent sensitive local draft is introduced. Unsynced edits remain in memory; save/submit stays gated until finalization and state save succeed. |
 | Upload preparation | Local provisional asset and server intent promise | After validating the current application context, local A4 rendering and server draft/intent preparation run concurrently. Server failure leaves local work recoverable but unsaved; only a matching session/company/application/generation may replace the provisional asset. |
+| Uploaded application editing | Editor metadata capabilities and revision CAS | Uploading a PDF is not submission. Title, reason, department and document category remain editable while draft/correction authorization permits; company is editable only for a never-submitted, unnumbered uploaded-PDF V2 draft. During transfer, queue the latest IME-committed inputs without changing the original upload intent. Synchronize them before preflight/submission. Company changes preserve the PDF and non-seal edits, remove foreign-company stamps and complete seam groups, and require a fresh review. |
+| Final submitted snapshot | Document-locked metadata, editor-save, preflight and submission transactions | Compare application content revision, latest editor revision/manifest and prepared-file witness under the same document lock. A change after preparation or a concurrent save yields a conflict, not a stale approval or stamped file. Workflow actors and immutable seal file versions are selected from the final server-confirmed snapshot. Already-submitted history cannot be reassigned to a different company. |
+| Stamp taxonomy and availability | Server company-seal policy and immutable Seal Vault files | Company: 公司章大/小、便章大/小、連續章. Institution: 圖記章大/小、便章大/小、連續章. Existing category IDs remain historical identifiers. Missing, inactive, invalid-calibration, unmatched or absent backing files are not selectable. Owner kind is explicit manager metadata, never inferred from a company name; unclassified is not a fabricated physical-inventory conclusion. |
+| Physical seal size | Immutable file calibration | Existing company/便章 square policies remain. New rectangular 圖記章 and single 連續章 require explicit measured width and height from the custodian; no invented physical size. Geometry and category-policy pairing are checked server-side. Historical locked versions remain replayable independently of the current pointer. |
 | Cancel / recovery | Upload controller and pending intent | Abort only owned transfer. Keep text and PDF in this page. Explicit retry synchronizes the same intent. Do not cancel an uncertain server finalization. |
 | Preview library | `ensurePdfJsLibrary` | Failed promise is not cached permanently; bounded retry can recover without reloading the whole app. Concurrent requests share one load. |
 | Reopen existing case | `loadUploadedEditorState` | Old case remains active until all required authorized sources validate. Detail and state reads must match the exact locked revision. Two-file bounded concurrency; visible source first. |
@@ -90,6 +94,14 @@ branding or a promise of zero network latency.
    exact locked/final version checks are mandatory.
 8. Six synthetic roles on desktop/tablet/mobile retain usable actions, no
    horizontal overflow, cross-company denial and conflict protection.
+9. Editing application fields before/during/after upload preserves the same
+   PDF draft and applies only the latest values; company changes cannot reuse
+   foreign stamps, prior seam groups or stale prepared output.
+10. Concurrent metadata/save/preflight/submit operations have one serial
+    authoritative order. Stale content/editor versions cannot create workflow
+    rows or output from a superseded snapshot.
+11. Stamp choices come only from available files for the selected owner/type;
+    an absent original is distinct from an unregistered digital current file.
 
 Local synthetic browser tests do not establish physical iOS Safari acceptance
 or authenticated production-business workflow proof. Production checks are

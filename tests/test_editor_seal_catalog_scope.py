@@ -28,7 +28,7 @@ class EditorSealCatalogScopeTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(backend, "launch_company_in_scope", return_value=True))
         self.stack.enter_context(mock.patch.object(backend, "supabase_official_company_row", side_effect=lambda _: self.company))
         self.stack.enter_context(mock.patch.object(backend, "supabase_official_session_user", return_value=self.user))
-        self.stack.enter_context(mock.patch.object(backend, "supabase_company_seal_row", side_effect=lambda _: copy.deepcopy(self.seal)))
+        self.stack.enter_context(mock.patch.object(backend, "supabase_company_seal_row", side_effect=lambda _, **kwargs: copy.deepcopy(self.seal)))
         self.stack.enter_context(mock.patch.object(backend, "supabase_filter_rows", return_value=[{"id": "SEAL-2"}]))
 
     def test_same_tenant_applicant_picker_has_only_safe_metadata(self):

@@ -1,5 +1,6 @@
 """Synthetic-only prepared-file locking and application CAS regressions."""
 import copy
+import json
 import unittest
 from contextlib import ExitStack
 from unittest import mock
@@ -94,6 +95,25 @@ class EditorRevisionRaceTest(unittest.TestCase):
         document_id, _, second = self.prepared_twice()
         for result in (backend.get_official_editor_state(self.conn, document_id, self.session), self.remote_state(document_id)):
             self.assertEqual(result["preparedFileId"], second["preparedFileId"])
+            self.assertEqual(result["preparedSha256"], second["preparedSha256"])
+            self.assertEqual(result["preparedUrl"], backend.official_editor_file_authorized_url(document_id, second["preparedFileId"]))
+
+    def test_draft_prepared_preview_requires_exact_application_witness_in_both_adapters(self):
+        document_id, _, second = self.prepared_twice()
+        row = self.conn.execute("SELECT * FROM official_document_editor_assets WHERE official_file_id=?", (second["preparedFileId"],)).fetchone()
+        metadata = backend.parse_json_field(row["metadata_json"])
+        document = backend.official_document_row(self.conn, document_id)
+        self.assertEqual(metadata["application_content_revision"], document["content_revision"])
+        self.assertEqual(metadata["application_company_id"], document["company_id"])
+        self.assertEqual(metadata["application_snapshot"], backend.editor_application.application_snapshot(document))
+        for field, value in (("application_content_revision", True), ("application_content_revision", document["content_revision"] + 1), ("application_company_id", "OTHER-COMPANY"), ("application_snapshot", {})):
+            with self.subTest(field=field, value=value):
+                changed = {**metadata, field: value}
+                self.conn.execute("UPDATE official_document_editor_assets SET metadata_json=? WHERE id=?", (json.dumps(changed), row["id"]))
+                for result in (backend.get_official_editor_state(self.conn, document_id, self.session), self.remote_state(document_id)):
+                    self.assertNotIn("preparedFileId", result)
+                    self.assertNotIn("preparedUrl", result)
+                self.conn.execute("UPDATE official_document_editor_assets SET metadata_json=? WHERE id=?", (row["metadata_json"], row["id"]))
 
     def test_locked_prepared_asset_must_match_submission_revision_hash_and_object(self):
         document_id, first, _, _ = self.submit_first()
