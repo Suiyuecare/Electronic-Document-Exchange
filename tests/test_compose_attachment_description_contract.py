@@ -145,7 +145,7 @@ class ComposeAttachmentDescriptionContractTest(unittest.TestCase):
         self.assertIn("draftAttachmentText(doc)", fallback)
 
     def test_description_remains_editable_and_explains_file_separation(self) -> None:
-        field = re.search(r'<textarea id="attachmentDetails"([^>]*)>', self.html)
+        field = re.search(r'<textarea\b(?=[^>]*\bid="attachmentDetails")([^>]*)>', self.html)
         self.assertIsNotNone(field)
         self.assertNotRegex(field.group(1), r"\b(readonly|disabled)\b")
         self.assertIn('maxlength="5000"', field.group(1))
