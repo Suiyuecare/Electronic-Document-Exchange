@@ -12,6 +12,7 @@ begin
   for v_row in
     select * from (values
       ('approval_step_actor_snapshots', 'SI'),
+      ('approved_original_scan_import_batches', 'S'),
       ('attachment_security', 'S'),
       ('attachments', 'S'),
       ('audit_logs', 'SI'),
@@ -156,7 +157,7 @@ begin
       and not exists (
         select 1
         from (values
-          ('approval_step_actor_snapshots'), ('attachment_security'), ('attachments'),
+          ('approval_step_actor_snapshots'), ('approved_original_scan_import_batches'), ('attachment_security'), ('attachments'),
           ('audit_logs'), ('auth_sessions'), ('background_jobs'),
           ('certificate_authorities'), ('certificate_validation_events'),
           ('companies'), ('company_registry'), ('company_seal_files'),
@@ -266,6 +267,7 @@ begin
       ('public.edoc_list_inbound_candidates(jsonb)'),
       ('public.edoc_timeliness_candidates(jsonb)'),
       ('public.edoc_set_company_seal_policy(text,text,text)'),
+      ('public.edoc_import_approved_original_scan_file(text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text)'),
       ('public.edoc_update_editor_application(jsonb)'),
       ('public.edoc_save_editor_revision(jsonb)'),
       ('public.edoc_commit_editor_preflight(jsonb)'),
@@ -286,6 +288,8 @@ begin
       ('public.edoc_revoke_official_workflow_delegation(text,text)'),
       ('public.edoc_set_current_company_seal_file(text,text,text,text)'),
       ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)'),
+      ('public.edoc_approved_original_scan_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)'),
+      ('public.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)'),
       ('public.edoc_number_safe_metadata(text)'),
       ('public.edoc_allocate_official_number()'),
       ('public.edoc_record_official_number()'),
@@ -334,6 +338,7 @@ begin
         ('public.edoc_list_inbound_candidates(jsonb)'),
         ('public.edoc_timeliness_candidates(jsonb)'),
         ('public.edoc_set_company_seal_policy(text,text,text)'),
+        ('public.edoc_import_approved_original_scan_file(text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text)'),
         ('public.edoc_update_editor_application(jsonb)'),
         ('public.edoc_save_editor_revision(jsonb)'),
         ('public.edoc_commit_editor_preflight(jsonb)'),
@@ -354,6 +359,8 @@ begin
         ('public.edoc_revoke_official_workflow_delegation(text,text)'),
         ('public.edoc_set_current_company_seal_file(text,text,text,text)'),
         ('public.edoc_company_seal_dimensions_are_valid(text,integer,integer,numeric,numeric,numeric,text,boolean)'),
+        ('public.edoc_approved_original_scan_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)'),
+        ('public.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)'),
         ('public.edoc_number_safe_metadata(text)'),
         ('public.edoc_allocate_official_number()'),
         ('public.edoc_record_official_number()'),

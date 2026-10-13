@@ -3,8 +3,13 @@
   "use strict";
   const ptPerMm = 72 / 25.4;
   const groupId = (element) => element?.kind === "seal" ? element.properties?.seamGroupId || "" : "";
+  const mode = (element) => element?.properties?.seamMode || "pair";
+  const edge = (element) => mode(element) === "grouped" ? element.properties?.seamEdge || "right" : "pair";
+  const partCount = (element) => mode(element) === "grouped" ? Number(element.properties?.seamPartCount) : 2;
   const rotation = (page) => ((Number(page.rotation || 0) % 360) + 360) % 360;
   const displayHeight = (page) => rotation(page) % 180 ? page.widthPt : page.heightPt;
+  const displayWidth = (page) => rotation(page) % 180 ? page.heightPt : page.widthPt;
+  const displaySize = (page, item) => rotation(page) % 180 ? { width: item.height, height: item.width } : { width: item.width, height: item.height };
   function initialTopMm(availableHeightPt, index, count) {
     // Deterministic staggering keeps batch placement reproducible and away from corners.
     const ratio = count > 1 ? 0.2 + 0.6 * index / (count - 1) : 0.5;
@@ -18,6 +23,29 @@
       default: return page.heightPt - item.y - item.height;
     }
   }
+  function leftPt(page, item) {
+    switch (rotation(page)) {
+      case 90: return item.y;
+      case 180: return page.widthPt - item.x - item.width;
+      case 270: return page.heightPt - item.y - item.height;
+      default: return item.x;
+    }
+  }
+  function offsetPt(page, item) {
+    return ["top", "bottom"].includes(edge(item)) ? leftPt(page, item) : topPt(page, item);
+  }
+  function partitionPages(numbers, maxCount = 5) {
+    if (!Number.isInteger(maxCount) || maxCount < 1 || maxCount > 5) return [];
+    const values = [...new Set(numbers)].sort((a, b) => a - b);
+    if (values.some((value) => !Number.isInteger(value) || value < 1)) return [];
+    const result = [];
+    for (const number of values) {
+      const last = result[result.length - 1];
+      if (!last || last.length === maxCount || number !== last[last.length - 1] + 1) result.push([number]);
+      else last.push(number);
+    }
+    return result;
+  }
   function groups(state) {
     const result = new Map();
     for (const element of state.elements || []) {
@@ -28,41 +56,85 @@
   }
   function invalidatedGroups(state) {
     return [...groups(state)].filter(([, members]) => {
-      const left = members.find(item => item.properties.seamPartIndex === 0);
-      const right = members.find(item => item.properties.seamPartIndex === 1);
-      const leftIndex = state.pages.findIndex(page => page.pageId === left?.pageId);
-      const rightIndex = state.pages.findIndex(page => page.pageId === right?.pageId);
-      return leftIndex < 0 || rightIndex !== leftIndex + 1;
+      const count = partCount(members[0]);
+      const groupMode = mode(members[0]);
+      const groupEdge = edge(members[0]);
+      const ordered = [...members].sort((a, b) => Number(a.properties.seamPartIndex) - Number(b.properties.seamPartIndex));
+      if (!Number.isInteger(count) || count < 1 || count > 5 || members.length !== count
+        || !["pair", "grouped"].includes(groupMode)
+        || (groupMode === "pair" && count !== 2)
+        || (groupMode === "grouped" && !["left", "right", "top", "bottom"].includes(groupEdge))) return true;
+      const indexes = ordered.map(item => state.pages.findIndex(page => page.pageId === item.pageId));
+      return indexes[0] < 0 || ordered.some((item, index) => item.properties.seamPartIndex !== index
+        || mode(item) !== groupMode || partCount(item) !== count || edge(item) !== groupEdge
+        || indexes[index] !== indexes[0] + index);
     }).map(([id]) => id);
   }
-  function position(state, id, topMm) {
+  function offsetLimitPt(state, id, requestedEdge = null) {
     const members = groups(state).get(id) || [];
-    if (members.length !== 2) return false;
+    if (!members.length) return 0;
+    const selectedEdge = requestedEdge || edge(members[0]);
+    const pages = members.map((item) => state.pages.find((page) => page.pageId === item.pageId));
+    if (pages.some((page) => !page)) return 0;
+    return Math.max(0, Math.min(...pages.map((page, index) => {
+      const size = displaySize(page, members[index]);
+      return ["top", "bottom"].includes(selectedEdge) ? displayWidth(page) - size.width : displayHeight(page) - size.height;
+    })));
+  }
+  function position(state, id, offsetMm, requestedEdge = null) {
+    const members = groups(state).get(id) || [];
+    if (!members.length || members.length !== partCount(members[0])) return false;
     const pages = members.map((item) => state.pages.find((page) => page.pageId === item.pageId));
     if (pages.some((page) => !page)) return false;
-    const limit = Math.min(...pages.map((page, index) => displayHeight(page) - members[index].height));
-    const top = Math.max(0, Math.min(limit, Number(topMm) * ptPerMm));
-    if (!Number.isFinite(top)) return false;
+    const selectedEdge = mode(members[0]) === "grouped" ? requestedEdge || edge(members[0]) : "pair";
+    if (!["pair", "left", "right", "top", "bottom"].includes(selectedEdge)) return false;
+    const offset = Math.max(0, Math.min(offsetLimitPt(state, id, selectedEdge), Number(offsetMm) * ptPerMm));
+    if (!Number.isFinite(offset)) return false;
     members.forEach((item, index) => {
       const page = pages[index];
       const r = rotation(page);
-      const displayWidth = r % 180 ? page.heightPt : page.widthPt;
-      const edge = item.properties.seamPartIndex === 0 ? displayWidth - item.width : 0;
-      if (r === 90) { item.x = top; item.y = edge; }
-      else if (r === 180) { item.x = page.widthPt - edge - item.width; item.y = top; }
-      else if (r === 270) { item.x = page.widthPt - top - item.width; item.y = page.heightPt - edge - item.height; }
-      else { item.x = edge; item.y = page.heightPt - top - item.height; }
+      const size = displaySize(page, item);
+      const memberEdge = selectedEdge === "pair" ? item.properties.seamPartIndex === 0 ? "right" : "left" : selectedEdge;
+      const left = memberEdge === "left" ? 0 : memberEdge === "right" ? displayWidth(page) - size.width : offset;
+      const top = memberEdge === "top" ? 0 : memberEdge === "bottom" ? displayHeight(page) - size.height : offset;
+      if (r === 90) { item.x = top; item.y = left; }
+      else if (r === 180) { item.x = page.widthPt - left - item.width; item.y = top; }
+      else if (r === 270) { item.x = page.widthPt - top - item.width; item.y = page.heightPt - left - item.height; }
+      else { item.x = left; item.y = page.heightPt - top - item.height; }
       item.x = Math.round(item.x * 10000) / 10000;
       item.y = Math.round(item.y * 10000) / 10000;
       item.rotation = 0;
+      if (mode(item) === "grouped") item.properties.seamEdge = selectedEdge;
     });
     return true;
+  }
+  function previewSlice(item, width, height, pageRotation = 0) {
+    const count = partCount(item), index = Number(item.properties?.seamPartIndex), selectedEdge = edge(item);
+    const horizontal = ["top", "bottom"].includes(selectedEdge);
+    const total = horizontal ? height : width;
+    const start = total * index / count, length = total / count;
+    const target = selectedEdge === "right" || selectedEdge === "bottom" || (selectedEdge === "pair" && index === 0) ? total - length : 0;
+    const slice = horizontal
+      ? { clip: { x: 0, y: target, width, height: length }, image: { x: 0, y: target - start, width, height } }
+      : { clip: { x: target, y: 0, width: length, height }, image: { x: target - start, y: 0, width, height } };
+    if (mode(item) !== "grouped") return slice;
+    const r = ((Number(pageRotation) % 360) + 360) % 360;
+    const shiftX = horizontal ? 0 : target - start, shiftY = horizontal ? target - start : 0;
+    // Apply PDF viewport quarter-turns to the original image, not its aspect
+    // ratio. The clip stays in displayed-page coordinates at the chosen edge.
+    const matrix = r === 90 ? [0, 1, -1, 0, width + shiftX, shiftY]
+      : r === 180 ? [-1, 0, 0, -1, width + shiftX, height + shiftY]
+      : r === 270 ? [0, -1, 1, 0, shiftX, height + shiftY]
+      : [1, 0, 0, 1, shiftX, shiftY];
+    slice.image = { x: 0, y: 0, width: r % 180 ? height : width, height: r % 180 ? width : height,
+      transform: `matrix(${matrix.join(" ")})` };
+    return slice;
   }
   function reconcile(state, previous) {
     const old = new Map((previous.elements || []).map((item) => [item.id, item]));
     const invalid = new Set(invalidatedGroups(state));
     for (const [id, members] of groups(state)) {
-      if (members.length !== 2 || invalid.has(id) || members.some((item) => !state.pages.some((page) => page.pageId === item.pageId))) {
+      if (invalid.has(id) || members.some((item) => !state.pages.some((page) => page.pageId === item.pageId))) {
         state.elements = state.elements.filter((item) => groupId(item) !== id);
         continue;
       }
@@ -70,12 +142,12 @@
       const page = state.pages.find((item) => item.pageId === changed.pageId);
       const oldPage = (previous.pages || []).find((entry) => entry.pageId === page.pageId);
       const oldItem = old.get(changed.id);
-      const top = oldPage && oldItem && rotation(oldPage) !== rotation(page) ? topPt(oldPage, oldItem) : topPt(page, changed);
-      position(state, id, top / ptPerMm);
+      const offset = oldPage && oldItem && rotation(oldPage) !== rotation(page) ? offsetPt(oldPage, oldItem) : offsetPt(page, changed);
+      position(state, id, offset / ptPerMm);
       const styled = members.find((item) => old.has(item.id) && item.opacity !== old.get(item.id).opacity) || members[0];
       members.forEach((item) => { item.opacity = styled.opacity; item.rotation = 0; });
     }
   }
-  root.EDOCSeam = { groups, groupId, position, reconcile, invalidatedGroups, ptPerMm, topPt, displayHeight, initialTopMm };
+  root.EDOCSeam = { groups, groupId, mode, edge, partCount, position, reconcile, invalidatedGroups, ptPerMm, topPt, leftPt, offsetPt, offsetLimitPt, displayHeight, displayWidth, initialTopMm, partitionPages, previewSlice };
   if (typeof module !== "undefined") module.exports = root.EDOCSeam;
 })(typeof globalThis !== "undefined" ? globalThis : window);

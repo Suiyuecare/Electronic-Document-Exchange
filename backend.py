@@ -51,12 +51,14 @@ from urllib.parse import parse_qs, unquote, urlparse
 from runtime_observability import capture_runtime_error, error_tracking_status
 from edoc_numbering import SQLITE_NUMBERING_SQL, install_sqlite_numbering
 from compose_resilience import SQLITE_COMPOSE_DRAFT_SQL, draft_payload as compose_draft_payload, public_draft, save_sqlite_draft, attachment_id, require_content_revision
-from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position
+from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position, require_grouped_company_seal
 from workflow_readiness import LIST_MAX_ROWS, TAIPEI, inbound_list_options, inbound_page, timeliness_report
 import official_handover_service
 import official_handover_followup
 import editor_application
 import seal_policy
+import seal_scan_exceptions
+import seal_operator_import
 
 from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
 from finance_bridge import (
@@ -179,6 +181,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_save_official_workflow_config",
     "edoc_set_current_company_seal_file",
     "edoc_set_company_seal_policy",
+    "edoc_import_approved_original_scan_file",
     "edoc_update_editor_application",
     "edoc_save_editor_revision",
     "edoc_commit_editor_preflight",
@@ -11575,6 +11578,8 @@ def company_seal_file_dimension_is_valid(file_row: Dict[str, Any], seal_size_typ
     """Verify persisted attestation fields; never infer them for a legacy file."""
     if not bool(file_row.get("dimension_validated")):
         return False
+    if file_row.get("dimension_policy_version") == seal_scan_exceptions.POLICY:
+        return seal_scan_exceptions.file_entry(file_row, seal_size_type) is not None
     if file_row.get("dimension_policy_version") in {seal_policy.CONTINUOUS_POLICY, seal_policy.OFFICIAL_POLICY}:
         return seal_policy.rectangular_file_dimensions_valid(file_row, str(seal_size_type))
     try:
@@ -11618,7 +11623,7 @@ def require_company_seal_file_dimensions(file_row: Dict[str, Any], seal_size_typ
         )
     if not company_seal_file_dimension_is_valid(file_row, seal_size_type):
         raise ValueError("seal_file_dimension_metadata_invalid")
-    allowed_current_policies = {seal_policy.CONTINUOUS_POLICY} if str(seal_size_type) == seal_policy.CONTINUOUS_SIZE else {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY}
+    allowed_current_policies = {seal_policy.CONTINUOUS_POLICY} if str(seal_size_type) == seal_policy.CONTINUOUS_SIZE else {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_scan_exceptions.POLICY}
     if current and str(file_row.get("dimension_policy_version") or "") not in allowed_current_policies:
         raise ValueError("current_seal_file_dimension_policy_upgrade_required")
     return file_row
@@ -11632,6 +11637,8 @@ def company_seal_file_dimension_profile(
 ) -> Dict[str, Any]:
     """Return the immutable physical calibration stored on one Seal Vault file."""
     require_company_seal_file_dimensions(file_row, seal_size_type, current=current)
+    if file_row.get("dimension_policy_version") == seal_scan_exceptions.POLICY:
+        return seal_scan_exceptions.profile(seal_scan_exceptions.file_entry(file_row, seal_size_type))
     if file_row.get("dimension_policy_version") in {seal_policy.CONTINUOUS_POLICY, seal_policy.OFFICIAL_POLICY}:
         return seal_policy.rectangular_geometry(str(seal_size_type), file_row.get("render_width_mm"), file_row.get("render_height_mm"), dpi=EDOC_SEAL_CALIBRATION_DPI)
     if str(file_row.get("dimension_policy_version") or "") == EDOC_SEAL_LEGACY_DIMENSION_POLICY_VERSION:
@@ -11654,7 +11661,7 @@ def canonical_company_seal_dimensions_pt(
     dimension_policy_version: str = "",
 ) -> Tuple[float, float]:
     """Accept conversion noise only, then restore the file version's exact size."""
-    profile = seal_policy.rectangular_geometry(str(seal_size_type), render_width_mm, render_height_mm, dpi=EDOC_SEAL_CALIBRATION_DPI) if dimension_policy_version in {seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY} else company_seal_dimension_profile(
+    profile = seal_scan_exceptions.geometry_profile(seal_size_type, render_width_mm, render_height_mm) if dimension_policy_version == seal_scan_exceptions.POLICY else seal_policy.rectangular_geometry(str(seal_size_type), render_width_mm, render_height_mm, dpi=EDOC_SEAL_CALIBRATION_DPI) if dimension_policy_version in {seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY} else company_seal_dimension_profile(
         seal_size_type,
         render_width_mm,
         render_height_mm,
@@ -12807,6 +12814,8 @@ def register_sqlite_functions(conn: sqlite3.Connection) -> None:
         lambda value: hashlib.sha256(str(value or "").encode("utf-8")).hexdigest(),
         deterministic=True,
     )
+    conn.create_function("edoc_approved_original_scan_matches", 12,
+                         seal_scan_exceptions.metadata_valid, deterministic=True)
 
 
 def local_company_seal_position_triggers_sql() -> str:
@@ -12848,7 +12857,7 @@ def local_company_seal_position_triggers_sql() -> str:
           OR (
             COALESCE(NEW.locked_seal_file_id, '') = ''
             AND file.is_current = 1
-            AND file.dimension_policy_version IN ('{EDOC_SEAL_DIMENSION_POLICY_VERSION}', '{seal_policy.OFFICIAL_POLICY}', '{seal_policy.CONTINUOUS_POLICY}')
+            AND file.dimension_policy_version IN ('{EDOC_SEAL_DIMENSION_POLICY_VERSION}', '{seal_policy.OFFICIAL_POLICY}', '{seal_policy.CONTINUOUS_POLICY}', '{seal_scan_exceptions.POLICY}')
           )
         )
         AND file.dimension_validated = 1
@@ -12862,8 +12871,11 @@ def local_company_seal_position_triggers_sql() -> str:
           ((1.0 * file.pixel_width / file.pixel_height) /
            (1.0 * file.render_width_mm / file.render_height_mm)) - 1.0
         ) <= {EDOC_SEAL_SOURCE_ASPECT_TOLERANCE}
-        AND file.pixel_width >= (file.render_width_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI})
-        AND file.pixel_height >= (file.render_height_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI})
+        AND ((file.pixel_width >= (file.render_width_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI})
+              AND file.pixel_height >= (file.render_height_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI}))
+             OR edoc_approved_original_scan_matches(seal.id,seal.company_id,seal.seal_category,seal.seal_size_type,
+                  file.file_hash,file.pixel_width,file.pixel_height,file.source_aspect_ratio,
+                  file.render_width_mm,file.render_height_mm,file.dimension_policy_version,file.dimension_validated))
         AND (
           (
             file.dimension_policy_version = '{EDOC_SEAL_LEGACY_DIMENSION_POLICY_VERSION}'
@@ -12907,6 +12919,9 @@ def local_company_seal_position_triggers_sql() -> str:
             AND file.render_width_mm BETWEEN 1.0 AND 200.0
             AND file.render_height_mm BETWEEN 1.0 AND 200.0
           )
+          OR edoc_approved_original_scan_matches(seal.id,seal.company_id,seal.seal_category,seal.seal_size_type,
+              file.file_hash,file.pixel_width,file.pixel_height,file.source_aspect_ratio,
+              file.render_width_mm,file.render_height_mm,file.dimension_policy_version,file.dimension_validated)
         )
         AND EXISTS (
           SELECT 1 FROM file_objects object
@@ -12971,13 +12986,19 @@ def local_company_seal_position_triggers_sql() -> str:
                 OR (file.dimension_policy_version = '{seal_policy.CONTINUOUS_POLICY}'
                     AND seal.seal_category='continuous_seal' AND seal.seal_size_type='single_seal'
                     AND file.render_width_mm BETWEEN 1 AND 200 AND file.render_height_mm BETWEEN 1 AND 200)
+                OR edoc_approved_original_scan_matches(seal.id,seal.company_id,seal.seal_category,seal.seal_size_type,
+                    file.file_hash,file.pixel_width,file.pixel_height,file.source_aspect_ratio,
+                    file.render_width_mm,file.render_height_mm,file.dimension_policy_version,file.dimension_validated)
               )
               AND file.dimension_validated = 1
               AND file.pixel_width > 0
               AND file.pixel_height > 0
               AND abs(file.source_aspect_ratio - (1.0 * file.pixel_width / file.pixel_height)) <= 0.000001
-              AND file.pixel_width >= file.render_width_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI}
-              AND file.pixel_height >= file.render_height_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI}
+              AND ((file.pixel_width >= file.render_width_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI}
+                    AND file.pixel_height >= file.render_height_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI})
+                   OR edoc_approved_original_scan_matches(seal.id,seal.company_id,seal.seal_category,seal.seal_size_type,
+                        file.file_hash,file.pixel_width,file.pixel_height,file.source_aspect_ratio,
+                        file.render_width_mm,file.render_height_mm,file.dimension_policy_version,file.dimension_validated))
               AND abs(((1.0 * file.pixel_width / file.pixel_height) / (1.0 * file.render_width_mm / file.render_height_mm)) - 1.0) <= {EDOC_SEAL_SOURCE_ASPECT_TOLERANCE}
               AND object.sha256 = file.file_hash
               AND object.size_bytes = file.file_size
@@ -17313,13 +17334,15 @@ def seal_file_with_backing_status(
     item["last_scan_at"] = file_object["last_scan_at"] if file_object else ""
     item["av_clean"] = seal_file_av_is_clean(file_object)
     seal = conn.execute(
-        "SELECT seal_size_type, seal_category FROM company_seals WHERE id = ?",
+        "SELECT seal_size_type, seal_category, company_id FROM company_seals WHERE id = ?",
         (item.get("seal_id") or "",),
     ).fetchone()
     try:
         item["dimension_valid"] = bool(
             seal and company_seal_file_dimension_is_valid(item, seal["seal_size_type"])
             and seal_policy.category_policy_valid(seal["seal_category"], seal["seal_size_type"], item)
+            and (item.get("dimension_policy_version") != seal_scan_exceptions.POLICY
+                 or seal_scan_exceptions.file_entry(item, seal["seal_size_type"])["company_id"] == seal["company_id"])
         )
     except ValueError:
         item["dimension_valid"] = False
@@ -17395,6 +17418,13 @@ def company_seal_api_dimension_metadata(
     seal_category: str = "",
 ) -> Dict[str, Any]:
     """Expose current-version geometry separately from the calibration policy."""
+    if current_file and current_file.get("dimension_policy_version") == seal_scan_exceptions.POLICY:
+        profile = company_seal_file_dimension_profile(seal_size_type, current_file, current=True)
+        return {"render_size_mm": None, "render_width_mm": profile["width_mm"],
+                "render_height_mm": profile["height_mm"], "render_width_pt": profile["width_pt"],
+                "render_height_pt": profile["height_pt"], "dimension_policy_version": seal_scan_exceptions.POLICY,
+                "calibration_dpi": 200, "calibration_required": False, "size_locked": True,
+                "original_scan_exception": True}
     manual = seal_category in {"official_seal", seal_policy.CONTINUOUS_CATEGORY}
     if manual:
         profile = company_seal_file_dimension_profile(seal_size_type, current_file, current=True) if current_file else None
@@ -17472,12 +17502,13 @@ def company_seal_row(conn: sqlite3.Connection, seal_id: str, *, owner_kind_value
         designated_current
         if designated_current
         and designated_current.get("usable")
-        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY}
+        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, seal_scan_exceptions.POLICY}
         else None
     )
     data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current, data.get("seal_category") or ""))
     data["current_file"] = seal_file_metadata(usable_current) if usable_current else None
     data["current_file_status"] = seal_file_metadata(designated_current) if designated_current else None
+    data["approved_original_scans"] = seal_scan_exceptions.approved_metadata(data)
     data["owner_kind"] = owner_kind_value if owner_kind_value is not None else company_seal_owner_kind(conn, data["company_id"])
     data["display_label"] = seal_policy.category_label(data.get("seal_category"))
     category_allowed = seal_policy.application_category_allowed(data["owner_kind"], data.get("seal_category"))
@@ -18087,6 +18118,7 @@ def validate_seal_file_upload(
     render_width_mm: Any = None,
     render_height_mm: Any = None,
     seal_category: str = "",
+    seal: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     configured_mime_types = {item.strip().lower() for item in EDOC_SEAL_ALLOWED_MIME_TYPES.split(",") if item.strip()}
     suffix = Path(file_name).suffix.lower().lstrip(".")
@@ -18111,6 +18143,14 @@ def validate_seal_file_upload(
     if len(data) > max_bytes:
         raise ValueError("seal_file_too_large")
     inspection = verify_seal_raster_image(data, normalized_mime)
+    approved = seal_scan_exceptions.upload_match(seal or {}, sha256_bytes(data), inspection["width"], inspection["height"], render_width_mm, render_height_mm)
+    if approved:
+        if normalized_mime != "image/png":
+            raise ValueError("approved_original_scan_format_mismatch")
+        return {**inspection, "pixel_width": inspection["width"], "pixel_height": inspection["height"],
+                "source_aspect_ratio": inspection["width"] / inspection["height"],
+                "render_width_mm": approved["render_width_mm"], "render_height_mm": approved["render_height_mm"],
+                "dimension_policy_version": seal_scan_exceptions.POLICY, "dimension_validated": True}
     return (
         validate_company_seal_raster_dimensions(
             seal_size_type,
@@ -18143,7 +18183,8 @@ def upload_company_seal_file(conn: sqlite3.Connection, seal_id: str, payload: Di
     data = decode_seal_file_content(content)
     file_name = Path(payload.get("file_name") or f"{seal_id}.png").name
     mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "image/png"
-    render_width_mm, render_height_mm = normalize_company_seal_upload_dimensions(payload, str(seal.get("seal_category") or ""))
+    known_scan = any(entry["png_sha256"] == sha256_bytes(data).lower() for entry in seal_scan_exceptions.approved_metadata(seal))
+    render_width_mm, render_height_mm = normalize_company_seal_upload_dimensions(payload, "official_seal" if known_scan else str(seal.get("seal_category") or ""))
     image_info = validate_seal_file_upload(
         file_name,
         mime_type,
@@ -18152,6 +18193,7 @@ def upload_company_seal_file(conn: sqlite3.Connection, seal_id: str, payload: Di
         render_width_mm,
         render_height_mm,
         str(seal.get("seal_category") or ""),
+        seal,
     )
     scan_status, scan_signature = scan_seal_upload_bytes(data, file_name)
     actor = seal_actor(session, payload)
@@ -25139,23 +25181,39 @@ def stamp_prepared_pdf_with_locked_seals(locked: Dict[str, Any]) -> Tuple[bytes,
             seam_element = seam_element_for_position(locked.get("state") or {}, position)
             seal_data = asset["data"]
             seal_mime = str(asset.get("mime_type") or "image/png")
-            transformed, transformed_width, transformed_height = _editor_transformed_image(
-                seal_data,
-                seal_mime,
-                float(rect.width),
-                float(rect.height),
-                pdf_safe_float(position.get("rotation"), 0),
-                max(0.0, min(1.0, pdf_safe_float(position.get("opacity"), 1))),
-            )
-            if seam_element:
-                transformed = split_seal_raster(transformed, seam_element["properties"]["seamPartIndex"], int(ordered_pages[page_index].get("rotation") or 0))
-            placed_rect = _editor_centered_rect(rect, transformed_width, transformed_height)
-            page.insert_image(
-                placed_rect,
-                stream=transformed,
-                keep_proportion=False,
-                overlay=True,
-            )
+            opacity = max(0.0, min(1.0, pdf_safe_float(position.get("opacity"), 1)))
+            if seam_element and seam_element["properties"].get("seamMode") == "grouped":
+                seam_properties = seam_element["properties"]
+                transformed = split_seal_raster(
+                    _editor_native_seal_png(seal_data, seal_mime, opacity),
+                    seam_properties["seamPartIndex"],
+                    int(ordered_pages[page_index].get("rotation") or 0),
+                    part_count=seam_properties["seamPartCount"],
+                    edge=seam_properties["seamEdge"],
+                )
+                # Keep the original native pixel canvas and physical footprint;
+                # no 216 DPI thumbnail/padding or post-rotation aspect squeeze.
+                placed_rect = rect
+                page.insert_image(placed_rect, stream=transformed, keep_proportion=False, overlay=True)
+            elif not seam_element and position.get("locked_dimension_policy_version") == seal_scan_exceptions.POLICY:
+                placed_rect = _editor_insert_native_seal(
+                    page, rect, seal_data, seal_mime,
+                    pdf_safe_float(position.get("rotation"), 0), opacity,
+                )
+            else:
+                # Historical square pair manifests retain their established
+                # upright rendering behavior and ordinary legacy version bytes.
+                transformed, transformed_width, transformed_height = _editor_transformed_image(
+                    seal_data, seal_mime, float(rect.width), float(rect.height),
+                    pdf_safe_float(position.get("rotation"), 0), opacity,
+                )
+                if seam_element:
+                    transformed = split_seal_raster(
+                        transformed, seam_element["properties"]["seamPartIndex"],
+                        int(ordered_pages[page_index].get("rotation") or 0),
+                    )
+                placed_rect = _editor_centered_rect(rect, transformed_width, transformed_height)
+                page.insert_image(placed_rect, stream=transformed, keep_proportion=False, overlay=True)
             seal_rects_by_page.setdefault(page_index, []).append(placed_rect)
 
         # Locked V3 revisions guarantee entered / replacement text is the highest
@@ -25929,6 +25987,7 @@ def local_editor_seal_file_context(
     element["properties"] = properties
     seal_id = str(properties.get("sealId") or properties.get("seal_id") or element.get("sealId") or "")
     seal = validate_official_document_seal(conn, seal_id, company_id, require_current=False)
+    require_grouped_company_seal(element, seal)
     file_id = str(properties.get("sealFileId") or properties.get("seal_file_id") or "")
     expected_hash = str(properties.get("sealFileSha256") or properties.get("seal_file_sha256") or "")
     if bool(file_id) != bool(expected_hash):
@@ -25977,6 +26036,7 @@ def supabase_editor_seal_file_context(
     element["properties"] = properties
     seal_id = str(properties.get("sealId") or properties.get("seal_id") or element.get("sealId") or "")
     seal = supabase_validate_official_document_seal(seal_id, company_id, require_current=False)
+    require_grouped_company_seal(element, seal)
     file_id = str(properties.get("sealFileId") or properties.get("seal_file_id") or "")
     expected_hash = str(properties.get("sealFileSha256") or properties.get("seal_file_sha256") or "")
     if bool(file_id) != bool(expected_hash):
@@ -26408,6 +26468,50 @@ def _editor_rect_center(rect: Any) -> Any:
     return fitz.Point((float(rect.x0) + float(rect.x1)) / 2, (float(rect.y0) + float(rect.y1)) / 2)
 
 
+def _editor_native_seal_png(data: bytes, mime_type: str, opacity: float = 1.0) -> bytes:
+    """Temporary native-pixel seal derivative; no resize, padding, or redraw."""
+    from PIL import Image, ImageEnhance  # type: ignore
+
+    if mime_type.lower() not in {"image/png", "image/jpeg", "image/webp"}:
+        raise ValueError("editor_native_seal_raster_required")
+    if not math.isfinite(opacity) or opacity < 0 or opacity > 1:
+        raise ValueError("editor_element_style_invalid")
+    if mime_type.lower() == "image/png" and opacity == 1:
+        return data
+    with Image.open(io.BytesIO(data)) as opened:
+        image = opened.convert("RGBA")
+        if opacity < 1:
+            image.putalpha(ImageEnhance.Brightness(image.getchannel("A")).enhance(opacity))
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+
+def _editor_insert_native_seal(page: Any, rect: Any, data: bytes, mime_type: str, rotation: float, opacity: float) -> Any:
+    """Place calibrated pixels through PDF affine rotation, never bitmap warp."""
+    import fitz  # type: ignore
+
+    png = _editor_native_seal_png(data, mime_type, opacity)
+    angle = float(rotation or 0) % 360
+    if not math.isfinite(angle):
+        raise ValueError("editor_element_style_invalid")
+    if angle == 0:
+        page.insert_image(rect, stream=png, keep_proportion=False, overlay=True)
+        return rect
+    radians = math.radians(angle)
+    width = abs(math.cos(radians)) * rect.width + abs(math.sin(radians)) * rect.height
+    height = abs(math.sin(radians)) * rect.width + abs(math.cos(radians)) * rect.height
+    placed_rect = _editor_centered_rect(rect, width, height)
+    overlay = fitz.open()
+    try:
+        base = overlay.new_page(width=rect.width, height=rect.height)
+        base.insert_image(base.rect, stream=png, keep_proportion=False, overlay=True)
+        page.show_pdf_page(placed_rect, overlay, 0, rotate=-angle, keep_proportion=True, overlay=True)
+    finally:
+        overlay.close()
+    return placed_rect
+
+
 def _editor_transformed_image(
     data: bytes,
     mime_type: str,
@@ -26727,7 +26831,7 @@ def render_editor_prepared_pdf(state: Dict[str, Any], asset_bytes_by_id: Dict[st
         output.close()
 
 
-def generate_editor_seal_preview(seal_bytes: bytes, mime_type: str) -> bytes:
+def generate_editor_seal_preview(seal_bytes: bytes, mime_type: str, *, preserve_canvas_aspect: bool = False) -> bytes:
     """Generate a low resolution, visibly watermarked preview; never return vault bytes."""
     import fitz  # type: ignore
 
@@ -26751,8 +26855,19 @@ def generate_editor_seal_preview(seal_bytes: bytes, mime_type: str) -> bytes:
         source_page = converted[0]
         source_rect = source_page.rect
         scale = min(1.0, 320.0 / max(float(source_rect.width), float(source_rect.height), 1.0))
-        width = max(96.0, float(source_rect.width) * scale)
-        height = max(96.0, float(source_rect.height) * scale)
+        if preserve_canvas_aspect:
+            # The approved native originals have explicit non-square physical
+            # geometry. Enlarge/reduce this watermarked preview uniformly only;
+            # independently clamping axes would add a false square canvas.
+            native_width = max(1.0, float(source_rect.width))
+            native_height = max(1.0, float(source_rect.height))
+            scale = min(320.0 / max(native_width, native_height),
+                        max(scale, 96.0 / min(native_width, native_height)))
+            width, height = native_width * scale, native_height * scale
+        else:
+            # Keep historical square-policy previews byte-compatible.
+            width = max(96.0, float(source_rect.width) * scale)
+            height = max(96.0, float(source_rect.height) * scale)
         page = preview_doc.new_page(width=width, height=height)
         page.show_pdf_page(page.rect, converted, 0, keep_proportion=True)
         for offset in range(-int(height), int(width) + int(height), 28):
@@ -26846,7 +26961,8 @@ def local_editor_seal_preview(
         seal_id=seal_id,
         detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};watermarked=true",
     )
-    return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png")
+    return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png",
+                                        preserve_canvas_aspect=seal_file.get("dimension_policy_version") == seal_scan_exceptions.POLICY)
 
 
 def _editor_revision_public(row: Dict[str, Any] | sqlite3.Row, locked_revision_id: str = "") -> Dict[str, Any]:
@@ -35559,6 +35675,8 @@ def supabase_seal_file_with_backing_status(file_row: Dict[str, Any]) -> Dict[str
         item["dimension_valid"] = bool(
             seal and company_seal_file_dimension_is_valid(item, seal.get("seal_size_type"))
             and seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), item)
+            and (item.get("dimension_policy_version") != seal_scan_exceptions.POLICY
+                 or seal_scan_exceptions.file_entry(item, seal.get("seal_size_type"))["company_id"] == seal.get("company_id"))
         )
     except ValueError:
         item["dimension_valid"] = False
@@ -35690,12 +35808,13 @@ def supabase_company_seal_row(seal_id: str, *, owner_kind_value: str | None = No
         designated_current
         if designated_current
         and designated_current.get("usable")
-        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY}
+        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, seal_scan_exceptions.POLICY}
         else None
     )
     data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current, data.get("seal_category") or ""))
     data["current_file"] = seal_file_metadata(usable_current) if usable_current else None
     data["current_file_status"] = seal_file_metadata(designated_current) if designated_current else None
+    data["approved_original_scans"] = seal_scan_exceptions.approved_metadata(data)
     data["owner_kind"] = owner_kind_value if owner_kind_value is not None else supabase_company_seal_owner_kind(data["company_id"])
     data["display_label"] = seal_policy.category_label(data.get("seal_category"))
     category_allowed = seal_policy.application_category_allowed(data["owner_kind"], data.get("seal_category"))
@@ -35978,7 +36097,8 @@ def supabase_upload_company_seal_file(seal_id: str, payload: Dict[str, Any], ses
     data = decode_seal_file_content(content)
     file_name = Path(payload.get("file_name") or f"{seal_id}.png").name
     mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "image/png"
-    render_width_mm, render_height_mm = normalize_company_seal_upload_dimensions(payload, str(seal.get("seal_category") or ""))
+    known_scan = any(entry["png_sha256"] == sha256_bytes(data).lower() for entry in seal_scan_exceptions.approved_metadata(seal))
+    render_width_mm, render_height_mm = normalize_company_seal_upload_dimensions(payload, "official_seal" if known_scan else str(seal.get("seal_category") or ""))
     image_info = validate_seal_file_upload(
         file_name,
         mime_type,
@@ -35987,6 +36107,7 @@ def supabase_upload_company_seal_file(seal_id: str, payload: Dict[str, Any], ses
         render_width_mm,
         render_height_mm,
         str(seal.get("seal_category") or ""),
+        seal,
     )
     scan_status, scan_signature = scan_seal_upload_bytes(data, file_name)
     actor = seal_actor(session, payload)
@@ -36047,7 +36168,7 @@ def supabase_upload_company_seal_file(seal_id: str, payload: Dict[str, Any], ses
                 and abs(float(item.get("render_width_mm") or 0) - image_info["render_width_mm"]) <= 0.000001
                 and abs(float(item.get("render_height_mm") or 0) - image_info["render_height_mm"]) <= 0.000001
                 and seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), item)
-                and str(item.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY}
+                and str(item.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, seal_scan_exceptions.POLICY}
                 and bool(item.get("is_current"))
                 and int(item.get("version") or 0) >= 1
             )
@@ -39712,7 +39833,8 @@ def supabase_editor_seal_preview(
     if sha256_bytes(data) != seal_file["file_hash"]:
         raise ValueError("seal_file_hash_mismatch")
     supabase_log_seal_usage(action="editor_seal_preview", actor_id=user.get("id") or "", seal_id=seal_id, detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};watermarked=true")
-    return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png")
+    return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png",
+                                        preserve_canvas_aspect=seal_file.get("dimension_policy_version") == seal_scan_exceptions.POLICY)
 
 
 def supabase_editor_asset_download(document_id: str, asset_id: str, expires: int, token: str, session: Dict[str, Any] | None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -48553,6 +48675,25 @@ class Handler(SimpleHTTPRequestHandler):
     def handle_api(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
         parts = [part for part in path.split("/") if part][1:]
         try:
+            if parts == ["admin", "approved-original-seal-import"]:
+                if method != "POST":
+                    self.send_json({"error": "method_not_allowed"}, 405)
+                    return
+                try:
+                    context = seal_operator_import.authorize(self.headers.get(seal_operator_import.HEADER, ""), os.environ)
+                except PermissionError:
+                    self.send_json({"error": "unauthorized"}, 401)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if not 0 < length <= 4 * 1024 * 1024:
+                    self.send_json({"error": "approved_scan_import_payload_invalid"}, 413)
+                    return
+                result = seal_operator_import.import_one(sys.modules[__name__], context, self.read_json())
+                self.send_json(result)
+                return
             if method == "POST" and parts == ["auth", "handoff"]:
                 self.handle_portal_handoff()
                 return

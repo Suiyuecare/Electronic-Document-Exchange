@@ -24,7 +24,8 @@ function node(value='') { return {value,dataset:{},hidden:false,disabled:false,o
   get selectedOptions(){return this.options.filter(o=>o.value===this.value)},
   focus(){this.focused=true},scrollIntoView(){this.scrolled=true}}; }
 const nodes={};
-for(const id of ['uploadedSealCompany','uploadedSealCategorySelect','uploadedSealSizeSelect','uploadedSealSealSelect','uploadedSealRecordLabel','uploadedSealPickerCompany','uploadedSealCompanyFocusBtn','uploadedSealPickerStatus','uploadedSealApplicationFields','uploadedEditorSeamPages'])nodes['#'+id]=node();
+for(const id of ['uploadedSealCompany','uploadedSealCategorySelect','uploadedSealSizeSelect','uploadedSealSealSelect','uploadedSealRecordLabel','uploadedSealPickerCompany','uploadedSealCompanyFocusBtn','uploadedSealPickerStatus','uploadedSealApplicationFields','uploadedEditorSeamPages','uploadedEditorSeamPanel','uploadedEditorSeamEdge'])nodes['#'+id]=node();
+nodes['#uploadedEditorSeamPanel'].hidden=true;nodes['#uploadedEditorSeamEdge'].value='right';
 nodes['#uploadedSealCompany'].options=[{value:'A',textContent:'合成公司 A'},{value:'B',textContent:'合成公司 B'}];
 nodes['#uploadedSealCompany'].value='A';
 const document={querySelector:id=>nodes[id]||null};
@@ -45,8 +46,9 @@ const addUploadedEditorElement=(kind,point,props,pages)=>placements.push({kind,p
 const showToast=value=>toasts.push(value);
 const commitUploadedEditorMutation=callback=>{changes++;callback(uploadedSealEditorState);return true};
 const parseUploadedEditorPageRange=raw=>raw.split(',').map(Number);
-const editorDefaultElement=(kind,page,point,props)=>({id:'new-'+uploadedSealEditorState.elements.length,pageId:page.pageId,kind,height:85,properties:{...props,sealId:selectedUploadedSeal()?.id,...companySealCurrentVersionSnapshot(selectedUploadedSeal())}});
-globalThis.EDOCSeam={groups:()=>new Map(),displayHeight:page=>page.heightPt,initialTopMm:(height,index)=>100+index*40,position:(state,id,top)=>state.elements.filter(e=>e.properties.seamGroupId===id).forEach(e=>e.y=top)};
+let nextElementId=0;
+const editorDefaultElement=(kind,page,point,props)=>({id:'new-'+(++nextElementId),pageId:page.pageId,kind,width:85,height:85,properties:{...props,sealId:selectedUploadedSeal()?.id,...companySealCurrentVersionSnapshot(selectedUploadedSeal())}});
+/* LOAD_REAL_SEAM */
 const hasAuthenticatedBackendSession=()=>true,frontendSessionScope=()=> 'userA';
 const normalizeUploadedEditorSealGeometry=()=>false;
 let backendRequest=async()=>[];
@@ -61,7 +63,8 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
             start = list(re.finditer(r"^(?:async )?function " + name + r"\(", source, re.M))[-1].start()
             end = re.search(r"\n(?:async )?function \w+\(", source[start:]).start() + start
             functions.append(source[start:end])
-        script = self.SETUP + "\n" + "\n".join(functions) + "\n(async()=>{" + body + "})().catch(e=>{console.error(e);process.exit(1)});"
+        setup = self.SETUP.replace("/* LOAD_REAL_SEAM */", "globalThis.EDOCSeam=require(" + json.dumps(str(ROOT / "editor-seam.js")) + ");")
+        script = setup + "\n" + "\n".join(functions) + "\n(async()=>{" + body + "})().catch(e=>{console.error(e);process.exit(1)});"
         result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -129,12 +132,20 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
         value = self.run_js('uploadedSealOptions=[seal("GENERAL"),seal("BANK-S","official_seal","small_seal")];renderUploadedSealOptions();select("official_seal","small_seal");addUploadedStamp("current_page",{x:123,y:234});addUploadedStamp("all_pages",{x:45,y:67});console.log(JSON.stringify(placements));')
         self.assertEqual(value, [{"kind": "seal", "point": {"x": 123, "y": 234}, "pages": ["P2"], "seal": "BANK-S"}, {"kind": "seal", "point": {"x": 45, "y": 67}, "pages": ["P1", "P2", "P3"], "seal": "BANK-S"}])
 
-    def test_seam_pairs_share_selected_seal_and_keep_independent_positions(self):
-        value = self.run_js('uploadedSealOptions=[seal("GENERAL"),seal("BANK-S","official_seal","small_seal")];renderUploadedSealOptions();select("official_seal","small_seal");addUploadedSeamGroups();console.log(JSON.stringify(uploadedSealEditorState.elements));')
-        self.assertEqual(len(value), 4)
-        self.assertEqual([item["y"] for item in value], [100, 100, 140, 140])
-        self.assertTrue(all(item["properties"]["sealId"] == "BANK-S" for item in value))
-        self.assertTrue(all(item["properties"]["sealFileId"] == "FILE-BANK-S" for item in value))
+    def test_grouped_seams_use_company_large_in_five_plus_two_independent_groups(self):
+        value = self.run_js('uploadedSealEditorState.pages=Array.from({length:7},(_,i)=>({pageId:"P"+(i+1),widthPt:595,heightPt:842}));uploadedSealOptions=[seal("GENERAL"),seal("COMPANY-L","establishment_seal"),seal("COMPANY-S","establishment_seal","small_seal"),seal("BANK-S","official_seal","small_seal")];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();const groups=[...EDOCSeam.groups(uploadedSealEditorState)];console.log(JSON.stringify({category:nodes["#uploadedSealCategorySelect"].value,sizes:nodes["#uploadedSealSizeSelect"].options.map(x=>x.value),groups:groups.map(([id,members])=>({count:members.length,parts:members.map(e=>e.properties.seamPartIndex),edge:members.map(e=>e.properties.seamEdge),offset:EDOCSeam.offsetPt(uploadedSealEditorState.pages.find(p=>p.pageId===members[0].pageId),members[0]),bindings:members.map(e=>({seal:e.properties.sealId,file:e.properties.sealFileId}))}))}));')
+        self.assertEqual(value["category"], "establishment_seal")
+        self.assertEqual(value["sizes"], ["large_seal"])
+        self.assertEqual([group["count"] for group in value["groups"]], [5, 2])
+        self.assertEqual([group["parts"] for group in value["groups"]], [list(range(5)), [0, 1]])
+        self.assertNotEqual(value["groups"][0]["offset"], value["groups"][1]["offset"])
+        self.assertTrue(all(binding == {"seal": "COMPANY-L", "file": "FILE-COMPANY-L"} for group in value["groups"] for binding in group["bindings"]))
+
+    def test_grouped_seams_reject_general_small_and_noncompany_seals(self):
+        for category, size in (("general_seal", "large_seal"), ("establishment_seal", "small_seal"), ("official_seal", "large_seal")):
+            value = self.run_js('uploadedSealOptions=[seal("INVALID",' + json.dumps(category) + ',' + json.dumps(size) + ')];renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({count:uploadedSealEditorState.elements.length,toasts}));')
+            self.assertEqual(value["count"], 0)
+            self.assertTrue(any("公司大章" in text for text in value["toasts"]))
 
     def test_company_jump_reveals_only_existing_company_control(self):
         value = self.run_js('nodes["#uploadedSealApplicationFields"].hidden=true;focusUploadedSealCompany();console.log(JSON.stringify({hidden:nodes["#uploadedSealApplicationFields"].hidden,focused:nodes["#uploadedSealCompany"].focused,value:nodes["#uploadedSealCompany"].value,changes}));')

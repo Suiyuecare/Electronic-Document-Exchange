@@ -1660,6 +1660,7 @@
                 </div>
                 <div class="pdf-editor-command-status">
                   <span class="pdf-editor-save-status idle" id="uploadedEditorSaveStatus" role="status" aria-live="polite">尚未建立草稿</span>
+                  <button class="secondary-button" id="uploadedEditorSaveDraftBtn" type="button" aria-busy="false" disabled>暫存草稿</button>
                   <button class="primary-button pdf-editor-conflict-action" id="uploadedEditorConflictCopyBtn" type="button" hidden>保留我的內容為新草稿</button>
                   <button class="secondary-button pdf-editor-conflict-action" id="uploadedEditorResolveConflictBtn" type="button" hidden>使用最新版</button>
                   <button class="text-button pdf-editor-conflict-action" id="uploadedEditorConflictBackupBtn" type="button" hidden>下載技術備份</button>
@@ -1700,7 +1701,7 @@
                   <button class="active" type="button" data-editor-tool="select" title="選取與移動">選取</button>
                   <button type="button" data-editor-tool="text" title="新增文字">加文字</button>
                   <button type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
-                  <button type="button" data-editor-tool="seal" title="放置公司印章">印章</button>
+                  <button type="button" data-editor-tool="seal" aria-label="用印：選擇印章並放置章位">用印</button>
                   <button id="uploadedEditorSeamToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorSeamPanel">騎縫章</button>
                   <details class="editor-disclosure" id="uploadedEditorMoreTools">
                     <summary>更多工具</summary>
@@ -1742,12 +1743,13 @@
               </div>
               <section class="pdf-editor-seam-panel" id="uploadedEditorSeamPanel" hidden aria-label="批次騎縫章">
                 <div class="editor-context-heading"><h4>騎縫章</h4><button id="uploadedEditorSeamCloseBtn" type="button" class="text-button" aria-label="關閉騎縫章設定">×</button></div>
-                <p>相鄰兩頁一組，自動錯開位置；可拖曳調整，尺寸固定。</p>
+                <p>使用公司大章，每 5 頁共用一枚；最後一組依剩餘頁數等分。</p>
                 <div class="pdf-editor-seam-actions">
                   <label>套用頁面<input id="uploadedEditorSeamPages" inputmode="numeric" placeholder="全部頁（或輸入 1-5）" /></label>
+                  <label>用印邊<select id="uploadedEditorSeamEdge"><option value="right">右邊</option><option value="left">左邊</option><option value="top">上邊</option><option value="bottom">下邊</option></select></label>
                   <button class="primary-button" id="uploadedEditorSeamAddBtn" type="button">加入騎縫章</button>
                 </div>
-                <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">至少需要兩頁 PDF。</p>
+                <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">請先上傳 PDF。</p>
                 <div id="uploadedEditorSeamGroups"></div>
               </section>
 
@@ -1886,6 +1888,7 @@
                 <span id="uploadedEditorPreflightStatus" class="pdf-editor-preflight-status">尚未產生送簽確認版</span>
                 <p id="uploadedEditorSubmissionSummary" class="uploaded-editor-submission-summary" hidden></p>
                 <div class="pdf-editor-submit-actions">
+                  <button class="secondary-button" id="uploadedEditorSaveDraftFooterBtn" type="button" aria-busy="false" disabled>暫存草稿</button>
                   <button class="text-button" id="clearUploadedStampsBtn" type="button">清除全部編輯</button>
                   <button class="primary-button" id="submitUploadedSealBtn" type="button">確認編輯並送出簽核</button>
                 </div>

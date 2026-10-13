@@ -10,6 +10,8 @@
         "includeFiles": [
           "edoc_numbering.py",
           "editor_seam.py",
+          "seal_scan_exceptions.py",
+          "seal_operator_import.py",
           "compose_resilience.py",
           "official_writing.py",
           "official_listing.py",

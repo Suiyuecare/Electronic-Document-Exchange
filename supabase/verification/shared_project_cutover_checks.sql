@@ -1,6 +1,68 @@
 -- Read-only verification for the approved eDoc shared-project isolation mode.
 -- This file never reads HR row contents and performs no writes.
 
+-- Exact original-scan maintenance gate: read-only permit and reviewed code.
+do $approved_original_scan_import_gate$
+declare
+  v_table regclass := pg_catalog.to_regclass('edoc.approved_original_scan_import_batches');
+  v_backend text := 'edoc_backend';
+  v_denied text[] := array['anon','authenticated','service_role','authenticator'];
+  v_role text;
+  v_expected record;
+  v_proc record;
+begin
+  if v_table is null or not exists (
+    select 1 from pg_catalog.pg_class where oid=v_table and relrowsecurity and relforcerowsecurity
+      and pg_catalog.pg_get_userbyid(relowner)='postgres'
+  ) then raise exception 'approved_scan_import_table_security_mismatch'; end if;
+  if not pg_catalog.has_table_privilege(v_backend,v_table,'SELECT')
+     or pg_catalog.has_table_privilege(v_backend,v_table,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'approved_scan_import_table_grant_mismatch';
+  end if;
+  foreach v_role in array v_denied loop
+    if pg_catalog.has_table_privilege(v_role,v_table,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception 'approved_scan_import_browser_table_grant';
+    end if;
+  end loop;
+  if exists(select 1 from pg_catalog.pg_class c, lateral pg_catalog.aclexplode(
+      coalesce(c.relacl,pg_catalog.acldefault('r',c.relowner))) a where c.oid=v_table and a.grantee=0)
+     or (select count(*) from pg_catalog.pg_policy where polrelid=v_table)<>1
+     or not exists(select 1 from pg_catalog.pg_policy where polrelid=v_table and polcmd='r'
+       and polroles=array[pg_catalog.to_regrole(v_backend)::oid]
+       and pg_catalog.pg_get_expr(polqual,polrelid)='true' and polwithcheck is null) then
+    raise exception 'approved_scan_import_table_policy_mismatch';
+  end if;
+  for v_expected in select * from (values
+    ('edoc.edoc_approved_original_scan_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i','54e012d678441ef84bd399625a6d7895d011fe4e328dc2d1093f09e9197528dd'),
+    ('edoc.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i','45c41cc878273f4452dcef0c50bd99635cc3e68b18e84a170ee795c6e184c691'),
+    ('edoc.edoc_import_approved_original_scan_file(text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text)',true,'v','b0639ceadd5765b95d33bfd64d8cf9c0ee4b2f1e57d3a7a64b7b5b76f3d283ed')
+  ) expected(signature,is_definer,volatility,body_sha256) loop
+    select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_expected.signature);
+    if not found then raise exception 'approved_scan_import_rpc_missing'; end if;
+    if v_proc.prosecdef is distinct from v_expected.is_definer
+       or v_proc.provolatile::text is distinct from v_expected.volatility
+       or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+       or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+       or not pg_catalog.has_function_privilege(v_backend,v_proc.oid,'EXECUTE')
+       or pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_proc.prosrc,'UTF8')),'hex')<>v_expected.body_sha256 then
+      raise exception 'approved_scan_import_rpc_security_or_source_mismatch';
+    end if;
+    if v_expected.is_definer and not coalesce(v_proc.proconfig @> array['lock_timeout=5s'],false) then
+      raise exception 'approved_scan_import_rpc_lock_timeout_missing';
+    end if;
+    foreach v_role in array v_denied loop
+      if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+        raise exception 'approved_scan_import_browser_rpc_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,
+        pg_catalog.acldefault('f',v_proc.proowner))) a where a.grantee=0 and a.privilege_type='EXECUTE') then
+      raise exception 'approved_scan_import_public_rpc_grant';
+    end if;
+  end loop;
+end;
+$approved_original_scan_import_gate$;
+
 do $editor_application_seal_policy_gate$
 declare
   v_table regclass := pg_catalog.to_regclass('edoc.company_seal_policies');
@@ -275,7 +337,7 @@ checks(check_name, passed, observed) as (
       (select count(*) from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
-         and class_row.relkind in ('r','p','v','m')) = 97,
+         and class_row.relkind in ('r','p','v','m')) = 98,
       (select count(*)::text from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
@@ -283,7 +345,11 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 72
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 73
+      and exists(select 1 from edoc_private.shared_project_migration_ledger
+        where file_name='20261013070841_approved_original_scan_exception.sql'
+          and source_sha256='ce8c72275232d689afdeee7376a2d69ce6fd67282cfdfd4477da8bb9d2205565'
+          and transformed_sha256='f85521c9a4a187d1135124441647e8535b0e402f1e0edcc7d3e93517720087d9')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261012114854_explicit_seal_owner_policy_and_continuous_geometry.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261012115431_editor_application_final_snapshot.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20260911133144_compose_resilience_drafts_revision.sql')

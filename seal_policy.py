@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import re
 from typing import Any, Iterable
+import seal_scan_exceptions
 
 OWNER_KINDS = frozenset({"company", "institution", "unclassified"})
 CONTINUOUS_CATEGORY = "continuous_seal"
@@ -165,6 +166,9 @@ def rectangular_file_dimensions_valid(row: dict[str, Any], size_type: str) -> bo
 
 def category_policy_valid(category: Any, size_type: Any, file_row: dict[str, Any]) -> bool:
     policy = str(file_row.get("dimension_policy_version") or "")
+    if policy == seal_scan_exceptions.POLICY:
+        entry = seal_scan_exceptions.file_entry(file_row, size_type)
+        return bool(entry and entry["seal_category"] == category)
     if policy == CONTINUOUS_POLICY:
         return category == CONTINUOUS_CATEGORY and size_type == CONTINUOUS_SIZE
     if policy == OFFICIAL_POLICY:

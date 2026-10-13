@@ -12643,6 +12643,7 @@ body[data-session-state="revalidating"] .workspace::after {
 .pdf-editor-seam-actions, .pdf-editor-seam-group { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
 .pdf-editor-seam-panel label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .pdf-editor-seam-panel input { min-height: 44px; font-size: 16px; width: 220px; max-width: 100%; }
+.pdf-editor-seam-panel select { min-height: var(--action-hit-size); font-size: 16px; max-width: 100%; }
 .pdf-editor-seam-panel button { min-height: 44px; }
 .pdf-editor-seam-group { border-top: 1px solid #ead8c5; padding: 12px 0; }
 .pdf-editor-seam-group strong { flex: 1 1 180px; align-self: center; }

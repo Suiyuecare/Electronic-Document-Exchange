@@ -72,6 +72,7 @@
     "20261006154028_terminal_official_decline.sql",
     "20261011140824_complete_workflow_readiness_queries.sql",
     "20261012114854_explicit_seal_owner_policy_and_continuous_geometry.sql",
-    "20261012115431_editor_application_final_snapshot.sql"
+    "20261012115431_editor_application_final_snapshot.sql",
+    "20261013070841_approved_original_scan_exception.sql"
   ]
 }
