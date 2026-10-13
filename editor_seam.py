@@ -37,14 +37,17 @@ def _display_geometry(page: dict, item: dict) -> tuple[float, float, float, floa
 
 
 def require_grouped_company_seal(element: dict, seal: dict) -> None:
-    """New batch seams use the classified company's primary large seal only.
+    """New batch seams use the classified owner's own primary large seal only.
 
     Existing pair manifests remain valid; no physical seal is reclassified as a
-    continuous seal, and no institution seal is silently borrowed.
+    continuous seal. The caller supplies the server-attested owner profile,
+    never a classification from editable element properties.
     """
     if (element.get("properties") or {}).get("seamMode") != "grouped":
         return
-    if seal.get("owner_kind") != "company" or seal.get("seal_category") != "establishment_seal" or seal.get("seal_size_type") != "large_seal":
+    owner = seal.get("owner_kind")
+    primary = "establishment_seal" if owner == "company" else "official_seal" if owner == "institution" else None
+    if not primary or seal.get("seal_category") != primary or seal.get("seal_size_type") != "large_seal":
         raise ValueError("editor_seam_company_large_seal_required")
 
 

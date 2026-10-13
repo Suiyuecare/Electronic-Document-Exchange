@@ -61,7 +61,8 @@ def check_groups(groups: list, seal: dict, edges: tuple[str, str]) -> bool:
             return False
         for part, (dimension, crop, binding) in enumerate(zip(group["dimensions"], group["slices"], group["bindings"])):
             expected = seal["width_mm"] * 72 / 25.4
-            if abs(dimension["width"] - expected) > 0.001 or abs(dimension["height"] - expected) > 0.001:
+            expected_height = seal.get("height_mm",seal["width_mm"]) * 72 / 25.4
+            if abs(dimension["width"] - expected) > 0.001 or abs(dimension["height"] - expected_height) > 0.001:
                 return False
             axis = "height" if edge in {"top", "bottom"} else "width"
             if abs(crop["clip"][axis] / dimension[axis] - 1 / count) > 0.00001:
@@ -103,29 +104,31 @@ def synthetic_pdf(path: Path) -> None:
     writer.save()
 
 
-def prepare_company_seal() -> dict:
-    """Use the normal file validator against a wholly synthetic 25mm stamp."""
-    raster = Image.new("RGBA", (500, 500), (255, 255, 255, 0))
+def prepare_company_seal(owner_kind="company") -> dict:
+    """Use normal file validation for a synthetic classified primary stamp."""
+    category="establishment_seal" if owner_kind=="company" else "official_seal"
+    height_mm=25 if owner_kind=="company" else 50
+    raster = Image.new("RGBA", (500, int(height_mm*20)), (255, 255, 255, 0))
     draw = ImageDraw.Draw(raster)
     for index, color in enumerate(((180, 0, 0, 255), (160, 30, 0, 255), (140, 60, 0, 255), (120, 90, 0, 255), (100, 120, 0, 255))):
-        draw.rectangle((index * 100 + 5, 5, index * 100 + 94, 494), outline=color, width=7)
+        draw.rectangle((index * 100 + 5, 5, index * 100 + 94, raster.height-6), outline=color, width=7)
         draw.text((index * 100 + 40, 240), str(index + 1), fill=color)
     stream = io.BytesIO(); raster.save(stream, format="PNG")
     with backend.connect() as conn:
-        row = conn.execute("SELECT id FROM company_seals WHERE company_id='CO-001' AND seal_category='establishment_seal' AND seal_size_type='large_seal' AND is_active=1 ORDER BY id LIMIT 1").fetchone()
-        if not row:
-            raise AssertionError("synthetic_company_large_slot_missing")
-        backend.upload_company_seal_file(conn, row["id"], {
-            "file_name": "synthetic-company-large-not-a-real-seal.png", "file_mime_type": "image/png",
+        backend.patch_company_seal_policy(conn,"CO-001",{"owner_kind":owner_kind})
+        row = conn.execute("SELECT id FROM company_seals WHERE company_id='CO-001' AND seal_category=? AND seal_size_type='large_seal' AND is_active=1 ORDER BY id LIMIT 1",(category,)).fetchone()
+        seal_id=row["id"] if row else backend.create_company_seal(conn,"CO-001",{"seal_name":"Synthetic classified primary large","seal_category":category,"seal_size_type":"large_seal"})["id"]
+        backend.upload_company_seal_file(conn, seal_id, {
+            "file_name": "synthetic-primary-large-not-a-real-seal.png", "file_mime_type": "image/png",
             "content_base64": base64.b64encode(stream.getvalue()).decode(),
-            "actor": "isolated-grouped-seam-fixture", "render_width_mm": 25, "render_height_mm": 25,
+            "actor": "isolated-grouped-seam-fixture", "render_width_mm": 25, "render_height_mm": height_mm,
         })
-        file_meta = backend.require_current_company_seal_file(conn, row["id"])
+        file_meta = backend.require_current_company_seal_file(conn, seal_id)
         conn.commit()
-        return {"id": row["id"], "file_id": file_meta["id"], "sha256": file_meta["file_hash"], "width_mm": 25}
+        return {"id":seal_id,"file_id":file_meta["id"],"sha256":file_meta["file_hash"],"width_mm":25,"height_mm":height_mm,"category":category,"owner_kind":owner_kind}
 
 
-def run(output: Path) -> dict:
+def run(output: Path,owner_kind="company") -> dict:
     output = output.resolve(); output.mkdir(parents=True, exist_ok=True)
     ui_sources = {name: (ROOT / name).read_bytes() for name in ("index.html", "app.js", "styles.css", "editor-seam.js")}
     report = {"scope": "loopback_synthetic_browser_shipping_http", "productionChanged": False,
@@ -175,7 +178,7 @@ def run(output: Path) -> dict:
     with mock.patch.object(QuietAcceptanceHandler, "send_head", head), mock.patch.object(QuietAcceptanceHandler, "send_json", trace), mock.patch.object(QuietAcceptanceHandler, "do_PUT", put), mock.patch.object(transport, "PLAYWRIGHT_BRIDGE", BRIDGE), mock.patch.dict(os.environ, browser_env):
         Fixture.setUpClass(); require_local_origin(Fixture.origin)
         try:
-            seal = prepare_company_seal(); report["syntheticSeal"] = seal
+            seal = prepare_company_seal(owner_kind); report["syntheticSeal"] = seal
             pdf = output / "synthetic-seven-pages.pdf"; synthetic_pdf(pdf)
             mirror = FinanceMirror(Fixture)
             directory = mirror.production_function(backend.supabase_finance_directory)
@@ -217,7 +220,7 @@ def run(output: Path) -> dict:
                     state = Fixture._expect_json("GET", f"/api/official-documents/{document_id}/editor-state", 200, token=auth["token"])["state"]
                     row["checks"]["latestMetadataAndTextReadback"] = detail["title"] == title and detail["request_reason"] == edited_reason and any(e.get("properties", {}).get("text") == "Synthetic edited text " + device for e in state["elements"])
                     browser.click_visible("#uploadedEditorSeamToggleBtn")
-                    row["checks"]["seamAutoSelectsOnlyCompanyLarge"] = browser.evaluate("selectedUploadedSeal()?.seal_category==='establishment_seal'&&selectedUploadedSeal()?.seal_size_type==='large_seal'&&[...document.querySelector('#uploadedSealCategorySelect').options].every(o=>o.value==='establishment_seal')&&[...document.querySelector('#uploadedSealSizeSelect').options].every(o=>o.value==='large_seal')")
+                    row["checks"]["seamAutoSelectsOnlyOwnerPrimaryLarge"] = browser.evaluate("selectedUploadedSeal()?.company_id==='CO-001'&&selectedUploadedSeal()?.owner_kind==="+json.dumps(owner_kind)+"&&selectedUploadedSeal()?.seal_category==="+json.dumps(seal["category"])+"&&selectedUploadedSeal()?.seal_size_type==='large_seal'&&[...document.querySelector('#uploadedSealCategorySelect').options].every(o=>o.value==="+json.dumps(seal["category"])+")&&[...document.querySelector('#uploadedSealSizeSelect').options].every(o=>o.value==='large_seal')")
                     for edge in ("right", "left", "top", "bottom"):
                         report["stage"] = device + ":edge:" + edge
                         while browser.evaluate("document.querySelectorAll('#uploadedEditorSeamGroups [data-seam-delete]').length"):
@@ -338,7 +341,7 @@ def verify_missing_seals(browser, pdf, report):
     browser.click_visible('#uploadedPdfEditor [data-editor-tool="seal"]')
     checks["stampPickerReachableAndExplainsMissingFile"] = browser.evaluate("!document.querySelector('#uploadedSealPicker').hidden&&!document.querySelector('#uploadedPdfEditor [data-editor-tool=seal]').disabled&&document.querySelector('#uploadedSealPickerStatus').textContent.includes('尚無已登錄並啟用')&&document.querySelector('#addSelectedStampBtn').disabled")
     browser.click_visible("#uploadedEditorSeamToggleBtn")
-    checks["seamSettingsReachableWithoutFalseAdd"] = browser.evaluate("!document.querySelector('#uploadedEditorSeamPanel').hidden&&!document.querySelector('#uploadedEditorSeamToggleBtn').disabled&&document.querySelector('#uploadedEditorSeamAddBtn').disabled&&document.querySelector('#uploadedEditorSeamStatus').textContent.includes('尚無可用公司大章')")
+    checks["seamSettingsReachableWithoutFalseAdd"] = browser.evaluate("!document.querySelector('#uploadedEditorSeamPanel').hidden&&!document.querySelector('#uploadedEditorSeamToggleBtn').disabled&&document.querySelector('#uploadedEditorSeamAddBtn').disabled&&document.querySelector('#uploadedEditorSeamStatus').textContent==='此單位尚無可用的大章，請先登錄公司章或圖記章。'")
     browser.run("screenshot", str(report_output := pdf.parent / "mobile-missing-seals.png"))
     report["missingSeals"] = {"checks": checks, "passed": all(checks.values()), "screenshot": report_output.name}
 
@@ -349,4 +352,5 @@ def write_report(output, report):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args(); raise SystemExit(0 if run(args.output)["passed"] else 1)
+    parser.add_argument("--owner-kind",choices=("company","institution"),default="company")
+    args = parser.parse_args(); raise SystemExit(0 if run(args.output,args.owner_kind)["passed"] else 1)

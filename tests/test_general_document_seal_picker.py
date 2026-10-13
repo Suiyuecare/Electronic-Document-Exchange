@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class GeneralDocumentSealPickerTest(unittest.TestCase):
     FUNCTIONS = [
         "uploadedSealPickerReadOnly", "uploadedSealCompanyRecords",
-        "uploadedSealPickerCategoryOptions", "renderUploadedSealOptions",
+        "uploadedSealPickerCategoryOptions", "uploadedSeamPrimaryLargeSeal", "renderUploadedSealOptions",
         "changeUploadedSealPickerSelection", "selectedUploadedSeal",
         "focusUploadedSealCompany", "officialSealHasCurrentFile",
         "companySealSelectable", "companySealCategoryLabel", "uploadedSealApplicationMetadataReadOnly",
@@ -141,11 +141,36 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
         self.assertNotEqual(value["groups"][0]["offset"], value["groups"][1]["offset"])
         self.assertTrue(all(binding == {"seal": "COMPANY-L", "file": "FILE-COMPANY-L"} for group in value["groups"] for binding in group["bindings"]))
 
-    def test_grouped_seams_reject_general_small_and_noncompany_seals(self):
-        for category, size in (("general_seal", "large_seal"), ("establishment_seal", "small_seal"), ("official_seal", "large_seal")):
-            value = self.run_js('uploadedSealOptions=[seal("INVALID",' + json.dumps(category) + ',' + json.dumps(size) + ')];renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({count:uploadedSealEditorState.elements.length,toasts}));')
-            self.assertEqual(value["count"], 0)
-            self.assertTrue(any("公司大章" in text for text in value["toasts"]))
+    def test_grouped_seams_reject_wrong_owner_category_small_and_unavailable_primary(self):
+        for owner,category,size in (("company","general_seal","large_seal"),("company","establishment_seal","small_seal"),
+            ("company","official_seal","large_seal"),("institution","establishment_seal","large_seal"),
+            ("institution","general_seal","large_seal"),("institution","bank_seal","large_seal"),
+            ("institution","continuous_seal","single_seal"),("institution","official_seal","small_seal"),
+            ("unclassified","official_seal","large_seal")):
+            with self.subTest(owner=owner,category=category,size=size):
+                record='({...seal("INVALID",'+json.dumps(category)+','+json.dumps(size)+'),owner_kind:'+json.dumps(owner)+'})'
+                value=self.run_js('uploadedSealOptions=['+record+'];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({count:uploadedSealEditorState.elements.length,selected:selectedUploadedSeal(),category:nodes["#uploadedSealCategorySelect"].value,toasts}));')
+                self.assertEqual(value["count"],0)
+                self.assertIsNone(value["selected"])
+                self.assertEqual(value["category"],"")
+                self.assertIn("請先選擇可用的印章版本。",value["toasts"])
+
+    def test_institution_primary_picker_uses_only_selected_unit_official_large(self):
+        value=self.run_js('nodes["#uploadedSealCompany"].options.push({value:"CO-INST",textContent:"合成機構"});nodes["#uploadedSealCompany"].value="CO-INST";uploadedSealApplicationRuntime.companyId="CO-INST";uploadedSealOptions=[{...seal("INST-L","official_seal","large_seal","CO-INST"),owner_kind:"institution",widthMm:20,heightMm:40},{...seal("INST-S","official_seal","small_seal","CO-INST"),owner_kind:"institution"},{...seal("GENERAL","general_seal","large_seal","CO-INST"),owner_kind:"institution"},{...seal("WRONG","establishment_seal","large_seal","CO-INST"),owner_kind:"institution"},seal("FOREIGN","establishment_seal","large_seal","A")];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({id:selectedUploadedSeal()?.id,category:nodes["#uploadedSealCategorySelect"].value,sizes:nodes["#uploadedSealSizeSelect"].options.map(o=>o.value),seals:nodes["#uploadedSealSealSelect"].options.map(o=>o.value),bindings:uploadedSealEditorState.elements.map(e=>e.properties.sealId),status:nodes["#uploadedSealPickerStatus"].textContent,toasts}));')
+        self.assertEqual(value["id"],"INST-L")
+        self.assertEqual(value["category"],"official_seal")
+        self.assertEqual(value["sizes"],["large_seal"])
+        self.assertEqual(value["seals"],["INST-L"])
+        self.assertEqual(value["bindings"],["INST-L"]*3)
+        self.assertIn("20.00 × 40.00 mm",value["status"])
+        self.assertTrue(any("圖記大章" in text for text in value["toasts"]))
+
+    def test_institution_primary_missing_current_or_invalid_dimensions_is_not_offered(self):
+        for patch in ('current_file:null,current_file_id:""','current_file:{usable:false,is_current:true},selectable:false',
+                      'current_file:{usable:true,is_current:false}','is_active:false','company_id:"FOREIGN"'):
+            with self.subTest(patch=patch):
+                value=self.run_js('uploadedSealOptions=[{...seal("INST-L","official_seal"),owner_kind:"institution",'+patch+'}];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({selected:selectedUploadedSeal(),count:uploadedSealEditorState.elements.length,disabled:nodes["#uploadedSealSealSelect"].disabled}));')
+                self.assertEqual(value,{"selected":None,"count":0,"disabled":True})
 
     def test_company_jump_reveals_only_existing_company_control(self):
         value = self.run_js('nodes["#uploadedSealApplicationFields"].hidden=true;focusUploadedSealCompany();console.log(JSON.stringify({hidden:nodes["#uploadedSealApplicationFields"].hidden,focused:nodes["#uploadedSealCompany"].focused,value:nodes["#uploadedSealCompany"].value,changes}));')

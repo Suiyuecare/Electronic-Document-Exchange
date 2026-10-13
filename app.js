@@ -27727,10 +27727,16 @@ function uploadedSealCompanyRecords() {
     && seal.is_active !== 0 && seal.is_active !== false);
 }
 
+function uploadedSeamPrimaryLargeSeal(seal) {
+  const primary = seal?.owner_kind === "company" ? "establishment_seal"
+    : seal?.owner_kind === "institution" ? "official_seal" : "";
+  return Boolean(primary && seal.seal_category === primary && seal.seal_size_type === "large_seal");
+}
+
 function uploadedSealPickerCategoryOptions(records = uploadedSealCompanyRecords()) {
   const seamOpen = document.querySelector("#uploadedEditorSeamPanel")?.hidden === false;
   const ready = records.filter((seal) => companySealSelectable(seal)
-    && (!seamOpen || (seal.seal_category === "establishment_seal" && seal.seal_size_type === "large_seal")));
+    && (!seamOpen || uploadedSeamPrimaryLargeSeal(seal)));
   const availableCodes = new Set(ready.map((seal) => seal.seal_category).filter(Boolean));
   const options = companySealRefOptions("category")
     .filter((item) => availableCodes.has(item.code))
@@ -27754,7 +27760,7 @@ function renderUploadedSealOptions() {
   const records = uploadedSealCompanyRecords();
   const seamOpen = document.querySelector("#uploadedEditorSeamPanel")?.hidden === false;
   const ready = records.filter((seal) => companySealSelectable(seal)
-    && (!seamOpen || (seal.seal_category === "establishment_seal" && seal.seal_size_type === "large_seal")));
+    && (!seamOpen || uploadedSeamPrimaryLargeSeal(seal)));
   const categories = uploadedSealPickerCategoryOptions(records);
   const sameCompany = categorySelect.dataset.companyId === companyId;
   const previousId = sameCompany ? select.value : "";
@@ -27762,7 +27768,7 @@ function renderUploadedSealOptions() {
   const previousCategory = initialized ? categorySelect.value : "";
   const previousSize = initialized ? sizeSelect.value : "";
   const first = ready.find((seal) => categories.some((item) => item.code === seal.seal_category)
-    && seal.seal_category === (seamOpen ? "establishment_seal" : "general_seal"))
+    && (seamOpen ? uploadedSeamPrimaryLargeSeal(seal) : seal.seal_category === "general_seal"))
     || ready.find((seal) => categories.some((item) => item.code === seal.seal_category));
   const category = categories.some((item) => item.code === previousCategory)
     ? previousCategory
@@ -27817,7 +27823,7 @@ function renderUploadedSealOptions() {
     status.textContent = uploadedSealEditorRuntime.sealOptionsLoading ? "正在載入印章…"
       : !companyId ? "請先選擇用印公司。"
         : seal ? `${categoryLabel}${size === "single_seal" ? "" : ` · ${size === "small_seal" ? "小章" : "大章"}`} · ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（尺寸固定）`
-          : !ready.length ? seamOpen ? "騎縫章使用公司大章；此公司尚無可用版本，請先登錄公司大章。" : "此公司尚無已登錄並啟用的章檔；只有印章目錄不能用印。"
+          : !ready.length ? seamOpen ? "此單位尚無可用的大章；公司使用公司章，機構使用圖記章。" : "此公司尚無已登錄並啟用的章檔；只有印章目錄不能用印。"
             : `此公司尚無可用的${categoryLabel}${size === "small_seal" ? "小章" : "大章"}，請另選款式或聯絡印章管理人。`;
   }
 }
@@ -29994,7 +30000,7 @@ function addUploadedSeamGroups() {
   if (uploadedSealPickerReadOnly()) return;
   const seal = selectedUploadedSeal();
   if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇可用的印章版本。");
-  if (seal.seal_category !== "establishment_seal" || seal.seal_size_type !== "large_seal") return showToast("騎縫章請使用此公司的公司大章。");
+  if (!uploadedSeamPrimaryLargeSeal(seal)) return showToast("騎縫章請使用本單位的公司章大章或圖記大章。");
   const binding = companySealCurrentVersionSnapshot(seal);
   if (!binding.sealFileId || !binding.sealFileSha256) return showToast("印章版本資料不完整，請重新整理後再建立騎縫章。");
   const raw = document.querySelector("#uploadedEditorSeamPages")?.value.trim() || "";
@@ -30026,7 +30032,7 @@ function addUploadedSeamGroups() {
       globalThis.EDOCSeam.position(state, id, globalThis.EDOCSeam.initialTopMm(limit, index, missing.length), edge);
     });
   });
-  if (changed) showToast(`已加入 ${missing.length} 組，每 5 頁共用一枚公司章；各組位置可調整。`);
+  if (changed) showToast(`已加入 ${missing.length} 組，每組最多 5 頁共用一枚${seal.owner_kind === "institution" ? "圖記大章" : "公司大章"}；各組位置可調整。`);
 }
 
 function renderUploadedSeamGroups() {
@@ -30035,12 +30041,12 @@ function renderUploadedSeamGroups() {
   const groups = [...globalThis.EDOCSeam.groups(uploadedSealEditorState)];
   const locked = uploadedSealPickerReadOnly();
   const selected = selectedUploadedSeal();
-  const hasUsableSeal = Boolean(selected && selected.seal_category === "establishment_seal" && selected.seal_size_type === "large_seal");
+  const hasUsableSeal = uploadedSeamPrimaryLargeSeal(selected);
   document.querySelector("#uploadedEditorSeamAddBtn")?.toggleAttribute("disabled", locked || !hasUsableSeal || !uploadedSealEditorState.pages.length);
   document.querySelector("#uploadedEditorSeamPages")?.toggleAttribute("disabled", locked);
   document.querySelector("#uploadedEditorSeamEdge")?.toggleAttribute("disabled", locked);
   const status = document.querySelector("#uploadedEditorSeamStatus");
-  if (status) status.textContent = !uploadedSealEditorState.pages.length ? "請先上傳 PDF。" : groups.length ? `已加入 ${groups.length} 組，可各別調整邊與位置。` : !hasUsableSeal ? "此公司尚無可用公司大章，請先登錄章檔。" : "選擇用印邊，再按「加入騎縫章」。";
+  if (status) status.textContent = !uploadedSealEditorState.pages.length ? "請先上傳 PDF。" : groups.length ? `已加入 ${groups.length} 組，可各別調整邊與位置。` : !hasUsableSeal ? "此單位尚無可用的大章，請先登錄公司章或圖記章。" : "選擇用印邊，再按「加入騎縫章」。";
   target.innerHTML = groups.map(([id, members], index) => {
     const first = members[0];
     const page = uploadedSealEditorState.pages.find((item) => item.pageId === first.pageId);

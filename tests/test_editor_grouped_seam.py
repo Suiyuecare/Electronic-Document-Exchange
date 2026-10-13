@@ -25,6 +25,7 @@ from editor_seam import (
     validate_seam_positions,
 )
 from tests import test_five_account_editor_workflow as workflow_fixture
+from tests import test_general_document_seal_workflow as general_seal_fixture
 
 
 def grouped_fixture(page_count=7, edge="right", rotations=(0, 90, 180, 270), *, size=84, height_size=None, offset=120):
@@ -119,14 +120,21 @@ class GroupedSeamGeometryTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError,"editor_seam_position_mismatch"):
                 seam_element_for_position(state,position)
 
-    def test_only_classified_company_primary_large_seal_allowed_for_new_groups(self):
+    def test_only_classified_owners_own_primary_large_seal_allowed_for_new_groups(self):
         element = grouped_fixture()["elements"][0]
         valid = {"owner_kind":"company", "seal_category":"establishment_seal", "seal_size_type":"large_seal"}
         require_grouped_company_seal(element,valid)
+        institution={"owner_kind":"institution","seal_category":"official_seal","seal_size_type":"large_seal"}
+        require_grouped_company_seal(element,institution)
         for patch in ({"owner_kind":"institution"}, {"owner_kind":"unclassified"}, {"seal_category":"general_seal"},
                       {"seal_category":"official_seal"}, {"seal_category":"continuous_seal"}, {"seal_size_type":"small_seal"}):
             with self.subTest(patch=patch), self.assertRaisesRegex(ValueError,"editor_seam_company_large_seal_required"):
                 require_grouped_company_seal(element,{**valid, **patch})
+        for patch in ({"owner_kind":"company"},{"owner_kind":"unclassified"},{"owner_kind":None},{"owner_kind":[]},
+                      {"seal_category":"establishment_seal"},{"seal_category":"general_seal"},{"seal_category":"bank_seal"},
+                      {"seal_category":"continuous_seal"},{"seal_size_type":"small_seal"},{"seal_size_type":"single_seal"}):
+            with self.subTest(institution_patch=patch),self.assertRaisesRegex(ValueError,"editor_seam_company_large_seal_required"):
+                require_grouped_company_seal(element,{**institution,**patch})
         legacy = copy.deepcopy(element); legacy["properties"]["seamMode"] = "pair"
         require_grouped_company_seal(legacy,{"owner_kind":"unclassified","seal_category":"general_seal"})
 
@@ -140,6 +148,19 @@ class GroupedSeamGeometryTests(unittest.TestCase):
                 backend.local_editor_seal_file_context(None,"CO-SYNTHETIC",element,bind_missing=False,require_current_selection=True)
             with self.assertRaisesRegex(ValueError,"editor_seam_company_large_seal_required"):
                 backend.supabase_editor_seal_file_context("CO-SYNTHETIC",element,bind_missing=False,require_current_selection=True)
+            storage.assert_not_called()
+
+    def test_element_owner_claim_cannot_override_attested_backend_owner(self):
+        element=grouped_fixture()["elements"][0]
+        element["properties"].update(owner_kind="institution",seal_category="official_seal",seal_size_type="large_seal")
+        wrong={"owner_kind":"company","seal_category":"official_seal","seal_size_type":"large_seal"}
+        with mock.patch.object(backend,"validate_official_document_seal",return_value=wrong), \
+             mock.patch.object(backend,"supabase_validate_official_document_seal",return_value=wrong), \
+             mock.patch.object(backend,"supabase_filter_rows") as storage:
+            for adapter,args in ((backend.local_editor_seal_file_context,(None,"CO-SYNTHETIC",element)),
+                                 (backend.supabase_editor_seal_file_context,("CO-SYNTHETIC",element))):
+                with self.assertRaisesRegex(ValueError,"editor_seam_company_large_seal_required"):
+                    adapter(*args,bind_missing=False,require_current_selection=True)
             storage.assert_not_called()
 
 
@@ -406,6 +427,57 @@ class GroupedSeamApprovalTests(unittest.TestCase):
             backend.upload_company_seal_file(self.conn,self.seal_id,{"file_name":"synthetic-native-original.png","file_mime_type":"image/png",
                 "content_base64":base64.b64encode(native).decode("ascii"),"render_width_mm":29.845,"render_height_mm":30.099,
                 "actor":"isolated-approved-original"})
+            self.seal_bytes=native
+            with mock.patch.dict(os.environ,{"EDOC_GROUPED_SEAM_EVIDENCE_DIR":""}):
+                self.test_seven_page_last_snapshot_cas_approval_stamp_download_all_four_edges()
+
+    def test_institution_own_rectangular_primary_large_completes_immutable_approval_flow(self):
+        backend.patch_company_seal_policy(self.conn,"CO-001",{"owner_kind":"institution"})
+        row=self.conn.execute("SELECT id FROM company_seals WHERE company_id='CO-001' AND seal_category='official_seal' AND seal_size_type='large_seal' AND is_active=1 ORDER BY id LIMIT 1").fetchone()
+        self.seal_id=row[0] if row else backend.create_company_seal(self.conn,"CO-001",{"seal_name":"Synthetic institution primary large","seal_category":"official_seal","seal_size_type":"large_seal"})["id"]
+        stream=io.BytesIO();Image.new("RGBA",(400,800),(180,0,0,255)).save(stream,"PNG")
+        self.seal_bytes=stream.getvalue()
+        backend.upload_company_seal_file(self.conn,self.seal_id,{"file_name":"synthetic-institution-primary.png","file_mime_type":"image/png",
+            "content_base64":base64.b64encode(self.seal_bytes).decode("ascii"),"render_width_mm":20,"render_height_mm":40,
+            "actor":"isolated-institution-grouped-seam"})
+        seal=backend.company_seal_row(self.conn,self.seal_id)
+        self.assertEqual((seal["owner_kind"],seal["seal_category"],seal["seal_size_type"]),("institution","official_seal","large_seal"))
+        seal_file=backend.require_current_company_seal_file(self.conn,self.seal_id)
+        element=grouped_fixture()["elements"][0]
+        element["properties"].update(sealId=self.seal_id,sealFileId=seal_file["id"],sealFileSha256=seal_file["file_hash"],
+            owner_kind="company",seal_category="bank_seal",renderWidthMm=999,renderHeightMm=999)
+        with general_seal_fixture.GeneralDocumentSealWorkflowTest._supabase_adapter(self):
+            for name,adapter,args in (("SQLite",backend.local_editor_seal_file_context,(self.conn,"CO-001")),
+                                      ("Supabase local adapter",backend.supabase_editor_seal_file_context,("CO-001",))):
+                with self.subTest(adapter=name):
+                    attested,file,profile=adapter(*args,copy.deepcopy(element),bind_missing=False,require_current_selection=True)
+                    self.assertEqual(attested["owner_kind"],"institution")
+                    self.assertEqual(file["id"],seal_file["id"])
+                    self.assertEqual((profile["width_mm"],profile["height_mm"]),(20,40))
+                    self.assertEqual(profile["dimension_policy_version"],backend.seal_policy.OFFICIAL_POLICY)
+                    bad=copy.deepcopy(element);bad["properties"]["sealFileSha256"]="f"*64
+                    with self.assertRaisesRegex(ValueError,"editor_seal_file_hash_mismatch"):
+                        adapter(*args,bad,bind_missing=False,require_current_selection=True)
+                    bad=copy.deepcopy(element);bad["properties"]["sealFileId"]="foreign-file"
+                    with self.assertRaisesRegex(ValueError,"editor_seal_file_not_found"):
+                        adapter(*args,bad,bind_missing=False,require_current_selection=True)
+            with self.assertRaisesRegex(ValueError,"official_document_seal_company_mismatch"):
+                backend.supabase_editor_seal_file_context("CO-FOREIGN",copy.deepcopy(element),bind_missing=False,require_current_selection=True)
+            with self.assertRaisesRegex(ValueError,"official_document_seal_company_mismatch"):
+                backend.local_editor_seal_file_context(self.conn,"CO-FOREIGN",copy.deepcopy(element),bind_missing=False,require_current_selection=True)
+        with mock.patch.dict(os.environ,{"EDOC_GROUPED_SEAM_EVIDENCE_DIR":""}):
+            self.test_seven_page_last_snapshot_cas_approval_stamp_download_all_four_edges()
+
+    def test_institution_approved_original_200dpi_keeps_rectangular_native_geometry(self):
+        backend.patch_company_seal_policy(self.conn,"CO-001",{"owner_kind":"institution"})
+        self.seal_id=backend.create_company_seal(self.conn,"CO-001",{"seal_name":"Synthetic institution approved scan","seal_category":"official_seal","seal_size_type":"large_seal"})["id"]
+        stream=io.BytesIO();Image.new("RGBA",(235,470),(180,0,0,255)).save(stream,"PNG")
+        native=stream.getvalue()
+        entry=(backend.sha256_bytes(native).lower(),"CO-001",self.seal_id,"official_seal","large_seal",235,470,29.845,59.69,0)
+        with mock.patch.object(backend.seal_scan_exceptions,"_ROWS",(*backend.seal_scan_exceptions._ROWS,entry)):
+            backend.upload_company_seal_file(self.conn,self.seal_id,{"file_name":"synthetic-institution-native-original.png","file_mime_type":"image/png",
+                "content_base64":base64.b64encode(native).decode("ascii"),"render_width_mm":29.845,"render_height_mm":59.69,
+                "actor":"isolated-approved-original-institution"})
             self.seal_bytes=native
             with mock.patch.dict(os.environ,{"EDOC_GROUPED_SEAM_EVIDENCE_DIR":""}):
                 self.test_seven_page_last_snapshot_cas_approval_stamp_download_all_four_edges()
