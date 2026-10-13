@@ -3,7 +3,7 @@
   "canonicalMap": "UX-CONTRACT.md",
   "sourceRoots": ["."],
   "ownership": {
-    "Select/Listbox": "native",
+    "Select/Listbox": "authored",
     "Date": "native"
   }
 }

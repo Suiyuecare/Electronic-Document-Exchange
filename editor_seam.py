@@ -7,11 +7,18 @@ import re
 
 
 SEAM_EDGES = frozenset({"left", "right", "top", "bottom"})
+CURRENT_SEAM_POLICY = "right-edge-10mm-v2"
+SEAM_MARGIN_PT = 10 * 72 / 25.4
 
 
 def _seam_description(element: dict) -> tuple[str, int, int, str]:
     props = element.get("properties") or {}
+    policy = props.get("seamPolicyVersion") or ""
+    if policy and policy != CURRENT_SEAM_POLICY:
+        raise ValueError("editor_seam_policy_invalid")
     mode, count, index = props.get("seamMode"), props.get("seamPartCount"), props.get("seamPartIndex")
+    if policy == CURRENT_SEAM_POLICY and (mode != "grouped" or props.get("seamEdge") != "right"):
+        raise ValueError("editor_seam_right_edge_required")
     if type(count) is not int or type(index) is not int:
         raise ValueError("editor_seam_group_invalid")
     if mode == "pair":
@@ -51,13 +58,32 @@ def require_grouped_company_seal(element: dict, seal: dict) -> None:
         raise ValueError("editor_seam_company_large_seal_required")
 
 
+def validate_seam_policy_transition(state: dict, previous: dict | None) -> None:
+    """New placements cannot opt into legacy rules; existing manifests keep them."""
+    if previous is None:
+        return
+    old = {item.get("id"): item for item in previous.get("elements") or []}
+    for item in state.get("elements") or []:
+        props = item.get("properties") or {}
+        if not props.get("seamGroupId"):
+            continue
+        prior = old.get(item.get("id")) or {}
+        prior_props = prior.get("properties") or {}
+        inherited = prior.get("kind") == "seal" and all(
+            props.get(key) == prior_props.get(key)
+            for key in ("seamGroupId", "seamMode", "seamPartCount", "seamPartIndex", "seamPolicyVersion", "sealId")
+        ) and item.get("pageId") == prior.get("pageId")
+        if not inherited and props.get("seamPolicyVersion") != CURRENT_SEAM_POLICY:
+            raise ValueError("editor_seam_current_policy_required")
+
+
 def validate_seam_groups(state: dict) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = {}
     for element in state.get("elements") or []:
         props = element.get("properties") or {}
         group_id = props.get("seamGroupId")
         if not group_id:
-            if any(key in props for key in ("seamPartIndex", "seamPartCount", "seamMode", "seamEdge")):
+            if any(key in props for key in ("seamPartIndex", "seamPartCount", "seamMode", "seamEdge", "seamPolicyVersion")):
                 raise ValueError("editor_seam_group_invalid")
             continue
         if element.get("kind") != "seal" or not isinstance(group_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", group_id):
@@ -80,6 +106,8 @@ def validate_seam_groups(state: dict) -> dict[str, list[dict]]:
             item_mode, item_count, _, item_edge = _seam_description(item)
             if item_mode != mode or item_count != count or (mode == "grouped" and item_edge != edge):
                 raise ValueError("editor_seam_seal_mismatch")
+            if (item["properties"].get("seamPolicyVersion") or "") != (first["properties"].get("seamPolicyVersion") or ""):
+                raise ValueError("editor_seam_policy_invalid")
             for key in ("sealId", "sealFileId", "sealFileSha256"):
                 if first["properties"].get(key) != item["properties"].get(key):
                     raise ValueError("editor_seam_seal_mismatch")
@@ -99,6 +127,10 @@ def validate_seam_groups(state: dict) -> dict[str, list[dict]]:
             limit = display_width - w if horizontal else display_height - h
             if not all(math.isfinite(value) for value in (actual, expected, offset, limit)) or offset < -0.001 or offset > limit + 0.001 or not math.isclose(actual, expected, abs_tol=0.001):
                 raise ValueError("editor_seam_position_mismatch")
+            if item["properties"].get("seamPolicyVersion") == CURRENT_SEAM_POLICY and (
+                top < SEAM_MARGIN_PT - 0.001 or top + h > display_height - SEAM_MARGIN_PT + 0.001
+            ):
+                raise ValueError("editor_seam_margin_required")
             offsets.append(offset)
         if any(not math.isclose(offsets[0], offset, abs_tol=0.001) for offset in offsets[1:]):
             raise ValueError("editor_seam_position_mismatch")

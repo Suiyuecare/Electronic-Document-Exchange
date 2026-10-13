@@ -29,7 +29,7 @@ function harness() {
     request_reason: 'Synthetic reason', handler_name: 'Test actor', dispatch_unit: 'Test department',
     applicant_department_id: 'SYNTHETIC-UNIT', applicant_department_name: 'Test department', document_category: 'test_document' };
   const nodes = new Map();
-  for (const id of ['uploadedEditorSaveDraftBtn', 'uploadedEditorSaveDraftFooterBtn']) {
+  for (const id of ['uploadedEditorSaveDraftBtn', 'uploadedEditorSaveDraftFooterBtn', 'uploadedEditorSaveDraftToolbarBtn']) {
     nodes.set('#' + id, { disabled: true, title: '', attrs: {}, setAttribute(key, value) { this.attrs[key] = value; } });
   }
   nodes.set('#uploadedSealTitle', { get value() { return fields.title; } });

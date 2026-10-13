@@ -228,7 +228,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         navigation = self.html[nav_start:nav_end]
         routes_and_labels = re.findall(
             r'class="nav-item(?: active)?" data-target="([^"]+)" data-icon="[^"]+"[^>]*>.*?'
-            r'<span class="nav-label">([^<]+)</span>\s*</button>',
+            r'<span class="nav-label">([^<]+)</span>(?:\s*<span class="draft-nav-count"[^>]*>[^<]*</span>)?\s*</button>',
             navigation,
             flags=re.DOTALL,
         )
@@ -236,13 +236,14 @@ class UiUxSimplificationContractTest(unittest.TestCase):
             ("dashboard", "首頁"),
             ("compose", "撰寫公文"),
             ("electronicSeal", "電子用印"),
+            ("drafts", "草稿編輯"),
             ("approvalLog", "簽核紀錄"),
             ("inbound", "收發管理"),
             ("settings", "系統設定"),
         ])
-        self.assertEqual(navigation.count('class="nav-item'), 6)
-        self.assertEqual(navigation.count('class="nav-ico"'), 6)
-        self.assertEqual(navigation.count('class="nav-label"'), 6)
+        self.assertEqual(navigation.count('class="nav-item'), 7)
+        self.assertEqual(navigation.count('class="nav-ico"'), 7)
+        self.assertEqual(navigation.count('class="nav-label"'), 7)
         normalized_css = re.sub(r"\s+", " ", self.css)
         self.assertIn(".nav-list { display: grid; grid-auto-rows: max-content; gap: 0; align-content: start;", normalized_css)
         self.assertIn(".nav-ico svg { width: 18px; height: 18px; fill: none; stroke: currentColor;", normalized_css)

@@ -103,8 +103,9 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
             for part in range(2):
                 page = state["pages"][group + part]
                 element = self._element(f"BANK-SEAM-{group}-{part}", self.bank, page, 0, 0,
-                    seamGroupId=f"GENERAL-SEAM-{group}", seamMode="pair", seamPartCount=2, seamPartIndex=part)
-                element["x"] = round(page["widthPt"] - element["width"], 4) if part == 0 else 0
+                    seamGroupId=f"GENERAL-SEAM-{group}", seamMode="grouped", seamPartCount=2, seamPartIndex=part,
+                    seamEdge="right", seamPolicyVersion="right-edge-10mm-v2")
+                element["x"] = round(page["widthPt"] - element["width"], 4)
                 element["y"] = round(page["heightPt"] - top - element["height"], 4)
                 element["zIndex"] = 20 + group * 2 + part
                 state["elements"].append(element)
@@ -162,7 +163,7 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
                 props = element["properties"]
                 x = element["x"] + element["width"] / 2
                 if "seamPartIndex" in props:
-                    x = element["x"] + element["width"] * (0.75 if props["seamPartIndex"] == 0 else 0.25)
+                    x = element["x"] + element["width"] * 0.75
                 y = state["pages"][page_index]["heightPt"] - element["y"] - element["height"] / 2
                 r, g, b = raster.getpixel((round(x), round(y)))
                 if props["sealId"] == self.large:

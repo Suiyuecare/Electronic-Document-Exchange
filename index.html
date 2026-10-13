@@ -13,6 +13,10 @@
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
     <link rel="stylesheet" href="styles.css?v=20260928-compose-submit-r1" />
+    <link rel="stylesheet" href="vendor/tom-select/tom-select.default.min.css?v=2.6.2" />
+    <link rel="stylesheet" href="workspace-select.css?v=20261014-r1" />
+    <link rel="stylesheet" href="workspace-navigation.css?v=20261014-r1" />
+    <link rel="stylesheet" href="editor-fluid.css?v=20261014-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
@@ -63,6 +67,10 @@
           <button class="nav-item" data-target="electronicSeal" data-icon="章">
             <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 13h8M9 13V9a3 3 0 0 1 6 0v4M6 13h12v4H6zM5 20h14"></path></svg></span>
             <span class="nav-label">電子用印</span>
+          </button>
+          <button class="nav-item" data-target="drafts" data-icon="稿">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7zM14 3v5h5M10 13h6M10 17h4"></path></svg></span>
+            <span class="nav-label">草稿編輯</span><span class="draft-nav-count" id="draftNavCount" aria-label="草稿數量尚未載入">—</span>
           </button>
           <p class="nav-section-label">流程管理</p>
           <button class="nav-item" data-target="approvalLog" data-icon="簽">
@@ -428,11 +436,12 @@
 
           <div class="inbound-toolbar panel">
             <div class="inbound-simple-flow" role="tablist" aria-label="簽核進度篩選">
-              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="my_pending">待我處理</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="delegated">代理待簽</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="overdue">逾期</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="processed">其他紀錄</button>
+              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="pending">待簽核</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="mine">我申請的</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="acted">已簽核</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="rejected">被退件</button>
             </div>
+            <label class="approval-task-filter">待辦篩選<select id="approvalTaskFilter"><option value="">全部</option><option value="delegated">代理待簽</option><option value="overdue">逾期</option><option value="operations">寄發・收件・用印重試</option></select></label>
             <label class="toolbar-search compact">搜尋<input id="approvalLogSearch" type="search" placeholder="文號、主旨、角色、狀態" /></label>
             <button class="secondary-button" id="officialHandoverOpenBtn" type="button" hidden aria-expanded="false" aria-controls="officialHandoverPanel">離職案件交接</button>
           </div>
@@ -1060,6 +1069,14 @@
           </div>
         </section>
 
+        <section class="view" id="drafts" aria-labelledby="workspaceDraftTitle">
+          <div class="section-header"><h3 id="workspaceDraftTitle">草稿編輯</h3><button type="button" class="primary-button" id="draftNewComposeBtn">寫新公文</button></div>
+          <div class="panel draft-workspace-toolbar"><label>搜尋草稿<input id="workspaceDraftSearch" type="search" placeholder="主旨或案件編號" /></label><button type="button" class="secondary-button" id="workspaceDraftRefreshBtn">重新整理</button><span id="workspaceDraftCount" role="status" aria-live="polite">正在載入…</span></div>
+          <section class="panel draft-local-recovery" id="workspaceLocalDraft" hidden aria-label="此裝置未同步草稿"></section>
+          <div class="workspace-draft-list" id="workspaceDraftList" aria-live="polite"></div>
+          <div class="official-list-pagination" id="workspaceDraftPagination"></div>
+        </section>
+
         <section class="view" id="compose">
           <div class="section-header">
             <div>
@@ -1077,14 +1094,14 @@
             <button type="button" class="secondary-button" id="composeCloudRetryBtn">重試保存</button>
             <button type="button" class="secondary-button" id="composeKeepNewDraftBtn" hidden>保留我的內容為新草稿</button>
           </div>
-          <section class="compose-resume-draft" id="composeResumeDraft" hidden aria-labelledby="composeResumeDraftTitle">
+          <section class="compose-resume-draft" id="composeResumeDraft" hidden aria-labelledby="composeResumeDraftTitle" data-draft-legacy>
             <div><strong id="composeResumeDraftTitle">繼續上次草稿？</strong><p id="composeResumeDraftDescription"></p></div>
             <div class="form-actions">
               <button class="primary-button" type="button" id="composeResumeDraftBtn">繼續上次草稿</button>
               <button class="secondary-button" type="button" id="composeStartFreshBtn">先寫新公文</button>
             </div>
           </section>
-          <details class="compose-cloud-drafts">
+          <details class="compose-cloud-drafts" hidden data-draft-legacy>
             <summary>雲端草稿 · 換裝置繼續填寫</summary>
             <div class="form-actions">
               <label>私人草稿<select id="composeCloudDraftSelect"><option value="">選擇私人雲端草稿</option></select></label>
@@ -1627,8 +1644,8 @@
                       <span class="field-hint" id="uploadedSealApprovalCategoryHint">選擇後，系統會自動套用 A／B／C／D 簽核層級。</span>
                     </label>
                   </div>
-                  <label>部門<select id="uploadedSealDepartment" required></select></label>
                   <label>用印公司<select id="uploadedSealCompany" required aria-describedby="uploadedSealCompanyLockHint"></select><span class="field-hint" id="uploadedSealCompanyLockHint" hidden></span></label>
+                  <label>部門<select id="uploadedSealDepartment" required></select></label>
                   <label class="electronic-seal-application-wide">申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
                   <label class="electronic-seal-application-wide">用印原因<textarea class="resize-none" id="uploadedSealReason" rows="3" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
                 </div>
@@ -1718,6 +1735,17 @@
                   <button id="uploadedEditorUndoBtn" type="button" disabled title="復原（⌘/Ctrl+Z）" aria-label="復原">↶</button>
                   <button id="uploadedEditorRedoBtn" type="button" disabled title="重做（⌘/Ctrl+Shift+Z）" aria-label="重做">↷</button>
                 </div>
+                <div class="pdf-editor-tool-group editor-persistent-actions" role="group" aria-label="儲存與送簽">
+                  <span id="uploadedEditorToolbarSaveStatus" class="editor-toolbar-save-status"></span>
+                  <button id="uploadedEditorSaveDraftToolbarBtn" class="secondary-button" type="button" aria-busy="false" disabled>暫存</button>
+                  <button id="uploadedEditorSubmitToolbarBtn" class="primary-button" type="button" disabled>預覽送簽</button>
+                </div>
+              </div>
+              <div id="uploadedEditorImageSync" class="editor-image-sync" role="status" hidden>
+                <progress max="100" value="0" aria-label="圖片上傳進度"></progress>
+                <span data-image-sync-label>可繼續編輯・圖片上傳 0%</span>
+                <button type="button" class="secondary-button" data-image-sync-retry hidden>重試</button>
+                <button type="button" class="text-button" data-image-sync-remove>移除圖片</button>
               </div>
 
               <p id="uploadedEditorToolNotice" role="status" hidden></p>
@@ -1743,10 +1771,10 @@
               </div>
               <section class="pdf-editor-seam-panel" id="uploadedEditorSeamPanel" hidden aria-label="批次騎縫章">
                 <div class="editor-context-heading"><h4>騎縫章</h4><button id="uploadedEditorSeamCloseBtn" type="button" class="text-button" aria-label="關閉騎縫章設定">×</button></div>
-                <p>使用本單位大章（公司章或圖記章），每 5 頁共用一枚；最後一組依剩餘頁數等分。</p>
+                <p>每 5 頁一組，固定右側；拖曳示意框可調整同組高度。</p>
                 <div class="pdf-editor-seam-actions">
+                  <label>騎縫用大章<select id="uploadedEditorSeamSealSelect" aria-describedby="uploadedEditorSeamStatus"></select></label>
                   <label>套用頁面<input id="uploadedEditorSeamPages" inputmode="numeric" placeholder="全部頁（或輸入 1-5）" /></label>
-                  <label>用印邊<select id="uploadedEditorSeamEdge"><option value="right">右邊</option><option value="left">左邊</option><option value="top">上邊</option><option value="bottom">下邊</option></select></label>
                   <button class="primary-button" id="uploadedEditorSeamAddBtn" type="button">加入騎縫章</button>
                 </div>
                 <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">請先上傳 PDF。</p>
@@ -4366,9 +4394,11 @@
       </section>
     </div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260928-library-recovery-r1"></script>
-    <script src="editor-seam.js?v=20260911-r1"></script>
+    <script src="editor-seam.js?v=20261014-seam-v2"></script>
     <script src="editor-a4.js?v=20260911-r1"></script>
     <script src="official-handover-ui.js?v=20261011-handover-r1"></script>
-    <script src="app.js?v=20261014-refresh-catalog-r1"></script>
+    <script src="app.js?v=20261014-editor-workspace-r1"></script>
+    <script src="vendor/tom-select/tom-select.complete.min.js?v=2.6.2"></script>
+    <script src="workspace-select.js?v=20261014-r1"></script>
   </body>
 </html>

@@ -13,7 +13,7 @@ class GeneralDocumentSealPickerTest(unittest.TestCase):
         "uploadedSealPickerReadOnly", "uploadedSealCompanyRecords",
         "uploadedSealCatalogReady", "uploadedSealCatalogMessage", "companySealCatalogUnavailableReason",
         "uploadedSealPickerCategoryOptions", "uploadedSeamPrimaryLargeSeal", "renderUploadedSealOptions",
-        "changeUploadedSealPickerSelection", "selectedUploadedSeal",
+        "changeUploadedSealPickerSelection", "selectedUploadedSeal", "selectedUploadedSeamSeal",
         "focusUploadedSealCompany", "officialSealHasCurrentFile",
         "companySealSelectable", "companySealCategoryLabel", "uploadedSealApplicationMetadataReadOnly",
         "addUploadedStamp", "addUploadedSeamGroups", "loadUploadedSealOptions",
@@ -25,7 +25,7 @@ function node(value='') { return {value,dataset:{},hidden:false,disabled:false,o
   get selectedOptions(){return this.options.filter(o=>o.value===this.value)},
   focus(){this.focused=true},scrollIntoView(){this.scrolled=true}}; }
 const nodes={};
-for(const id of ['uploadedSealCompany','uploadedSealCategorySelect','uploadedSealSizeSelect','uploadedSealSealSelect','uploadedSealRecordLabel','uploadedSealPickerCompany','uploadedSealCompanyFocusBtn','uploadedSealPickerStatus','uploadedSealApplicationFields','uploadedEditorSeamPages','uploadedEditorSeamPanel','uploadedEditorSeamEdge'])nodes['#'+id]=node();
+for(const id of ['uploadedSealCompany','uploadedSealCategorySelect','uploadedSealSizeSelect','uploadedSealSealSelect','uploadedSealRecordLabel','uploadedSealPickerCompany','uploadedSealCompanyFocusBtn','uploadedSealPickerStatus','uploadedSealApplicationFields','uploadedEditorSeamPages','uploadedEditorSeamPanel','uploadedEditorSeamEdge','uploadedEditorSeamSealSelect'])nodes['#'+id]=node();
 nodes['#uploadedEditorSeamPanel'].hidden=true;nodes['#uploadedEditorSeamEdge'].value='right';
 nodes['#uploadedSealCompany'].options=[{value:'A',textContent:'合成公司 A'},{value:'B',textContent:'合成公司 B'}];
 nodes['#uploadedSealCompany'].value='A';
@@ -50,7 +50,7 @@ const showToast=value=>toasts.push(value);
 const commitUploadedEditorMutation=callback=>{changes++;callback(uploadedSealEditorState);return true};
 const parseUploadedEditorPageRange=raw=>raw.split(',').map(Number);
 let nextElementId=0;
-const editorDefaultElement=(kind,page,point,props)=>({id:'new-'+(++nextElementId),pageId:page.pageId,kind,width:85,height:85,properties:{...props,sealId:selectedUploadedSeal()?.id,...companySealCurrentVersionSnapshot(selectedUploadedSeal())}});
+const editorDefaultElement=(kind,page,point,props,override)=>({id:'new-'+(++nextElementId),pageId:page.pageId,kind,width:85,height:85,properties:{...props,sealId:(override||selectedUploadedSeal())?.id,...companySealCurrentVersionSnapshot(override||selectedUploadedSeal())}});
 /* LOAD_REAL_SEAM */
 const hasAuthenticatedBackendSession=()=>true,frontendSessionScope=()=> 'userA';
 const normalizeUploadedEditorSealGeometry=()=>false;
@@ -137,11 +137,11 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
 
     def test_grouped_seams_use_company_large_in_five_plus_two_independent_groups(self):
         value = self.run_js('uploadedSealEditorState.pages=Array.from({length:7},(_,i)=>({pageId:"P"+(i+1),widthPt:595,heightPt:842}));uploadedSealOptions=[seal("GENERAL"),seal("COMPANY-L","establishment_seal"),seal("COMPANY-S","establishment_seal","small_seal"),seal("BANK-S","official_seal","small_seal")];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();const groups=[...EDOCSeam.groups(uploadedSealEditorState)];console.log(JSON.stringify({category:nodes["#uploadedSealCategorySelect"].value,sizes:nodes["#uploadedSealSizeSelect"].options.map(x=>x.value),groups:groups.map(([id,members])=>({count:members.length,parts:members.map(e=>e.properties.seamPartIndex),edge:members.map(e=>e.properties.seamEdge),offset:EDOCSeam.offsetPt(uploadedSealEditorState.pages.find(p=>p.pageId===members[0].pageId),members[0]),bindings:members.map(e=>({seal:e.properties.sealId,file:e.properties.sealFileId}))}))}));')
-        self.assertEqual(value["category"], "establishment_seal")
+        self.assertEqual(value["category"], "general_seal")  # Ordinary picker is not hijacked by seam mode.
         self.assertEqual(value["sizes"], ["large_seal"])
         self.assertEqual([group["count"] for group in value["groups"]], [5, 2])
         self.assertEqual([group["parts"] for group in value["groups"]], [list(range(5)), [0, 1]])
-        self.assertNotEqual(value["groups"][0]["offset"], value["groups"][1]["offset"])
+        self.assertEqual(value["groups"][0]["offset"], value["groups"][1]["offset"])
         self.assertTrue(all(binding == {"seal": "COMPANY-L", "file": "FILE-COMPANY-L"} for group in value["groups"] for binding in group["bindings"]))
 
     def test_grouped_seams_reject_wrong_owner_category_small_and_unavailable_primary(self):
@@ -152,21 +152,20 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
             ("unclassified","official_seal","large_seal")):
             with self.subTest(owner=owner,category=category,size=size):
                 record='({...seal("INVALID",'+json.dumps(category)+','+json.dumps(size)+'),owner_kind:'+json.dumps(owner)+'})'
-                value=self.run_js('uploadedSealOptions=['+record+'];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({count:uploadedSealEditorState.elements.length,selected:selectedUploadedSeal(),category:nodes["#uploadedSealCategorySelect"].value,toasts}));')
+                value=self.run_js('uploadedSealOptions=['+record+'];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({count:uploadedSealEditorState.elements.length,selected:selectedUploadedSeamSeal(),category:nodes["#uploadedSealCategorySelect"].value,toasts}));')
                 self.assertEqual(value["count"],0)
                 self.assertIsNone(value["selected"])
-                self.assertEqual(value["category"],"")
                 self.assertIn("請先選擇可用的印章版本。",value["toasts"])
 
     def test_institution_primary_picker_uses_only_selected_unit_official_large(self):
         self.SETUP += '\nuploadedSealCatalogState.companyId="CO-INST";\n'
         value=self.run_js('nodes["#uploadedSealCompany"].options.push({value:"CO-INST",textContent:"合成機構"});nodes["#uploadedSealCompany"].value="CO-INST";uploadedSealApplicationRuntime.companyId="CO-INST";uploadedSealOptions=[{...seal("INST-L","official_seal","large_seal","CO-INST"),owner_kind:"institution",widthMm:20,heightMm:40},{...seal("INST-S","official_seal","small_seal","CO-INST"),owner_kind:"institution"},{...seal("GENERAL","general_seal","large_seal","CO-INST"),owner_kind:"institution"},{...seal("WRONG","establishment_seal","large_seal","CO-INST"),owner_kind:"institution"},seal("FOREIGN","establishment_seal","large_seal","A")];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({id:selectedUploadedSeal()?.id,category:nodes["#uploadedSealCategorySelect"].value,sizes:nodes["#uploadedSealSizeSelect"].options.map(o=>o.value),seals:nodes["#uploadedSealSealSelect"].options.map(o=>o.value),bindings:uploadedSealEditorState.elements.map(e=>e.properties.sealId),status:nodes["#uploadedSealPickerStatus"].textContent,toasts}));')
-        self.assertEqual(value["id"],"INST-L")
-        self.assertEqual(value["category"],"official_seal")
+        self.assertEqual(value["id"],"GENERAL")
+        self.assertEqual(value["category"],"general_seal")
         self.assertEqual(value["sizes"],["large_seal"])
-        self.assertEqual(value["seals"],["INST-L"])
+        self.assertEqual(value["seals"],["GENERAL"])
         self.assertEqual(value["bindings"],["INST-L"]*3)
-        self.assertIn("20.00 × 40.00 mm",value["status"])
+        self.assertIn("30.00 × 30.00 mm",value["status"])
         self.assertTrue(any("圖記大章" in text for text in value["toasts"]))
 
     def test_institution_primary_missing_current_or_invalid_dimensions_is_not_offered(self):
@@ -179,6 +178,13 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
     def test_company_jump_reveals_only_existing_company_control(self):
         value = self.run_js('nodes["#uploadedSealApplicationFields"].hidden=true;focusUploadedSealCompany();console.log(JSON.stringify({hidden:nodes["#uploadedSealApplicationFields"].hidden,focused:nodes["#uploadedSealCompany"].focused,value:nodes["#uploadedSealCompany"].value,changes}));')
         self.assertEqual(value, {"hidden": False, "focused": True, "value": "A", "changes": 0})
+
+    def test_opening_seam_keeps_small_company_and_institution_seal_selected(self):
+        for category, owner in (("establishment_seal", "company"), ("official_seal", "institution")):
+            with self.subTest(owner=owner):
+                body = 'uploadedSealOptions=[seal("BIG",CATEGORY,"large_seal"),seal("SMALL",CATEGORY,"small_seal")];uploadedSealOptions.forEach(s=>s.owner_kind=OWNER);renderUploadedSealOptions();select(CATEGORY,"small_seal");nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({ordinary:selectedUploadedSeal().id,seam:selectedUploadedSeamSeal().id,sizes:nodes["#uploadedSealSizeSelect"].options.map(x=>x.value),placed:uploadedSealEditorState.elements.map(e=>e.properties.sealId)}));'
+                value = self.run_js(body.replace("CATEGORY", json.dumps(category)).replace("OWNER", json.dumps(owner)))
+                self.assertEqual(value, {"ordinary": "SMALL", "seam": "BIG", "sizes": ["large_seal", "small_seal"], "placed": ["BIG"] * 3})
 
     def test_late_old_company_response_cannot_replace_current_picker(self):
         value = self.run_js('let release;backendRequest=path=>path.includes("/A/")?new Promise(resolve=>release=resolve):Promise.resolve([seal("B","official_seal","large_seal","B")]);const old=loadUploadedSealOptions("A");nodes["#uploadedSealCompany"].value="B";await loadUploadedSealOptions("B");release([seal("A")]);await old;console.log(JSON.stringify({id:selectedUploadedSeal().id,loading:uploadedSealEditorRuntime.sealOptionsLoading,records:uploadedSealOptions.map(x=>x.id)}));')

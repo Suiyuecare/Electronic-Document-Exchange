@@ -142,7 +142,7 @@ APP_SECRET=<server-only>
 
 `EDOC_STORAGE_PUBLISHABLE_KEY` 只用於 Storage 的公開 client identification；上傳授權仍須由後端核發。共享模式的 `EDOC_STORAGE_SERVICE_ROLE_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 是同一把 `edoc_backend` custom secret，且只存在 server-side environment；獨立 project 模式仍必須使用各 project 自己的 server key 並分開輪替。
 
-PDF Editor 的 signed TUS 只可寫入 `editor/` 暫存路徑。Finalize 完成大小、SHA-256 與 PDF／圖片解析後，後端必須把已驗證 bytes 以 service role 建立在 `editor-final/<document>/<asset>/` 不可變路徑；圖片另須通過掃毒，來源 PDF／匯入 PDF 則須通過結構預檢並明確記錄為 `not_scanned`。migration `20260827194500_promote_editor_tus_staging_to_immutable.sql` 會在同一筆資料庫交易中將 asset 與 file object 綁到正式路徑，成功後才清除暫存。正式驗收不得把短效 Storage token 宣稱為密碼學上的一次性 token，而要用不同內容重播，確認正式檔案的路徑、hash 與下載內容完全不變。
+PDF Editor 的 signed TUS 只可寫入 `editor/` 暫存路徑。Finalize 完成大小、SHA-256 與 PDF／圖片解析後，後端必須把已驗證 bytes 以專用後端角色建立在 `editor-final/<document>/<asset>/` 不可變路徑；來源 PDF／匯入 PDF 與電子用印編輯器 PNG／JPEG 須通過結構預檢並明確記錄為 `not_scanned`，不執行病毒特徵掃描。一般附件與印章登錄的掃描規則不變。migration `20260827194500_promote_editor_tus_staging_to_immutable.sql` 會在同一筆資料庫交易中將 asset 與 file object 綁到正式路徑，成功後才清除暫存；圖片例外須先套用 `20261013171937_editor_images_skip_av_preflight_required.sql` 或相對應的 shared-schema forward，否則資料庫必須拒絕 finalize。正式驗收不得把短效 Storage token 宣稱為密碼學上的一次性 token，而要用不同內容重播，確認正式檔案的路徑、hash 與下載內容完全不變。
 
 正式通知的最低可上線基準是站內通知。Email 與 LINE 為選配，未提供並驗證下列環境變數時必須保持 disabled/pending，不可放假值或把「待驗證」視為成功：
 

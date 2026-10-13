@@ -21,11 +21,16 @@ class EditorConflictCopyPostgresTest(unittest.TestCase):
     def setUpClass(cls):
         pg_fixture.ComposeOutputPostgresTest.setUpClass.__func__(cls)
         root = Path(__file__).resolve().parents[1]
-        cls.pg.execute("CREATE UNIQUE INDEX fixture_editor_job_asset ON official_document_editor_storage_jobs(asset_id)")
+        # Replay the real released table, including path/time/lease checks.
+        # SQLite-shaped fixtures omit those checks and previously missed a
+        # conflict-copy RPC that could not commit on the production schema.
+        cls.pg.execute("DROP TABLE official_document_editor_storage_jobs")
         for name in (
             "20260827194500_promote_editor_tus_staging_to_immutable.sql",
             "20260911133603_editor_conflict_copy_atomic.sql",
+            "20260913130517_editor_storage_v2_opaque_paths.sql",
             "20260925044708_editor_pdf_uploads_skip_antivirus_preflight_required.sql",
+            "20261013171937_editor_images_skip_av_preflight_required.sql",
         ):
             cls.pg.execute((root / "supabase/migrations" / name).read_text())
         cls.pg.execute("GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA public TO service_role")

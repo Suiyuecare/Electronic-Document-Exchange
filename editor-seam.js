@@ -2,6 +2,9 @@
 (function (root) {
   "use strict";
   const ptPerMm = 72 / 25.4;
+  const CURRENT_POLICY = "right-edge-10mm-v2";
+  const MARGIN_PT = 10 * ptPerMm;
+  const isCurrentPolicy = (item) => item?.properties?.seamPolicyVersion === CURRENT_POLICY;
   const groupId = (element) => element?.kind === "seal" ? element.properties?.seamGroupId || "" : "";
   const mode = (element) => element?.properties?.seamMode || "pair";
   const edge = (element) => mode(element) === "grouped" ? element.properties?.seamEdge || "right" : "pair";
@@ -59,14 +62,18 @@
       const count = partCount(members[0]);
       const groupMode = mode(members[0]);
       const groupEdge = edge(members[0]);
+      const policy = members[0].properties?.seamPolicyVersion || "";
       const ordered = [...members].sort((a, b) => Number(a.properties.seamPartIndex) - Number(b.properties.seamPartIndex));
       if (!Number.isInteger(count) || count < 1 || count > 5 || members.length !== count
         || !["pair", "grouped"].includes(groupMode)
         || (groupMode === "pair" && count !== 2)
-        || (groupMode === "grouped" && !["left", "right", "top", "bottom"].includes(groupEdge))) return true;
+        || (groupMode === "grouped" && !["left", "right", "top", "bottom"].includes(groupEdge))
+        || (policy && policy !== CURRENT_POLICY)
+        || (policy === CURRENT_POLICY && (groupMode !== "grouped" || groupEdge !== "right"))) return true;
       const indexes = ordered.map(item => state.pages.findIndex(page => page.pageId === item.pageId));
       return indexes[0] < 0 || ordered.some((item, index) => item.properties.seamPartIndex !== index
         || mode(item) !== groupMode || partCount(item) !== count || edge(item) !== groupEdge
+        || (item.properties?.seamPolicyVersion || "") !== policy
         || indexes[index] !== indexes[0] + index);
     }).map(([id]) => id);
   }
@@ -81,6 +88,18 @@
       return ["top", "bottom"].includes(selectedEdge) ? displayWidth(page) - size.width : displayHeight(page) - size.height;
     })));
   }
+  function offsetBoundsPt(state, id, requestedEdge = null) {
+    const members = groups(state).get(id) || [];
+    const margin = members.length && isCurrentPolicy(members[0]) ? MARGIN_PT : 0;
+    return { min: margin, max: offsetLimitPt(state, id, requestedEdge) - margin };
+  }
+  function initialBatchTopMm(state, ids) {
+    const bounds = ids.map((id) => offsetBoundsPt(state, id, "right"));
+    if (!bounds.length) return 0;
+    const min = Math.max(...bounds.map((item) => item.min));
+    const max = Math.min(...bounds.map((item) => item.max));
+    return max < min ? NaN : (min + max) / 2 / ptPerMm;
+  }
   function position(state, id, offsetMm, requestedEdge = null) {
     const members = groups(state).get(id) || [];
     if (!members.length || members.length !== partCount(members[0])) return false;
@@ -88,7 +107,12 @@
     if (pages.some((page) => !page)) return false;
     const selectedEdge = mode(members[0]) === "grouped" ? requestedEdge || edge(members[0]) : "pair";
     if (!["pair", "left", "right", "top", "bottom"].includes(selectedEdge)) return false;
-    const offset = Math.max(0, Math.min(offsetLimitPt(state, id, selectedEdge), Number(offsetMm) * ptPerMm));
+    if (members.some((item) => (item.properties?.seamPolicyVersion || "") !== (members[0].properties?.seamPolicyVersion || ""))
+      || (members[0].properties?.seamPolicyVersion && !isCurrentPolicy(members[0]))
+      || (isCurrentPolicy(members[0]) && (mode(members[0]) !== "grouped" || selectedEdge !== "right"))) return false;
+    const bounds = offsetBoundsPt(state, id, selectedEdge);
+    if (bounds.max < bounds.min) return false;
+    const offset = Math.max(bounds.min, Math.min(bounds.max, Number(offsetMm) * ptPerMm));
     if (!Number.isFinite(offset)) return false;
     members.forEach((item, index) => {
       const page = pages[index];
@@ -148,6 +172,6 @@
       members.forEach((item) => { item.opacity = styled.opacity; item.rotation = 0; });
     }
   }
-  root.EDOCSeam = { groups, groupId, mode, edge, partCount, position, reconcile, invalidatedGroups, ptPerMm, topPt, leftPt, offsetPt, offsetLimitPt, displayHeight, displayWidth, initialTopMm, partitionPages, previewSlice };
+  root.EDOCSeam = { groups, groupId, mode, edge, partCount, position, reconcile, invalidatedGroups, ptPerMm, topPt, leftPt, offsetPt, offsetLimitPt, offsetBoundsPt, initialBatchTopMm, CURRENT_POLICY, MARGIN_PT, isCurrentPolicy, displayHeight, displayWidth, initialTopMm, partitionPages, previewSlice };
   if (typeof module !== "undefined") module.exports = root.EDOCSeam;
 })(typeof globalThis !== "undefined" ? globalThis : window);

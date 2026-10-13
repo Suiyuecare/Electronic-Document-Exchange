@@ -124,6 +124,7 @@ class EditorConflictCopyTest(Fixture):
         partner.update({"id": "seam-second-half", "pageId": "second-copy-page", "x": 0})
         partner["properties"]["seamPartIndex"] = 1
         state["elements"].append(partner)
+        backend._insert_editor_revision(self.conn, source_id, state, session["user"])
         result = backend.copy_official_editor_conflict(self.conn, source_id, payload, session)
         groups = backend.validate_seam_groups(result["state"])
         self.assertEqual(len(groups["fixture-seam"]), 2)

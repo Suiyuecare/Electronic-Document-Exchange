@@ -271,7 +271,7 @@ declare
   v_rpc text;
   v_role text;
 begin
-  foreach v_rpc in array array['edoc_confirm_official_document(jsonb)','edoc_list_official_document_candidates(jsonb)','edoc_list_inbound_candidates(jsonb)','edoc_timeliness_candidates(jsonb)'] loop
+  foreach v_rpc in array array['edoc_confirm_official_document(jsonb)','edoc_list_official_document_candidates(jsonb)','edoc_list_inbound_candidates(jsonb)','edoc_timeliness_candidates(jsonb)','edoc_workspace_drafts(jsonb)'] loop
     select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure('edoc.' || v_rpc);
     if not found then raise exception 'worklist_receipt_rpc_missing'; end if;
     if v_proc.prosecdef or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
@@ -420,7 +420,12 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 74
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 76
+      and exists(select 1 from edoc_private.shared_project_migration_ledger
+        where file_name='20261013172206_workspace_drafts_catalog.sql'
+          and source_sha256='59fdfd9531323299db19b67822e0108cc883f45805ab69c0d602cc3b01e353bc'
+          and transformed_sha256='3217cdb89da22b062b92e4a2cbda30a0d3094bec15732b4a1fce3fd2bf76b8fc')
+      and exists(select 1 from edoc_private.shared_project_migration_ledger where file_name='20261013171937_editor_images_skip_av_preflight_required.sql')
       and exists(select 1 from edoc_private.shared_project_migration_ledger
         where file_name='20261013125111_approved_native120_scan_exception.sql'
           and source_sha256='6aabdb1587e82eb2e6c8124e1b18157c296662e84f58c10497b400585dd216c9'
@@ -463,7 +468,7 @@ checks(check_name, passed, observed) as (
         left join edoc.official_document_files official_file on official_file.id = asset.official_file_id
         where asset.scan_status = 'not_scanned'
           and (
-            asset.asset_kind not in ('source_pdf', 'import_pdf')
+            asset.asset_kind not in ('source_pdf', 'import_pdf', 'image')
             or asset.upload_status <> 'finalized'
             or asset.preflight_status <> 'passed'
             or file_object.id is null
@@ -474,6 +479,12 @@ checks(check_name, passed, observed) as (
             or file_object.sha256 <> asset.sha256
             or file_object.size_bytes <> asset.size_bytes
             or file_object.bucket <> asset.storage_bucket
+            or (asset.asset_kind = 'image' and (
+              asset.mime_type not in ('image/png', 'image/jpeg')
+              or file_object.mime_type is distinct from asset.mime_type
+              or coalesce(file_object.scan_engine, '') <> ''
+              or file_object.last_scan_at is not null
+            ))
             or (asset.asset_kind = 'source_pdf' and (
               official_file.id is null
               or official_file.document_id <> asset.document_id

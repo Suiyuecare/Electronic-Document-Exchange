@@ -29,13 +29,15 @@ class DeploymentRunbookContractTest(unittest.TestCase):
         self.assertNotIn("EDOC_TSA_API_KEY=", section)
         self.assertNotIn("HTTPS credential 仍需更新", section)
 
-    def test_pdf_policy_is_consistent_with_image_scanning(self):
+    def test_editor_preflight_policy_does_not_change_general_attachment_scanning(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         doc = (ROOT / "docs/deployment-production.md").read_text(encoding="utf-8")
         self.assertNotIn("V2 preflight 目前採同步", readme)
-        self.assertIn("圖片仍需可用且已核准的掃描 provider", readme)
+        self.assertIn("一般附件與印章登錄的掃描規則不變", readme)
+        self.assertIn("PNG／JPEG", readme)
         self.assertIn("同步完成前仍禁止送簽與切換案件", readme)
-        self.assertIn("圖片另須通過掃毒", doc)
+        self.assertIn("一般附件與印章登錄的掃描規則不變", doc)
+        self.assertIn("20261013171937_editor_images_skip_av_preflight_required.sql", doc)
         self.assertIn("結構預檢並明確記錄為 `not_scanned`", doc)
 
 

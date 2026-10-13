@@ -1,0 +1,74 @@
+/* Editor-only compact controls. Finance shell identity is unchanged. */
+#uploadedPdfEditor { overflow: visible; }
+#uploadedPdfEditor .pdf-editor-toolbar {
+  position: sticky;
+  top: 90px;
+  z-index: 18;
+  gap: 6px;
+  padding: 6px;
+  background: #fffaf3;
+  box-shadow: 0 2px 8px rgb(76 47 24 / 7%);
+}
+#uploadedPdfEditor .editor-persistent-actions {
+  margin-left: auto;
+  gap: 6px;
+  flex-wrap: wrap;
+  border: 0;
+  padding: 0;
+}
+#uploadedPdfEditor .editor-toolbar-save-status {
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #74695f;
+}
+#uploadedPdfEditor .editor-persistent-actions .primary-button {
+  background: #b65308;
+  color: #fff;
+}
+#uploadedPdfEditor .editor-image-sync {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin: 8px 0;
+  border: 1px solid #efceab;
+  border-radius: 10px;
+  background: #fffaf3;
+  font-size: 13px;
+}
+#uploadedPdfEditor .editor-image-sync[hidden] { display: none; }
+#uploadedPdfEditor .editor-image-sync progress { width: 100px; max-width: 100%; accent-color: #b65308; }
+#uploadedPdfEditor .editor-image-sync[data-state="error"] { border-color: #d9897a; }
+#uploadedPdfEditor .editor-seal-position {
+  fill: rgb(235 133 0 / 12%);
+  stroke: #ac5207;
+  stroke-width: 1.5px;
+  stroke-dasharray: 4 2;
+  vector-effect: non-scaling-stroke;
+}
+#uploadedPdfEditor .editor-seal-position-label {
+  fill: #854009;
+  font-weight: 600;
+  pointer-events: none;
+}
+#uploadedPdfEditor .pdf-editor-seam-actions { align-items: end; }
+#uploadedPdfEditor .pdf-editor-seam-actions > label { min-width: 0; }
+@media (max-width: 980px) {
+  #uploadedPdfEditor .editor-persistent-actions { flex: 1 1 auto; justify-content: flex-end; }
+  #uploadedPdfEditor .editor-toolbar-save-status { max-width: 8rem; }
+}
+@media (min-width: 761px) and (max-width: 1180px) {
+  #uploadedPdfEditor .pdf-editor-toolbar { top: 104px; }
+}
+@media (max-width: 760px) {
+  #uploadedPdfEditor .pdf-editor-toolbar { top: 64px; }
+}
+@media (max-width: 600px) {
+  #uploadedPdfEditor .editor-toolbar-save-status { display: none; }
+  #uploadedPdfEditor .editor-persistent-actions button { min-height: 44px; }
+  #uploadedPdfEditor .pdf-editor-seam-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+}

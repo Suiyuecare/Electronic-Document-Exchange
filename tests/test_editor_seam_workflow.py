@@ -116,6 +116,9 @@ class EditorSeamWorkflowTest(unittest.TestCase):
                     },
                 })
         self.assertEqual(len(validate_seam_groups(state)), 2)
+        # Replay a persisted pre-v2 pair manifest; new pair creation is no
+        # longer offered, but historic approval/rendering must remain valid.
+        revision = backend._editor_revision_public(backend._insert_editor_revision(self.conn, document_id, state, applicant["user"]))
         saved = backend.save_official_editor_state(self.conn, document_id, {
             "revisionNo": revision["revisionNo"], "baseManifestSha256": revision["manifestSha256"], "state": state,
         }, applicant)

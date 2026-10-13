@@ -51,7 +51,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from runtime_observability import capture_runtime_error, error_tracking_status
 from edoc_numbering import SQLITE_NUMBERING_SQL, install_sqlite_numbering
 from compose_resilience import SQLITE_COMPOSE_DRAFT_SQL, draft_payload as compose_draft_payload, public_draft, save_sqlite_draft, attachment_id, require_content_revision
-from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position, require_grouped_company_seal
+from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position, require_grouped_company_seal, validate_seam_policy_transition
 from workflow_readiness import LIST_MAX_ROWS, TAIPEI, inbound_list_options, inbound_page, timeliness_report
 import official_handover_service
 import official_handover_followup
@@ -179,6 +179,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_revalidate_finance_session_v2",
     "edoc_revoke_official_workflow_delegation",
     "edoc_save_compose_draft",
+    "edoc_workspace_drafts",
     "edoc_save_official_workflow_config",
     "edoc_set_current_company_seal_file",
     "edoc_set_company_seal_policy",
@@ -22780,6 +22781,23 @@ def save_compose_draft(conn: sqlite3.Connection, draft_id: str, payload: Dict[st
     return save_sqlite_draft(conn, draft_id, payload, compose_draft_user(session), now())
 
 
+def get_compose_draft(draft_id: str, session: Dict[str, Any] | None, conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    user = compose_draft_user(session)
+    filters = {"id": draft_id, "applicant_id": user["id"], "company_id": user["company_id"], "archived": False}
+    rows = ([dict(r) for r in conn.execute("SELECT * FROM official_document_compose_drafts WHERE id=? AND applicant_id=? AND company_id=? AND archived=0", (draft_id, user["id"], user["company_id"]))]
+            if conn is not None else supabase_filter_rows("official_document_compose_drafts", filters, limit=1))
+    if not rows:
+        raise PermissionError("compose_draft_scope_forbidden")
+    result = public_draft(rows[0])
+    linked_id = result["snapshot"].get("officialDocumentId") or result["snapshot"].get("draftRequestId")
+    if linked_id:
+        linked = ([dict(r) for r in conn.execute("SELECT id,applicant_id,current_status FROM official_documents WHERE id=?", (linked_id,))]
+                  if conn is not None else supabase_filter_rows("official_documents", {"id": linked_id}, limit=1))
+        if linked and (linked[0].get("applicant_id") != user["id"] or linked[0].get("current_status") not in {"draft", "rejected"}):
+            raise ValueError("compose_draft_no_longer_editable")
+    return result
+
+
 def supabase_list_compose_drafts(session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = compose_draft_user(session)
     rows = supabase_filter_rows("official_document_compose_drafts", {"applicant_id": user["id"], "company_id": user["company_id"], "archived": False}, limit=20, order="updated_at.desc")
@@ -26104,6 +26122,7 @@ def validate_editor_seal_placements(
 ) -> None:
     """Fail closed before persisting or preparing a placement for an unusable seal."""
     editor_state_seal_ids(state)
+    validate_seam_policy_transition(state, previous_state)
     previous_bindings = editor_state_seal_binding_map(previous_state)
     for element in state.get("elements") or []:
         if not isinstance(element, dict) or element.get("kind") != "seal":
@@ -26156,6 +26175,7 @@ def validate_supabase_editor_seal_placements(
     previous_state: Dict[str, Any] | None = None,
 ) -> None:
     editor_state_seal_ids(state)
+    validate_seam_policy_transition(state, previous_state)
     previous_bindings = editor_state_seal_binding_map(previous_state)
     for element in state.get("elements") or []:
         if not isinstance(element, dict) or element.get("kind") != "seal":
@@ -26435,9 +26455,13 @@ def inspect_editor_image(data: bytes, mime_type: str) -> Dict[str, Any]:
         with Image.open(io.BytesIO(data)) as image:
             actual_format = str(image.format or "").upper()
             width, height = image.size
+            if actual_format != expected_format or width <= 0 or height <= 0 or width * height > 40_000_000:
+                raise ValueError("editor_image_invalid")
             image.verify()
-        if actual_format != expected_format or width <= 0 or height <= 0 or width * height > 40_000_000:
-            raise ValueError("editor_image_invalid")
+        # verify() checks the container; load() also rejects truncated pixel
+        # streams before an image can enter the immutable editor asset set.
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
         return {"ok": True, "format": actual_format, "widthPx": width, "heightPx": height, "pages": [], "pageCount": 0, "flags": {"executable": False}}
     except ValueError:
         raise
@@ -26884,6 +26908,22 @@ def generate_editor_seal_preview(seal_bytes: bytes, mime_type: str, *, preserve_
         image_doc.close()
 
 
+def generate_editor_seal_placeholder(seal_file: Dict[str, Any], seal_size_type: str) -> bytes:
+    """Compatibility preview contains geometry only, never private Seal Vault pixels."""
+    import fitz  # type: ignore
+
+    profile = company_seal_file_dimension_profile(seal_size_type, seal_file)
+    width, height = float(profile["width_pt"]), float(profile["height_pt"])
+    document = fitz.open()
+    try:
+        page = document.new_page(width=width, height=height)
+        page.draw_rect(page.rect + (1, 1, -1, -1), color=(0.76, 0.34, 0.05), width=1, dashes="[3 2]")
+        page.insert_textbox(page.rect + (2, height * .35, -2, -2), "PLACEHOLDER", fontsize=min(8, width / 8), align=1, color=(0.76, 0.34, 0.05))
+        return page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=True).tobytes("png")
+    finally:
+        document.close()
+
+
 def editor_state_references_seal_file(
     state: Dict[str, Any],
     seal_id: str,
@@ -26953,18 +26993,14 @@ def local_editor_seal_preview(
         # Once any binding field is present the request must pass the strict
         # branch above and can never silently fall back to current.
         seal_file = require_current_company_seal_file(conn, seal_id)
-    _, data = read_file_object_bytes(conn, seal_file["file_object_id"])
-    if sha256_bytes(data) != seal_file["file_hash"]:
-        raise ValueError("seal_file_hash_mismatch")
     log_seal_usage(
         conn,
         action="editor_seal_preview",
         actor_id=user.get("id") or "",
         seal_id=seal_id,
-        detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};watermarked=true",
+        detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};placeholder=true;private_pixels=false",
     )
-    return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png",
-                                        preserve_canvas_aspect=seal_scan_exceptions.is_native_policy(seal_file.get("dimension_policy_version")))
+    return generate_editor_seal_placeholder(seal_file, seal.get("seal_size_type") or "large_seal")
 
 
 def _editor_revision_public(row: Dict[str, Any] | sqlite3.Row, locked_revision_id: str = "") -> Dict[str, Any]:
@@ -27361,8 +27397,14 @@ def _editor_conflict_copy_bundle(document: Dict[str, Any], payload: Dict[str, An
     new_assets, new_objects, new_files = [], [], []
     for index, asset in enumerate(assets):
         original_object = object_by_id[asset["file_object_id"]]
+        # A conflict copy is a new upload lineage, not a legacy commitment.
+        # Use the same opaque v2 paths as all new immutable editor assets.
+        copied_metadata = {**remap(parse_json_field(asset.get("metadata_json"))), "storage_key_version": 2}
+        copied_path = _supabase_editor_immutable_storage_path(new_id, {
+            **asset, "id": asset_map[asset["id"]], "metadata_json": copied_metadata,
+        }, str(asset["sha256"]))
         new_object = {**original_object, "id": f"FILE-COPY-{suffix}-{index}", "document_id": new_id,
-                      "storage_key": f"editor-final/{new_id}/{asset_map[asset['id']]}/{asset['sha256'].upper()}-{Path(asset['file_name']).name}", "created_by": user["id"], "created_at": ts,
+                      "storage_key": copied_path, "created_by": user["id"], "created_at": ts,
                       "signed_url_expires_at": None, "last_download_at": None}
         new_objects.append(new_object)
         original_file = file_by_id.get(asset.get("official_file_id"))
@@ -27373,7 +27415,7 @@ def _editor_conflict_copy_bundle(document: Dict[str, Any], payload: Dict[str, An
             new_files.append(new_file)
         new_asset = {**asset, "id": asset_map[asset["id"]], "document_id": new_id, "editor_revision_id": revision_id, "file_object_id": new_object["id"],
                      "official_file_id": new_file["id"] if new_file else None, "storage_path": new_object["storage_key"], "created_by": user["id"], "created_at": ts,
-                     "metadata_json": json.dumps(remap(parse_json_field(asset.get("metadata_json"))), ensure_ascii=False)}
+                     "metadata_json": json.dumps(copied_metadata, ensure_ascii=False)}
         new_assets.append(new_asset)
     return {"source_document_id": document["id"], "actor_id": user["id"], "request_hash": request_hash, "document": new_document, "revision": revision,
             "assets": new_assets, "file_objects": new_objects, "files": new_files}
@@ -27515,6 +27557,7 @@ def create_official_editor_upload_intent(conn: sqlite3.Connection, document_id: 
 
 
 EDITOR_PDF_NO_AV_ASSET_KINDS = frozenset({"source_pdf", "import_pdf"})
+EDITOR_UPLOAD_NO_AV_ASSET_KINDS = EDITOR_PDF_NO_AV_ASSET_KINDS | {"image"}
 
 
 def editor_asset_preflight_is_ready(asset: Dict[str, Any]) -> bool:
@@ -27524,7 +27567,7 @@ def editor_asset_preflight_is_ready(asset: Dict[str, Any]) -> bool:
     scan_status = str(asset.get("scan_status") or "").strip().lower()
     if scan_status in {"passed", "已通過", "clean"}:
         return True
-    return str(asset.get("asset_kind") or "") in EDITOR_PDF_NO_AV_ASSET_KINDS and scan_status == "not_scanned"
+    return str(asset.get("asset_kind") or "") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS and scan_status == "not_scanned"
 
 
 def _editor_source_file_matches_unscanned_preflight(
@@ -27673,7 +27716,7 @@ def _local_editor_asset_failure(
     target = _local_editor_upload_path(asset)
     if target.exists():
         target.unlink()
-    failed_scan_status = "not_scanned" if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending"
+    failed_scan_status = "not_scanned" if asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending"
     conn.execute(
         """
         UPDATE official_document_editor_assets
@@ -28056,7 +28099,7 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
     if not latest or int(metadata.get("base_revision_no") or 0) != int(latest.get("revision_no") or 0):
         _local_editor_asset_failure(conn, asset, "editor_revision_conflict")
         raise ValueError("editor_revision_conflict")
-    if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS:
+    if asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS:
         scan_status, signature = "not_scanned", ""
     else:
         scan_status, signature = editor_scan_bytes_for_threats(data, asset["file_name"])
@@ -38781,7 +38824,7 @@ def _supabase_editor_asset_failure(
         "upload_status": current_status,
     }, {
         "upload_status": "quarantined" if quarantine else "failed",
-        "scan_status": "not_scanned" if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending",
+        "scan_status": "not_scanned" if asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending",
         "preflight_status": "blocked" if quarantine else "failed",
         "metadata_json": json.dumps(metadata, ensure_ascii=False),
         "finalized_at": now(),
@@ -39281,7 +39324,7 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         if failed_asset.get("upload_status") == "finalized":
             return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_revision_conflict")
-    if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS:
+    if asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS:
         scan_status, signature = "not_scanned", ""
     else:
         try:
@@ -39915,15 +39958,8 @@ def supabase_editor_seal_preview(
             raise ValueError("editor_seal_file_hash_mismatch")
     else:
         seal_file = supabase_require_current_company_seal_file(seal_id)
-    objects = supabase_filter_rows("file_objects", {"id": seal_file.get("file_object_id")}, limit=1)
-    if not objects:
-        raise ValueError("seal_file_object_required")
-    data = supabase_storage_download(objects[0]["storage_key"], objects[0].get("bucket") or EDOC_SEAL_STORAGE_BUCKET)
-    if sha256_bytes(data) != seal_file["file_hash"]:
-        raise ValueError("seal_file_hash_mismatch")
-    supabase_log_seal_usage(action="editor_seal_preview", actor_id=user.get("id") or "", seal_id=seal_id, detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};watermarked=true")
-    return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png",
-                                        preserve_canvas_aspect=seal_scan_exceptions.is_native_policy(seal_file.get("dimension_policy_version")))
+    supabase_log_seal_usage(action="editor_seal_preview", actor_id=user.get("id") or "", seal_id=seal_id, detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};placeholder=true;private_pixels=false")
+    return generate_editor_seal_placeholder(seal_file, seal.get("seal_size_type") or "large_seal")
 
 
 def supabase_editor_asset_download(document_id: str, asset_id: str, expires: int, token: str, session: Dict[str, Any] | None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -39943,7 +39979,7 @@ def supabase_editor_asset_download(document_id: str, asset_id: str, expires: int
     if not file_object:
         raise ValueError("editor_asset_file_object_missing")
     if not file_object_av_is_clean(file_object) and not (
-        asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS
+        asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS
         and str(asset.get("scan_status") or "").strip().lower() == "not_scanned"
         and str(file_object.get("scan_status") or "").strip().lower() == "not_scanned"
     ):
@@ -48190,6 +48226,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
         self.send_header("X-EDOC-Preview-Expires-In", str(EDOC_EDITOR_PREVIEW_TTL_SECONDS))
+        self.send_header("X-EDOC-Seal-Preview", "geometry-only")
         self.end_headers()
         self.wfile.write(data)
 
@@ -49460,6 +49497,13 @@ class Handler(SimpleHTTPRequestHandler):
                 if parts == ["compose-drafts"] and method == "GET":
                     self.send_json(supabase_list_compose_drafts(supabase_current_session(self.bearer_token())))
                     return
+                if parts == ["workspace-drafts"] and method == "GET":
+                    from workspace_drafts import list_supabase as list_workspace_drafts
+                    self.send_json(list_workspace_drafts(sys.modules[__name__], query, supabase_current_session(self.bearer_token())))
+                    return
+                if len(parts) == 2 and parts[0] == "compose-drafts" and method == "GET":
+                    self.send_json(get_compose_draft(parts[1], supabase_current_session(self.bearer_token())))
+                    return
                 if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
                     self.send_json(supabase_save_compose_draft(parts[1], self.read_json(), supabase_current_session(self.bearer_token())))
                     return
@@ -50526,6 +50570,13 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if parts == ["compose-drafts"] and method == "GET":
                     self.send_json(list_compose_drafts(conn, current_session(conn, self.bearer_token())))
+                    return
+                if parts == ["workspace-drafts"] and method == "GET":
+                    from workspace_drafts import list_sqlite as list_workspace_drafts
+                    self.send_json(list_workspace_drafts(sys.modules[__name__], conn, query, current_session(conn, self.bearer_token())))
+                    return
+                if len(parts) == 2 and parts[0] == "compose-drafts" and method == "GET":
+                    self.send_json(get_compose_draft(parts[1], current_session(conn, self.bearer_token()), conn))
                     return
                 if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
                     result = save_compose_draft(conn, parts[1], self.read_json(), current_session(conn, self.bearer_token()))

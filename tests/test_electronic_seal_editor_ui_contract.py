@@ -151,8 +151,8 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         expected = [
             "uploadedSealApplicant",
             "uploadedSealApprovalCategorySelect",
-            "uploadedSealDepartment",
             "uploadedSealCompany",
+            "uploadedSealDepartment",
             "uploadedSealTitle",
             "uploadedSealReason",
         ]

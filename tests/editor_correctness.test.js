@@ -35,7 +35,7 @@ function pointerRaceHarness() {
     renderUploadedEditorSvgLayer() {}, renderUploadedEditorProperties() {},
     selectUploadedEditorElement: id => { h.runtime.selectedIds = new Set(id ? [id] : []); },
   });
-  const names = ['beginUploadedEditorPointer', 'moveUploadedEditorPointer', 'endUploadedEditorPointer', 'applyUploadedEditorCanonicalSaveResponse'];
+  const names = ['beginUploadedEditorPointer', 'moveUploadedEditorPointer', 'queueUploadedEditorPointerRender', 'flushUploadedEditorPointerRender', 'endUploadedEditorPointer', 'applyUploadedEditorCanonicalSaveResponse'];
   if (source.includes('function finishUploadedEditorPointerAction(')) names.push('finishUploadedEditorPointerAction');
   vm.runInContext(names.map(implementation).join('\n'), h.c);
   h.pointer = (id, x, y, onElement = true, type = 'pointermove') => ({
@@ -75,7 +75,7 @@ test('the real autosave snapshot and delayed response preserve a later live drag
   let release, sentState;
   Object.assign(h.runtime, { documentId: 'fixture-document', dirtyGeneration: 1, savedGeneration: 0, baseManifestSha256: 'initial', saving: false });
   Object.assign(h.c, {
-    navigator: { onLine: true }, window: { clearTimeout() {}, setTimeout: () => 1 },
+    navigator: { onLine: true }, window: { clearTimeout() {}, setTimeout: () => 1, requestAnimationFrame: () => 1, cancelAnimationFrame() {} },
     calculateUploadedEditorManifest: async () => 'saved-hash',
     backendRequest: (url, options) => { sentState = JSON.parse(options.body).state; return new Promise(resolve => { release = resolve; }); },
     applyEditorRevisionFromResponse: result => { h.c.uploadedSealEditorState.revisionNo = result.revisionNo; },
@@ -203,18 +203,20 @@ function harness() {
   const events = [];
   const page = { pageId: 'p1', sourceAssetId: 'pdf', sourcePageIndex: 0, widthPt: 595.2756, heightPt: 841.8898, rotation: 0 };
   const state = { schemaVersion: 2, revisionNo: 1, sourceFiles: [{ assetId: 'pdf', kind: 'source_pdf' }], pages: [page], elements: [] };
-  const runtime = { reviewMode: 'edited', uploading: false, locked: false, currentPageId: 'p1', imageUrls: new Map(), selectedIds: new Set(), clipboard: [], pdfDocuments: new Map(), assetFiles: new Map(), assetUrls: new Map(), pageProxies: new Map() };
-  const c = { File, Blob, Uint8Array, console, Map, Set, crypto: require('node:crypto').webcrypto,
+  const runtime = { reviewMode: 'edited', uploading: false, locked: false, currentPageId: 'p1', imageUrls: new Map(), selectedIds: new Set(), clipboard: [], undoStack: [], redoStack: [], pdfDocuments: new Map(), assetFiles: new Map(), assetUrls: new Map(), pageProxies: new Map() };
+  const c = { File, Blob, Uint8Array, console, Map, Set, AbortController, crypto: require('node:crypto').webcrypto,
     uploadedSealEditorState: state, uploadedSealEditorRuntime: runtime,
+    uploadedSealApplicationRuntime: {}, scheduleUploadedSealApplicationSave() {}, renderUploadedEditorSubmissionActions() {},
     PDF_EDITOR_MAX_IMAGE_BYTES: 10 * 1024 * 1024, PDF_EDITOR_MAX_ELEMENTS: 1000,
     PDF_EDITOR_ALLOWED_KINDS: new Set(['text', 'seal', 'image']),
     document: { querySelector: () => null }, URL: { createObjectURL: () => 'blob:fixture', revokeObjectURL() {} },
-    window: { confirm: () => true }, EDOCSeam: require(path.join(root, 'editor-seam.js')),
+    window: { confirm: () => true, clearTimeout() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {} }, EDOCSeam: require(path.join(root, 'editor-seam.js')),
     uploadedSealApplicationScopeSnapshot: () => ({ id: 'test' }), uploadedSealApplicationScopeIsCurrent: () => true,
     clearUploadedEditorUploadError() {}, setUploadedEditorSaveStatus() {},
     requestEditorUpload: async () => ({ asset_id: 'image', sha256: 'abc' }), performTusUpload: async () => {},
     assertEditorUploadCurrent() {}, finalizeEditorUpload: async () => ({ asset: { id: 'image' } }), applyEditorRevisionFromResponse() {},
-    currentUploadedEditorPage: () => state.pages[0], editorDefaultElement: () => ({ id: 'image-element', kind: 'image', pageId: 'p1', width: 100, height: 100, x: 20, y: 20 }),
+    currentUploadedEditorPage: () => state.pages[0], editorDefaultElement: (kind, page, point, properties) => ({ id: 'image-element', kind, pageId: 'p1', width: 100, height: 100, x: 20, y: 20, properties }),
+    readUploadedEditorImageSize: async () => ({ width: 300, height: 200 }),
     reportEditorUploadFailure: async () => {}, showUploadedEditorUploadError: () => events.push('error'),
     showToast: message => events.push(message), renderUploadedSealWorkbench() {},
     cloneUploadedEditorValue: structuredClone, normalizeUploadedEditorSealGeometry() {}, normalizeUploadedEditorElementLayers() {},
@@ -222,30 +224,31 @@ function harness() {
     validateUploadedPdfDocument: async () => {}, roundEditorPoint: value => Number(value.toFixed(4)), normalizeEditorDegrees: value => value || 0,
   };
   vm.createContext(c);
-  vm.runInContext(['commitUploadedEditorMutation', 'handleUploadedEditorImage', 'uploadedEditorCopyPlacement', 'pasteUploadedEditorSelection', 'parseUploadedEditorPageRange', 'copyUploadedEditorSelectionToPages', 'loadPdfJsAsset', 'hydrateUploadedEditorAuthorizedAssets'].map(implementation).join('\n'), c);
+  vm.runInContext(['commitUploadedEditorMutation', 'handleUploadedEditorImage', 'uploadedEditorImageGeometry', 'uploadedEditorPendingImageIsCurrent', 'syncUploadedEditorPendingImage', 'mapUploadedEditorLocalImage', 'renderUploadedEditorImageSync', 'discardUploadedEditorPendingImage', 'uploadedEditorCopyPlacement', 'pasteUploadedEditorSelection', 'parseUploadedEditorPageRange', 'copyUploadedEditorSelectionToPages', 'loadPdfJsAsset', 'hydrateUploadedEditorAuthorizedAssets'].map(implementation).join('\n'), c);
   return { c, page, state, runtime, events };
 }
 
-test('image completion inserts once through the real mutation gate, while external edits remain blocked', async () => {
+test('image appears before upload, permits edits and binds the final asset once without losing edits', async () => {
   const h = harness();
   h.c.performTusUpload = async () => {
-    assert.equal(h.runtime.uploading, true);
+    assert.equal(h.runtime.uploading, false);
     h.c.commitUploadedEditorMutation(state => state.elements.push({ id: 'unexpected', kind: 'text', pageId: 'p1' }));
-    assert.equal(h.state.elements.length, 0);
+    assert.equal(h.state.elements.length, 2);
   };
   await h.c.handleUploadedEditorImage(new File(['synthetic'], 'test.png', { type: 'image/png' }));
-  assert.equal(h.state.elements.length, 1);
+  await h.runtime.pendingImage?.promise;
+  assert.equal(h.state.elements.length, 2);
   assert.equal(h.state.elements[0].kind, 'image');
   assert.equal(h.state.sourceFiles.filter(item => item.assetId === 'image').length, 1);
-  assert.equal(h.events.filter(item => item === 'dirty').length, 1);
+  assert.equal(h.events.filter(item => item === 'dirty').length, 3);
   assert.equal(h.runtime.uploading, false);
   assert.ok(h.runtime.selectedIds.has('image-element'));
 });
 
-test('image completion never circumvents locked or read-only versions', async () => {
+test('local image insertion never circumvents locked or read-only versions', async () => {
   for (const change of [runtime => { runtime.locked = true; }, runtime => { runtime.reviewMode = 'original'; }]) {
     const h = harness();
-    h.c.finalizeEditorUpload = async () => { change(h.runtime); return { asset: { id: 'image' } }; };
+    change(h.runtime);
     await h.c.handleUploadedEditorImage(new File(['synthetic'], 'test.png', { type: 'image/png' }));
     assert.equal(h.state.elements.length, 0);
     assert.equal(h.events.filter(item => item === 'dirty').length, 0);

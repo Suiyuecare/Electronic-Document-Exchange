@@ -43,8 +43,9 @@ def options(query, user, session, api):
     size = first("page_size")
     if size and (not size.isdigit() or not 1 <= int(size) <= PAGE_MAX):
         raise ValueError("official_list_page_size_invalid")
-    result = {key: first(key) for key in ("scope", "status", "company_id", "applicant_id", "search", "view")}
-    if len(result["search"]) > 200 or result["view"] not in {"", "attention", "my_pending", "delegated", "overdue", "processed"}:
+    result = {key: first(key) for key in ("scope", "status", "company_id", "applicant_id", "search", "view", "task_filter")}
+    if (len(result["search"]) > 200 or result["view"] not in {"", "attention", "my_pending", "delegated", "overdue", "processed", "pending", "mine", "acted", "rejected"}
+            or result["task_filter"] not in {"", "delegated", "overdue", "operations"}):
         raise ValueError("official_list_filter_invalid")
     result.update(actor_id=str(user["id"]), actor_company_id=str(user.get("company_id") or ""),
                   company_wide=api.session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]))
@@ -165,10 +166,29 @@ def project(api, bundle, config, user, session):
                 delegation_id=delegation.get("id") if delegation else "")
     if scope == "todo" and not (item["can_act"] or item["can_retry_stamp"] or item["can_confirm"] or item["can_create_linked_application"] or item["can_manage_dispatch"]):
         return None
-    if config["view"]:
+    decision_actions = {"approve", "reject", "add_sign", "return_previous", "decline"}
+    acted = any(log.get("actor_id") == user["id"] and log.get("action") in decision_actions
+                for log in bundle.get("decision_logs", []))
+    # Actor columns are write-on-decision evidence, not assigned approvers.
+    acted = acted or any(s.get("decision_actor_user_id") == user["id"] and s.get("status") in {"approved", "rejected"}
+                         and s.get("step_key") != "applicant_confirm" for s in all_steps)
+    operations = bool(item["can_manage_dispatch"] or item["can_retry_stamp"] or item["can_confirm"] or item["can_create_linked_application"])
+    item["approval_views"] = {
+        "pending": bool((item["can_act"] and item.get("current_step") != "applicant_confirm") or operations),
+        "mine": item.get("applicant_id") == user["id"],
+        "acted": bool(acted),
+        "rejected": item.get("current_status") in {"rejected", "declined"},
+    }
+    item["approval_task_filters"] = {"delegated": bool(delegation), "overdue": category(api, item, user) == "overdue", "operations": operations}
+    if config["view"] in item["approval_views"]:
+        if not item["approval_views"][config["view"]]:
+            return None
+    elif config["view"]:
         current_category = category(api, item, user)
         if current_category not in ({"my_pending", "delegated", "overdue"} if config["view"] == "attention" else {config["view"]}):
             return None
+    if config.get("task_filter") and not item["approval_task_filters"].get(config["task_filter"]):
+        return None
     if config["search"] and not matches_search(item, config["search"]):
         return None
     return item
@@ -224,6 +244,32 @@ def list_sqlite(api, conn, query, session):
         if config["scope"] == "mine":
             where.append("d.applicant_id = ?")
             params.append(user["id"])
+        # Filter necessary view candidates before LIMIT and bundle hydration.
+        # project() remains the independent authorization/qualification gate.
+        if config["view"] == "mine":
+            where.append("d.applicant_id = ?")
+            params.append(user["id"])
+        elif config["view"] == "rejected":
+            where.append("d.current_status IN ('rejected','declined')")
+        elif config["view"] == "acted":
+            where.append("""(EXISTS(SELECT 1 FROM official_document_approval_logs l
+              WHERE l.document_id=d.id AND l.actor_id=?
+                AND l.action IN ('approve','reject','add_sign','return_previous','decline'))
+              OR EXISTS(SELECT 1 FROM official_document_approval_steps s
+                WHERE s.document_id=d.id AND s.decision_actor_user_id=?
+                  AND s.status IN ('approved','rejected') AND s.step_key<>'applicant_confirm'))""")
+            params.extend([user["id"], user["id"]])
+        elif config["view"] == "pending":
+            # Deliberately broad: preserve delegated review, receipt, dispatch,
+            # stamp retry and offboarding follow-up, then requalify in project().
+            where.append("""(d.current_status IN ('draft','rejected','approved','stamping','stamping_failed')
+              OR (d.current_step='applicant_confirm' AND d.current_status IN ('stamped','dispatched','sent_by_applicant'))
+              OR EXISTS(SELECT 1 FROM official_document_approval_steps s
+                WHERE s.document_id=d.id AND s.step_key=d.current_step
+                  AND s.status='pending' AND s.step_key<>'applicant_confirm')
+              OR EXISTS(SELECT 1 FROM official_document_dispatch_records r
+                WHERE r.document_id=d.id AND r.dispatch_status IN ('pending','failed')
+                  AND coalesce(r.completed_at,'')=''))""")
         # Only possible participants/company readers enter the candidate page.
         candidate_scope = """(d.applicant_id = ? OR (d.company_id = ? AND ?)
           OR EXISTS(SELECT 1 FROM official_document_approval_steps s WHERE s.document_id=d.id AND (s.approver_user_id=? OR s.decision_actor_user_id=?))

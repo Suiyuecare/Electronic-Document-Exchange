@@ -379,6 +379,15 @@ class GroupedSeamApprovalTests(unittest.TestCase):
                     item["pageId"]=page_map[item["pageId"]]
                     item["properties"].update(sealId=self.seal_id,sealFileId=seal_file["id"],sealFileSha256=seal_file["file_hash"],
                         renderWidthMm=profile["width_mm"],renderHeightMm=profile["height_mm"],dimensionPolicyVersion=profile["dimension_policy_version"])
+                if edge == "right":
+                    for item in state["elements"]:
+                        item["properties"]["seamPolicyVersion"] = "right-edge-10mm-v2"
+                else:
+                    # Historical manifests remain readable/editable without
+                    # rewriting an already persisted edge policy. New requests
+                    # may no longer create these unversioned placements.
+                    prior = backend._insert_editor_revision(self.conn,document_id,state,applicant["user"])
+                    revision = backend._editor_revision_public(prior)
                 payload={"revisionNo":revision["revisionNo"],"baseManifestSha256":revision["manifestSha256"],"state":state}
                 saved=backend.save_official_editor_state(self.conn,document_id,payload,applicant)
                 with self.assertRaisesRegex(ValueError,"editor_revision_conflict"):

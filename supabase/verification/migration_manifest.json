@@ -74,6 +74,8 @@
     "20261012114854_explicit_seal_owner_policy_and_continuous_geometry.sql",
     "20261012115431_editor_application_final_snapshot.sql",
     "20261013070841_approved_original_scan_exception.sql",
-    "20261013125111_approved_native120_scan_exception.sql"
+    "20261013125111_approved_native120_scan_exception.sql",
+    "20261013171937_editor_images_skip_av_preflight_required.sql",
+    "20261013172206_workspace_drafts_catalog.sql"
   ]
 }

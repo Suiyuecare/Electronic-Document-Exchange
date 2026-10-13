@@ -25,6 +25,34 @@ class ComposeResilienceTest(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM official_documents").fetchone()[0], document_count)
         self.assertEqual(backend.list_compose_drafts(self.conn, self.session)[0]["id"], key)
 
+    def test_all_shipping_autosave_selectors_including_continuous_seal_are_allowed(self):
+        import re
+        from pathlib import Path
+        from compose_resilience import SELECTORS
+        source = (Path(__file__).resolve().parents[1] / "app.js").read_text()
+        block = re.search(r"const composeAutosaveSelectors = \[(.*?)\];", source, re.S).group(1)
+        selectors = re.findall(r'"#([^"]+)"', block)
+        self.assertEqual(set(selectors), set(SELECTORS))
+        key = "OD-" + str(uuid.uuid4())
+        snapshot = self.snapshot(**{"#" + name: "" for name in selectors})
+        snapshot["values"]["#continuousSealType"] = "連續章"
+        result = backend.save_compose_draft(self.conn, key, {"snapshot": snapshot, "expected_revision": 0}, self.session)
+        self.assertEqual("連續章", result["snapshot"]["values"]["#continuousSealType"])
+
+    def test_selected_draft_rechecks_owner_and_reopened_correction_status(self):
+        draft = self.create()
+        key = "OD-" + str(uuid.uuid4())
+        snapshot = {**self.snapshot(), "draftRequestId": draft["id"]}
+        backend.save_compose_draft(self.conn, key, {"snapshot": snapshot, "expected_revision": 0}, self.session)
+        self.assertEqual(key, backend.get_compose_draft(key, self.session, self.conn)["id"])
+        self.conn.execute("UPDATE official_documents SET current_status='rejected' WHERE id=?", (draft["id"],))
+        self.assertEqual(key, backend.get_compose_draft(key, self.session, self.conn)["id"])
+        self.conn.execute("UPDATE official_documents SET current_status='pending_applicant_manager' WHERE id=?", (draft["id"],))
+        with self.assertRaisesRegex(ValueError, "no_longer_editable"):
+            backend.get_compose_draft(key, self.session, self.conn)
+        with self.assertRaisesRegex(PermissionError, "scope_forbidden"):
+            backend.get_compose_draft("OD-" + str(uuid.uuid4()), self.session, self.conn)
+
     def test_cloud_draft_replay_and_stale_device_are_not_silent_overwrites(self):
         key = "OD-" + str(uuid.uuid4())
         first = {"snapshot": self.snapshot(), "expected_revision": 0}

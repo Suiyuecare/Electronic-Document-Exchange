@@ -152,6 +152,9 @@ jobs:
           EDOC_COMPOSE_TEST_PG_PORT=54322 \
             python -m unittest -v \
               tests.test_editor_pdf_upload_shared_forward \
+              tests.test_editor_image_upload_shared_forward \
+              tests.test_workspace_drafts_postgres \
+              tests.test_editor_conflict_copy_postgres \
               tests.test_editor_applicant_selection_postgres \
               tests.test_editor_cross_company_workflow_postgres \
               tests.test_configurable_workflow_postgres \
@@ -277,6 +280,7 @@ jobs:
           node --check official-handover-ui.js
           node --check editor-a4.js
           node --check editor-seam.js
+          node --check workspace-select.js
           node --test tests/*.test.js
           node tests/handover_feature_gate.js
 

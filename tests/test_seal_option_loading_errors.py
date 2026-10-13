@@ -18,7 +18,7 @@ function setup(kind){
  uploadedSealCatalogState:{scope:'actor-a:company-a',token:'session-a',companyId:'A',status:'ready',request:null},
  composeSealCatalogState:{scope:'',token:'',status:'idle',request:null},composeSealOptionsRequestNo:0,composeSealOptions:[],composeSealOptionsCompanyId:'',composeSealOptionsLoading:false,composeSealOptionsError:false,
  officialSealOptions:[{id:'old'}],uploadedSealOptions:[{id:'old'}],uploadedSealOptionsRequestNo:0,
- financeDirectoryRefreshGeneration:0,departmentRegistry:[],resetRouteBackendData(){},renderFinanceDirectorySyncStatus(){},
+ financeDirectoryRefreshGeneration:0,departmentRegistry:[],resetRouteBackendData(){},renderFinanceDirectorySyncStatus(){},resetWorkspaceDrafts(){},
  uploadedSealEditorRuntime:{sealOptionsLoading:false,documentId:'synthetic-doc',locked:false},uploadedSealApplicationRuntime:{companyId:'A'},uploadedSealEditorState:{},
  nodes:{'#officialCompanySelect':{value:'A'},'#uploadedSealCompany':{value:'A',dataset:{},replaceChildren(){}}}};
  c.document={querySelector:s=>c.nodes[s]||null};c.frontendSessionScope=()=>c.scope;c.hasAuthenticatedBackendSession=()=>c.authenticated;

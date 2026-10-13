@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import sqlite3
 import time
 import unittest
 import uuid
@@ -126,7 +127,15 @@ class RoleComposeHttpJourneysTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         self.assertTrue(result.body.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertNotEqual(backend.sha256_bytes(result.body), seal["seal_file_sha256"])
+        # Byte equality with a renderer that accepts only calibration metadata
+        # proves this is synthetic geometry, not a watermarked original raster.
+        with sqlite3.connect(backend.DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            current = dict(conn.execute("SELECT * FROM company_seal_files WHERE id=?", (seal["seal_file_id"],)).fetchone())
+            size = conn.execute("SELECT seal_size_type FROM company_seals WHERE id=?", (seal["seal_id"],)).fetchone()[0]
+        self.assertEqual(result.body, backend.generate_editor_seal_placeholder(current, size))
         headers = {name.lower(): value for name, value in result.headers}
+        self.assertEqual(headers["x-edoc-seal-preview"], "geometry-only")
         self.assertIn("no-store", headers["cache-control"])
         self.assertEqual(int(headers["x-edoc-preview-expires-in"]), backend.EDOC_EDITOR_PREVIEW_TTL_SECONDS)
         anonymous = self.fixture._request("GET", url)

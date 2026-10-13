@@ -124,13 +124,19 @@ def prepare_company_seal(owner_kind="company") -> dict:
             "actor": "isolated-grouped-seam-fixture", "render_width_mm": 25, "render_height_mm": height_mm,
         })
         file_meta = backend.require_current_company_seal_file(conn, seal_id)
+        small = conn.execute("SELECT id FROM company_seals WHERE company_id='CO-001' AND seal_category=? AND seal_size_type='small_seal' AND is_active=1 ORDER BY id LIMIT 1", (category,)).fetchone()
+        small_id = small["id"] if small else backend.create_company_seal(conn, "CO-001", {"seal_name":"Synthetic ordinary small", "seal_category":category, "seal_size_type":"small_seal"})["id"]
+        small_image = Image.new("RGBA", (300, 300), (255, 255, 255, 0))
+        ImageDraw.Draw(small_image).rectangle((10, 10, 290, 290), outline=(180, 0, 0, 255), width=8)
+        small_stream = io.BytesIO(); small_image.save(small_stream, format="PNG")
+        backend.upload_company_seal_file(conn, small_id, {"file_name":"synthetic-small-not-a-real-seal.png", "file_mime_type":"image/png", "content_base64":base64.b64encode(small_stream.getvalue()).decode(), "actor":"isolated-grouped-seam-fixture", "render_width_mm":15, "render_height_mm":15})
         conn.commit()
-        return {"id":seal_id,"file_id":file_meta["id"],"sha256":file_meta["file_hash"],"width_mm":25,"height_mm":height_mm,"category":category,"owner_kind":owner_kind}
+        return {"id":seal_id,"file_id":file_meta["id"],"sha256":file_meta["file_hash"],"width_mm":25,"height_mm":height_mm,"category":category,"owner_kind":owner_kind,"small_id":small_id}
 
 
 def run(output: Path,owner_kind="company") -> dict:
     output = output.resolve(); output.mkdir(parents=True, exist_ok=True)
-    ui_sources = {name: (ROOT / name).read_bytes() for name in ("index.html", "app.js", "styles.css", "editor-seam.js")}
+    ui_sources = {name: (ROOT / name).read_bytes() for name in ("index.html", "app.js", "styles.css", "editor-seam.js", "editor-fluid.css", "workspace-select.js", "workspace-select.css", "workspace-navigation.css")}
     report = {"scope": "loopback_synthetic_browser_shipping_http", "productionChanged": False,
               "hostedVerified": False, "humanSSOVerified": False, "physicalDeviceVerified": False,
               "governmentExchange": "DISABLED", "approvalSubmitted": False, "finalStampExecuted": False,
@@ -190,7 +196,9 @@ def run(output: Path,owner_kind="company") -> dict:
                 for device, width, height in (("desktop", 1440, 1000), ("tablet", 820, 1100), ("mobile", 390, 844)):
                     row = {"device": device, "checks": {}, "edgeCases": []}; report["cases"].append(row)
                     auth = isolated_browser_session(Fixture, "staff", entity_id="E1")
+                    report["stage"] = device + ":open_editor"
                     open_editor(browser, auth, device, width, height)
+                    report["stage"] = device + ":upload_pdf"
                     upload_pdf(browser, pdf, device)
                     row["checks"]["stampActionUsesCanonicalUseSealLabel"] = browser.evaluate("document.querySelector('#uploadedPdfEditor [data-editor-tool=seal]').textContent==='用印'")
                     browser.add_pdf_text("Synthetic edited text " + device)
@@ -219,32 +227,49 @@ def run(output: Path,owner_kind="company") -> dict:
                     detail = Fixture._expect_json("GET", f"/api/official-documents/{document_id}", 200, token=auth["token"])
                     state = Fixture._expect_json("GET", f"/api/official-documents/{document_id}/editor-state", 200, token=auth["token"])["state"]
                     row["checks"]["latestMetadataAndTextReadback"] = detail["title"] == title and detail["request_reason"] == edited_reason and any(e.get("properties", {}).get("text") == "Synthetic edited text " + device for e in state["elements"])
+                    browser.click_visible('#uploadedPdfEditor [data-editor-tool="seal"]')
+                    select_visible(browser, "uploadedSealCategorySelect", seal["category"])
+                    select_visible(browser, "uploadedSealSizeSelect", "small_seal")
+                    row["checks"]["ordinarySmallSealSelectable"] = browser.evaluate("selectedUploadedSeal()?.id==="+json.dumps(seal["small_id"]))
                     browser.click_visible("#uploadedEditorSeamToggleBtn")
-                    row["checks"]["seamAutoSelectsOnlyOwnerPrimaryLarge"] = browser.evaluate("selectedUploadedSeal()?.company_id==='CO-001'&&selectedUploadedSeal()?.owner_kind==="+json.dumps(owner_kind)+"&&selectedUploadedSeal()?.seal_category==="+json.dumps(seal["category"])+"&&selectedUploadedSeal()?.seal_size_type==='large_seal'&&[...document.querySelector('#uploadedSealCategorySelect').options].every(o=>o.value==="+json.dumps(seal["category"])+")&&[...document.querySelector('#uploadedSealSizeSelect').options].every(o=>o.value==='large_seal')")
-                    for edge in ("right", "left", "top", "bottom"):
+                    row["checks"]["seamAutoSelectsOnlyOwnerPrimaryLarge"] = browser.evaluate("selectedUploadedSeamSeal()?.company_id==='CO-001'&&selectedUploadedSeamSeal()?.owner_kind==="+json.dumps(owner_kind)+"&&selectedUploadedSeamSeal()?.seal_category==="+json.dumps(seal["category"])+"&&selectedUploadedSeamSeal()?.seal_size_type==='large_seal'")
+                    row["checks"]["seamDoesNotReplaceOrdinarySmallSelection"] = browser.evaluate("document.querySelector('#uploadedSealSizeSelect').value==='small_seal'&&document.querySelector('#uploadedSealSealSelect').value==="+json.dumps(seal["small_id"]))
+                    for edge in ("right",):
                         report["stage"] = device + ":edge:" + edge
                         while browser.evaluate("document.querySelectorAll('#uploadedEditorSeamGroups [data-seam-delete]').length"):
                             browser.click_visible("#uploadedEditorSeamGroups article:first-child [data-seam-delete]")
-                        browser.run("select", "#uploadedEditorSeamEdge", edge)
                         browser.click_visible("#uploadedEditorSeamAddBtn")
                         groups = browser.evaluate(GROUP_SNAPSHOT)
                         passed = check_groups(groups, seal, (edge, edge))
                         row["edgeCases"].append({"edge": edge, "groups": groups, "passed": passed})
                         row["checks"][edge + "FivePlusTwoFractionalParts"] = passed
+                        row["checks"]["newGroupsShareInitialHeight"] = abs(groups[0]["offsets"][0] - groups[1]["offsets"][0]) < .01
+                        row["checks"]["newPolicyVersionAndMargins"] = browser.evaluate("(()=>{const items=uploadedSealEditorState.elements.filter(e=>e.properties?.seamGroupId);return items.length===7&&items.every(e=>{const p=uploadedSealEditorState.pages.find(p=>p.pageId===e.pageId),offset=EDOCSeam.offsetPt(p,e);return e.properties.seamPolicyVersion==='right-edge-10mm-v2'&&offset>=EDOCSeam.MARGIN_PT-.001&&offset+e.height<=EDOCSeam.displayHeight(p)-EDOCSeam.MARGIN_PT+.001})})()")
+                        row["checks"]["draftOnlyShowsPositionPlaceholders"] = browser.evaluate("document.querySelectorAll('#uploadedEditorSvgLayer [data-seal-position]').length>0&&document.querySelectorAll('#uploadedEditorSvgLayer image').length===0")
                         browser.run("screenshot", str(output / f"{device}-{edge}-seam.png"))
                     report["stage"] = device + ":independent_position"
-                    browser.run("select", "#uploadedEditorSeamGroups article:nth-child(1) [data-seam-edge]", "left")
-                    browser.run("select", "#uploadedEditorSeamGroups article:nth-child(2) [data-seam-edge]", "top")
                     browser.run("fill", "#uploadedEditorSeamGroups article:nth-child(1) [data-seam-position]", "31")
                     browser.run("press", "Tab")
                     browser.run("fill", "#uploadedEditorSeamGroups article:nth-child(2) [data-seam-position]", "56")
                     browser.run("press", "Tab")
                     groups = browser.evaluate(GROUP_SNAPSHOT)
-                    row["checks"]["independentGroupEdgeAndOffset"] = check_groups(groups, seal, ("left", "top")) and all(abs(offset - target) < .01 for group, target in zip(groups, (31, 56)) for offset in group["offsets"])
+                    row["checks"]["independentGroupOffsetFixedRight"] = check_groups(groups, seal, ("right", "right")) and all(abs(offset - target) < .01 for group, target in zip(groups, (31, 56)) for offset in group["offsets"])
+                    for value in ("0", "999"):
+                        browser.run("fill", "#uploadedEditorSeamGroups article:nth-child(1) [data-seam-position]", value)
+                        browser.run("press", "Tab")
+                        unchanged = browser.evaluate(GROUP_SNAPSHOT)
+                        row["checks"]["rejectsOutOfMargin"+value] = all(abs(offset-31)<.01 for offset in unchanged[0]["offsets"])
+                    browser.run("fill", "#uploadedEditorSeamGroups article:nth-child(1) [data-seam-position]", "31")
+                    browser.run("press", "Tab")
                     manual_save(browser, "uploadedEditorSaveDraftFooterBtn")
                     row["checks"]["footerSaveFocusPreserved"] = browser.evaluate("document.activeElement.id==='uploadedEditorSaveDraftFooterBtn'")
                     row["layout"] = browser.evaluate(AUDIT_JS); row["editor"] = browser.evaluate(EDITOR_AUDIT)
-                    row["checks"]["noOverflowAndAllEditorTargets44"] = not row["layout"]["overflow"] and not row["editor"]["shortTargets"]
+                    # The native select is deliberately a 1px accessibility proxy,
+                    # and the search input is only the inner text of a 44px control.
+                    # Measure the actual clickable Tom Select surface, preserving
+                    # the raw audit above rather than excluding those controls.
+                    row["resolvedEditorTargets"] = browser.evaluate("(()=>"+json.dumps(row["editor"]["shortTargets"])+".map(item=>{const e=document.getElementById(item.id),target=e?.tomselect?.control||e?.closest('.ts-control')||e,r=target?.getBoundingClientRect();return {...item,resolvedTag:target?.tagName,resolvedWidth:r?.width||0,resolvedHeight:r?.height||0}}))()")
+                    row["checks"]["noOverflowAndAllEditorTargets44"] = not row["layout"]["overflow"] and all(item["resolvedWidth"] >= 44 and item["resolvedHeight"] >= 44 for item in row["resolvedEditorTargets"])
                     browser.run("screenshot", str(output / f"{device}-saved.png"))
                     report["stage"] = device + ":reopen_actual_queue"
                     browser.run("open", Fixture.origin + f"/?reopen={time.monotonic_ns()}#electronicSeal")
@@ -252,7 +277,7 @@ def run(output: Path,owner_kind="company") -> dict:
                     browser.click_visible("#electronicSealWorkQueue > summary")
                     browser.click_visible('[data-electronic-seal-open="' + document_id + '"]')
                     browser.until("uploadedSealEditorRuntime.documentId===" + json.dumps(document_id) + "&&uploadedSealEditorState.pages.length===7&&!uploadedSealApplicationRuntime.openPromise&&!uploadedSealEditorRuntime.sealOptionsLoading", timeout=40)
-                    row["checks"]["reopenPreservesImmutableBindingsAndGroups"] = check_groups(browser.evaluate(GROUP_SNAPSHOT), seal, ("left", "top"))
+                    row["checks"]["reopenPreservesImmutableBindingsAndGroups"] = check_groups(browser.evaluate(GROUP_SNAPSHOT), seal, ("right", "right"))
                     report["stage"] = device + ":preflight_actual_action"
                     browser.until("!document.querySelector('#submitUploadedSealBtn').disabled")
                     browser.click_visible("#submitUploadedSealBtn")
@@ -267,6 +292,7 @@ def run(output: Path,owner_kind="company") -> dict:
                     row["preparedFile"] = {"downloadStatus": downloaded.status, "sha256": downloaded_hash,
                                            "expectedSha256": prepared["hash"], "pages": prepared["pages"], "locked": prepared["locked"]}
                     row["checks"]["preparedFileSevenPagesExactHashNotSubmitted"] = downloaded.status == 200 and downloaded_hash.upper() == prepared["hash"].upper() and len(PdfReader(io.BytesIO(downloaded.body)).pages) == 7 and prepared["pages"] == 7 and prepared["locked"] is False
+                    row["checks"]["preparedFileContainsNoActualSealImage"] = all(not list(page.images) for page in PdfReader(io.BytesIO(downloaded.body)).pages)
                     browser.run("screenshot", str(output / f"{device}-prepared.png"))
                     browser.click_visible("#uploadedEditorBackToEditBtn")
                     browser.until("uploadedSealEditorRuntime.reviewMode==='edited'")
@@ -281,7 +307,8 @@ def run(output: Path,owner_kind="company") -> dict:
             report["passed"] = False; report["errorCode"] = str(error) if isinstance(error, AssertionError) or str(error).startswith("browser_") else type(error).__name__
             if browser:
                 try:
-                    report["failure"] = browser.evaluate("({errors:window.__fixtureErrors,doc:uploadedSealEditorRuntime.documentId,pages:uploadedSealEditorState.pages.length,tool:uploadedSealEditorRuntime.tool,status:document.querySelector('#uploadedEditorSaveStatus')?.textContent,preflight:document.querySelector('#uploadedEditorPreflightStatus')?.textContent,notice:document.querySelector('#uploadedSealPickerStatus')?.textContent})")
+                    report["assetDiagnostic"] = browser.evaluate("({tomSelect:typeof window.TomSelect,adapter:typeof window.EDOCWorkspaceSelect,categoryEnhanced:!!document.querySelector('#uploadedSealApprovalCategorySelect')?.tomselect,scripts:[...document.scripts].filter(x=>/workspace-select|tom-select/.test(x.src)).map(x=>x.src),requests:performance.getEntriesByType('resource').filter(x=>/workspace-select|tom-select/.test(x.name)).map(x=>({name:x.name,status:x.responseStatus,bytes:x.decodedBodySize}))})")
+                    report["failure"] = browser.evaluate("({errors:window.__fixtureErrors,timing:window.__fixtureTiming,entry:document.querySelector('#moduleEntryProgress')?.outerHTML,categoryOptions:[...document.querySelector('#uploadedSealApprovalCategorySelect').options].map(e=>({value:e.value,text:e.textContent})),directoryLoading:uploadedSealEditorRuntime.directoryLoading,sealOptionsLoading:uploadedSealEditorRuntime.sealOptionsLoading,catalogStatus:uploadedSealCatalogState.status,doc:uploadedSealEditorRuntime.documentId,pages:uploadedSealEditorState.pages.length,tool:uploadedSealEditorRuntime.tool,status:document.querySelector('#uploadedEditorSaveStatus')?.textContent,preflight:document.querySelector('#uploadedEditorPreflightStatus')?.textContent,notice:document.querySelector('#uploadedSealPickerStatus')?.textContent})")
                     browser.run("screenshot", str(output / "failure.png"))
                 except Exception:
                     pass
@@ -298,12 +325,12 @@ def open_editor(browser, auth, device, width, height):
     browser.evaluate("localStorage.clear();sessionStorage.clear();localStorage.setItem('suiyuecare-edoc-session'," + json.dumps(json.dumps(auth)) + ");true")
     browser.run("set", "viewport", str(width), str(height))
     browser.run("open", Fixture.origin + f"/?grouped={device}-{time.monotonic_ns()}#electronicSeal")
-    browser.until("window.__fixtureTiming?.appInteractiveMs&&document.querySelector('#uploadedSealApprovalCategorySelect')?.options.length>1&&!uploadedSealEditorRuntime.directoryLoading&&!uploadedSealEditorRuntime.sealOptionsLoading", timeout=40)
+    browser.until("window.__fixtureTiming?.appInteractiveMs&&!document.querySelector('#moduleEntryProgress')?.getClientRects().length&&document.querySelector('#uploadedSealApprovalCategorySelect')?.options.length>1&&!uploadedSealEditorRuntime.directoryLoading&&!uploadedSealEditorRuntime.sealOptionsLoading", timeout=40)
 
 
 def upload_pdf(browser, pdf, label):
     category = browser.evaluate("[...document.querySelector('#uploadedSealApprovalCategorySelect').options].find(e=>e.textContent.includes('合作意向書')).value")
-    browser.run("select", "#uploadedSealApprovalCategorySelect", category)
+    select_visible(browser, "uploadedSealApprovalCategorySelect", category)
     browser.run("fill", "#uploadedSealTitle", "合成七頁用印驗收 " + label)
     browser.run("fill", "#uploadedSealReason", "僅本機去識別化驗收，不送簽、不正式用印、不寄發。")
     browser.run("upload", "#uploadedSealPdfInput", str(pdf))
@@ -313,6 +340,27 @@ def upload_pdf(browser, pdf, label):
 def manual_save(browser, button):
     browser.click_visible("#" + button)
     browser.until("!uploadedSealApplicationRuntime.manualSaveOperation&&!uploadedSealEditorRuntime.saving&&!uploadedSealApplicationRuntime.promise&&document.querySelector('#uploadedEditorSaveStatus').textContent==='草稿已暫存'", timeout=40)
+
+
+def select_visible(browser, identity, value):
+    stage = "enhance"
+    try:
+        browser.until("!!document.querySelector(" + json.dumps("#"+identity) + ").tomselect")
+        control = "#"+identity+"-ts-control"
+        stage = "click_control"
+        browser.click_visible("#"+identity+" + .ts-wrapper .ts-control")
+        stage = "fill_query"
+        label = browser.evaluate("[...document.querySelector("+json.dumps("#"+identity)+").options].find(o=>o.value==="+json.dumps(value)+").textContent")
+        browser.run("fill", control, label)
+        stage = "find_option"
+        browser.until("document.querySelector("+json.dumps("#"+identity)+").tomselect.activeOption?.dataset.value==="+json.dumps(value))
+        stage = "keyboard_select_option"
+        browser.run("press", "Enter")
+        stage = "commit_value"
+        browser.until("document.querySelector("+json.dumps("#"+identity)+").value==="+json.dumps(value))
+    except Exception as error:
+        info = browser.evaluate("(()=>{const s=document.querySelector("+json.dumps("#"+identity)+"),t=s.tomselect,r=t?.control.getBoundingClientRect();return {value:s.value,disabled:s.disabled,open:t?.isOpen,query:t?.control_input.value,rect:r?.toJSON(),hit:r?document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.outerHTML:null}})()")
+        raise AssertionError("combobox_"+stage+":"+json.dumps(info,ensure_ascii=False)) from error
 
 
 def verify_failures(browser, fault, row):

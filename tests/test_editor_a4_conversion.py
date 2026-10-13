@@ -319,7 +319,7 @@ class EditorA4LocalFlowTests(unittest.TestCase):
                 self.conn, self.draft["id"], dict(original), {**dict(file_object), "scan_status": "pending"}
             )
 
-    def test_editor_image_still_requires_antivirus(self):
+    def test_editor_image_records_structural_preflight_without_antivirus(self):
         from PIL import Image
         output = io.BytesIO()
         Image.new("RGB", (24, 16), "orange").save(output, format="PNG")
@@ -334,8 +334,9 @@ class EditorA4LocalFlowTests(unittest.TestCase):
             finalized = backend.finalize_official_editor_upload(
                 self.conn, self.draft["id"], intent["upload_id"], {"sha256": digest}, self.session
             )
-        scanner.assert_called_once()
-        self.assertEqual(finalized["asset"]["scanStatus"], "passed")
+        scanner.assert_not_called()
+        self.assertEqual(finalized["asset"]["scanStatus"], "not_scanned")
+        self.assertEqual(finalized["asset"]["preflightStatus"], "passed")
 
 
 class EditorA4SupabaseContractTests(unittest.TestCase):

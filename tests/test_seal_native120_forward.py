@@ -1,5 +1,6 @@
 """Source-integrity tests for the separate six-image approval, never activation."""
 import re
+import json
 import unittest
 
 import seal_scan_20261013 as native
@@ -77,7 +78,8 @@ class Native120ForwardTest(unittest.TestCase):
             self.assertIn("native120_scan_import_exact_constraints_mismatch", text)
             self.assertIn("native120_scan_import_attestation_trigger_mismatch", text)
             if schema == "edoc":
-                self.assertIn("migration_ledger) = 74", text)
+                manifest = json.loads((forward.ROOT / "supabase/verification/migration_manifest.json").read_text())
+                self.assertIn(f"migration_ledger) = {len(manifest['migrations']) + 1}", text)
                 self.assertIn("('r','p','v','m')) = 99", text)
                 self.assertIn(sha256_text(forward.source_sql()), text)
                 self.assertIn(sha256_text(forward.transformed_sql(forward.source_sql())), text)

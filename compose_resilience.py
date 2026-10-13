@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS official_document_compose_drafts (
 CREATE INDEX IF NOT EXISTS idx_compose_draft_owner ON official_document_compose_drafts(applicant_id, company_id, archived, updated_at);
 """
 
-SELECTORS = frozenset("composeCompanySelect docType priority composeApprovalCategorySelect dispatchNo dispatchDate composeOutputMode recipient originalRecipients copyRecipients documentPurpose contactAddress contactOwner contactPhone contactFax contactEmail largeSealType smallSealType subject bodyText attachmentDetails".split())
+SELECTORS = frozenset("composeCompanySelect docType priority composeApprovalCategorySelect dispatchNo dispatchDate composeOutputMode recipient originalRecipients copyRecipients documentPurpose contactAddress contactOwner contactPhone contactFax contactEmail largeSealType smallSealType continuousSealType subject bodyText attachmentDetails".split())
 
 def draft_payload(draft_id, payload, user):
     if not re.fullmatch(r"OD-[0-9a-fA-F-]{36}", draft_id):

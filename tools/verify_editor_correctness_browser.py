@@ -28,6 +28,7 @@ from tests.test_five_account_http_acceptance import FiveAccountHttpAcceptanceTes
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "tests/.artifacts/editor-correctness-browser")
+    parser.add_argument("--devices", default="desktop,tablet,mobile", help="Comma-separated device names for an isolated rerun")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -58,7 +59,9 @@ def main() -> int:
         browser = Browser(config, session=browser_session, namespace=browser_session)
         try:
             auth = isolated_browser_session(fixture, "staff")
-            for device, dimensions in [("desktop", (1440, 1000)), ("mobile", (390, 844))]:
+            for device, dimensions in [("desktop", (1440, 1000)), ("tablet", (820, 1000)), ("mobile", (390, 844))]:
+                if device not in args.devices.split(","):
+                    continue
                 row = {"device": device, "checks": {}}
                 report["journeys"].append(row)
                 browser.run("open", fixture.origin + "/assets/favicon-32.png")
@@ -69,7 +72,7 @@ def main() -> int:
                 browser.run("snapshot", "-i")
                 row["checks"]["existingCasesCollapsed"] = browser.evaluate("!document.querySelector('#electronicSealWorkQueue').open")
                 row["queueLayouts"] = []
-                widths = [1440] if device == "desktop" else [375, 390, 430, 760, 820]
+                widths = [1440] if device == "desktop" else [820] if device == "tablet" else [375, 390, 430, 760, 820]
                 for width in widths:
                     browser.run("set", "viewport", str(width), str(dimensions[1]))
                     layout = browser.evaluate("(()=>{const q=document.querySelector('#electronicSealWorkQueue'),s=q.querySelector('summary'),r=q.getBoundingClientRect();return {width:innerWidth,height:r.height,summaryHeight:s.getBoundingClientRect().height,closed:!q.open,overflow:document.documentElement.scrollWidth>innerWidth+1}})()")
@@ -84,7 +87,9 @@ def main() -> int:
                     browser.until("!document.body.classList.contains('mobile-navigation-open')&&document.querySelector('#primarySidebar').getBoundingClientRect().right<=1")
                 browser.run("screenshot", str(output / f"{device}-queue-collapsed.png"))
                 category = browser.evaluate("[...document.querySelector('#uploadedSealApprovalCategorySelect').options].find(e=>e.textContent.includes('合作意向書')).value")
-                browser.run("select", "#uploadedSealApprovalCategorySelect", category)
+                browser.run("fill", "#uploadedSealApprovalCategorySelect-ts-control", "合作意向書")
+                browser.run("press", "Enter")
+                browser.until("document.querySelector('#uploadedSealApprovalCategorySelect').value===" + json.dumps(category))
                 browser.run("fill", "#uploadedSealTitle", f"合成測試 {device} PDF 編輯")
                 browser.run("fill", "#uploadedSealReason", "隔離測試，不送簽、不用印、不寄發。")
                 pdf_path = Path(fixture.tmp.name) / f"synthetic-{device}.pdf"
@@ -96,30 +101,38 @@ def main() -> int:
                 writer.save()
                 browser.run("upload", "#uploadedSealPdfInput", str(pdf_path))
                 browser.until("uploadedSealEditorState.pages.length===3&&!uploadedSealEditorRuntime.uploading")
-                browser.click_visible("#uploadedSealApplicationToggleBtn")
-                row["checks"]["applicationCollapsedWithoutLosingValues"] = browser.evaluate("document.querySelector('#uploadedSealApplicationFields').hidden&&document.querySelector('#uploadedSealTitle').value.includes('合成測試')")
+                row["checks"]["applicationRemainsEditableAfterUpload"] = browser.evaluate("!document.querySelector('#uploadedSealApplicationFields').hidden&&!document.querySelector('#uploadedSealTitle').disabled&&document.querySelector('#uploadedSealTitle').value.includes('合成測試')")
                 row["checks"]["approvalRouteStillVisible"] = browser.evaluate("document.querySelector('#uploadedSealApprovalRouteBadge').getClientRects().length>0")
                 if browser.evaluate("Boolean(document.querySelector('#uploadedEditorMoreTools [data-editor-tool=\"image\"]'))"):
                     browser.click_visible("#uploadedEditorMoreTools > summary")
                 browser.click_visible('#uploadedPdfEditor [data-editor-tool="image"]')
                 # A plain synthetic rectangle, never a real seal image.
                 image_path = Path(fixture.tmp.name) / "synthetic.png"
-                Image.new("RGB", (32, 32), (250, 180, 80)).save(image_path, format="PNG")
+                Image.new("RGB", (400, 200), (250, 180, 80)).save(image_path, format="PNG")
                 browser.run("upload", "#uploadedEditorImageInput", str(image_path))
                 browser.until("uploadedSealEditorState.elements.some(e=>e.kind==='image')&&!uploadedSealEditorRuntime.uploading")
-                browser.until("uploadedSealEditorRuntime.savedGeneration>=uploadedSealEditorRuntime.dirtyGeneration&&!uploadedSealEditorRuntime.saving")
+                browser.until("!uploadedSealEditorRuntime.pendingImage&&uploadedSealEditorRuntime.savedGeneration>=uploadedSealEditorRuntime.dirtyGeneration&&!uploadedSealEditorRuntime.saving")
                 row["checks"]["imageInsertedAndAutosaved"] = browser.evaluate("uploadedSealEditorState.elements.filter(e=>e.kind==='image').length===1")
+                row["checks"]["imageIntrinsicRatio"] = browser.evaluate("(()=>{const image=uploadedSealEditorState.elements.find(e=>e.kind==='image');return Math.abs(image.width/image.height-2)<0.001&&!image.properties.localPending})()")
                 document_id = browser.evaluate("uploadedSealEditorRuntime.documentId")
                 image_readback = fixture._expect_json("GET", f"/api/official-documents/{document_id}/editor-state", 200, token=auth["token"])
                 image_state = image_readback.get("state") or image_readback.get("editor_state")
                 row["checks"]["serverReadbackContainsImage"] = sum(e.get("kind") == "image" for e in image_state["elements"]) == 1
+                browser.run("open", fixture.origin + f"/?image_reopen={time.monotonic_ns()}#electronicSeal")
+                browser.until("Boolean(document.querySelector('[data-electronic-seal-open=" + json.dumps(document_id) + "]'))")
+                browser.click_visible("#electronicSealWorkQueue > summary")
+                browser.click_visible('[data-electronic-seal-open="' + document_id + '"]')
+                browser.until("uploadedSealEditorState.elements.some(e=>e.kind==='image')&&!uploadedSealEditorRuntime.locked")
+                row["checks"]["imageReopensVisibleWithSameRatio"] = browser.evaluate("(()=>{const e=uploadedSealEditorState.elements.find(e=>e.kind==='image');return Math.abs(e.width/e.height-2)<0.001&&Boolean(uploadedSealEditorRuntime.imageUrls.get(e.properties.assetId))&&Boolean(document.querySelector('#uploadedEditorSvgLayer image'))})()")
+                browser.evaluate("document.querySelector('#uploadedPdfCanvas').scrollIntoView({block:'start',behavior:'instant'});true")
+                row["checks"]["saveAndSubmitStayVisibleWhileEditing"] = browser.evaluate("(()=>{const buttons=['#uploadedEditorSaveDraftToolbarBtn','#uploadedEditorSubmitToolbarBtn','#uploadedEditorToolTray [data-editor-tool=select]'].map(s=>document.querySelector(s)),header=document.querySelector('.topbar').getBoundingClientRect();return buttons.every(e=>{const r=e.getBoundingClientRect();return r.width>=44&&r.height>=44&&r.top>=header.bottom&&r.bottom<=innerHeight})})()")
                 # Deleting source page one must not shift retained source bindings.
                 browser.click_visible("#uploadedEditorThumbnailToggleBtn")
                 browser.until("document.querySelector('#uploadedPdfEditor').dataset.thumbnailsOpen==='true'")
                 browser.evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))")
                 browser.run("snapshot", "-i")
                 browser.click_visible('[data-editor-page-action="delete"]')
-                browser.run("dialog", "accept")
+                browser.click_visible("#workspaceTypedConfirmSubmitBtn")
                 browser.until("uploadedSealEditorState.pages.length===2&&uploadedSealEditorRuntime.savedGeneration>=uploadedSealEditorRuntime.dirtyGeneration&&!uploadedSealEditorRuntime.saving")
                 document_id = browser.evaluate("uploadedSealEditorRuntime.documentId")
                 browser.run("open", fixture.origin + f"/?editor_reopen={time.monotonic_ns()}#electronicSeal")
@@ -145,9 +158,11 @@ def main() -> int:
                 if browser.evaluate("document.querySelector('#uploadedPdfEditor').dataset.propertiesOpen!=='true'"):
                     browser.click_visible("#uploadedEditorPropertiesToggleBtn")
                 browser.click_visible("#uploadedEditorPropertyForm > .editor-precision-settings > summary")
+                browser.evaluate("window.__propertyEvents=[];document.addEventListener('focusin',event=>window.__propertyEvents.push({id:event.target.id,at:performance.now()}));true")
                 edge = browser.evaluate("(()=>{const e=[...uploadedSealEditorRuntime.selectedIds].map(editorElementById)[0],p=currentUploadedEditorPage();return {x:p.widthPt-e.width,y:p.heightPt-e.height}})()")
                 browser.run("fill", "#uploadedEditorPropertyX", str(edge["x"]))
                 row["focusedPropertyDuringSave"] = browser.evaluate("(async()=>{const input=document.querySelector('#uploadedEditorPropertyX'),before={value:input.value,focused:document.activeElement===input};await saveUploadedEditorState({immediate:true});return {before,after:{value:input.value,focused:document.activeElement===input}}})()")
+                row["propertyFocusEvents"] = browser.evaluate("window.__propertyEvents")
                 property_during_save = row["focusedPropertyDuringSave"]
                 row["checks"]["focusedPropertySurvivesCanonicalSave"] = property_during_save["before"] == property_during_save["after"]
                 browser.run("fill", "#uploadedEditorPropertyX", str(edge["x"]))

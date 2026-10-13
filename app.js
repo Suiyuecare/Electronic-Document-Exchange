@@ -965,7 +965,10 @@ let composeSaveState = {
   title: "尚未暫存",
   detail: "輸入內容會先保護在此瀏覽器；按暫存草稿後會出現在發文清單。"
 };
-let approvalLogFilter = "my_pending";
+let approvalLogFilter = "pending";
+let approvalTaskFilter = "";
+let workspaceDraftState = { scope: "", total: null, rows: [], cursor: "", hasMore: false, loading: false, error: "", search: "", generation: 0, updatedAt: 0 };
+let workspaceDraftSummaryRequest = null;
 let approvalLogSearchTerm = "";
 const composeDefaultContactPhone = "02-66045432 #";
 const composeDefaultContactFax = "N/A";
@@ -1378,6 +1381,8 @@ function clearUploadedEditorSensitivePreviews({ preserveOpeningPreview = false }
     document.querySelector("#uploadedEditorOpeningPreview")?.remove();
   }
   uploadedSealEditorRuntime?.uploadAbortController?.abort?.();
+  uploadedSealEditorRuntime?.pendingImage?.controller?.abort?.();
+  if (uploadedSealEditorRuntime?.pointerFrame) window.cancelAnimationFrame(uploadedSealEditorRuntime.pointerFrame);
   if (typeof uploadedSealEditorRuntime === "object") uploadedSealEditorRuntime.uploadAbortController = null;
   finishUploadedEditorTextEdit({ cancel: true });
   window.clearTimeout(uploadedSealEditorRuntime?.saveTimer || 0);
@@ -1401,6 +1406,9 @@ function clearUploadedEditorSensitivePreviews({ preserveOpeningPreview = false }
     uploadedSealEditorRuntime.preparedPdfDocument = null;
     void uploadedSealEditorRuntime.pendingPdfPreparation?.pdfDocument?.destroy?.();
     uploadedSealEditorRuntime.pendingPdfPreparation = null;
+    uploadedSealEditorRuntime.pendingImage = null;
+    uploadedSealEditorRuntime.pointerFrame = 0;
+    uploadedSealEditorRuntime.pointerRenderIds?.clear?.();
     uploadedSealEditorRuntime.pendingFinalization = null;
     uploadedSealEditorRuntime.pendingEditorSave = false;
     uploadedSealEditorRuntime.finalizingAsset = false;
@@ -1473,6 +1481,9 @@ const uploadedSealEditorRuntime = {
   pendingFinalization: null,
   pendingEditorSave: false,
   pendingPdfPreparation: null,
+  pendingImage: null,
+  pointerFrame: 0,
+  pointerRenderIds: new Set(),
   companyChanging: false,
   directoryLoading: false,
   sealOptionsLoading: false,
@@ -2583,6 +2594,7 @@ const titles = {
   electronicSeal: "電子用印",
   inbound: "公文收錄",
   compose: "建立電子公文",
+  drafts: "草稿編輯",
   format: "文書格式",
   workflow: "流程控管",
   seals: "印鑑管理",
@@ -3112,6 +3124,7 @@ const routeScrollPositions = new Map();
 let routeScrollScope = "";
 
 function setView(target) {
+  bindWorkspaceDraftControls();
   const routeStartedAt = performance.now();
   if (!isRouteAllowed(target)) target = "dashboard";
   const scope = frontendSessionScope();
@@ -3153,6 +3166,8 @@ function setView(target) {
     scheduleOfficialDraftFontRerender();
     prepareComposeDraftRecovery();
   }
+  if (target === "drafts") void loadWorkspaceDrafts();
+  else void refreshWorkspaceDraftCount();
   if (hasAuthenticatedBackendSession()) {
     if (target === "approvalLog") void loadApprovalProgressFromBackend();
     else if (["electronicSeal", "contractSeal"].includes(target)) void loadOfficialWorkflow("all", { source: "editor", search: document.querySelector("#electronicSealWorkQueueSearch")?.value || "" });
@@ -3631,12 +3646,12 @@ function canSyncAuditLogs() {
 }
 
 const navByIdentity = {
-  employee: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
-  supervisor: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound"],
+  employee: ["dashboard", "compose", "electronicSeal", "drafts", "approvalLog", "inbound"],
+  supervisor: ["dashboard", "compose", "electronicSeal", "drafts", "approvalLog", "inbound"],
   viewer: ["dashboard", "approvalLog", "inbound"],
-  companyOps: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"],
-  administrativeDirector: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"],
-  executive: ["dashboard", "compose", "electronicSeal", "approvalLog", "inbound", "settings"]
+  companyOps: ["dashboard", "compose", "electronicSeal", "drafts", "approvalLog", "inbound", "settings"],
+  administrativeDirector: ["dashboard", "compose", "electronicSeal", "drafts", "approvalLog", "inbound", "settings"],
+  executive: ["dashboard", "compose", "electronicSeal", "drafts", "approvalLog", "inbound", "settings"]
 };
 
 const secondaryRoutesByIdentity = {
@@ -3722,6 +3737,7 @@ const integratedMajorPageGroups = Object.freeze({
     ["notifications", "通知紀錄", false]
   ],
   compose: [],
+  drafts: [],
   electronicSeal: [],
   approvalLog: [
     ["reports", "簽核統計", false]
@@ -6484,6 +6500,7 @@ function stopFinanceDirectoryAutoRefresh() {
 }
 
 function clearFinanceDirectoryCache() {
+  resetWorkspaceDrafts();
   uploadedSealOptionsRequestNo += 1;
   uploadedSealCatalogState.request?.controller?.abort();
   uploadedSealCatalogState = { scope: "", token: "", companyId: "", status: "idle", error: "", request: null };
@@ -8771,8 +8788,225 @@ function renderComposeRecoveryPrompt() {
 
 function prepareComposeDraftRecovery() {
   if (!authState?.token) return;
-  renderComposeRecoveryPrompt();
-  void refreshComposeCloudDrafts();
+  document.querySelector("#composeResumeDraft")?.setAttribute("hidden", "");
+  void refreshWorkspaceDraftCount();
+}
+
+function workspaceDraftScope() {
+  return `${frontendSessionScope()}|${authState?.token || ""}`;
+}
+
+function resetWorkspaceDrafts() {
+  workspaceDraftState = { scope: "", total: null, rows: [], cursor: "", hasMore: false, loading: false, error: "", search: "", generation: workspaceDraftState.generation + 1, updatedAt: 0 };
+  workspaceDraftSummaryRequest = null;
+  renderWorkspaceDraftCount();
+  document.querySelector("#workspaceDraftList")?.replaceChildren();
+  document.querySelector("#workspaceLocalDraft")?.setAttribute("hidden", "");
+}
+
+function renderWorkspaceDraftCount() {
+  const count = workspaceDraftState.scope === workspaceDraftScope() ? workspaceDraftState.total : null;
+  const badge = document.querySelector("#draftNavCount");
+  if (badge) { badge.textContent = Number.isInteger(count) ? String(count) : "—"; badge.setAttribute("aria-label", Number.isInteger(count) ? `${count} 件未完成草稿` : "草稿數量尚未載入"); }
+}
+
+async function refreshWorkspaceDraftCount({ force = false } = {}) {
+  if (!authState?.token || !isRouteAllowed("drafts")) return;
+  const scope = workspaceDraftScope();
+  if (workspaceDraftState.scope && workspaceDraftState.scope !== scope) resetWorkspaceDrafts();
+  if (!force && workspaceDraftState.scope === scope && Date.now() - workspaceDraftState.updatedAt < 30000) return;
+  if (workspaceDraftSummaryRequest?.scope === scope) return workspaceDraftSummaryRequest.promise;
+  const request = { scope, promise: null, generation: workspaceDraftState.generation };
+  workspaceDraftSummaryRequest = request;
+  request.promise = (async () => {
+    try {
+      const result = await backendRequest("/workspace-drafts?summary=1");
+      if (workspaceDraftSummaryRequest !== request || scope !== workspaceDraftScope() || request.generation !== workspaceDraftState.generation) return;
+      if (!Number.isInteger(result?.total) || result.total < 0) throw new Error("草稿數量格式錯誤");
+      Object.assign(workspaceDraftState, { scope, total: result.total, updatedAt: Date.now() });
+      renderWorkspaceDraftCount();
+    } catch (error) {
+      if (workspaceDraftSummaryRequest === request && scope === workspaceDraftScope() && request.generation === workspaceDraftState.generation && [401, 403].includes(error?.status)) resetWorkspaceDrafts();
+      /* Unknown is not zero; the draft page offers a scoped retry. */
+    }
+    finally { if (workspaceDraftSummaryRequest === request) workspaceDraftSummaryRequest = null; }
+  })();
+  return request.promise;
+}
+
+function invalidateWorkspaceDrafts() {
+  workspaceDraftState.updatedAt = 0;
+  workspaceDraftState.generation += 1;
+  workspaceDraftSummaryRequest = null;
+  if (activeRouteTarget === "drafts") void loadWorkspaceDrafts();
+  else void refreshWorkspaceDraftCount({ force: true });
+}
+
+async function loadWorkspaceDrafts({ append = false } = {}) {
+  if (!authState?.token || !isRouteAllowed("drafts")) return;
+  const scope = workspaceDraftScope();
+  const search = String(document.querySelector("#workspaceDraftSearch")?.value || "").trim();
+  const sameQuery = workspaceDraftState.scope === scope && workspaceDraftState.search === search;
+  if (append && (!sameQuery || workspaceDraftState.loading || !workspaceDraftState.hasMore)) return;
+  if (workspaceDraftState.scope !== scope) resetWorkspaceDrafts();
+  const generation = ++workspaceDraftState.generation;
+  const cursor = append ? workspaceDraftState.cursor : "";
+  Object.assign(workspaceDraftState, { scope, search, loading: true, error: "" });
+  if (!sameQuery) workspaceDraftState.rows = [];
+  renderWorkspaceDrafts();
+  const query = new URLSearchParams({ page_size: "25", search });
+  if (cursor) query.set("cursor", cursor);
+  const current = () => workspaceDraftScope() === scope && workspaceDraftState.generation === generation;
+  try {
+    const result = await backendRequest(`/workspace-drafts?${query}`);
+    if (!current()) return;
+    if (!Array.isArray(result?.items) || !Number.isInteger(result.total) || typeof result.has_more !== "boolean") throw new Error("草稿資料格式錯誤");
+    const rows = append ? [...workspaceDraftState.rows, ...result.items] : result.items;
+    Object.assign(workspaceDraftState, { rows: [...new Map(rows.map(row => [row.key, row])).values()], cursor: result.next_cursor || "", hasMore: Boolean(result.has_more && result.next_cursor), filteredTotal: result.total });
+    // A search result count is never the global sidebar count.
+    if (!search) Object.assign(workspaceDraftState, { total: result.total, updatedAt: Date.now() });
+    else void refreshWorkspaceDraftCount();
+  } catch (error) {
+    if (!current()) return;
+    workspaceDraftState.error = error?.status === 403 ? "目前沒有草稿存取權限。" : "草稿更新失敗，已保留目前清單。";
+    if ([401, 403].includes(error?.status)) { workspaceDraftState.rows = []; workspaceDraftState.total = null; }
+  } finally {
+    if (current()) { workspaceDraftState.loading = false; renderWorkspaceDrafts(); renderWorkspaceDraftCount(); }
+  }
+}
+
+function renderWorkspaceDrafts() {
+  const state = workspaceDraftState;
+  const list = document.querySelector("#workspaceDraftList");
+  if (!list) return;
+  const count = document.querySelector("#workspaceDraftCount");
+  if (count) count.textContent = state.error || (state.loading ? "正在載入…" : `共 ${state.filteredTotal ?? 0} 件未完成${state.search ? "（搜尋結果）" : ""}`);
+  list.setAttribute("aria-busy", String(state.loading));
+  renderStableWorkflowMarkup(list, state.rows.length ? state.rows.map(row => `<article class="panel workspace-draft-card" data-workflow-row="${escapeHtml(row.key)}"><div><span class="status-pill">${row.status === "rejected" ? "退回補正" : row.source_type === "uploaded_pdf" ? "用印草稿" : "公文草稿"}</span><h4>${escapeHtml(row.title)}</h4><small>${escapeHtml(row.updated_at)}${row.official_id ? ` · ${escapeHtml(row.official_id)}` : ""}</small></div><button class="primary-button" type="button" data-workspace-draft-open="${escapeHtml(row.key)}">${row.status === "rejected" ? "繼續補正" : "繼續編輯"}</button></article>`).join("") : `<div class="panel ux-empty-state"><strong>${state.loading ? "正在載入草稿…" : state.error ? "暫時無法載入草稿" : state.search ? "沒有符合的草稿" : "目前沒有未完成草稿"}</strong></div>`);
+  list.querySelectorAll("[data-workspace-draft-open]").forEach(button => bindWorkflowActionOnce(button, () => void openWorkspaceDraft(button.dataset.workspaceDraftOpen, button)));
+  const pagination = document.querySelector("#workspaceDraftPagination");
+  if (pagination) {
+    renderStableWorkflowMarkup(pagination, state.error || state.hasMore ? `<button class="secondary-button" type="button" data-drafts-more ${state.loading ? "disabled" : ""}>${state.error ? "重試" : "載入更多"}</button>` : "");
+    const more = pagination.querySelector("[data-drafts-more]");
+    if (more) bindWorkflowActionOnce(more, () => void loadWorkspaceDrafts({ append: !workspaceDraftState.error }));
+  }
+  const local = document.querySelector("#workspaceLocalDraft");
+  const saved = readComposeAutosave();
+  // Local recovery is explicitly separate, never added to the server total.
+  if (local) {
+    local.hidden = !saved || !composeSnapshotHasMeaningfulContent(saved.snapshot);
+    if (!local.hidden) {
+      local.innerHTML = `<div><strong>此裝置的編輯備份</strong><p>${escapeHtml(saved.snapshot?.values?.["#subject"] || saved.snapshot?.values?.["#documentPurpose"] || "未命名公文")}</p><small>本機備份，不列入雲端草稿數量。</small></div><button type="button" class="secondary-button" data-local-draft-open>開啟備份</button>`;
+      local.querySelector("button").onclick = () => void openWorkspaceLocalDraft(saved);
+    }
+  }
+}
+
+async function openWorkspaceLocalDraft(saved) {
+  const scope = workspaceDraftScope();
+  const snapshot = saved?.snapshot;
+  if (!snapshot || snapshot.userId !== authState?.user?.id || snapshot.companyId !== authState?.user?.company_id) return;
+  try {
+    // A backup from another device may belong to a case already submitted.
+    // Recheck status before restoring it; never revive a sent or rejected-final case.
+    if (snapshot.cloudDraftId) await backendRequest(`/compose-drafts/${encodeURIComponent(snapshot.cloudDraftId)}`);
+    else if (snapshot.officialDocumentId) {
+      const item = await backendRequest(`/official-documents/${encodeURIComponent(snapshot.officialDocumentId)}`);
+      if (item.applicant_id !== authState?.user?.id || !["draft", "rejected"].includes(item.current_status)) throw new Error("這份案件已送出或終止，不能再作為草稿編輯。");
+    }
+    if (scope !== workspaceDraftScope()) return;
+    composeRecoveryCandidate = { identity: composeAutosaveIdentity(), token: authState?.token || "", saved, cloudId: snapshot.cloudDraftId || "" };
+    await resumeComposeDraft();
+    if (scope === workspaceDraftScope()) setView("compose");
+  } catch (error) { if (scope === workspaceDraftScope()) showToast(`備份無法開啟：${error.message}`); }
+}
+
+async function openWorkspaceDraft(key, button) {
+  const row = workspaceDraftState.rows.find(item => item.key === key);
+  if (!row) return;
+  const scope = workspaceDraftScope();
+  if (button) button.disabled = true;
+  try {
+    if (row.kind === "cloud") {
+      const draft = await backendRequest(`/compose-drafts/${encodeURIComponent(row.id)}`);
+      if (scope !== workspaceDraftScope()) return;
+      composeCloudRows = [...composeCloudRows.filter(item => item.id !== draft.id), draft];
+      await loadComposeCloudDraft(draft.id);
+      if (scope === workspaceDraftScope() && composeCloudDraftId === draft.id) setView("compose");
+    } else if (row.source_type === "uploaded_pdf") {
+      await openOfficialDocumentEditorReview(row.id, "edited");
+    } else {
+      await beginOfficialCorrection({ id: row.id, applicant_id: authState.user.id, current_status: row.status });
+    }
+  } catch (error) { if (scope === workspaceDraftScope()) showToast(`草稿無法開啟：${error.message}`); }
+  finally { if (button?.isConnected) button.disabled = false; }
+}
+
+async function startNewWorkspaceCompose() {
+  const scope = workspaceDraftScope();
+  const inputScope = composeRequestScope();
+  const selectedFiles = [...(document.querySelector("#attachments")?.files || [])];
+  const sameFiles = () => {
+    const current = [...(document.querySelector("#attachments")?.files || [])];
+    return current.length === selectedFiles.length && current.every((file, index) => file === selectedFiles[index]);
+  };
+  if (selectedFiles.length) {
+    const snapshot = JSON.stringify(composeRawSnapshot());
+    if (!await requestWorkspaceConfirmation("另寫新公文", `目前選取 ${selectedFiles.length} 個附件。另寫新公文會清除這些選取，尚未上傳的附件不會保存在文字草稿內。`, "清除附件並另寫新公文")) return;
+    if (scope !== workspaceDraftScope() || inputScope !== composeRequestScope() || snapshot !== JSON.stringify(composeRawSnapshot()) || !sameFiles()) return;
+  }
+  if (composeSnapshotHasMeaningfulContent(composeRawSnapshot())) {
+    const snapshot = JSON.stringify(composeRawSnapshot());
+    const saved = await saveComposeCloudDraft();
+    if (scope !== workspaceDraftScope() || inputScope !== composeRequestScope()) return;
+    if (!sameFiles()) return showToast("保存期間附件已變更，已保留目前輸入；請再確認後建立新公文。");
+    if (!saved) return showToast("目前內容尚未保存，請先重試保存，再建立新公文。");
+    // The user can keep typing while persistence runs. A new entry must never
+    // discard those later keystrokes or a different draft opened meanwhile.
+    if (snapshot !== JSON.stringify(composeRawSnapshot()) && composeCloudSavedSnapshots.get(composeCloudDraftId) !== JSON.stringify(composeRawSnapshot())) {
+      return showToast("保存期間內容有更新，已保留目前輸入；完成保存後再按撰寫公文。");
+    }
+  }
+  resetComposeAsyncScope();
+  currentComposeDraftId = "";
+  composeDraftRequestId = "";
+  composeOfficialContentRevision = null;
+  document.querySelector("#composeForm")?.reset();
+  ["#recipient", "#subject", "#bodyText", "#documentPurpose", "#attachmentDetails", "#dispatchNo", "#originalRecipients"].forEach(selector => { const node = document.querySelector(selector); if (node) node.value = ""; });
+  const date = document.querySelector("#dispatchDate");
+  if (date) date.value = composeTodayDate();
+  renderComposeCompanyOptions(true);
+  renderApprovalCategorySelect("#composeApprovalCategorySelect", "", { requireSelection: true });
+  draftConfirmed = false;
+  draftSigned = false;
+  activeComposeStep = "fill";
+  Object.assign(composeSealPlacements.large, { page: 1, x: 70, y: 80 });
+  Object.assign(composeSealPlacements.small, { page: 1, x: 84, y: 80 });
+  Object.assign(composeSealPlacements.single, { page: 1, x: 58, y: 80 });
+  composeSaveState = { tone: "idle", title: "新公文", detail: "開始填寫後自動保存至草稿編輯。" };
+  renderComposeSaveStatus();
+  renderDraftPreview();
+  setView("compose");
+  invalidateWorkspaceDrafts();
+}
+
+function bindWorkspaceDraftControls() {
+  if (bindWorkspaceDraftControls.bound) return;
+  bindWorkspaceDraftControls.bound = true;
+  document.querySelector("#workspaceDraftRefreshBtn")?.addEventListener("click", () => void loadWorkspaceDrafts());
+  document.querySelector("#draftNewComposeBtn")?.addEventListener("click", () => void startNewWorkspaceCompose());
+  document.querySelector("#workspaceDraftSearch")?.addEventListener("input", () => {
+    clearTimeout(bindWorkspaceDraftControls.searchTimer);
+    const scope = workspaceDraftScope();
+    bindWorkspaceDraftControls.searchTimer = setTimeout(() => { if (scope === workspaceDraftScope()) void loadWorkspaceDrafts(); }, 250);
+  });
+  document.querySelector("#approvalTaskFilter")?.addEventListener("change", event => { approvalTaskFilter = event.target.value; void loadApprovalProgressFromBackend(); });
+  document.addEventListener("click", event => {
+    const control = event.target.closest?.('.nav-item[data-target="compose"], .mobile-primary-item[data-target="compose"]');
+    if (!control || !isRouteAllowed("compose")) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    void startNewWorkspaceCompose();
+  }, true);
 }
 
 async function resumeComposeDraft() {
@@ -10955,11 +11189,11 @@ async function loadDashboardOfficialWorkflow({ throwOnError = false } = {}) {
   }
 }
 
-async function loadOfficialWorkflow(scope = officialWorkflowScope, { isCurrent = () => true, throwOnError = false, append = false, search = officialWorkflowSearchTerm, view = "", source = "workflow", status = officialWorkflowStatusFilter } = {}) {
+async function loadOfficialWorkflow(scope = officialWorkflowScope, { isCurrent = () => true, throwOnError = false, append = false, search = officialWorkflowSearchTerm, view = "", taskFilter = "", source = "workflow", status = officialWorkflowStatusFilter } = {}) {
   const sessionScope = frontendSessionScope();
   const sessionToken = typeof authState === "object" ? authState?.token || "" : "";
   if (!isCurrent()) return;
-  const query = { scope, search: String(search || "").trim(), view, source, status: source === "workflow" ? status : "" };
+  const query = { scope, search: String(search || "").trim(), view, source, status: source === "workflow" ? status : "", ...(taskFilter ? { taskFilter } : {}) };
   const sameQuery = officialWorkflowPage.scope === sessionScope && JSON.stringify(officialWorkflowPage.query) === JSON.stringify(query);
   if (append && (!sameQuery || officialWorkflowPage.loading || !officialWorkflowPage.hasMore)) return;
   const generation = ++officialWorkflowPage.generation;
@@ -10979,6 +11213,7 @@ async function loadOfficialWorkflow(scope = officialWorkflowScope, { isCurrent =
   if (query.status) params.set("status", query.status);
   if (query.search) params.set("search", query.search);
   if (query.view) params.set("view", query.view);
+  if (query.taskFilter) params.set("task_filter", query.taskFilter);
   if (cursor) params.set("cursor", cursor);
   try {
     const readKey = JSON.stringify({ sessionScope, sessionToken, query, append, cursor });
@@ -11123,7 +11358,17 @@ async function showSubmittedOfficialDocument(documentId, { isCurrent = () => tru
 }
 
 async function loadApprovalProgressFromBackend(options = {}) {
-  return loadOfficialWorkflow("all", { ...options, source: "approval", search: approvalLogSearchTerm, view: approvalLogFilter, status: "" });
+  normalizeApprovalProgressFilter();
+  return loadOfficialWorkflow("all", { ...options, source: "approval", search: approvalLogSearchTerm, view: approvalLogFilter, taskFilter: approvalTaskFilter, status: "" });
+}
+
+function normalizeApprovalProgressFilter() {
+  if (["delegated", "overdue"].includes(approvalLogFilter)) { approvalTaskFilter = approvalLogFilter; approvalLogFilter = "pending"; }
+  if (["my_pending", "attention"].includes(approvalLogFilter)) approvalLogFilter = "pending";
+  if (approvalLogFilter === "processed") approvalLogFilter = "acted";
+  if (approvalLogFilter !== "pending") approvalTaskFilter = "";
+  const select = document.querySelector("#approvalTaskFilter");
+  if (select) { select.value = approvalTaskFilter; select.closest("label").hidden = approvalLogFilter !== "pending"; }
 }
 
 function syncOfficialWorkflowFormMode() {
@@ -22577,6 +22822,7 @@ async function fetchWithDeadline(url, options = {}, { timeoutMs = 20000, label =
 }
 
 async function backendRequest(path, options = {}, prefetchedResponse = null) {
+  const mutationScope = typeof workspaceDraftScope === "function" ? workspaceDraftScope() : "";
   const { headers: optionHeaders = {}, timeoutMs: requestedTimeoutMs, ...fetchOptions } = options;
   const heavyRequest = /\/(?:editor-preflight|convert-a4|finalize|generate|submit|stamp|sign|export)(?:[/?]|$)/.test(path);
   const timeoutMs = requestedTimeoutMs ?? (heavyRequest ? 120000 : 20000);
@@ -22606,6 +22852,11 @@ async function backendRequest(path, options = {}, prefetchedResponse = null) {
     error.retryable = data.retryable === true;
     if (path === "/backup/restore-drill" && response.status === 503 && data?.blocked === true && data?.ok === false) error.operationReport = data;
     throw error;
+  }
+  if (outcomeUnknown && typeof workspaceDraftScope === "function" && /^\/(?:compose-drafts|official-documents)(?:\/|$)/.test(path)
+      && mutationScope === workspaceDraftScope()) {
+    clearTimeout(backendRequest.draftCountTimer);
+    backendRequest.draftCountTimer = setTimeout(() => { if (mutationScope === workspaceDraftScope()) invalidateWorkspaceDrafts(); }, 350);
   }
   return data;
 }
@@ -24697,10 +24948,11 @@ function approvalLogRecords(officialItems = officialWorkflowItems) {
 }
 
 function filteredApprovalLogRecords() {
+  normalizeApprovalProgressFilter();
   const term = approvalLogSearchTerm.trim().toLowerCase();
   return approvalLogRecords().filter((record) => {
     const { task, doc } = record;
-    const matchesFilter = approvalProgressCategory(record) === approvalLogFilter;
+    const matchesFilter = approvalRecordMatchesView(record, approvalLogFilter, approvalTaskFilter);
     const haystack = `${task.id} ${task.title} ${task.step} ${task.role} ${task.status} ${doc?.no || ""} ${doc?.subject || ""} ${doc?.to || ""} ${doc?.companyName || ""} ${record.officialDocument?.current_status || ""} ${record.officialDocument?.applicant_name || ""}`.toLowerCase();
     return matchesFilter && (!term || haystack.includes(term));
   }).sort((left, right) => {
@@ -24712,6 +24964,32 @@ function filteredApprovalLogRecords() {
     if (leftDue !== rightDue) return leftDue - rightDue;
     return String(right.submittedAt || "").localeCompare(String(left.submittedAt || ""));
   });
+}
+
+function approvalRecordMatchesView(record, view, taskFilter = "") {
+  const item = record.officialDocument;
+  if (item) {
+    const memberships = item.approval_views || {};
+    // Never infer a completed decision from the assigned participant's name.
+    const fallback = view === "mine" ? officialDocumentIsApplicant(item)
+      : view === "rejected" ? ["rejected", "declined"].includes(item.current_status)
+      : view === "pending" ? Boolean((item.can_act && item.current_step !== "applicant_confirm") || item.can_confirm || item.can_manage_dispatch || item.can_retry_stamp || item.can_create_linked_application)
+      : false;
+    if (!(typeof memberships[view] === "boolean" ? memberships[view] : fallback)) return false;
+    if (!taskFilter) return true;
+    const filters = item.approval_task_filters || {};
+    if (typeof filters[taskFilter] === "boolean") return filters[taskFilter];
+    if (taskFilter === "delegated") return Boolean(item.can_act && item.delegation_id);
+    if (taskFilter === "overdue") return approvalRecordIsOverdue(record);
+    return Boolean(item.can_confirm || item.can_manage_dispatch || item.can_retry_stamp || item.can_create_linked_application);
+  }
+  if (hasAuthenticatedBackendSession()) return false;
+  const category = approvalProgressCategory(record);
+  if (taskFilter && category !== taskFilter) return false;
+  if (view === "pending") return ["my_pending", "delegated", "overdue"].includes(category);
+  if (view === "mine") return record.task?.requester === activeRole();
+  if (view === "rejected") return /退回|駁回|不通過/.test(record.task?.status || "");
+  return false;
 }
 
 function approvalRecordDueTimestamp({ officialDocument, task } = {}) {
@@ -24796,6 +25074,7 @@ function closeApprovalLogMobileDetail() {
 }
 
 function renderApprovalLog() {
+  normalizeApprovalProgressFilter();
   officialHandoverController?.sync();
   const list = document.querySelector("#approvalLogList");
   const detail = document.querySelector("#approvalLogDetail");
@@ -24817,11 +25096,11 @@ function renderApprovalLog() {
     });
     heading.insertBefore(proxyButton, fullCaseButton || null);
   }
-  const progressLabels = { my_pending: "待我處理", delegated: "代理待簽", overdue: "逾期", processed: "其他紀錄" };
+  const progressLabels = { pending: "待簽核", mine: "我申請的", acted: "已簽核", rejected: "被退件" };
   const allProgressRecords = approvalLogRecords();
   document.querySelectorAll("[data-approval-log-filter]").forEach((button) => {
     const key = button.dataset.approvalLogFilter;
-    const count = allProgressRecords.filter((record) => approvalProgressCategory(record) === key).length;
+    const count = allProgressRecords.filter((record) => approvalRecordMatchesView(record, key)).length;
     button.textContent = hasAuthenticatedBackendSession() ? progressLabels[key] || key : `${progressLabels[key] || key} ${count}`;
     button.classList.toggle("active", key === approvalLogFilter);
     button.setAttribute("aria-selected", String(key === approvalLogFilter));
@@ -27725,6 +28004,7 @@ function uploadedSealApplicationMetadataReadOnly() {
 
 function uploadedSealApplicationCompanyReadOnly() {
   return uploadedSealApplicationMetadataReadOnly()
+    || Boolean(uploadedSealEditorRuntime.pendingImage)
     || Boolean(uploadedSealEditorRuntime.documentId && uploadedSealApplicationRuntime.companyEditable !== true);
 }
 
@@ -27873,9 +28153,7 @@ function uploadedSeamPrimaryLargeSeal(seal) {
 }
 
 function uploadedSealPickerCategoryOptions(records = uploadedSealCompanyRecords()) {
-  const seamOpen = document.querySelector("#uploadedEditorSeamPanel")?.hidden === false;
-  const ready = records.filter((seal) => companySealSelectable(seal)
-    && (!seamOpen || uploadedSeamPrimaryLargeSeal(seal)));
+  const ready = records.filter(companySealSelectable);
   const availableCodes = new Set(ready.map((seal) => seal.seal_category).filter(Boolean));
   const options = companySealRefOptions("category")
     .filter((item) => availableCodes.has(item.code))
@@ -27897,9 +28175,7 @@ function renderUploadedSealOptions() {
   const company = document.querySelector("#uploadedSealCompany");
   const companyId = company?.value || "";
   const records = uploadedSealCompanyRecords();
-  const seamOpen = document.querySelector("#uploadedEditorSeamPanel")?.hidden === false;
-  const ready = records.filter((seal) => companySealSelectable(seal)
-    && (!seamOpen || uploadedSeamPrimaryLargeSeal(seal)));
+  const ready = records.filter(companySealSelectable);
   const categories = uploadedSealPickerCategoryOptions(records);
   const sameCompany = categorySelect.dataset.companyId === companyId;
   const previousId = sameCompany ? select.value : "";
@@ -27907,7 +28183,7 @@ function renderUploadedSealOptions() {
   const previousCategory = initialized ? categorySelect.value : "";
   const previousSize = initialized ? sizeSelect.value : "";
   const first = ready.find((seal) => categories.some((item) => item.code === seal.seal_category)
-    && (seamOpen ? uploadedSeamPrimaryLargeSeal(seal) : seal.seal_category === "general_seal"))
+    && seal.seal_category === "general_seal")
     || ready.find((seal) => categories.some((item) => item.code === seal.seal_category));
   const category = categories.some((item) => item.code === previousCategory)
     ? previousCategory
@@ -27963,7 +28239,7 @@ function renderUploadedSealOptions() {
     status.textContent = !uploadedSealCatalogReady() || catalogMessage ? catalogMessage
       : !companyId ? "請先選擇用印公司。"
         : seal ? `${categoryLabel}${size === "single_seal" ? "" : ` · ${size === "small_seal" ? "小章" : "大章"}`} · ${formatCompanySealMeasurement(geometry.widthMm)} × ${formatCompanySealMeasurement(geometry.heightMm)} mm（尺寸固定）`
-          : !ready.length ? seamOpen ? "此單位尚無可用的大章；公司使用公司章，機構使用圖記章。" : "此公司尚無已登錄並啟用的章檔；只有印章目錄不能用印。"
+          : !ready.length ? "此公司尚無已登錄並啟用的章檔；只有印章目錄不能用印。"
             : `此公司尚無可用的${categoryLabel}${size === "small_seal" ? "小章" : "大章"}，請另選款式或聯絡印章管理人。`;
   }
 }
@@ -28055,6 +28331,13 @@ function selectedUploadedSeal() {
   return uploadedSealCompanyRecords().find((seal) => seal.id === sealId
     && seal.seal_category === category && seal.seal_size_type === size
     && companySealSelectable(seal)) || null;
+}
+
+function selectedUploadedSeamSeal() {
+  if (uploadedSealPickerReadOnly()) return null;
+  const choices = uploadedSealCompanyRecords().filter((seal) => companySealSelectable(seal) && uploadedSeamPrimaryLargeSeal(seal));
+  const selectedId = document.querySelector("#uploadedEditorSeamSealSelect")?.value || "";
+  return choices.find((seal) => seal.id === selectedId) || choices[0] || null;
 }
 
 function configureUploadedSealMode(target = activeRouteTarget) {
@@ -28539,6 +28822,8 @@ function setUploadedEditorSaveStatus(kind, message) {
   status.className = `pdf-editor-save-status ${kind}`;
   status.textContent = kind === "saved" && /^已(?:保存 · revision|載入 revision) \d+$/.test(message) ? "已保存" : message;
   status.title = message;
+  const mirror = document.querySelector("#uploadedEditorToolbarSaveStatus");
+  if (mirror) { mirror.textContent = status.textContent; mirror.title = message; }
 }
 
 function setUploadedPdfUploadProgress(state = "hidden", percent = null, label = "") {
@@ -29611,6 +29896,7 @@ function applyUploadedEditorCanonicalSaveResponse(result, savingGeneration) {
   // A save may take long enough for another pointer or keyboard edit to land.
   // Never replace those newer local edits with the older request response.
   if (uploadedSealEditorRuntime.dirtyGeneration !== savingGeneration) return false;
+  if (uploadedSealEditorRuntime.pendingImage) return false;
   // Pointer moves are live previews until the owning pointer finishes. Keep
   // their coordinates while a previous autosave advances only the lock cursor.
   if (uploadedSealEditorRuntime.pointerAction && uploadedSealEditorRuntime.pointerAction.type !== "swipe") return false;
@@ -29892,8 +30178,8 @@ function uploadedEditorClientPoint(clientX, clientY) {
   };
 }
 
-function editorDefaultElement(kind, page, point, properties = {}) {
-  const seal = selectedUploadedSeal();
+function editorDefaultElement(kind, page, point, properties = {}, sealChoice = null) {
+  const seal = sealChoice || selectedUploadedSeal();
   const sealGeometry = companySealFixedGeometry(seal || properties.sealSizeType || "large_seal");
   const sealVersionSnapshot = companySealCurrentVersionSnapshot(seal);
   const defaults = {
@@ -30160,7 +30446,7 @@ function renderUploadedEditorSelectionActions() {
 
 function addUploadedSeamGroups() {
   if (uploadedSealPickerReadOnly()) return;
-  const seal = selectedUploadedSeal();
+  const seal = selectedUploadedSeamSeal();
   if (!seal || !officialSealHasCurrentFile(seal)) return showToast("請先選擇可用的印章版本。");
   if (!uploadedSeamPrimaryLargeSeal(seal)) return showToast("騎縫章請使用本單位的公司章大章或圖記大章。");
   const binding = companySealCurrentVersionSnapshot(seal);
@@ -30173,26 +30459,35 @@ function addUploadedSeamGroups() {
   const numbers = raw ? parseUploadedEditorPageRange(raw) : uploadedSealEditorState.pages.map((_, index) => index + 1);
   const pageGroups = globalThis.EDOCSeam.partitionPages(numbers, 5);
   if (!pageGroups.length) return showToast("請選擇要用印的頁面。");
-  const edge = document.querySelector("#uploadedEditorSeamEdge")?.value || "right";
-  if (!["left", "right", "top", "bottom"].includes(edge)) return;
+  const edge = "right";
   const existing = [...globalThis.EDOCSeam.groups(uploadedSealEditorState).values()];
   const missing = pageGroups.filter((numbers) => !existing.some((members) => members.length === numbers.length
     && numbers.every((number, index) => members.some((item) => item.pageId === uploadedSealEditorState.pages[number - 1].pageId && item.properties.seamPartIndex === index))
     && members[0].properties.seamMode === "grouped" && members[0].properties.seamEdge === edge
+    && members[0].properties.seamPolicyVersion === globalThis.EDOCSeam.CURRENT_POLICY
     && members[0].properties.sealId === seal.id && members[0].properties.sealFileId === binding.sealFileId
     && members[0].properties.sealFileSha256 === binding.sealFileSha256));
   if (!missing.length) return showToast("選取的頁面已有這枚印章的騎縫章，可直接調整各組位置。");
   if (uploadedSealEditorState.elements.length + missing.reduce((total, pages) => total + pages.length, 0) > PDF_EDITOR_MAX_ELEMENTS) return showToast("加入後將超過 1,000 個物件上限。");
   const changed = commitUploadedEditorMutation((state) => {
-    missing.forEach((numbers, index) => {
+    const firstExisting = existing.find((members) => globalThis.EDOCSeam.isCurrentPolicy(members[0]))?.[0];
+    const existingPage = state.pages.find((page) => page.pageId === firstExisting?.pageId);
+    const inheritedTop = existingPage ? globalThis.EDOCSeam.offsetPt(existingPage, firstExisting) / globalThis.EDOCSeam.ptPerMm : null;
+    const ids = [];
+    missing.forEach((numbers) => {
       const id = `seam-${crypto.randomUUID()}`;
+      ids.push(id);
       const members = numbers.map((number, part) => editorDefaultElement("seal", state.pages[number - 1], null, {
-        seamGroupId: id, seamMode: "grouped", seamPartCount: numbers.length, seamPartIndex: part, seamEdge: edge
-      }));
+        seamGroupId: id, seamMode: "grouped", seamPartCount: numbers.length, seamPartIndex: part, seamEdge: edge,
+        seamPolicyVersion: globalThis.EDOCSeam.CURRENT_POLICY
+      }, seal));
       state.elements.push(...members);
-      const limit = globalThis.EDOCSeam.offsetLimitPt(state, id);
-      globalThis.EDOCSeam.position(state, id, globalThis.EDOCSeam.initialTopMm(limit, index, missing.length), edge);
     });
+    const bounds = ids.map(id => globalThis.EDOCSeam.offsetBoundsPt(state, id));
+    const lower = Math.max(...bounds.map(bound => bound.min)) / globalThis.EDOCSeam.ptPerMm;
+    const upper = Math.min(...bounds.map(bound => bound.max)) / globalThis.EDOCSeam.ptPerMm;
+    const top = Math.max(lower, Math.min(upper, inheritedTop ?? globalThis.EDOCSeam.initialBatchTopMm(state, ids)));
+    ids.forEach((id) => globalThis.EDOCSeam.position(state, id, top, edge));
   });
   if (changed) showToast(`已加入 ${missing.length} 組，每組最多 5 頁共用一枚${seal.owner_kind === "institution" ? "圖記大章" : "公司大章"}；各組位置可調整。`);
 }
@@ -30202,13 +30497,22 @@ function renderUploadedSeamGroups() {
   if (!target || !globalThis.EDOCSeam) return;
   const groups = [...globalThis.EDOCSeam.groups(uploadedSealEditorState)];
   const locked = uploadedSealPickerReadOnly();
-  const selected = selectedUploadedSeal();
+  const seamSelect = document.querySelector("#uploadedEditorSeamSealSelect");
+  if (seamSelect) {
+    const current = seamSelect.value;
+    const choices = uploadedSealCompanyRecords().filter((seal) => companySealSelectable(seal) && uploadedSeamPrimaryLargeSeal(seal));
+    const markup = choices.length ? choices.map((seal) => `<option value="${escapeDraftHtml(seal.id)}">${escapeDraftHtml(seal.seal_name || (seal.owner_kind === "institution" ? "圖記大章" : "公司大章"))}</option>`).join("") : '<option value="">尚無可用大章</option>';
+    if (seamSelect.innerHTML !== markup) seamSelect.innerHTML = markup;
+    if (choices.some((seal) => seal.id === current)) seamSelect.value = current;
+    seamSelect.disabled = locked || !choices.length;
+  }
+  const selected = selectedUploadedSeamSeal();
   const hasUsableSeal = uploadedSeamPrimaryLargeSeal(selected);
   document.querySelector("#uploadedEditorSeamAddBtn")?.toggleAttribute("disabled", locked || !hasUsableSeal || !uploadedSealEditorState.pages.length);
   document.querySelector("#uploadedEditorSeamPages")?.toggleAttribute("disabled", locked);
   document.querySelector("#uploadedEditorSeamEdge")?.toggleAttribute("disabled", locked);
   const status = document.querySelector("#uploadedEditorSeamStatus");
-  if (status) status.textContent = !uploadedSealEditorState.pages.length ? "請先上傳 PDF。" : groups.length ? `已加入 ${groups.length} 組，可各別調整邊與位置。` : !hasUsableSeal ? "此單位尚無可用的大章，請先登錄公司章或圖記章。" : "選擇用印邊，再按「加入騎縫章」。";
+  if (status) status.textContent = !uploadedSealEditorState.pages.length ? "請先上傳 PDF。" : groups.length ? `${groups.length} 組 · 拖曳可調整各組高度` : !hasUsableSeal ? "此單位尚無可用的大章，請先登錄公司章或圖記章。" : "固定右側，距頁首與頁尾至少 10 mm。";
   target.innerHTML = groups.map(([id, members], index) => {
     const first = members[0];
     const page = uploadedSealEditorState.pages.find((item) => item.pageId === first.pageId);
@@ -30217,9 +30521,11 @@ function renderUploadedSeamGroups() {
     const edge = globalThis.EDOCSeam.edge(first);
     const offsetMm = globalThis.EDOCSeam.offsetPt(page, first) / globalThis.EDOCSeam.ptPerMm;
     const maxMm = globalThis.EDOCSeam.offsetLimitPt(uploadedSealEditorState, id) / globalThis.EDOCSeam.ptPerMm;
+    const bounds = globalThis.EDOCSeam.offsetBoundsPt(uploadedSealEditorState, id);
+    const currentPolicy = globalThis.EDOCSeam.isCurrentPolicy(first);
     const grouped = first.properties.seamMode === "grouped";
-    const edgeField = grouped ? `<label>用印邊<select data-seam-edge="${escapeDraftHtml(id)}"${locked ? " disabled" : ""}>${[["right", "右邊"], ["left", "左邊"], ["top", "上邊"], ["bottom", "下邊"]].map(([value, label]) => `<option value="${value}"${edge === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>` : "";
-    return `<article class="pdf-editor-seam-group"><strong>第 ${index + 1} 組 · 第 ${pages[0]}${pages.length > 1 ? `–${pages.at(-1)}` : ""} 頁${grouped ? ` · 每頁 1/${members.length} 枚` : " · 舊版兩頁半章"}</strong>${edgeField}<label>${["top", "bottom"].includes(edge) ? "距左邊" : "距頁首"}（mm）<input type="number" min="0" max="${maxMm.toFixed(2)}" step="0.1" inputmode="decimal" value="${offsetMm.toFixed(1)}" data-seam-position="${escapeDraftHtml(id)}"${locked ? " disabled" : ""}></label><button class="secondary-button" type="button" data-seam-locate="${escapeDraftHtml(first.id)}">查看位置</button><button class="text-button" type="button" data-seam-delete="${escapeDraftHtml(id)}"${locked ? " disabled" : ""}>刪除此組</button></article>`;
+    const edgeField = grouped && !currentPolicy ? `<span>原有章位 · ${({right:"右側",left:"左側",top:"上側",bottom:"下側"})[edge]}</span>` : "";
+    return `<article class="pdf-editor-seam-group"><strong>第 ${index + 1} 組 · 第 ${pages[0]}${pages.length > 1 ? `–${pages.at(-1)}` : ""} 頁${grouped ? ` · 每頁 1/${members.length} 枚` : " · 舊版兩頁半章"}</strong>${edgeField}<label>${["top", "bottom"].includes(edge) ? "距左邊" : "距頁首"}（mm）<input type="number" min="${bounds.min / globalThis.EDOCSeam.ptPerMm}" max="${(currentPolicy ? bounds.max / globalThis.EDOCSeam.ptPerMm : maxMm).toFixed(2)}" step="0.1" inputmode="decimal" value="${offsetMm.toFixed(1)}" data-seam-position="${escapeDraftHtml(id)}"${locked ? " disabled" : ""}></label><button class="secondary-button" type="button" data-seam-locate="${escapeDraftHtml(first.id)}">查看位置</button><button class="text-button" type="button" data-seam-delete="${escapeDraftHtml(id)}"${locked ? " disabled" : ""}>刪除此組</button></article>`;
   }).join("");
   target.querySelectorAll("[data-seam-position]").forEach((input) => input.addEventListener("change", () => {
     if (!validateWorkspaceControl(input)) return;
@@ -30322,68 +30628,9 @@ function cacheUploadedEditorSealPreview(binding, url, expiresAt) {
 }
 
 async function loadSealPreviewUrl(sealId, sealFileId = "", sealFileSha256 = "") {
-  if (!sealId) return "";
-  const binding = uploadedEditorSealPreviewBinding({ sealId, sealFileId, sealFileSha256 });
-  const hasAnyFileBinding = Boolean(binding.sealFileId || binding.sealFileSha256);
-  if (hasAnyFileBinding && !(binding.sealFileId && binding.sealFileSha256)) return "";
-  const activeUrl = activeUploadedEditorSealPreviewUrl(binding);
-  if (activeUrl) return activeUrl;
-  const cached = uploadedSealEditorRuntime.sealPreviewUrls.get(binding.cacheKey);
-  if (cached?.promise) return cached.promise;
-  let pendingObjectUrl = "";
-  const promise = (async () => {
-    const headers = { "Cache-Control": "no-store" };
-    if (isHeaderSafeToken(authState?.token)) headers.Authorization = `Bearer ${authState.token}`;
-    const query = new URLSearchParams();
-    if (binding.sealFileId) {
-      query.set("fileId", binding.sealFileId);
-      query.set("fileSha256", binding.sealFileSha256);
-      const documentId = String(uploadedSealEditorRuntime.documentId || "");
-      const revisionId = String(uploadedSealEditorRuntime.revisionId || "");
-      // Historical versions are disclosed only when the saved revision proves
-      // that it references this exact seal file. A newly placed current version
-      // can still be verified by ID + hash before its autosave completes.
-      if (documentId && revisionId && uploadedSealEditorRuntime.savedSealPreviewBindings.has(binding.cacheKey)) {
-        query.set("documentId", documentId);
-        query.set("revisionId", revisionId);
-      }
-    }
-    const queryString = query.toString();
-    const suffix = queryString ? `?${queryString}` : "";
-    const response = await fetch(`${backendApiBase}/company-seals/${encodeURIComponent(binding.sealId)}/editor-preview${suffix}`, { headers, cache: "no-store" });
-    if (!response.ok) throw new Error("seal_preview_unavailable");
-    const contentType = response.headers.get("Content-Type") || "";
-    let url = "";
-    const previewReceivedAt = Date.now();
-    const maximumPreviewExpiry = previewReceivedAt + 5 * 60 * 1000;
-    let expiresAt = maximumPreviewExpiry;
-    if (contentType.includes("application/json")) {
-      const result = await response.json();
-      url = result.url || result.preview_url || "";
-      const parsedExpiry = Date.parse(result.expires_at || result.expiresAt || "");
-      if (Number.isFinite(parsedExpiry) && parsedExpiry > previewReceivedAt) expiresAt = Math.min(parsedExpiry, maximumPreviewExpiry);
-    } else {
-      url = URL.createObjectURL(await response.blob());
-      pendingObjectUrl = url;
-      const ttlSeconds = Number(response.headers.get("X-EDOC-Preview-Expires-In"));
-      if (Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
-        expiresAt = previewReceivedAt + Math.min(300, ttlSeconds) * 1000;
-      } else {
-        const parsedExpiry = Date.parse(response.headers.get("Expires") || "");
-        if (Number.isFinite(parsedExpiry) && parsedExpiry > previewReceivedAt) expiresAt = Math.min(parsedExpiry, maximumPreviewExpiry);
-      }
-    }
-    cacheUploadedEditorSealPreview(binding, url, expiresAt);
-    pendingObjectUrl = "";
-    renderUploadedEditorSvgLayer();
-    return url;
-  })().catch(() => {
-    if (String(pendingObjectUrl).startsWith("blob:")) URL.revokeObjectURL(pendingObjectUrl);
-    uploadedSealEditorRuntime.sealPreviewUrls.set(binding.cacheKey, { url: "", expiresAt: Date.now() + 30000 });
-    return "";
-  });
-  uploadedSealEditorRuntime.sealPreviewUrls.set(binding.cacheKey, { promise, expiresAt: 0, url: "" });
-  return promise;
+  // Kept as a no-op for old callers. Placement never requests real seal pixels;
+  // the server resolves the immutable version only for authorized final output.
+  return "";
 }
 
 function svgEditorNode(name, attributes = {}) {
@@ -30397,26 +30644,17 @@ function appendEditorElementVisual(group, element, rect) {
   const properties = element.properties || {};
   // A <g> has no painted area of its own. Keep an explicit hit target behind
   // the visual so text/lines can be selected directly, including on touch.
-  const hitWidth = Math.max(44, rect.width);
-  const hitHeight = Math.max(44, rect.height);
+  const selectionRect = element.kind === "seal" && properties.seamGroupId ? uploadedEditorSealPositionRect(element, rect) : rect;
+  const hitWidth = Math.max(44, selectionRect.width);
+  const hitHeight = Math.max(44, selectionRect.height);
   group.append(svgEditorNode("rect", {
-    x: rect.left - (hitWidth - rect.width) / 2,
-    y: rect.top - (hitHeight - rect.height) / 2,
+    x: selectionRect.left - (hitWidth - selectionRect.width) / 2,
+    y: selectionRect.top - (hitHeight - selectionRect.height) / 2,
     width: hitWidth, height: hitHeight, fill: "transparent",
     class: "editor-object-hit", "aria-hidden": "true"
   }));
   if (element.kind === "seal") {
-    const previewBinding = uploadedEditorSealPreviewBinding(properties);
-    const preview = activeUploadedEditorSealPreviewUrl(previewBinding);
-    if (preview && properties.seamGroupId) appendUploadedSeamPreview(group, element, preview, rect);
-    else if (preview) group.append(svgEditorNode("image", { href: preview, x: rect.left, y: rect.top, width: rect.width, height: rect.height, preserveAspectRatio: "xMidYMid meet" }));
-    else {
-      group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, rx: 5, class: "editor-seal-placeholder" }));
-      const label = svgEditorNode("text", { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, "text-anchor": "middle", "dominant-baseline": "middle", class: "editor-seal-label" });
-      label.textContent = properties.seamGroupId ? properties.seamMode === "grouped" ? `騎縫章預覽 · 1/${properties.seamPartCount}` : "騎縫半章預覽" : properties.sealName || "印章預覽";
-      group.append(label);
-      void loadSealPreviewUrl(previewBinding.sealId, previewBinding.sealFileId, previewBinding.sealFileSha256);
-    }
+    appendUploadedSealPlaceholder(group, element, rect);
   } else if (["text", "replacement"].includes(element.kind)) {
     if (element.kind === "replacement") group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, fill: properties.fill || "#ffffff", class: "editor-replacement-base" }));
     ensureUploadedEditorTextFont();
@@ -30442,7 +30680,13 @@ function appendEditorElementVisual(group, element, rect) {
     });
   } else if (element.kind === "image") {
     const url = uploadedSealEditorRuntime.imageUrls.get(properties.assetId) || "";
-    if (url) group.append(svgEditorNode("image", { href: url, x: rect.left, y: rect.top, width: rect.width, height: rect.height, preserveAspectRatio: "none" }));
+    const rotation = normalizeEditorDegrees(currentUploadedEditorPage()?.rotation || 0);
+    const sideways = rotation === 90 || rotation === 270;
+    const width = sideways ? rect.height : rect.width, height = sideways ? rect.width : rect.height;
+    if (url) group.append(svgEditorNode("image", { href: url, x: rect.left + (rect.width - width) / 2,
+      y: rect.top + (rect.height - height) / 2, width, height,
+      transform: `rotate(${rotation} ${rect.left + rect.width / 2} ${rect.top + rect.height / 2})`,
+      preserveAspectRatio: element.properties?.nativeAspectRatio ? "xMidYMid meet" : "none" }));
     else group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, class: "editor-image-placeholder" }));
   } else if (element.kind === "shape") {
     if (properties.shapeType === "line") group.append(svgEditorNode("line", { x1: rect.left, y1: rect.top + rect.height / 2, x2: rect.left + rect.width, y2: rect.top + rect.height / 2, stroke: properties.stroke || "#ea580c", "stroke-width": properties.strokeWidth || 2 }));
@@ -30453,7 +30697,7 @@ function appendEditorElementVisual(group, element, rect) {
     group.append(svgEditorNode("rect", { x: rect.left, y: rect.top, width: rect.width, height: rect.height, rx: element.kind === "highlight" ? 2 : 0, fill: element.kind === "redaction" ? properties.fill || "#000" : properties.color || "#fde047", class: `editor-${element.kind}` }));
   }
   if (selected) {
-    group.append(svgEditorNode("rect", { x: rect.left - 2, y: rect.top - 2, width: rect.width + 4, height: rect.height + 4, class: "editor-selection-outline" }));
+    group.append(svgEditorNode("rect", { x: selectionRect.left - 2, y: selectionRect.top - 2, width: selectionRect.width + 4, height: selectionRect.height + 4, class: "editor-selection-outline" }));
     if (uploadedSealEditorRuntime.selectedIds.size === 1) {
       if (element.kind !== "seal") {
         group.append(svgEditorNode("circle", { cx: rect.left + rect.width, cy: rect.top + rect.height, r: 22, class: "editor-handle-hit", "data-editor-handle": "resize", "data-editor-element-id": element.id }));
@@ -30468,7 +30712,36 @@ function appendEditorElementVisual(group, element, rect) {
   }
 }
 
+function uploadedEditorSealPositionRect(element, rect) {
+  if (!element.properties?.seamGroupId) return rect;
+  const page = uploadedSealEditorState.pages.find((entry) => entry.pageId === element.pageId);
+  const clip = globalThis.EDOCSeam.previewSlice(element, rect.width, rect.height, Number(page?.rotation || 0)).clip;
+  return { left: rect.left + clip.x, top: rect.top + clip.y, width: clip.width, height: clip.height };
+}
+
+function appendUploadedSealPlaceholder(group, element, rect) {
+  const properties = element.properties || {};
+  const seam = Boolean(properties.seamGroupId);
+  const placement = uploadedEditorSealPositionRect(element, rect);
+  const box = { x: placement.left, y: placement.top, width: placement.width, height: placement.height };
+  group.append(svgEditorNode("rect", { ...box, class: "editor-seal-placeholder editor-seal-position", "data-seal-position": "true" }));
+  const label = svgEditorNode("text", { x: box.x + box.width / 2, y: box.y + box.height / 2,
+    "text-anchor": "middle", "dominant-baseline": "middle", class: "editor-seal-label editor-seal-position-label",
+    "font-size": Math.max(8, Math.min(12, seam ? box.width * .7 : box.width / 6)),
+    ...(seam && box.width < box.height ? { "writing-mode": "vertical-rl" } : {}) });
+  label.textContent = seam ? `${properties.seamPartIndex + 1}/${properties.seamPartCount || 2}` : "用印位置";
+  group.append(label);
+  const title = svgEditorNode("title");
+  title.textContent = `${properties.sealName || "印章"} · ${seam ? "騎縫章 " : ""}用印位置示意，核准後套用正式章圖`;
+  group.append(title);
+}
+
 function renderUploadedEditorSvgLayer() {
+  if (uploadedSealEditorRuntime.pointerFrame) {
+    window.cancelAnimationFrame?.(uploadedSealEditorRuntime.pointerFrame);
+    uploadedSealEditorRuntime.pointerFrame = 0;
+    uploadedSealEditorRuntime.pointerRenderIds?.clear();
+  }
   renderUploadedEditorTextEdit();
   const svg = document.querySelector("#uploadedEditorSvgLayer");
   const viewport = uploadedSealEditorRuntime.currentViewport;
@@ -31056,20 +31329,91 @@ function setUploadedEditorZoom(value, { fit = false } = {}) {
 function snapUploadedEditorPosition(element, x, y) {
   const page = uploadedSealEditorState.pages.find((item) => item.pageId === element.pageId);
   if (!page) return { x, y, guides: [] };
-  const candidatesX = [0, page.widthPt / 2 - element.width / 2, page.widthPt - element.width];
-  const candidatesY = [0, page.heightPt / 2 - element.height / 2, page.heightPt - element.height];
-  uploadedSealEditorState.elements.filter((item) => item.pageId === element.pageId && item.id !== element.id).forEach((item) => {
-    candidatesX.push(item.x, item.x + item.width, item.x + item.width / 2 - element.width / 2);
-    candidatesY.push(item.y, item.y + item.height, item.y + item.height / 2 - element.height / 2);
-  });
+  const action = uploadedSealEditorRuntime.pointerAction;
+  let candidates = action?.snapCandidates;
+  if (!candidates) {
+    const candidatesX = [0, page.widthPt / 2 - element.width / 2, page.widthPt - element.width];
+    const candidatesY = [0, page.heightPt / 2 - element.height / 2, page.heightPt - element.height];
+    uploadedSealEditorState.elements.filter((item) => item.pageId === element.pageId && item.id !== element.id && !uploadedSealEditorRuntime.selectedIds.has(item.id)).forEach((item) => {
+      candidatesX.push(item.x, item.x + item.width, item.x + item.width / 2 - element.width / 2);
+      candidatesY.push(item.y, item.y + item.height, item.y + item.height / 2 - element.height / 2);
+    });
+    candidates = { x: candidatesX, y: candidatesY };
+    if (action) action.snapCandidates = candidates;
+  }
   let snappedX = x;
   let snappedY = y;
   const guides = [];
-  const nearestX = candidatesX.sort((a, b) => Math.abs(a - x) - Math.abs(b - x))[0];
-  const nearestY = candidatesY.sort((a, b) => Math.abs(a - y) - Math.abs(b - y))[0];
+  const nearestX = candidates.x.reduce((best, value) => Math.abs(value - x) < Math.abs(best - x) ? value : best);
+  const nearestY = candidates.y.reduce((best, value) => Math.abs(value - y) < Math.abs(best - y) ? value : best);
   if (Math.abs(nearestX - x) <= 3) { snappedX = nearestX; guides.push({ axis: "x", value: nearestX + element.width / 2 }); }
   if (Math.abs(nearestY - y) <= 3) { snappedY = nearestY; guides.push({ axis: "y", value: nearestY + element.height / 2 }); }
   return { x: snappedX, y: snappedY, guides };
+}
+
+function resizeUploadedEditorElement(element, start, startPoint, point, page) {
+  // The opposite corner is the anchor, in PDF coordinates. Projection onto the
+  // initial diagonal works with the page's quarter turns and rotated objects;
+  // unlike screen deltaY, PDF deltaY points upwards.
+  const center = { x: start.x + start.width / 2, y: start.y + start.height / 2 };
+  const anchor = { x: center.x * 2 - startPoint.x, y: center.y * 2 - startPoint.y };
+  const vector = { x: startPoint.x - anchor.x, y: startPoint.y - anchor.y };
+  const length2 = vector.x ** 2 + vector.y ** 2;
+  if (length2 < 1) return;
+  let scale = ((point.x - anchor.x) * vector.x + (point.y - anchor.y) * vector.y) / length2;
+  let minimum = Math.max(4 / start.width, 4 / start.height);
+  let maximum = Infinity;
+  if (["text", "replacement"].includes(element.kind)) {
+    const font = Number(start.properties?.fontSize || 14);
+    minimum = Math.max(minimum, 6 / font);
+    maximum = Math.min(maximum, 144 / font);
+  }
+  const cx = center.x - anchor.x, cy = center.y - anchor.y;
+  for (const [origin, slope, limit] of [[anchor.x, cx - start.width / 2, page.widthPt], [anchor.x, cx + start.width / 2, page.widthPt], [anchor.y, cy - start.height / 2, page.heightPt], [anchor.y, cy + start.height / 2, page.heightPt]]) {
+    if (slope > 0) maximum = Math.min(maximum, (limit - origin) / slope);
+    else if (slope < 0) maximum = Math.min(maximum, -origin / slope);
+  }
+  if (!Number.isFinite(scale) || maximum < minimum) return;
+  scale = Math.max(minimum, Math.min(maximum, scale));
+  element.width = roundEditorPoint(start.width * scale);
+  element.height = roundEditorPoint(start.height * scale);
+  element.x = roundEditorPoint(anchor.x + cx * scale - element.width / 2);
+  element.y = roundEditorPoint(anchor.y + cy * scale - element.height / 2);
+  if (["text", "replacement"].includes(element.kind)) element.properties.fontSize = roundEditorPoint(Number(start.properties?.fontSize || 14) * scale);
+}
+
+function queueUploadedEditorPointerRender(ids) {
+  uploadedSealEditorRuntime.pointerRenderIds ||= new Set();
+  for (const id of ids) uploadedSealEditorRuntime.pointerRenderIds.add(id);
+  if (uploadedSealEditorRuntime.pointerFrame) return;
+  uploadedSealEditorRuntime.pointerFrame = window.requestAnimationFrame(flushUploadedEditorPointerRender);
+}
+
+function flushUploadedEditorPointerRender() {
+  uploadedSealEditorRuntime.pointerFrame = 0;
+  const svg = document.querySelector("#uploadedEditorSvgLayer");
+  const ids = uploadedSealEditorRuntime.pointerRenderIds || new Set();
+  uploadedSealEditorRuntime.pointerRenderIds = new Set();
+  if (!svg || !uploadedSealEditorRuntime.pointerAction || uploadedSealEditorRuntime.reviewMode !== "edited") return;
+  for (const id of ids) {
+    const element = editorElementById(id);
+    if (!element || element.pageId !== uploadedSealEditorRuntime.currentPageId) continue;
+    const group = [...svg.children].find((node) => node.dataset?.editorElementId === id);
+    if (!group) continue;
+    const rect = uploadedEditorViewportRect(element);
+    group.setAttribute("transform", Number(element.rotation || 0) ? `rotate(${-Number(element.rotation)} ${rect.left + rect.width / 2} ${rect.top + rect.height / 2})` : "");
+    group.replaceChildren();
+    appendEditorElementVisual(group, element, rect);
+  }
+  svg.querySelectorAll(".editor-alignment-guide").forEach((node) => node.remove());
+  const page = currentUploadedEditorPage();
+  for (const guide of uploadedSealEditorRuntime.guides || []) {
+    const rect = uploadedEditorViewportRect({ pageId: page.pageId, x: guide.axis === "x" ? guide.value : 0,
+      y: guide.axis === "y" ? guide.value : 0, width: guide.axis === "x" ? 0 : page.widthPt, height: guide.axis === "y" ? 0 : page.heightPt });
+    svg.append(svgEditorNode("line", guide.axis === "x"
+      ? { x1: rect.left, y1: 0, x2: rect.left, y2: uploadedSealEditorRuntime.currentViewport.height, class: "editor-alignment-guide" }
+      : { x1: 0, y1: rect.top, x2: uploadedSealEditorRuntime.currentViewport.width, y2: rect.top, class: "editor-alignment-guide" }));
+  }
 }
 
 function selectUploadedEditorElement(elementId, additive = false) {
@@ -31181,10 +31525,7 @@ function moveUploadedEditorPointer(event) {
     globalThis.EDOCSeam?.reconcile(uploadedSealEditorState, action.previousState);
     uploadedSealEditorRuntime.guides = snapped.guides;
   } else if (action.type === "resize") {
-    if (element.kind !== "seal") {
-      element.width = roundEditorPoint(Math.max(4, Math.min(page.widthPt - element.x, action.startElement.width + point.x - action.startPoint.x)));
-      element.height = roundEditorPoint(Math.max(4, Math.min(page.heightPt - element.y, action.startElement.height + point.y - action.startPoint.y)));
-    }
+    if (element.kind !== "seal") resizeUploadedEditorElement(element, action.startElement, action.startPoint, point, page);
   } else if (action.type === "rotate") {
     const rect = document.querySelector("#uploadedPdfStage")?.getBoundingClientRect();
     const visual = uploadedEditorViewportRect(action.startElement);
@@ -31192,11 +31533,17 @@ function moveUploadedEditorPointer(event) {
     const centerY = (rect?.top || 0) + visual.top + visual.height / 2;
     element.rotation = roundEditorPoint(Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180 / Math.PI + 90);
   }
-  renderUploadedEditorSvgLayer();
-  renderUploadedEditorProperties();
+  const ids = new Set([...uploadedSealEditorRuntime.selectedIds]);
+  const groups = new Set([...ids].map((id) => editorElementById(id)?.properties?.seamGroupId).filter(Boolean));
+  for (const item of uploadedSealEditorState.elements) if (groups.has(item.properties?.seamGroupId)) ids.add(item.id);
+  queueUploadedEditorPointerRender(ids);
 }
 
 function endUploadedEditorPointer(event) {
+  if (uploadedSealEditorRuntime.pointerFrame) {
+    window.cancelAnimationFrame?.(uploadedSealEditorRuntime.pointerFrame);
+    flushUploadedEditorPointerRender();
+  }
   if (event.pointerType === "touch") uploadedSealEditorRuntime.touchPointers.delete(event.pointerId);
   if (uploadedSealEditorRuntime.touchPointers.size < 2 || uploadedSealEditorRuntime.pinchPointerIds?.includes(event.pointerId)) {
     uploadedSealEditorRuntime.pinchStartDistance = 0;
@@ -31311,7 +31658,7 @@ function renderUploadedEditorProperties() {
   document.querySelector(".editor-property-shape")?.toggleAttribute("hidden", element.kind !== "shape");
 }
 
-function updateUploadedEditorProperty() {
+function updateUploadedEditorProperty(event = null) {
   const ids = [...uploadedSealEditorRuntime.selectedIds];
   if (!ids.length) return;
   const read = (selector) => document.querySelector(selector)?.value;
@@ -31322,15 +31669,29 @@ function updateUploadedEditorProperty() {
         element.x = Math.max(0, Math.min(page.widthPt - element.width, Number(read("#uploadedEditorPropertyX") || element.x)));
         element.y = Math.max(0, Math.min(page.heightPt - element.height, Number(read("#uploadedEditorPropertyY") || element.y)));
         if (element.kind !== "seal") {
-          element.width = Math.max(1, Math.min(page.widthPt - element.x, Number(read("#uploadedEditorPropertyWidth") || element.width)));
-          element.height = Math.max(1, Math.min(page.heightPt - element.y, Number(read("#uploadedEditorPropertyHeight") || element.height)));
+          const proportional = ["image", "text", "replacement"].includes(element.kind);
+          const changed = event?.target?.id || "";
+          let factor = 1;
+          if (changed === "uploadedEditorPropertyWidth") factor = Number(read("#uploadedEditorPropertyWidth")) / element.width;
+          else if (changed === "uploadedEditorPropertyHeight") factor = Number(read("#uploadedEditorPropertyHeight")) / element.height;
+          else if (changed === "uploadedEditorPropertyFontSize" && ["text", "replacement"].includes(element.kind)) factor = Number(read("#uploadedEditorPropertyFontSize")) / Number(element.properties?.fontSize || 14);
+          if (proportional && Number.isFinite(factor) && factor > 0) {
+            factor = Math.min(factor, (page.widthPt - element.x) / element.width, (page.heightPt - element.y) / element.height);
+            if (["text", "replacement"].includes(element.kind)) factor = Math.max(6 / element.properties.fontSize, Math.min(144 / element.properties.fontSize, factor));
+            element.width = roundEditorPoint(element.width * factor);
+            element.height = roundEditorPoint(element.height * factor);
+            if (["text", "replacement"].includes(element.kind)) element.properties.fontSize = roundEditorPoint(element.properties.fontSize * factor);
+          } else if (!proportional) {
+            element.width = Math.max(1, Math.min(page.widthPt - element.x, Number(read("#uploadedEditorPropertyWidth") || element.width)));
+            element.height = Math.max(1, Math.min(page.heightPt - element.y, Number(read("#uploadedEditorPropertyHeight") || element.height)));
+          }
         }
         element.rotation = Number(read("#uploadedEditorPropertyRotation") || 0);
         element.opacity = Math.max(0.05, Math.min(1, Number(read("#uploadedEditorPropertyOpacity") || 1)));
         element.properties = {
           ...(element.properties || {}),
           text: read("#uploadedEditorPropertyText") ?? element.properties?.text,
-          fontSize: Math.max(6, Math.min(144, Number(read("#uploadedEditorPropertyFontSize") || element.properties?.fontSize || 14))),
+          fontSize: ["text", "replacement"].includes(element.kind) ? element.properties?.fontSize || 14 : Math.max(6, Math.min(144, Number(read("#uploadedEditorPropertyFontSize") || element.properties?.fontSize || 14))),
           color: read("#uploadedEditorPropertyColor") || element.properties?.color || "#111827",
           shapeType: element.kind === "shape" ? (read("#uploadedEditorPropertyShapeType") || element.properties?.shapeType || "rectangle") : element.properties?.shapeType
         };
@@ -31465,6 +31826,7 @@ async function runUploadedEditorPageAction(action) {
 }
 
 async function handleUploadedEditorImportPdf(files) {
+  if (uploadedSealEditorRuntime.pendingImage) return showToast("請待圖片同步完成後，再匯入 PDF。");
   if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再匯入 PDF。");
   if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.locked) return showToast("目前無法匯入，請等待文件同步完成或開啟可編輯草稿。");
   const importScope = uploadedSealApplicationScopeSnapshot();
@@ -31543,72 +31905,234 @@ async function handleUploadedEditorImportPdf(files) {
   }
 }
 
+async function readUploadedEditorImageSize(file) {
+  const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const png = bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value);
+  const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  if ((file.type === "image/png" && !png) || (file.type === "image/jpeg" && !jpeg)) throw new Error("圖片格式與檔案內容不符。");
+  let image = null;
+  let url = "";
+  try {
+    if (typeof createImageBitmap === "function") image = await createImageBitmap(file);
+    else {
+      url = URL.createObjectURL(file);
+      image = new Image();
+      image.src = url;
+      await image.decode();
+    }
+    const width = Number(image.width || image.naturalWidth);
+    const height = Number(image.height || image.naturalHeight);
+    if (!(width > 0 && height > 0) || width * height > 40000000) throw new Error("圖片尺寸過大，請使用 4,000 萬像素以內的圖片。");
+    return { width, height };
+  } finally {
+    image?.close?.();
+    if (url) URL.revokeObjectURL(url);
+  }
+}
+
+function uploadedEditorImageGeometry(size, page) {
+  const scale = Math.min(144 / size.width, 144 / size.height, page.widthPt * 0.8 / size.width, page.heightPt * 0.8 / size.height);
+  const width = size.width * scale;
+  const height = size.height * scale;
+  return { width, height, x: (page.widthPt - width) / 2, y: (page.heightPt - height) / 2 };
+}
+
+function uploadedEditorPendingImageIsCurrent(pending) {
+  return uploadedSealEditorRuntime.pendingImage === pending && uploadedSealApplicationScopeIsCurrent(pending.scope);
+}
+
+function renderUploadedEditorImageSync() {
+  const panel = document.querySelector("#uploadedEditorImageSync");
+  if (!panel) return;
+  const pending = uploadedSealEditorRuntime.pendingImage;
+  panel.hidden = !pending;
+  if (!pending) return;
+  const failed = Boolean(pending.error);
+  panel.dataset.state = failed ? "error" : "syncing";
+  const label = panel.querySelector("[data-image-sync-label]");
+  if (label) label.textContent = pending.discarded ? failed ? "圖片已移除；請重試確認同步結果後儲存。" : "圖片已移除・正在確認同步結果"
+    : failed ? "圖片未同步，可繼續編輯。請重試或移除。"
+    : pending.transferComplete ? "可繼續編輯・圖片同步中" : `可繼續編輯・圖片上傳 ${Math.round(pending.progress * 100)}%`;
+  const progress = panel.querySelector("progress");
+  if (progress) { if (pending.transferComplete || failed) progress.removeAttribute("value"); else progress.value = pending.progress * 100; }
+  const retry = panel.querySelector("[data-image-sync-retry]");
+  if (retry) { retry.hidden = !failed; retry.disabled = Boolean(pending.promise); }
+  const remove = panel.querySelector("[data-image-sync-remove]");
+  if (remove) remove.disabled = Boolean(pending.discarded);
+}
+
+function mapUploadedEditorLocalImage(pending, assetId = "", sha256 = "") {
+  // Rewrite only the immutable asset reference. Never reinstall the old upload
+  // snapshot over positions, text, undo/redo or an active drag edited meanwhile.
+  const update = (state) => {
+    if (!state) return;
+    if (!assetId) {
+      if (state.sourceFiles) state.sourceFiles = state.sourceFiles.filter(source => source.assetId !== pending.localAssetId);
+      if (state.elements) state.elements = state.elements.filter(element => element.properties?.assetId !== pending.localAssetId);
+      return;
+    }
+    state.sourceFiles?.forEach(source => {
+      if (source.assetId === pending.localAssetId) { source.assetId = assetId; source.sha256 = sha256; delete source.localPending; }
+    });
+    state.elements?.forEach(element => {
+      if (element.properties?.assetId === pending.localAssetId) { element.properties.assetId = assetId; element.properties.sha256 = sha256; delete element.properties.localPending; }
+    });
+  };
+  [uploadedSealEditorState, ...uploadedSealEditorRuntime.undoStack, ...uploadedSealEditorRuntime.redoStack,
+    uploadedSealEditorRuntime.pointerAction?.previousState].forEach(update);
+  const clipboard = { elements: uploadedSealEditorRuntime.clipboard };
+  update(clipboard);
+  uploadedSealEditorRuntime.clipboard = clipboard.elements;
+  update({ elements: Object.values(uploadedSealEditorRuntime.pointerAction?.startElements || {}) });
+  if (uploadedSealEditorRuntime.pointerAction?.startElement) update({ elements: [uploadedSealEditorRuntime.pointerAction.startElement] });
+}
+
+function discardUploadedEditorPendingImage() {
+  const pending = uploadedSealEditorRuntime.pendingImage;
+  if (!pending) return;
+  // Finalization may already have committed a new revision. Remove the local
+  // image immediately, but keep the write barrier until that response (or an
+  // idempotent retry) supplies the current cursor. Never resurrect the image.
+  pending.discarded = true;
+  if (!pending.finalizing) pending.controller.abort();
+  finishUploadedEditorPointerAction();
+  mapUploadedEditorLocalImage(pending);
+  const url = uploadedSealEditorRuntime.imageUrls.get(pending.localAssetId);
+  if (url) URL.revokeObjectURL(url);
+  uploadedSealEditorRuntime.imageUrls.delete(pending.localAssetId);
+  if (!pending.finalizing) uploadedSealEditorRuntime.pendingImage = null;
+  syncLegacyUploadedEditorCollections();
+  markUploadedEditorDirty();
+  renderUploadedSealWorkbench();
+}
+
+async function syncUploadedEditorPendingImage(pending = uploadedSealEditorRuntime.pendingImage) {
+  if (!pending || !uploadedEditorPendingImageIsCurrent(pending)) return null;
+  if (pending.promise) return pending.promise;
+  pending.error = null;
+  const operation = (async () => {
+    try {
+      // Existing writes finish first; subsequent saves/metadata writes are
+      // gated until the image asset has an authoritative immutable identity.
+      await uploadedSealEditorRuntime.savePromise;
+      await uploadedSealApplicationRuntime.promise;
+      if (!uploadedEditorPendingImageIsCurrent(pending)) return null;
+      if (!pending.intent) {
+        // Preserve an uncertain POST outcome; never create another upload
+        // behind a retry after the server may already have accepted this one.
+        if (!pending.intentPromise) pending.intentPromise = requestEditorUpload(pending.file, "image");
+        try { pending.intent = await pending.intentPromise; }
+        catch (error) { if (!error?.outcomeUnknown) pending.intentPromise = null; throw error; }
+      }
+      if (!uploadedEditorPendingImageIsCurrent(pending)) return null;
+      if (!pending.transferComplete) {
+        await performTusUpload(pending.file, pending.intent, (progress) => {
+          if (uploadedEditorPendingImageIsCurrent(pending)) { pending.progress = progress; renderUploadedEditorImageSync(); }
+        }, { signal: pending.controller.signal });
+        pending.transferComplete = true;
+      }
+      if (!uploadedEditorPendingImageIsCurrent(pending)) return null;
+      renderUploadedEditorImageSync();
+      pending.finalizing = true;
+      const finalized = await finalizeEditorUpload(pending.intent, pending.file);
+      if (!uploadedEditorPendingImageIsCurrent(pending)) return null;
+      assertEditorUploadCurrent(pending.intent);
+      const asset = finalized.asset || {};
+      const assetId = asset.id || asset.asset_id || pending.intent.asset_id;
+      if (!assetId || String(assetId).startsWith("local-image-")) throw new Error("圖片尚未取得儲存編號，請重試同步。");
+      applyEditorRevisionFromResponse(finalized);
+      if (!pending.discarded) mapUploadedEditorLocalImage(pending, assetId, pending.intent.sha256);
+      const url = uploadedSealEditorRuntime.imageUrls.get(pending.localAssetId);
+      uploadedSealEditorRuntime.imageUrls.delete(pending.localAssetId);
+      if (url && !pending.discarded) uploadedSealEditorRuntime.imageUrls.set(assetId, url);
+      uploadedSealEditorRuntime.pendingImage = null;
+      syncLegacyUploadedEditorCollections();
+      markUploadedEditorDirty();
+      renderUploadedSealWorkbench();
+      scheduleUploadedSealApplicationSave();
+      return finalized;
+    } catch (error) {
+      if (!uploadedEditorPendingImageIsCurrent(pending)) return null;
+      // Only explicit server validation/terminal-asset codes establish that
+      // this immutable intent did not commit an editor revision. A generic
+      // 400/409, timeout, 5xx or lost response must retain the write barrier.
+      const terminalCode = String(error?.detail || error?.code || "");
+      const terminalRejection = error?.outcomeUnknown !== true
+        && [400, 409, 413, 415, 422].includes(Number(error?.status))
+        && ["editor_image_invalid", "editor_image_type_not_supported", "editor_upload_size_mismatch",
+          "editor_upload_hash_mismatch", "editor_asset_preflight_failed", "editor_upload_new_intent_required"].includes(terminalCode);
+      if (pending.finalizing && terminalRejection) {
+        pending.finalizing = false;
+        if (pending.discarded) {
+          uploadedSealEditorRuntime.pendingImage = null;
+          markUploadedEditorDirty();
+          renderUploadedSealWorkbench();
+          scheduleUploadedSealApplicationSave();
+          return null;
+        }
+      }
+      pending.error = error;
+      setUploadedEditorSaveStatus("error", "圖片未同步；可繼續編輯");
+      renderUploadedEditorImageSync();
+      renderUploadedEditorSubmissionActions();
+      return null;
+    } finally {
+      if (uploadedEditorPendingImageIsCurrent(pending)) { pending.promise = null; renderUploadedEditorImageSync(); }
+    }
+  })();
+  pending.promise = operation;
+  renderUploadedEditorImageSync();
+  return operation;
+}
+
 async function handleUploadedEditorImage(file) {
   if (!file) return;
   if (uploadedSealEditorRuntime.reviewMode !== "edited") return showToast("請先切回編輯版再插入圖片。");
   if (!["image/png", "image/jpeg"].includes(file.type)) return showToast("圖片只接受 PNG 或 JPEG。");
   if (file.size > PDF_EDITOR_MAX_IMAGE_BYTES) return showToast("單張圖片不得超過 10 MB。");
-  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.locked) return showToast("目前無法插入圖片，請等待上傳完成或開啟可編輯草稿。");
-  const destinationPageId = currentUploadedEditorPage()?.pageId;
-  if (!destinationPageId) return showToast("請先載入 PDF，再插入圖片。");
-  const imageScope = uploadedSealApplicationScopeSnapshot();
-  uploadedSealEditorRuntime.uploading = true;
-  renderUploadedSealWorkbench();
-  let intent = null;
+  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.pendingImage
+    || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave) return showToast("請待目前檔案同步完成後，再加入下一張圖片。");
+  const page = currentUploadedEditorPage();
+  if (!page) return showToast("請先載入 PDF，再插入圖片。");
+  const pending = { file, scope: uploadedSealApplicationScopeSnapshot(), localAssetId: `local-image-${crypto.randomUUID()}`,
+    controller: new AbortController(), progress: 0, transferComplete: false, promise: null, error: null, intent: null };
+  uploadedSealEditorRuntime.pendingImage = pending;
+  window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
   try {
-    clearUploadedEditorUploadError();
-    setUploadedEditorSaveStatus("uploading", "圖片直傳中 0%");
-    intent = await requestEditorUpload(file, "image");
-    await performTusUpload(file, intent, (progress) => { if (uploadedSealApplicationScopeIsCurrent(imageScope, false)) setUploadedEditorSaveStatus("uploading", `圖片直傳中 ${Math.round(progress * 100)}%`); });
-    assertEditorUploadCurrent(intent);
-    setUploadedEditorSaveStatus("checking", "圖片掃毒中");
-    const finalized = await finalizeEditorUpload(intent, file);
-    assertEditorUploadCurrent(intent);
-    applyEditorRevisionFromResponse(finalized);
-    const asset = finalized.asset || {};
-    const assetId = asset.id || asset.asset_id || intent.asset_id;
-    const url = URL.createObjectURL(file);
-    const previous = uploadedSealEditorRuntime.imageUrls.get(assetId);
-    if (previous) URL.revokeObjectURL(previous);
-    uploadedSealEditorRuntime.imageUrls.set(assetId, url);
-    const page = uploadedSealEditorState.pages.find((item) => item.pageId === destinationPageId);
-    if (!page) throw new Error("請先載入 PDF，再插入圖片。");
-    let element = null;
-    // Upload and preflight have completed and the scope/intent were rechecked.
-    // Release the interaction guard immediately before this synchronous commit:
-    // no user event or draft switch can interleave, and the normal locked/review
-    // guards remain enforced. Never expose a general upload-bypass parameter.
-    uploadedSealEditorRuntime.uploading = false;
-    const committed = commitUploadedEditorMutation((state) => {
-      if (!state.sourceFiles.some((source) => source.assetId === assetId)) {
-        state.sourceFiles.push({ assetId, kind: "image", fileName: file.name, mimeType: file.type, sizeBytes: file.size, sha256: intent.sha256 });
-      }
-      element = editorDefaultElement("image", page, null, { assetId, sha256: intent.sha256, mimeType: file.type });
+    const size = await readUploadedEditorImageSize(file);
+    if (!uploadedEditorPendingImageIsCurrent(pending)) return;
+    const element = editorDefaultElement("image", page, null, { assetId: pending.localAssetId, mimeType: file.type,
+      nativeAspectRatio: size.width / size.height, widthPx: size.width, heightPx: size.height, localPending: true });
+    Object.assign(element, uploadedEditorImageGeometry(size, page));
+    uploadedSealEditorRuntime.imageUrls.set(pending.localAssetId, URL.createObjectURL(file));
+    const committed = commitUploadedEditorMutation(state => {
+      state.sourceFiles.push({ assetId: pending.localAssetId, kind: "image", fileName: file.name, mimeType: file.type, sizeBytes: file.size, localPending: true });
       state.elements.push(element);
-    });
-    if (!committed) throw new Error("圖片已上傳，但目前版本無法編輯；請回到可編輯草稿後重試。");
-    uploadedSealEditorRuntime.selectedIds = new Set(element ? [element.id] : []);
+    }, { render: false });
+    if (!committed) throw new Error("目前無法插入圖片，請回到可編輯草稿。");
+    uploadedSealEditorRuntime.selectedIds = new Set([element.id]);
+    uploadedSealEditorRuntime.tool = "select";
     renderUploadedSealWorkbench();
+    // Deliberately do not await network: decode + local placement is the
+    // interaction boundary; authoritative save/submit remains gated below.
+    void syncUploadedEditorPendingImage(pending);
   } catch (error) {
-    if (!uploadedSealApplicationScopeIsCurrent(imageScope, false)) return;
-    await reportEditorUploadFailure(intent, error);
-    if (!uploadedSealApplicationScopeIsCurrent(imageScope, false)) return;
-    setUploadedEditorSaveStatus("error", "圖片上傳失敗");
-    showUploadedEditorUploadError(error, () => handleUploadedEditorImage(file), "重新上傳圖片");
-    showToast(`圖片上傳失敗：${error.message}`);
+    if (!uploadedEditorPendingImageIsCurrent(pending)) return;
+    discardUploadedEditorPendingImage();
+    showToast(error.message || "圖片無法開啟，請選擇其他 PNG 或 JPEG。");
   } finally {
-    if (uploadedSealApplicationScopeIsCurrent(imageScope, false)) {
-      uploadedSealEditorRuntime.uploading = false;
-      const input = document.querySelector("#uploadedEditorImageInput");
-      if (input) input.value = "";
-      renderUploadedSealWorkbench();
-    }
+    const input = document.querySelector("#uploadedEditorImageInput");
+    if (input && uploadedSealApplicationScopeIsCurrent(pending.scope)) input.value = "";
   }
 }
 
 async function saveUploadedEditorState({ immediate = false, intent = "submit" } = {}) {
   window.clearTimeout(uploadedSealEditorRuntime.saveTimer);
   if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.conflict) return null;
+  if (uploadedSealEditorRuntime.pendingImage || uploadedSealEditorState.sourceFiles.some(source => source.localPending || String(source.assetId).startsWith("local-image-"))) {
+    setUploadedEditorSaveStatus("checking", "可繼續編輯・圖片同步完成後自動儲存");
+    return null;
+  }
   if (uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.finalizationError) {
     setUploadedEditorSaveStatus("checking", "可繼續編輯；文件同步完成前暫不保存或送簽");
     return null;
@@ -32276,6 +32800,7 @@ async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
 }
 
 async function preflightUploadedEditor() {
+  if (uploadedSealEditorRuntime.pendingImage) throw new Error("圖片尚未同步完成，請完成後再產生確認版。");
   if (!finishUploadedEditorTextEdit()) throw new Error("請先完成文字編輯。");
   if (!uploadedSealEditorRuntime.documentId) throw new Error("尚未建立 PDF 編輯草稿。");
   const preflightScope = uploadedSealApplicationScopeSnapshot();
@@ -32365,6 +32890,7 @@ async function openUploadedPdfPicker() {
 }
 
 async function handleUploadedSealPdfChange(fileOverride = null) {
+  if (uploadedSealEditorRuntime.pendingImage) return showToast("請待圖片同步完成後，再更換 PDF。");
   const selectionStartedAt = performance.now();
   const input = document.querySelector("#uploadedSealPdfInput");
   const file = fileOverride instanceof File ? fileOverride : input?.files?.[0];
@@ -32766,8 +33292,8 @@ function renderUploadedSealWorkbench() {
     editor.dataset.activeTool = uploadedSealEditorRuntime.tool;
   }
   const sourceInput = document.querySelector("#uploadedSealPdfInput");
-  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
-  const uploadActionDisabled = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
+  if (sourceInput) sourceInput.disabled = !featureEnabled || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.pendingImage || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
+  const uploadActionDisabled = uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.pendingImage || uploadedSealEditorRuntime.companyChanging || uploadedSealEditorRuntime.directoryLoading || reviewReadOnly;
   const emptyUploadButton = document.querySelector("#uploadedPdfEmptyUploadBtn");
   if (emptyUploadButton) emptyUploadButton.disabled = uploadActionDisabled;
   const replaceButton = document.querySelector("#uploadedPdfReplaceBtn");
@@ -32812,6 +33338,7 @@ function renderUploadedSealWorkbench() {
     button.classList.toggle("active", button.dataset.editorTool === uploadedSealEditorRuntime.tool);
     button.setAttribute("aria-pressed", String(button.dataset.editorTool === uploadedSealEditorRuntime.tool));
     button.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
+    if (button.dataset.editorTool === "image" && uploadedSealEditorRuntime.pendingImage) button.disabled = true;
   });
   const hasUsableSeal = uploadedSealCompanyRecords().some(companySealSelectable);
   renderUploadedSealAvailabilityNotice(hasUsableSeal);
@@ -32841,7 +33368,7 @@ function renderUploadedSealWorkbench() {
     if (control) control.disabled = reviewReadOnly || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading;
   });
   const importPdfButton = document.querySelector("#uploadedEditorImportPdfBtn");
-  if (importPdfButton && (uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave)) {
+  if (importPdfButton && (uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.pendingImage)) {
     importPdfButton.disabled = true;
   }
   const addStampButton = document.querySelector("#addSelectedStampBtn");
@@ -32849,17 +33376,18 @@ function renderUploadedSealWorkbench() {
   const placementSelect = document.querySelector("#uploadedSealStampType");
   if (placementSelect) placementSelect.disabled = sealPickerReadOnly;
   renderUploadedEditorSubmissionActions();
+  renderUploadedEditorImageSync();
   document.querySelectorAll("[data-uploaded-placement-mode]").forEach((button) => button.classList.toggle("active", button.dataset.uploadedPlacementMode === uploadedSealPlacementMode));
   const generalOptions = document.querySelector("#uploadedEditorGeneralOptions");
   const seamOpen = document.querySelector("#uploadedEditorSeamPanel")?.hidden === false;
-  if (generalOptions) generalOptions.hidden = !seamOpen && !["seal", "replacement"].includes(uploadedSealEditorRuntime.tool);
+  if (generalOptions) generalOptions.hidden = seamOpen || !["seal", "replacement"].includes(uploadedSealEditorRuntime.tool);
   document.querySelector("#uploadedSealTextTools")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "replacement");
   const textInputLabel = document.querySelector("#uploadedEditorTextInputLabel");
   const textInput = document.querySelector("#uploadedSealTextInput");
   if (textInputLabel) textInputLabel.textContent = uploadedSealEditorRuntime.tool === "replacement" ? "取代後文字（舊內容會安全移除）" : "文字";
   if (textInput) textInput.placeholder = uploadedSealEditorRuntime.tool === "replacement" ? "輸入安全取代後的新文字，再點選文件位置" : "輸入要加入的文字";
   const sealPicker = document.querySelector("#uploadedSealPicker");
-  if (sealPicker) sealPicker.hidden = !seamOpen && uploadedSealEditorRuntime.tool !== "seal";
+  if (sealPicker) sealPicker.hidden = seamOpen || uploadedSealEditorRuntime.tool !== "seal";
   const placementHint = document.querySelector("#uploadedSealPlacementHint");
   if (placementHint) placementHint.hidden = seamOpen || uploadedSealEditorRuntime.tool !== "seal" || !hasSelectedSeal;
   document.querySelector("#uploadedSealStampType")?.closest("label")?.toggleAttribute("hidden", uploadedSealEditorRuntime.tool !== "seal");
@@ -33019,12 +33547,18 @@ function renderUploadedEditorSubmissionActions() {
   button.textContent = uploadedSealEditorRuntime.locked ? "已送出簽核" : uploadedSealApplicationRuntime.submissionBusy ? "處理中…" : current ? "確認內容並送簽" : "預覽送簽確認版";
   button.disabled = uploadedSealApplicationRuntime.submissionBusy || Boolean(uploadedSealApplicationRuntime.manualSaveOperation)
     || uploadedSealEditorRuntime.locked || uploadedSealEditorRuntime.uploading
-    || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.finalizationError || uploadedSealEditorRuntime.pendingEditorSave
+    || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.finalizationError || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.pendingImage
     || uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration
     || !uploadedSealCatalogReady() || !hasSeal || !uploadedSealEditorState.pages.length || !workflowReady
     || (!current && uploadedSealEditorRuntime.reviewMode !== "edited");
   button.title = uploadedSealEditorRuntime.locked ? "此案件已送出簽核，申請資訊與 PDF 皆為唯讀。" : !uploadedSealCatalogReady() ? uploadedSealCatalogMessage() : !hasSeal ? "請由執行長或行政部門主任啟用印章版本後再送簽。"
     : !workflowReady ? "會計系統簽核關係尚未完整，只能先保存 PDF 草稿。" : "";
+  const toolbarButton = document.querySelector("#uploadedEditorSubmitToolbarBtn");
+  if (toolbarButton) {
+    toolbarButton.disabled = button.disabled;
+    toolbarButton.textContent = uploadedSealEditorRuntime.locked ? "已送簽" : uploadedSealApplicationRuntime.submissionBusy ? "處理中…" : current ? "確認送簽" : "預覽送簽";
+    toolbarButton.title = button.title;
+  }
   const preflightStatus = document.querySelector("#uploadedEditorPreflightStatus");
   if (uploadedSealEditorRuntime.locked && preflightStatus) preflightStatus.textContent = "已送出簽核，文件唯讀。";
   let back = document.querySelector("#uploadedEditorBackToEditBtn");
@@ -33050,6 +33584,7 @@ function renderUploadedEditorSubmissionActions() {
 }
 
 function uploadedEditorDraftSaveIssue() {
+  if (uploadedSealEditorRuntime.pendingImage) return "圖片尚未同步完成；可繼續編輯，完成後會自動儲存。";
   if (!uploadedSealEditorRuntime.documentId || !uploadedSealEditorState.pages.length) return "請先上傳 PDF，再暫存草稿。";
   if (uploadedSealEditorRuntime.locked || uploadedSealApplicationRuntime.submissionBusy) return "已送簽或正在送簽，不能修改草稿。";
   if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset
@@ -33066,7 +33601,7 @@ function uploadedEditorDraftSaveIssue() {
 function renderUploadedEditorDraftSaveActions() {
   const busy = Boolean(uploadedSealApplicationRuntime.manualSaveOperation);
   const issue = uploadedEditorDraftSaveIssue();
-  for (const selector of ["#uploadedEditorSaveDraftBtn", "#uploadedEditorSaveDraftFooterBtn"]) {
+  for (const selector of ["#uploadedEditorSaveDraftBtn", "#uploadedEditorSaveDraftFooterBtn", "#uploadedEditorSaveDraftToolbarBtn"]) {
     const button = document.querySelector(selector);
     if (!button) continue;
     button.disabled = busy || Boolean(issue);
@@ -33085,7 +33620,7 @@ async function saveUploadedEditorDraft() {
     return false;
   }
   const focused = document.activeElement;
-  const saveTrigger = ["uploadedEditorSaveDraftBtn", "uploadedEditorSaveDraftFooterBtn"].includes(focused?.id) ? focused : null;
+  const saveTrigger = ["uploadedEditorSaveDraftBtn", "uploadedEditorSaveDraftFooterBtn", "uploadedEditorSaveDraftToolbarBtn"].includes(focused?.id) ? focused : null;
   const operation = { scope: uploadedSealApplicationScopeSnapshot(), saveTrigger };
   uploadedSealApplicationRuntime.manualSaveOperation = operation;
   renderUploadedEditorSubmissionActions();
@@ -33289,7 +33824,7 @@ async function syncUploadedSealApplicationDraft() {
   if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
   if (uploadedSealApplicationMetadataReadOnly() && !uploadedSealApplicationRuntime.submissionBusy) return;
   if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset
-    || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.draftCreatePromise) {
+    || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.draftCreatePromise || uploadedSealEditorRuntime.pendingImage) {
     uploadedSealApplicationRuntime.queued = uploadedSealApplicationHasUnsavedChanges();
     renderUploadedSealApplicationSaveStatus();
     return;
@@ -33431,7 +33966,7 @@ async function flushUploadedSealDraftBeforeSwitch() {
   finishUploadedEditorPointerAction();
   if (!finishUploadedEditorTextEdit()) throw new Error("請先完成文字編輯。");
   const scope = uploadedSealApplicationScopeSnapshot();
-  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.draftCreatePromise) {
+  if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.draftCreatePromise || uploadedSealEditorRuntime.pendingImage) {
     throw new Error("PDF 正在上傳或建立草稿，請完成後再切換案件。");
   }
   if (!uploadedSealEditorRuntime.documentId || uploadedSealEditorRuntime.locked) return;
@@ -33538,6 +34073,7 @@ async function handleUploadedSealCompanyChange(event) {
 
 async function submitUploadedSealApplication() {
   if (uploadedSealApplicationRuntime.submissionBusy || uploadedSealApplicationRuntime.manualSaveOperation || uploadedSealEditorRuntime.locked) return;
+  if (uploadedSealEditorRuntime.pendingImage) return showToast("圖片尚未同步完成，請完成後再送簽。");
   if (!uploadedSealCatalogReady()) return showToast(uploadedSealCatalogMessage());
   if (uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingEditorSave
     || uploadedSealEditorRuntime.draftCreatePromise) return showToast("PDF 尚未完成同步；申請資料可繼續填寫，完成後再送簽。");
@@ -35434,7 +35970,12 @@ function setUploadedEditorMobileDrawer(kind, open, trigger = null) {
   if (backdrop) backdrop.hidden = false;
   document.body.classList.add("pdf-editor-mobile-drawer-open");
   uploadedEditorMobileDrawerReturnFocus = trigger || document.activeElement;
-  window.requestAnimationFrame(() => openPane?.querySelector(".pdf-editor-pane-close")?.focus());
+  window.requestAnimationFrame(() => {
+    const stillOpen = editor?.dataset[thumbnailsOpen ? "thumbnailsOpen" : "propertiesOpen"] === "true";
+    // A delayed frame must not steal focus after the user already started
+    // typing, or move focus into a drawer that has since been closed.
+    if (stillOpen && !openPane?.contains(document.activeElement)) openPane?.querySelector(".pdf-editor-pane-close")?.focus();
+  });
 }
 
 function syncUploadedEditorMobileDrawer() {
@@ -35502,7 +36043,7 @@ window.addEventListener("online", () => {
 });
 window.addEventListener("beforeunload", (event) => {
   if (uploadedSealEditorRuntime.textEdit || uploadedSealApplicationHasUnsavedChanges() || uploadedSealApplicationRuntime.promise
-    || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.finalizationError || uploadedSealEditorRuntime.pendingEditorSave
+    || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.finalizationError || uploadedSealEditorRuntime.pendingEditorSave || uploadedSealEditorRuntime.pendingImage
     || (uploadedSealEditorRuntime.documentId && !uploadedSealEditorRuntime.locked
       && (uploadedSealEditorRuntime.saving || uploadedSealEditorRuntime.savedGeneration < uploadedSealEditorRuntime.dirtyGeneration))) {
     event.preventDefault();
@@ -35670,7 +36211,10 @@ document.querySelector("#clearUploadedStampsBtn")?.addEventListener("click", asy
   uploadedSealEditorRuntime.selectedIds.clear();
 });
 document.querySelector("#submitUploadedSealBtn")?.addEventListener("click", submitUploadedSealApplication);
-for (const selector of ["#uploadedEditorSaveDraftBtn", "#uploadedEditorSaveDraftFooterBtn"]) {
+document.querySelector("#uploadedEditorSubmitToolbarBtn")?.addEventListener("click", submitUploadedSealApplication);
+document.querySelector("[data-image-sync-retry]")?.addEventListener("click", () => void syncUploadedEditorPendingImage());
+document.querySelector("[data-image-sync-remove]")?.addEventListener("click", discardUploadedEditorPendingImage);
+for (const selector of ["#uploadedEditorSaveDraftBtn", "#uploadedEditorSaveDraftFooterBtn", "#uploadedEditorSaveDraftToolbarBtn"]) {
   document.querySelector(selector)?.addEventListener("click", () => { void saveUploadedEditorDraft(); });
 }
 document.querySelector("#uploadedSealType")?.addEventListener("change", (event) => {
