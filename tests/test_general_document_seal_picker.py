@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class GeneralDocumentSealPickerTest(unittest.TestCase):
     FUNCTIONS = [
         "uploadedSealPickerReadOnly", "uploadedSealCompanyRecords",
+        "uploadedSealCatalogReady", "uploadedSealCatalogMessage", "companySealCatalogUnavailableReason",
         "uploadedSealPickerCategoryOptions", "uploadedSeamPrimaryLargeSeal", "renderUploadedSealOptions",
         "changeUploadedSealPickerSelection", "selectedUploadedSeal",
         "focusUploadedSealCompany", "officialSealHasCurrentFile",
@@ -34,13 +35,15 @@ const uploadedSealApplicationRuntime={editable:true,metadataEditable:true,compan
 const uploadedSealEditorState={elements:[],pages:[{pageId:'P1',widthPt:595,heightPt:842},{pageId:'P2',widthPt:595,heightPt:842},{pageId:'P3',widthPt:595,heightPt:842}]};
 const PDF_EDITOR_MAX_ELEMENTS=1000;
 let uploadedSealOptions=[],uploadedSealOptionsRequestNo=0,toasts=[],renders=0,placements=[],changes=0;
+const authState={token:'synthetic-session'};
+let uploadedSealCatalogState={scope:'userA',token:authState.token,companyId:'A',status:'ready',request:null};
 const refs=[{code:'general_seal',name:'便章'},{code:'bank_seal',name:'銀行印鑑章'},{code:'establishment_seal',name:'設立'},{code:'official_seal',name:'圖記'},{code:'continuous_seal',name:'連續章'},{code:'other',name:'其他'}];
 const companySealRefOptions=()=>refs, companySealRefName=(type,code)=>refs.find(x=>x.code===code)?.name||code;
 const escapeDraftHtml=value=>String(value).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 const companySealFixedGeometry=seal=>({widthMm:seal.widthMm||30,heightMm:seal.heightMm||30});
 const formatCompanySealMeasurement=value=>Number(value).toFixed(2);
 const companySealCurrentVersionSnapshot=seal=>({sealFileId:seal.current_file_id,sealFileSha256:seal.hash});
-const renderUploadedSealWorkbench=()=>renders++,renderUploadedSealApplicationDisclosure=()=>{};
+const renderUploadedSealWorkbench=()=>{renders++;renderUploadedSealOptions()},renderUploadedSealApplicationDisclosure=()=>{};
 const currentUploadedEditorPage=()=>uploadedSealEditorState.pages[1];
 const addUploadedEditorElement=(kind,point,props,pages)=>placements.push({kind,point,pages,seal:selectedUploadedSeal()?.id});
 const showToast=value=>toasts.push(value);
@@ -93,7 +96,7 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
         self.assertEqual(value, {"small": "BANK-S", "large": "EST-L"})
 
     def test_company_change_cannot_keep_another_companys_stamp(self):
-        value = self.run_js('uploadedSealOptions=[seal("A-GENERAL"),seal("B-BANK","official_seal","small_seal","B")];renderUploadedSealOptions();nodes["#uploadedSealCompany"].value="B";const stale=selectedUploadedSeal();renderUploadedSealOptions();console.log(JSON.stringify({stale,selected:selectedUploadedSeal().id,options:nodes["#uploadedSealSealSelect"].options.map(x=>x.value)}));')
+        value = self.run_js('uploadedSealOptions=[seal("A-GENERAL"),seal("B-BANK","official_seal","small_seal","B")];renderUploadedSealOptions();nodes["#uploadedSealCompany"].value="B";const stale=selectedUploadedSeal();backendRequest=async()=>[seal("B-BANK","official_seal","small_seal","B")];await loadUploadedSealOptions("B");console.log(JSON.stringify({stale,selected:selectedUploadedSeal().id,options:nodes["#uploadedSealSealSelect"].options.map(x=>x.value)}));')
         self.assertIsNone(value["stale"])
         self.assertEqual(value["selected"], "B-BANK")
         self.assertEqual(value["options"], ["B-BANK"])
@@ -156,6 +159,7 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
                 self.assertIn("請先選擇可用的印章版本。",value["toasts"])
 
     def test_institution_primary_picker_uses_only_selected_unit_official_large(self):
+        self.SETUP += '\nuploadedSealCatalogState.companyId="CO-INST";\n'
         value=self.run_js('nodes["#uploadedSealCompany"].options.push({value:"CO-INST",textContent:"合成機構"});nodes["#uploadedSealCompany"].value="CO-INST";uploadedSealApplicationRuntime.companyId="CO-INST";uploadedSealOptions=[{...seal("INST-L","official_seal","large_seal","CO-INST"),owner_kind:"institution",widthMm:20,heightMm:40},{...seal("INST-S","official_seal","small_seal","CO-INST"),owner_kind:"institution"},{...seal("GENERAL","general_seal","large_seal","CO-INST"),owner_kind:"institution"},{...seal("WRONG","establishment_seal","large_seal","CO-INST"),owner_kind:"institution"},seal("FOREIGN","establishment_seal","large_seal","A")];nodes["#uploadedEditorSeamPanel"].hidden=false;renderUploadedSealOptions();addUploadedSeamGroups();console.log(JSON.stringify({id:selectedUploadedSeal()?.id,category:nodes["#uploadedSealCategorySelect"].value,sizes:nodes["#uploadedSealSizeSelect"].options.map(o=>o.value),seals:nodes["#uploadedSealSealSelect"].options.map(o=>o.value),bindings:uploadedSealEditorState.elements.map(e=>e.properties.sealId),status:nodes["#uploadedSealPickerStatus"].textContent,toasts}));')
         self.assertEqual(value["id"],"INST-L")
         self.assertEqual(value["category"],"official_seal")
@@ -182,15 +186,15 @@ function select(category,size) {nodes['#uploadedSealCategorySelect'].value=categ
 
     def test_catalogue_completion_refreshes_toolbar_even_when_geometry_is_unchanged(self):
         value = self.run_js('let release;backendRequest=()=>new Promise(resolve=>release=resolve);const pending=loadUploadedSealOptions("A");const loading=uploadedSealPickerReadOnly();release([seal("GENERAL")]);await pending;console.log(JSON.stringify({loading,after:uploadedSealPickerReadOnly(),renders,selected:selectedUploadedSeal().id}));')
-        self.assertEqual(value, {"loading": True, "after": False, "renders": 1, "selected": "GENERAL"})
+        self.assertEqual(value, {"loading": True, "after": False, "renders": 2, "selected": "GENERAL"})
 
     def test_failed_catalogue_load_releases_busy_state_without_using_stale_seals(self):
         value = self.run_js('uploadedSealOptions=[seal("GENERAL")];renderUploadedSealOptions();backendRequest=async()=>{throw new Error("synthetic offline")};await loadUploadedSealOptions("A");console.log(JSON.stringify({loading:uploadedSealEditorRuntime.sealOptionsLoading,selected:selectedUploadedSeal(),records:uploadedSealOptions.length,renders,toasts}));')
         self.assertFalse(value["loading"])
         self.assertIsNone(value["selected"])
-        self.assertEqual(value["records"], 0)
-        self.assertEqual(value["renders"], 1)
-        self.assertTrue(value["toasts"])
+        self.assertEqual(value["records"], 1)
+        self.assertEqual(value["renders"], 2)
+        self.assertFalse(value["toasts"])
 
 
 if __name__ == "__main__":

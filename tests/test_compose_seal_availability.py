@@ -13,7 +13,7 @@ class ComposeSealAvailabilityTest(unittest.TestCase):
     def test_large_and_small_choices_are_filtered_by_company_size_and_current_file(self):
         source = (ROOT / "app.js").read_text()
         functions = []
-        for name in ("companySealSelectable", "composeSealOptionsForSelectedCompany", "composeSealOptionsAreLoadingForSelectedCompany", "composeSealTypeLabel", "renderComposeSealTypeOptions", "loadComposeSealOptions", "officialSealHasCurrentFile"):
+        for name in ("companySealSelectable", "companySealCatalogUnavailableReason", "composeSealOptionsForSelectedCompany", "composeSealOptionsAreLoadingForSelectedCompany", "composeSealTypeLabel", "renderComposeSealTypeOptions", "loadComposeSealOptions", "officialSealHasCurrentFile"):
             match = re.search(r"^(?:async )?function " + re.escape(name) + r"\([^\n]*\) \{\n.*?^\}", source, re.M | re.S)
             self.assertIsNotNone(match, name)
             functions.append(match.group())
@@ -30,6 +30,8 @@ function node(value=''){return {value,dataset:{},disabled:false,hidden:false,opt
 const nodes={'#composeCompanySelect':node('A'),'#composeOutputMode':node('physical'),'#largeSealType':node('一般章'),'#smallSealType':node('無'),'#continuousSealType':node('無'),'#composeContinuousSealField':node(),'#composeSealAvailabilityNotice':node(),'#composeSealAvailabilityHint':node(),'#composeSealRetryBtn':node()};
 const document={querySelector:s=>nodes[s]||null};
 let composeSealOptionsCompanyId='A',composeSealOptionsRequestNo=0,composeSealOptionsLoading=false,composeSealOptionsError=false;
+const authState={token:'synthetic-session'};
+let composeSealCatalogState={scope:'test-scope',token:authState.token,status:'ready',request:null};
 const ready=(row)=>({company_id:'A',owner_kind:'company',selectable:true,is_active:true,current_file:{id:'FILE-'+row.id,usable:true,is_current:true},...row});
 let composeSealOptions=[ready({id:'BANK-S',seal_category:'bank_seal',seal_size_type:'small_seal'}),ready({id:'GENERAL-S',seal_category:'general_seal',seal_size_type:'small_seal'}),{id:'EMPTY-GENERAL',owner_kind:'company',selectable:false,company_id:'A',seal_category:'general_seal',seal_size_type:'large_seal',is_active:true},ready({id:'INACTIVE',seal_category:'general_seal',seal_size_type:'large_seal',is_active:false})];
 const composeCompanyForOfficialApplication=name=>name==='A'?{id:'A'}:name==='B'?{id:'B'}:null;
@@ -37,7 +39,7 @@ const composeOutputMode=()=>nodes['#composeOutputMode'].value;
 const escapeDraftHtml=value=>String(value);
 const hasAuthenticatedBackendSession=()=>true,frontendSessionScope=()=> 'test-scope';
 let sealRows=[];
-const backendRequest=async path=>{assert.match(path,/^\/companies\/(A|B)\/seals$/);return sealRows};
+const backendRequest=async path=>{assert.match(path,/^\/companies\/(A|B)\/seals\?editor=1$/);return sealRows};
 """+"\n".join(functions)+r"""
 ;(async()=>{
 composeSealOptionsCompanyId='';
@@ -59,7 +61,7 @@ composeSealOptionsCompanyId='B';composeSealOptions=[];
 renderComposeSealTypeOptions();
 assert.deepEqual(nodes['#smallSealType'].options.map(x=>x.value),['無']);
 assert.equal(nodes['#composeSealAvailabilityNotice'].hidden,false);
-assert.match(nodes['#composeSealAvailabilityHint'].textContent,/尚無已上傳的可用印章/);
+assert.match(nodes['#composeSealAvailabilityHint'].textContent,/尚無已登錄並啟用的章檔/);
 console.log('compose seal choices are company-scoped and current-file-only');
 nodes['#composeCompanySelect'].value='A';
 sealRows=[

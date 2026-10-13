@@ -15,13 +15,23 @@ class EditorSealCatalogScopeTests(unittest.TestCase):
         self.company = {"id": "CO-2", "finance_tenant_id": "TENANT-1", "finance_entity_id": "E2",
                         "source_system": "finance", "status": "active"}
         self.seal = {"id": "SEAL-2", "company_id": "CO-2", "is_active": True, "seal_name": "測試章",
-                     "seal_size_type": "large_seal", "render_width_mm": 40, "render_height_mm": 40,
+                     "seal_size_type": "large_seal", "seal_category": "general_seal", "render_width_mm": 30, "render_height_mm": 30,
                      "current_file": {"id": "FILE-2", "file_hash": "a" * 64, "version": 2,
-                                      "render_width_mm": 40, "render_height_mm": 40, "usable": True,
+                                      "render_width_mm": 30, "render_height_mm": 30, "usable": True,
                                       "file_object_id": "PRIVATE-OBJECT", "file_name": "private.png",
                                       "storage_key": "private-vault/path", "uploaded_by": "PRIVATE-PERSON"},
                      "current_file_status": {"storage_key": "private-vault/path"},
                      "created_by": "PRIVATE-PERSON", "purpose_description": "PRIVATE-TEXT"}
+        self.catalog_file = {"id": "FILE-2", "seal_id": "SEAL-2", "file_object_id": "PRIVATE-OBJECT",
+                             "file_hash": "a" * 64, "version": 2, "is_current": True,
+                             "render_width_mm": 30, "render_height_mm": 30,
+                             "pixel_width": 400, "pixel_height": 400, "source_aspect_ratio": 1,
+                             "dimension_validated": True,
+                             "dimension_policy_version": backend.EDOC_SEAL_DIMENSION_POLICY_VERSION,
+                             "file_mime_type": "image/png", "file_size": 100,
+                             "file_storage_key": "private-vault/path",
+                             "backing": {"id": "PRIVATE-OBJECT", "sha256": "a" * 64, "size_bytes": 100,
+                                         "mime_type": "image/png", "storage_key": "private-vault/path", "scan_status": "clean"}}
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.object(backend, "is_production", return_value=True))
@@ -30,11 +40,15 @@ class EditorSealCatalogScopeTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(backend, "supabase_official_session_user", return_value=self.user))
         self.stack.enter_context(mock.patch.object(backend, "supabase_company_seal_row", side_effect=lambda _, **kwargs: copy.deepcopy(self.seal)))
         self.stack.enter_context(mock.patch.object(backend, "supabase_filter_rows", return_value=[{"id": "SEAL-2"}]))
+        self.stack.enter_context(mock.patch.object(backend, "supabase_request", side_effect=lambda *_args, **_kwargs: [{
+            **self.company, "owner_policy": {"owner_kind": "company"},
+            "seals": [{**copy.deepcopy(self.seal), "files": [copy.deepcopy(self.catalog_file)]}],
+        }]))
 
     def test_same_tenant_applicant_picker_has_only_safe_metadata(self):
         result = backend.supabase_list_company_seals("CO-2", self.session, editor=True)
         self.assertEqual(result[0]["current_file"]["file_hash"], "a" * 64)
-        self.assertEqual(result[0]["render_width_mm"], 40)
+        self.assertEqual(result[0]["render_width_mm"], 30)
         self.assertNotIn("PRIVATE", str(result))
         self.assertNotIn("storage_key", str(result))
         self.assertNotIn("file_name", str(result))

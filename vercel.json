@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
+  "regions": ["icn1"],
   "builds": [
     {
       "src": "api/index.py",

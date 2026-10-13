@@ -66,6 +66,7 @@ const scheduleUploadedSealApplicationSave=()=>calls.push({operation:'queue',comp
 const refreshWorkflowReadinessForContext=async()=>{};
 const showToast=s=>toasts.push(s);
 let uploadedSealOptions=[],uploadedSealOptionsRequestNo=0;
+let uploadedSealCatalogState={scope:'one',token:'',companyId:'TEST-CO',status:'ready',request:null};
 let backendRequest=async(path)=>{calls.push({path});return [];};
 const normalizeUploadedEditorSealGeometry=()=>false;
 function makeSelect(){return {value:'',dataset:{},options:[],disabled:false,
@@ -181,7 +182,7 @@ company.value='';renderUploadedSealCompanyOptions();assert.equal(company.value,'
 
     def test_delayed_seal_response_cannot_cross_company_selection(self):
         self.run_js('''
-let release;backendRequest=async(path)=>path.includes('TEST-CO')?await new Promise(resolve=>release=resolve):[{id:'NEW-COMPANY-SEAL'}];
+let release;backendRequest=async(path)=>path.includes('TEST-CO')?await new Promise(resolve=>release=resolve):[{id:'NEW-COMPANY-SEAL',company_id:'OTHER-CO'}];
 const old=loadUploadedSealOptions('TEST-CO');company.value='OTHER-CO';
 await loadUploadedSealOptions('OTHER-CO');release([{id:'OLD-COMPANY-SEAL'}]);await old;
 assert.deepEqual(uploadedSealOptions.map(s=>s.id),['NEW-COMPANY-SEAL']);
@@ -218,7 +219,7 @@ assert.equal(company.value,'TEST-CO');assert.equal(clears,0);assert.equal(calls.
 confirmResult=true;backendRequest=async()=>{throw new Error('版本衝突')};company.value='OTHER-CO';
 await handleUploadedSealCompanyChange({currentTarget:company});
 assert.equal(company.value,'OTHER-CO');assert.equal(clears,0);assert.equal(uploadedSealEditorRuntime.documentId,'OLD');assert.equal(uploadedSealEditorState.pages[0].pageId,'old-page');
-assert.match(toasts[0],/版本衝突/);assert.equal(uploadedSealEditorRuntime.companyChanging,false);
+assert.match(uploadedSealCatalogState.error,/版本衝突/);assert.equal(uploadedSealCatalogState.status,'error');assert.equal(uploadedSealEditorRuntime.companyChanging,false);
 ''')
 
     def test_correction_keeps_department_editable_but_company_history_immutable(self):

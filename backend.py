@@ -34328,7 +34328,7 @@ def normalize_ui_usage_payload(payload: Dict[str, Any], session: Dict[str, Any] 
             raise ValueError("ui_performance_fields_invalid")
         performance = payload.get("performance")
         allowed = {
-            "stage": {"workspace_visible", "pdf_local_editable", "pdf_cloud_saved", "file_reopen", "file_download"},
+            "stage": {"workspace_visible", "workspace_core_ready", "pdf_local_editable", "pdf_cloud_saved", "file_reopen", "file_download"},
             "outcome": {"success", "failure", "timeout", "cancelled"},
             "fileSizeBucket": {"none", "0_1mb", "1_10mb", "10_50mb"},
             "pageCountBucket": {"none", "1", "2_25", "26_100", "101_300"},
@@ -35666,13 +35666,27 @@ def supabase_log_seal_usage(
 
 
 def supabase_seal_file_with_backing_status(file_row: Dict[str, Any]) -> Dict[str, Any]:
+    file_object = supabase_get("file_objects", file_row.get("file_object_id") or "") if file_row.get("file_object_id") else None
+    seal = supabase_get("company_seals", file_row.get("seal_id") or "")
+    return _supabase_seal_file_status_from_rows(file_row, seal, file_object, verify_storage=True)
+
+
+def _supabase_seal_file_status_from_rows(
+    file_row: Dict[str, Any], seal: Dict[str, Any] | None,
+    file_object: Dict[str, Any] | None, *, verify_storage: bool,
+) -> Dict[str, Any]:
+    """Validate one immutable registration; catalog choice is not a byte check.
+
+    Catalogs may show a registered file without fetching every private blob.
+    Preview, preflight and stamping use the public strict helper above, which
+    always checks Storage afresh. An unperformed check is explicitly unknown,
+    never evidence that a registered file is absent (or that bytes exist).
+    """
     item = dict(file_row)
-    file_object = supabase_get("file_objects", item.get("file_object_id") or "") if item.get("file_object_id") else None
     item["scan_status"] = file_object.get("scan_status") if file_object else "檔案不存在"
     item["scan_engine"] = file_object.get("scan_engine") if file_object else ""
     item["last_scan_at"] = file_object.get("last_scan_at") if file_object else ""
     item["av_clean"] = seal_file_av_is_clean(file_object)
-    seal = supabase_get("company_seals", item.get("seal_id") or "")
     try:
         item["dimension_valid"] = bool(
             seal and company_seal_file_dimension_is_valid(item, seal.get("seal_size_type"))
@@ -35683,15 +35697,27 @@ def supabase_seal_file_with_backing_status(file_row: Dict[str, Any]) -> Dict[str
     except ValueError:
         item["dimension_valid"] = False
     item["backing_metadata_valid"] = seal_policy.backing_metadata_matches(item, file_object)
-    item["backing_storage_exists"] = supabase_seal_backing_exists(file_object) if file_object and item["backing_metadata_valid"] else False
-    item["usable"] = bool(
+    if item["backing_metadata_valid"] and not verify_storage:
+        key = str(file_object.get("storage_key") or "")
+        item["backing_metadata_valid"] = bool(
+            str(file_object.get("bucket") or EDOC_SEAL_STORAGE_BUCKET) == EDOC_SEAL_STORAGE_BUCKET
+            and key and not Path(key).is_absolute() and ".." not in Path(key).parts
+        )
+    metadata_ready = bool(
         item.get("is_current")
         and item.get("file_object_id")
         and item["av_clean"]
         and item["dimension_valid"]
         and item["backing_metadata_valid"]
-        and item["backing_storage_exists"]
     )
+    if verify_storage:
+        item["backing_storage_exists"] = supabase_seal_backing_exists(file_object) if file_object and item["backing_metadata_valid"] else False
+        item["storage_verification"] = "verified" if item["backing_storage_exists"] else "unavailable"
+        item["usable"] = bool(metadata_ready and item["backing_storage_exists"])
+    else:
+        item["backing_storage_exists"] = None
+        item["storage_verification"] = "required_on_use"
+        item["usable"] = metadata_ready
     return item
 
 
@@ -35805,24 +35831,8 @@ def supabase_company_seal_row(seal_id: str, *, owner_kind_value: str | None = No
         raise ValueError("seal_not_found")
     company = supabase_get("companies", seal.get("company_id", "")) or {}
     designated_current = supabase_current_company_seal_file(seal_id, require_usable=False)
-    data = {**seal, "company_name": company.get("name", ""), "company_tax_id": company.get("tax_id", "")}
-    usable_current = (
-        designated_current
-        if designated_current
-        and designated_current.get("usable")
-        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, *seal_scan_exceptions.POLICIES}
-        else None
-    )
-    data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current, data.get("seal_category") or ""))
-    data["current_file"] = seal_file_metadata(usable_current) if usable_current else None
-    data["current_file_status"] = seal_file_metadata(designated_current) if designated_current else None
-    data["approved_original_scans"] = seal_scan_exceptions.approved_metadata(data)
-    data["owner_kind"] = owner_kind_value if owner_kind_value is not None else supabase_company_seal_owner_kind(data["company_id"])
-    data["display_label"] = seal_policy.category_label(data.get("seal_category"))
-    category_allowed = seal_policy.application_category_allowed(data["owner_kind"], data.get("seal_category"))
-    data["selectable"] = bool(data.get("is_active") and usable_current and category_allowed)
-    data["availability_reason"] = "classification_required" if data["owner_kind"] == "unclassified" else "unsupported_application_category" if data.get("seal_category") in {"bank_seal", "other"} else "owner_policy_mismatch" if not category_allowed else "ready" if data["selectable"] else "inactive" if not data.get("is_active") else "unusable_current" if designated_current else "missing_current"
-    return data
+    owner = owner_kind_value if owner_kind_value is not None else supabase_company_seal_owner_kind(seal["company_id"])
+    return _supabase_seal_catalog_row(seal, company, owner, designated_current)
 
 
 def supabase_validate_official_document_seal(
@@ -36007,14 +36017,91 @@ def supabase_list_company_seals(
         assert_editor_seal_catalog_company(supabase_official_session_user(session), company_id, session)
     else:
         assert_supabase_seal_company_access(company_id, session)
-    rows = supabase_filter_rows("company_seals", {"company_id": company_id}, order="is_active.desc,seal_category.asc,seal_size_type.asc,created_at.desc", limit=500)
-    budget_token = _seal_storage_probe_budget.set(time.monotonic() + 2.0)
-    try:
-        owner = supabase_company_seal_owner_kind(company_id)
-        result = [supabase_company_seal_row(row["id"], owner_kind_value=owner) for row in rows]
-    finally:
-        _seal_storage_probe_budget.reset(budget_token)
-    return [editor_seal_catalog_metadata(row) for row in result if row.get("is_active")] if editor else result
+    # One FK-embedded snapshot replaces 3-5 REST requests per stamp. In
+    # particular, a large catalog must not consume a shared Storage deadline
+    # before its later (otherwise valid) stamps have even been inspected.
+    params = {
+        "select": "id,name,tax_id,owner_policy:company_seal_policies(owner_kind),seals:company_seals(*,files:company_seal_files(*,backing:file_objects(*)))",
+        "id": f"eq.{company_id}", "limit": "1",
+        "seals.order": "is_active.desc,seal_category.asc,seal_size_type.asc,created_at.desc",
+        "seals.limit": "501", "seals.files.is_current": "eq.true",
+        "seals.files.order": "version.desc", "seals.files.limit": "2",
+    }
+    if editor:
+        params["seals.is_active"] = "eq.true"
+        params["seals.seal_category"] = "in.(establishment_seal,official_seal,general_seal,continuous_seal)"
+    snapshot = supabase_request("GET", f"companies?{urllib.parse.urlencode(params)}")
+    if not isinstance(snapshot, list):
+        raise RuntimeError("seal_catalog_response_invalid")
+    if not snapshot:
+        raise ValueError("company_not_found")
+    company = snapshot[0]
+    if not isinstance(company, dict) or company.get("id") != company_id or not isinstance(company.get("seals"), list):
+        raise RuntimeError("seal_catalog_response_invalid")
+    rows = company["seals"]
+    if len(rows) > 500:
+        raise RuntimeError("seal_catalog_limit_exceeded")
+    policy = company.get("owner_policy")
+    # PostgREST returns an object for the unique company_id relationship;
+    # accept a singleton array as well for older schema-cache representations.
+    if isinstance(policy, list):
+        if len(policy) > 1:
+            raise RuntimeError("seal_catalog_owner_conflict")
+        policy = policy[0] if policy else None
+    if policy is not None and not isinstance(policy, dict):
+        raise RuntimeError("seal_catalog_response_invalid")
+    owner = seal_policy.owner_kind((policy or {}).get("owner_kind"))
+    result = []
+    for seal in rows:
+        if not isinstance(seal, dict) or seal.get("company_id") != company_id:
+            raise RuntimeError("seal_catalog_response_invalid")
+        if editor and (not seal.get("is_active") or seal.get("seal_category") not in {"establishment_seal", "official_seal", "general_seal", "continuous_seal"}):
+            continue
+        files = seal.get("files")
+        if not isinstance(files, list) or len(files) > 1:
+            raise RuntimeError("seal_catalog_current_conflict" if isinstance(files, list) else "seal_catalog_response_invalid")
+        current = None
+        if files:
+            file_row = files[0]
+            if not isinstance(file_row, dict) or file_row.get("seal_id") != seal.get("id") or file_row.get("is_current") is not True:
+                raise RuntimeError("seal_catalog_response_invalid")
+            backing = file_row.get("backing")
+            if backing is not None and not isinstance(backing, dict):
+                raise RuntimeError("seal_catalog_response_invalid")
+            current = _supabase_seal_file_status_from_rows(
+                {key: value for key, value in file_row.items() if key != "backing"},
+                seal, backing, verify_storage=not editor,
+            )
+        row = _supabase_seal_catalog_row(seal, company, owner, current)
+        if editor:
+            row = {**editor_seal_catalog_metadata(row),
+                   "availability_basis": "registered_metadata",
+                   "storage_verification": "required_on_use"}
+        result.append(row)
+    return result
+
+
+def _supabase_seal_catalog_row(
+    seal: Dict[str, Any], company: Dict[str, Any], owner: str,
+    designated_current: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Assemble a catalog row without additional REST calls or private fields."""
+    data = {key: value for key, value in seal.items() if key != "files"}
+    data.update(company_name=company.get("name", ""), company_tax_id=company.get("tax_id", ""))
+    usable_current = designated_current if designated_current and designated_current.get("usable") and str(designated_current.get("dimension_policy_version") or "") in {
+        EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY,
+        seal_policy.CONTINUOUS_POLICY, *seal_scan_exceptions.POLICIES,
+    } else None
+    data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current, data.get("seal_category") or ""))
+    data["current_file"] = seal_file_metadata(usable_current) if usable_current else None
+    data["current_file_status"] = seal_file_metadata(designated_current) if designated_current else None
+    data["approved_original_scans"] = seal_scan_exceptions.approved_metadata(data)
+    data["owner_kind"] = owner
+    data["display_label"] = seal_policy.category_label(data.get("seal_category"))
+    category_allowed = seal_policy.application_category_allowed(owner, data.get("seal_category"))
+    data["selectable"] = bool(data.get("is_active") and usable_current and category_allowed)
+    data["availability_reason"] = "classification_required" if owner == "unclassified" else "unsupported_application_category" if data.get("seal_category") in {"bank_seal", "other"} else "owner_policy_mismatch" if not category_allowed else "ready" if data["selectable"] else "inactive" if not data.get("is_active") else "unusable_current" if designated_current else "missing_current"
+    return data
 
 
 def supabase_create_company_seal(company_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -49683,7 +49770,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json({"options": rows, "grouped": grouped})
                     return
                 if len(parts) == 3 and parts[0] == "companies" and parts[2] == "seals":
-                    session = supabase_current_session(self.bearer_token())
+                    # The authenticated dispatcher above already resolved this
+                    # request's session. Do not repeat the remote SSO lookup.
                     if method == "GET":
                         if not self.require_table_access(session, "company_seals"):
                             return

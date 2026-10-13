@@ -74,10 +74,13 @@ const defer=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve
 const flush=async()=>{for(let i=0;i<12;i++)await Promise.resolve()};
 const frontendSessionScope=()=>session,window={clearTimeout(){}};
 let uploadedSealMode='normal';
+const authState={token:'synthetic-session'};
+let uploadedSealCatalogState={scope:'actor-A',token:authState.token,companyId:'COMPANY-A',status:'ready'};
+const uploadedSealCatalogMessage=()=> '印章清單尚未就緒';
 const uploadedSealApplicationRuntime={epoch:1,submissionBusy:false,submissionOperation:null,submissionPreview:'valid',timer:0,contentRevision:7,queued:false};
 const uploadedSealEditorRuntime={documentId:'CASE-A',locked:false,revisionId:'REV',preparedFileId:'FILE',preparedSha256:'HASH',reviewMode:'prepared',preparedPdfDocument:{},dirtyGeneration:1,reviewGeneration:0};
 const uploadedSealEditorState={pages:[{pageId:'page1'}],elements:[{kind:'seal'}],manifestSha256:'MANIFEST',revisionNo:1};
-const fields={};const document={querySelector:s=>fields[s]||null};
+const fields={'#uploadedSealCompany':{value:'COMPANY-A'}};const document={querySelector:s=>fields[s]||null};
 const approvalSelectionForSelect=()=>({documentCategory:'contract',approvalRouteCode:'A'});
 const renderUploadedSealWorkbench=()=>renders++,showToast=message=>toasts.push(message),addSealAudit=(...args)=>audits.push(args);
 const setUploadedEditorSaveStatus=(...args)=>savedStatus.push(args),renderWorkflowReadinessContext=()=>{};
@@ -94,7 +97,12 @@ const switchDraft=()=>{uploadedSealEditorRuntime.documentId='CASE-B';uploadedSea
 '''
 
     def submission(self, case, setup=None):
-        self.run_js(["uploadedSealApplicationScopeSnapshot", "uploadedSealApplicationScopeIsCurrent", "resetUploadedSealApplicationSaving", "submitUploadedSealApplication"], setup or self.SCOPE_SETUP, case)
+        self.run_js(["uploadedSealCatalogReady", "uploadedSealApplicationScopeSnapshot", "uploadedSealApplicationScopeIsCurrent", "resetUploadedSealApplicationSaving", "submitUploadedSealApplication"], setup or self.SCOPE_SETUP, case)
+
+    def test_submit_does_not_mutate_when_catalog_is_unfresh(self):
+        self.submission(r'''
+uploadedSealCatalogState.status='error';await submitUploadedSealApplication();assert.deepEqual(calls,[]);assert.equal(uploadedSealEditorRuntime.locked,false);assert.match(toasts[0],/印章清單尚未就緒/);
+''')
 
     def test_current_submit_completes_locks_and_cleans_loading(self):
         self.submission(r'''
