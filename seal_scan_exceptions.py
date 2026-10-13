@@ -1,17 +1,21 @@
-"""One user-approved, exact-byte 200 DPI original-scan exception.
+"""Exact-source native scan policy facade with the original 22-entry API intact.
 
 This is provenance metadata, not seal artwork. It does not authorize an actor,
 activate a stamp, relax the general 250 DPI policy, or alter original pixels.
-Only the 22 faithful PNGs from the approved 1:1 source can use this policy.
+The legacy POLICY/_ROWS remain the 22 faithful 200 DPI PNGs. The separate
+20261013 registry supplies only its six independently approved 120 DPI crops.
 """
 from __future__ import annotations
 
 import math
 from decimal import Decimal
 from typing import Any
+import seal_scan_20261013 as native120
 
 POLICY = "original-scan-200dpi-20260914-v1"
 SOURCE_SHA256 = "95d90878c71f0efd874de4b0e812daebd536ec23435bb3a5ffb0dde9ed604b2e"
+NATIVE120_POLICY = native120.POLICY
+POLICIES = frozenset((POLICY, NATIVE120_POLICY))
 _ROWS = (
     ("8e47708f7838e097c31a94ee261da349f8fe4d84187da60f923f0b8f5067a0df","FINCO-263DD88BDAAA","CSEAL-FINCO-263DD88BDAAA-establishment_seal-large_seal","establishment_seal","large_seal",235,237,29.845,30.099,1),
     ("8a620f14bb6730bbbaa08f8d54a1b3b6872ef2ef0889917692293184f719f416","FINCO-263DD88BDAAA","CSEAL-FINCO-263DD88BDAAA-establishment_seal-small_seal","establishment_seal","small_seal",116,119,14.732,15.113,1),
@@ -43,10 +47,17 @@ def approved_metadata(seal: dict[str, Any]) -> list[dict[str, Any]]:
     """Authorized catalog metadata only; never image bytes or Storage keys."""
     return [dict(zip(_KEYS, row), source_pdf_sha256=SOURCE_SHA256,
                  dimension_policy_version=POLICY, calibration_dpi=200)
-            for row in _ROWS if row[1:5] == tuple(str(seal.get(key) or "") for key in ("company_id", "id", "seal_category", "seal_size_type"))]
+            for row in _ROWS if row[1:5] == tuple(str(seal.get(key) or "") for key in ("company_id", "id", "seal_category", "seal_size_type"))] + native120.approved_metadata(seal)
+
+
+def is_native_policy(policy: Any) -> bool:
+    """Exact known policies only; a name prefix is never an attestation."""
+    return isinstance(policy, str) and policy in POLICIES
 
 
 def profile(entry: dict[str, Any]) -> dict[str, Any]:
+    if entry.get("dimension_policy_version") == NATIVE120_POLICY:
+        return native120.profile(entry)
     w, h = float(entry["render_width_mm"]), float(entry["render_height_mm"])
     return {"seal_size_type": entry["seal_size_type"], "size_mm": None,
             "width_mm": w, "height_mm": h, "width_pt": w * 72 / 25.4, "height_pt": h * 72 / 25.4,
@@ -84,6 +95,8 @@ def upload_match(seal: dict[str, Any], file_hash: str, width: int, height: int,
 
 
 def file_entry(row: dict[str, Any], size_type: Any) -> dict[str, Any] | None:
+    if row.get("dimension_policy_version") == NATIVE120_POLICY:
+        return native120.file_entry(row, size_type)
     attested = row.get("dimension_validated")
     if row.get("dimension_policy_version") != POLICY or not (attested is True or type(attested) is int and attested == 1):
         return None
@@ -113,8 +126,12 @@ def file_entry(row: dict[str, Any], size_type: Any) -> dict[str, Any] | None:
     return None
 
 
-def geometry_profile(size_type: Any, width: Any, height: Any) -> dict[str, Any]:
+def geometry_profile(size_type: Any, width: Any, height: Any, *, policy: str = POLICY) -> dict[str, Any]:
     """Conversion only, not authorization; callers must first validate the file."""
+    if policy == NATIVE120_POLICY:
+        return native120.geometry_profile(size_type, width, height)
+    if policy != POLICY:
+        raise ValueError("approved_original_scan_geometry_mismatch")
     for values in _ROWS:
         entry = dict(zip(_KEYS, values))
         if entry["seal_size_type"] == size_type and abs(float(width) - entry["render_width_mm"]) <= 0.000001 and abs(float(height) - entry["render_height_mm"]) <= 0.000001:

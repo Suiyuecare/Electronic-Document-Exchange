@@ -59,6 +59,7 @@ import editor_application
 import seal_policy
 import seal_scan_exceptions
 import seal_operator_import
+import seal_operator_import_120
 
 from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
 from finance_bridge import (
@@ -182,6 +183,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_set_current_company_seal_file",
     "edoc_set_company_seal_policy",
     "edoc_import_approved_original_scan_file",
+    "edoc_import_approved_native120_scan_file",
     "edoc_update_editor_application",
     "edoc_save_editor_revision",
     "edoc_commit_editor_preflight",
@@ -11578,7 +11580,7 @@ def company_seal_file_dimension_is_valid(file_row: Dict[str, Any], seal_size_typ
     """Verify persisted attestation fields; never infer them for a legacy file."""
     if not bool(file_row.get("dimension_validated")):
         return False
-    if file_row.get("dimension_policy_version") == seal_scan_exceptions.POLICY:
+    if seal_scan_exceptions.is_native_policy(file_row.get("dimension_policy_version")):
         return seal_scan_exceptions.file_entry(file_row, seal_size_type) is not None
     if file_row.get("dimension_policy_version") in {seal_policy.CONTINUOUS_POLICY, seal_policy.OFFICIAL_POLICY}:
         return seal_policy.rectangular_file_dimensions_valid(file_row, str(seal_size_type))
@@ -11623,7 +11625,7 @@ def require_company_seal_file_dimensions(file_row: Dict[str, Any], seal_size_typ
         )
     if not company_seal_file_dimension_is_valid(file_row, seal_size_type):
         raise ValueError("seal_file_dimension_metadata_invalid")
-    allowed_current_policies = {seal_policy.CONTINUOUS_POLICY} if str(seal_size_type) == seal_policy.CONTINUOUS_SIZE else {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_scan_exceptions.POLICY}
+    allowed_current_policies = {seal_policy.CONTINUOUS_POLICY} if str(seal_size_type) == seal_policy.CONTINUOUS_SIZE else {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, *seal_scan_exceptions.POLICIES}
     if current and str(file_row.get("dimension_policy_version") or "") not in allowed_current_policies:
         raise ValueError("current_seal_file_dimension_policy_upgrade_required")
     return file_row
@@ -11637,7 +11639,7 @@ def company_seal_file_dimension_profile(
 ) -> Dict[str, Any]:
     """Return the immutable physical calibration stored on one Seal Vault file."""
     require_company_seal_file_dimensions(file_row, seal_size_type, current=current)
-    if file_row.get("dimension_policy_version") == seal_scan_exceptions.POLICY:
+    if seal_scan_exceptions.is_native_policy(file_row.get("dimension_policy_version")):
         return seal_scan_exceptions.profile(seal_scan_exceptions.file_entry(file_row, seal_size_type))
     if file_row.get("dimension_policy_version") in {seal_policy.CONTINUOUS_POLICY, seal_policy.OFFICIAL_POLICY}:
         return seal_policy.rectangular_geometry(str(seal_size_type), file_row.get("render_width_mm"), file_row.get("render_height_mm"), dpi=EDOC_SEAL_CALIBRATION_DPI)
@@ -11661,7 +11663,7 @@ def canonical_company_seal_dimensions_pt(
     dimension_policy_version: str = "",
 ) -> Tuple[float, float]:
     """Accept conversion noise only, then restore the file version's exact size."""
-    profile = seal_scan_exceptions.geometry_profile(seal_size_type, render_width_mm, render_height_mm) if dimension_policy_version == seal_scan_exceptions.POLICY else seal_policy.rectangular_geometry(str(seal_size_type), render_width_mm, render_height_mm, dpi=EDOC_SEAL_CALIBRATION_DPI) if dimension_policy_version in {seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY} else company_seal_dimension_profile(
+    profile = seal_scan_exceptions.geometry_profile(seal_size_type, render_width_mm, render_height_mm, policy=dimension_policy_version) if seal_scan_exceptions.is_native_policy(dimension_policy_version) else seal_policy.rectangular_geometry(str(seal_size_type), render_width_mm, render_height_mm, dpi=EDOC_SEAL_CALIBRATION_DPI) if dimension_policy_version in {seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY} else company_seal_dimension_profile(
         seal_size_type,
         render_width_mm,
         render_height_mm,
@@ -12857,7 +12859,7 @@ def local_company_seal_position_triggers_sql() -> str:
           OR (
             COALESCE(NEW.locked_seal_file_id, '') = ''
             AND file.is_current = 1
-            AND file.dimension_policy_version IN ('{EDOC_SEAL_DIMENSION_POLICY_VERSION}', '{seal_policy.OFFICIAL_POLICY}', '{seal_policy.CONTINUOUS_POLICY}', '{seal_scan_exceptions.POLICY}')
+            AND file.dimension_policy_version IN ('{EDOC_SEAL_DIMENSION_POLICY_VERSION}', '{seal_policy.OFFICIAL_POLICY}', '{seal_policy.CONTINUOUS_POLICY}', '{seal_scan_exceptions.POLICY}', '{seal_scan_exceptions.NATIVE120_POLICY}')
           )
         )
         AND file.dimension_validated = 1
@@ -17341,7 +17343,7 @@ def seal_file_with_backing_status(
         item["dimension_valid"] = bool(
             seal and company_seal_file_dimension_is_valid(item, seal["seal_size_type"])
             and seal_policy.category_policy_valid(seal["seal_category"], seal["seal_size_type"], item)
-            and (item.get("dimension_policy_version") != seal_scan_exceptions.POLICY
+            and (not seal_scan_exceptions.is_native_policy(item.get("dimension_policy_version"))
                  or seal_scan_exceptions.file_entry(item, seal["seal_size_type"])["company_id"] == seal["company_id"])
         )
     except ValueError:
@@ -17418,12 +17420,12 @@ def company_seal_api_dimension_metadata(
     seal_category: str = "",
 ) -> Dict[str, Any]:
     """Expose current-version geometry separately from the calibration policy."""
-    if current_file and current_file.get("dimension_policy_version") == seal_scan_exceptions.POLICY:
+    if current_file and seal_scan_exceptions.is_native_policy(current_file.get("dimension_policy_version")):
         profile = company_seal_file_dimension_profile(seal_size_type, current_file, current=True)
         return {"render_size_mm": None, "render_width_mm": profile["width_mm"],
                 "render_height_mm": profile["height_mm"], "render_width_pt": profile["width_pt"],
-                "render_height_pt": profile["height_pt"], "dimension_policy_version": seal_scan_exceptions.POLICY,
-                "calibration_dpi": 200, "calibration_required": False, "size_locked": True,
+                "render_height_pt": profile["height_pt"], "dimension_policy_version": profile["dimension_policy_version"],
+                "calibration_dpi": profile["calibration_dpi"], "calibration_required": False, "size_locked": True,
                 "original_scan_exception": True}
     manual = seal_category in {"official_seal", seal_policy.CONTINUOUS_CATEGORY}
     if manual:
@@ -17502,7 +17504,7 @@ def company_seal_row(conn: sqlite3.Connection, seal_id: str, *, owner_kind_value
         designated_current
         if designated_current
         and designated_current.get("usable")
-        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, seal_scan_exceptions.POLICY}
+        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, *seal_scan_exceptions.POLICIES}
         else None
     )
     data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current, data.get("seal_category") or ""))
@@ -18150,7 +18152,7 @@ def validate_seal_file_upload(
         return {**inspection, "pixel_width": inspection["width"], "pixel_height": inspection["height"],
                 "source_aspect_ratio": inspection["width"] / inspection["height"],
                 "render_width_mm": approved["render_width_mm"], "render_height_mm": approved["render_height_mm"],
-                "dimension_policy_version": seal_scan_exceptions.POLICY, "dimension_validated": True}
+                "dimension_policy_version": approved["dimension_policy_version"], "dimension_validated": True}
     return (
         validate_company_seal_raster_dimensions(
             seal_size_type,
@@ -25195,7 +25197,7 @@ def stamp_prepared_pdf_with_locked_seals(locked: Dict[str, Any]) -> Tuple[bytes,
                 # no 216 DPI thumbnail/padding or post-rotation aspect squeeze.
                 placed_rect = rect
                 page.insert_image(placed_rect, stream=transformed, keep_proportion=False, overlay=True)
-            elif not seam_element and position.get("locked_dimension_policy_version") == seal_scan_exceptions.POLICY:
+            elif not seam_element and seal_scan_exceptions.is_native_policy(position.get("locked_dimension_policy_version")):
                 placed_rect = _editor_insert_native_seal(
                     page, rect, seal_data, seal_mime,
                     pdf_safe_float(position.get("rotation"), 0), opacity,
@@ -26962,7 +26964,7 @@ def local_editor_seal_preview(
         detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};watermarked=true",
     )
     return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png",
-                                        preserve_canvas_aspect=seal_file.get("dimension_policy_version") == seal_scan_exceptions.POLICY)
+                                        preserve_canvas_aspect=seal_scan_exceptions.is_native_policy(seal_file.get("dimension_policy_version")))
 
 
 def _editor_revision_public(row: Dict[str, Any] | sqlite3.Row, locked_revision_id: str = "") -> Dict[str, Any]:
@@ -35675,7 +35677,7 @@ def supabase_seal_file_with_backing_status(file_row: Dict[str, Any]) -> Dict[str
         item["dimension_valid"] = bool(
             seal and company_seal_file_dimension_is_valid(item, seal.get("seal_size_type"))
             and seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), item)
-            and (item.get("dimension_policy_version") != seal_scan_exceptions.POLICY
+            and (not seal_scan_exceptions.is_native_policy(item.get("dimension_policy_version"))
                  or seal_scan_exceptions.file_entry(item, seal.get("seal_size_type"))["company_id"] == seal.get("company_id"))
         )
     except ValueError:
@@ -35808,7 +35810,7 @@ def supabase_company_seal_row(seal_id: str, *, owner_kind_value: str | None = No
         designated_current
         if designated_current
         and designated_current.get("usable")
-        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, seal_scan_exceptions.POLICY}
+        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, *seal_scan_exceptions.POLICIES}
         else None
     )
     data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current, data.get("seal_category") or ""))
@@ -36168,7 +36170,7 @@ def supabase_upload_company_seal_file(seal_id: str, payload: Dict[str, Any], ses
                 and abs(float(item.get("render_width_mm") or 0) - image_info["render_width_mm"]) <= 0.000001
                 and abs(float(item.get("render_height_mm") or 0) - image_info["render_height_mm"]) <= 0.000001
                 and seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), item)
-                and str(item.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, seal_scan_exceptions.POLICY}
+                and str(item.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, *seal_scan_exceptions.POLICIES}
                 and bool(item.get("is_current"))
                 and int(item.get("version") or 0) >= 1
             )
@@ -39834,7 +39836,7 @@ def supabase_editor_seal_preview(
         raise ValueError("seal_file_hash_mismatch")
     supabase_log_seal_usage(action="editor_seal_preview", actor_id=user.get("id") or "", seal_id=seal_id, detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};watermarked=true")
     return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png",
-                                        preserve_canvas_aspect=seal_file.get("dimension_policy_version") == seal_scan_exceptions.POLICY)
+                                        preserve_canvas_aspect=seal_scan_exceptions.is_native_policy(seal_file.get("dimension_policy_version")))
 
 
 def supabase_editor_asset_download(document_id: str, asset_id: str, expires: int, token: str, session: Dict[str, Any] | None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -48675,6 +48677,25 @@ class Handler(SimpleHTTPRequestHandler):
     def handle_api(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
         parts = [part for part in path.split("/") if part][1:]
         try:
+            if parts == ["admin", "approved-native120-seal-import"]:
+                if method != "POST":
+                    self.send_json({"error": "method_not_allowed"}, 405)
+                    return
+                try:
+                    context = seal_operator_import_120.authorize(self.headers.get(seal_operator_import_120.HEADER, ""), os.environ)
+                except PermissionError:
+                    self.send_json({"error": "unauthorized"}, 401)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if not 0 < length <= 4 * 1024 * 1024:
+                    self.send_json({"error": "approved_scan_import_payload_invalid"}, 413)
+                    return
+                result = seal_operator_import_120.import_one(sys.modules[__name__], context, self.read_json())
+                self.send_json(result)
+                return
             if parts == ["admin", "approved-original-seal-import"]:
                 if method != "POST":
                     self.send_json({"error": "method_not_allowed"}, 405)

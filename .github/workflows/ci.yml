@@ -163,6 +163,7 @@ jobs:
               tests.test_workflow_readiness_postgres \
               tests.test_explicit_seal_policy_postgres \
               tests.test_seal_scan_exceptions_postgres \
+              tests.test_seal_native120_postgres \
               tests.test_editor_application_final_snapshot_postgres \
               tests.test_official_handover_postgres
 

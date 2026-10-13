@@ -6,6 +6,81 @@ begin;
 
 -- Read-only repair gate; mirrored for the isolated shared backend cutover.
 -- Exact original-scan maintenance gate: read-only permit and reviewed code.
+-- Six native120 assets: exact-source, role and trigger gate; read-only.
+do $approved_native120_scan_import_gate$
+declare
+  v_table regclass := pg_catalog.to_regclass('public.approved_native120_scan_import_batches');
+  v_backend text := 'service_role';
+  v_denied text[] := array['anon','authenticated','authenticator'];
+  v_role text; v_expected record; v_proc record;
+begin
+  if v_table is null or not exists(select 1 from pg_catalog.pg_class where oid=v_table
+      and relrowsecurity and relforcerowsecurity and pg_catalog.pg_get_userbyid(relowner)='postgres') then
+    raise exception 'native120_scan_import_table_security_mismatch';
+  end if;
+  if not pg_catalog.has_table_privilege(v_backend,v_table,'SELECT')
+     or pg_catalog.has_table_privilege(v_backend,v_table,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'native120_scan_import_table_grant_mismatch';
+  end if;
+  foreach v_role in array v_denied loop
+    if pg_catalog.has_table_privilege(v_role,v_table,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception 'native120_scan_import_browser_table_grant';
+    end if;
+  end loop;
+  if exists(select 1 from pg_catalog.pg_class c, lateral pg_catalog.aclexplode(
+      coalesce(c.relacl,pg_catalog.acldefault('r',c.relowner))) a where c.oid=v_table and a.grantee=0)
+     or (select count(*) from pg_catalog.pg_policy where polrelid=v_table)<>1
+     or not exists(select 1 from pg_catalog.pg_policy where polrelid=v_table and polcmd='r'
+       and polroles=array[pg_catalog.to_regrole(v_backend)::oid]
+       and pg_catalog.pg_get_expr(polqual,polrelid)='true' and polwithcheck is null) then
+    raise exception 'native120_scan_import_table_policy_mismatch';
+  end if;
+  if (select pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+       pg_catalog.string_agg(conname||':'||pg_catalog.pg_get_constraintdef(oid,true),'|' order by conname),'UTF8')),'hex')
+       from pg_catalog.pg_constraint where conrelid=v_table)
+     is distinct from '75e64288b64d1637b85dda9be1b70df1c03544610188d0ed4e26ffa403927e4e' then
+    raise exception 'native120_scan_import_exact_constraints_mismatch';
+  end if;
+  for v_expected in select * from (values
+    ('public.edoc_approved_native120_scan_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i',true,'1a8bdc48e527c9c75fe01ccd9900ef979a7c1493ad97b8d69f7ad1b25b87ff03'),
+    ('public.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i',true,'48309913044515970c7032a9635a40c59e9b008448a719f90186c16403aebc08'),
+    ('public.edoc_import_approved_native120_scan_file(text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text)',true,'v',true,'4ab0c5bdb6676ac2041ef60fdd7b8f3eb0a00f8c2b5e92e7aead29178c301dd9'),
+    ('public.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)',true,'v',true,'ec28a95120f983b9815939dc5dd5f5cc32b29de7c999ee189089463a4484b9fa'),
+    ('public.edoc_set_current_company_seal_file(text,text,text,text)',true,'v',true,'dcc14ce9d7d28aff8955bfdde0a0d980b7afa86afcd63b257673148ab4d17fd9'),
+    ('public.edoc_enforce_approved_native120_scan_file()',false,'v',false,'c6b652228c992c835e3e79c5d5c9e7932c98435279c42a76a52482c4bdc1a262'),
+    ('public.edoc_enforce_company_seal_position_dimensions()',false,'v',false,'e6125e22f751d74d65afcd15d6cc609fa20dd022479f146fd2e4db33749d1209')
+  ) expected(signature,is_definer,volatility,backend_execute,body_sha256) loop
+    select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_expected.signature);
+    if not found then raise exception 'native120_scan_import_rpc_missing'; end if;
+    if v_proc.prosecdef is distinct from v_expected.is_definer
+       or v_proc.provolatile::text is distinct from v_expected.volatility
+       or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+       or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+       or pg_catalog.has_function_privilege(v_backend,v_proc.oid,'EXECUTE') is distinct from v_expected.backend_execute
+       or pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_proc.prosrc,'UTF8')),'hex')<>v_expected.body_sha256 then
+      raise exception 'native120_scan_import_rpc_security_or_source_mismatch';
+    end if;
+    if v_expected.is_definer and not coalesce(v_proc.proconfig @> array['lock_timeout=5s'],false) then
+      raise exception 'native120_scan_import_rpc_lock_timeout_missing';
+    end if;
+    foreach v_role in array v_denied loop
+      if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+        raise exception 'native120_scan_import_browser_rpc_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,
+        pg_catalog.acldefault('f',v_proc.proowner))) a where a.grantee=0 and a.privilege_type='EXECUTE') then
+      raise exception 'native120_scan_import_public_rpc_grant';
+    end if;
+  end loop;
+  if not exists(select 1 from pg_catalog.pg_trigger where tgrelid='public.company_seal_files'::regclass
+       and tgname='edoc_approved_native120_scan_file' and not tgisinternal and tgenabled='O' and tgtype=23
+       and tgfoid='public.edoc_enforce_approved_native120_scan_file()'::regprocedure and tgnargs=0 and tgattr=''::int2vector) then
+    raise exception 'native120_scan_import_attestation_trigger_mismatch';
+  end if;
+end;
+$approved_native120_scan_import_gate$;
+
 do $approved_original_scan_import_gate$
 declare
   v_table regclass := pg_catalog.to_regclass('public.approved_original_scan_import_batches');
@@ -38,7 +113,7 @@ begin
   end if;
   for v_expected in select * from (values
     ('public.edoc_approved_original_scan_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i','54e012d678441ef84bd399625a6d7895d011fe4e328dc2d1093f09e9197528dd'),
-    ('public.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i','377bd13e46983c89146c5e802fe9b7c17a539b56b3df057c5c7eee9106da6815'),
+    ('public.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i','48309913044515970c7032a9635a40c59e9b008448a719f90186c16403aebc08'),
     ('public.edoc_import_approved_original_scan_file(text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text)',true,'v','641cde9559374f10572f5caf39e3a1632f278458e6307b4ec14c6f42fed692bc')
   ) expected(signature,is_definer,volatility,body_sha256) loop
     select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_expected.signature);

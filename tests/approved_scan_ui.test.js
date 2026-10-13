@@ -42,3 +42,39 @@ test('mismatched pixels or physical dimensions fail closed instead of modifying 
     const h=harness();mutate(h);await assert.rejects(h.resolve(),/核准尺寸/);
   }
 });
+
+function native120Harness() {
+  const h = harness();
+  h.record.approved_original_scans[0] = {...entry,pixel_width:125,pixel_height:124,
+    render_width_mm:26.458,render_height_mm:26.247,calibration_dpi:120,
+    dimension_policy_version:'native-scan-120dpi-20261013-v1',
+    source_pdf_sha256:'4426fcf11ca7cd45ed8d2e942b137c7f5f4ac6efc585ad87078faaadf941487c'};
+  h.context.decodeCompanySealImageDimensions = async()=>({width:125,height:124});
+  return h;
+}
+test('approved native120 accepts only its three-decimal original dimensions without square squeezing', async()=>{
+  const h=native120Harness(); const result=await h.resolve();
+  assert.equal(result.widthMm,26.458);assert.equal(result.heightMm,26.247);
+  assert.match(result.message,/120 DPI/);
+  assert.equal(result.profile.dimension_policy_version,'native-scan-120dpi-20261013-v1');
+  vm.runInContext(source.slice(source.indexOf('const pdfPointsPerMm'),source.indexOf('let officialSealOptions')),h.context);
+  vm.runInContext(implementation('companySealSizeType'),h.context);
+  vm.runInContext(implementation('companySealUsesManualRectangle'),h.context);
+  assert.equal(h.context.companySealUsesManualRectangle(result.profile),true);
+});
+test('native120 source or policy mixing cannot borrow old200 authorization or widen rounding', async()=>{
+  for(const mutate of [h=>h.record.approved_original_scans[0].source_pdf_sha256=entry.source_pdf_sha256,
+    h=>h.record.approved_original_scans[0].calibration_dpi=200,
+    h=>h.record.approved_original_scans[0].dimension_policy_version='native-scan-120dpi-invented',
+    h=>h.record.company_id='CO-008',h=>h.record.seal_category='bank_seal',
+    h=>h.context.hashBlob=async()=>'b'.repeat(64)]) {
+    const h=native120Harness();mutate(h);assert.equal(await h.resolve(),null);
+  }
+  for(const mutate of [h=>h.record.approved_original_scans[0].render_width_mm+=.001,
+    h=>h.record.approved_original_scans[0].render_height_mm=h.record.approved_original_scans[0].render_width_mm,
+    h=>h.context.decodeCompanySealImageDimensions=async()=>({width:126,height:124})]) {
+    const h=native120Harness();mutate(h);await assert.rejects(h.resolve(),/核准尺寸/);
+  }
+  const old=harness();old.record.approved_original_scans[0].render_width_mm+=.0004;
+  await assert.rejects(old.resolve(),/核准尺寸/);
+});

@@ -166,7 +166,7 @@ def rectangular_file_dimensions_valid(row: dict[str, Any], size_type: str) -> bo
 
 def category_policy_valid(category: Any, size_type: Any, file_row: dict[str, Any]) -> bool:
     policy = str(file_row.get("dimension_policy_version") or "")
-    if policy == seal_scan_exceptions.POLICY:
+    if seal_scan_exceptions.is_native_policy(policy):
         entry = seal_scan_exceptions.file_entry(file_row, size_type)
         return bool(entry and entry["seal_category"] == category)
     if policy == CONTINUOUS_POLICY:

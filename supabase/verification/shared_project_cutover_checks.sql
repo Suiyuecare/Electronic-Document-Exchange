@@ -2,6 +2,81 @@
 -- This file never reads HR row contents and performs no writes.
 
 -- Exact original-scan maintenance gate: read-only permit and reviewed code.
+-- Six native120 assets: exact-source, role and trigger gate; read-only.
+do $approved_native120_scan_import_gate$
+declare
+  v_table regclass := pg_catalog.to_regclass('edoc.approved_native120_scan_import_batches');
+  v_backend text := 'edoc_backend';
+  v_denied text[] := array['anon','authenticated','service_role','authenticator'];
+  v_role text; v_expected record; v_proc record;
+begin
+  if v_table is null or not exists(select 1 from pg_catalog.pg_class where oid=v_table
+      and relrowsecurity and relforcerowsecurity and pg_catalog.pg_get_userbyid(relowner)='postgres') then
+    raise exception 'native120_scan_import_table_security_mismatch';
+  end if;
+  if not pg_catalog.has_table_privilege(v_backend,v_table,'SELECT')
+     or pg_catalog.has_table_privilege(v_backend,v_table,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+    raise exception 'native120_scan_import_table_grant_mismatch';
+  end if;
+  foreach v_role in array v_denied loop
+    if pg_catalog.has_table_privilege(v_role,v_table,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
+      raise exception 'native120_scan_import_browser_table_grant';
+    end if;
+  end loop;
+  if exists(select 1 from pg_catalog.pg_class c, lateral pg_catalog.aclexplode(
+      coalesce(c.relacl,pg_catalog.acldefault('r',c.relowner))) a where c.oid=v_table and a.grantee=0)
+     or (select count(*) from pg_catalog.pg_policy where polrelid=v_table)<>1
+     or not exists(select 1 from pg_catalog.pg_policy where polrelid=v_table and polcmd='r'
+       and polroles=array[pg_catalog.to_regrole(v_backend)::oid]
+       and pg_catalog.pg_get_expr(polqual,polrelid)='true' and polwithcheck is null) then
+    raise exception 'native120_scan_import_table_policy_mismatch';
+  end if;
+  if (select pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+       pg_catalog.string_agg(conname||':'||pg_catalog.pg_get_constraintdef(oid,true),'|' order by conname),'UTF8')),'hex')
+       from pg_catalog.pg_constraint where conrelid=v_table)
+     is distinct from '75e64288b64d1637b85dda9be1b70df1c03544610188d0ed4e26ffa403927e4e' then
+    raise exception 'native120_scan_import_exact_constraints_mismatch';
+  end if;
+  for v_expected in select * from (values
+    ('edoc.edoc_approved_native120_scan_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i',true,'1a8bdc48e527c9c75fe01ccd9900ef979a7c1493ad97b8d69f7ad1b25b87ff03'),
+    ('edoc.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i',true,'6c876ebf3bc4aad4a43c4e0e318b3a281ff658e5f5549f4c346217460a474b24'),
+    ('edoc.edoc_import_approved_native120_scan_file(text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text)',true,'v',true,'d3e8ca6085c256f3246b573425f4d7ad26583bbc408104cf08baa529d6e95454'),
+    ('edoc.edoc_create_company_seal_file_version(text,text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text,text,text)',true,'v',true,'185ed92981126047f1678d0793293461dbf55b767c606f1ffb7e4a48182f218b'),
+    ('edoc.edoc_set_current_company_seal_file(text,text,text,text)',true,'v',true,'299df406fef15e6d978621ad184ce40b7f882b5da606f5e95f28c4393325ded7'),
+    ('edoc.edoc_enforce_approved_native120_scan_file()',false,'v',false,'57035cba03195c3032754c24731497af1ed0848ca23b5af5504d76ee21060ec4'),
+    ('edoc.edoc_enforce_company_seal_position_dimensions()',false,'v',false,'23ab030e8010253e054a368f73945de0592c05eab5b6d6d358414c909a839b3d')
+  ) expected(signature,is_definer,volatility,backend_execute,body_sha256) loop
+    select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_expected.signature);
+    if not found then raise exception 'native120_scan_import_rpc_missing'; end if;
+    if v_proc.prosecdef is distinct from v_expected.is_definer
+       or v_proc.provolatile::text is distinct from v_expected.volatility
+       or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+       or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+       or pg_catalog.has_function_privilege(v_backend,v_proc.oid,'EXECUTE') is distinct from v_expected.backend_execute
+       or pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_proc.prosrc,'UTF8')),'hex')<>v_expected.body_sha256 then
+      raise exception 'native120_scan_import_rpc_security_or_source_mismatch';
+    end if;
+    if v_expected.is_definer and not coalesce(v_proc.proconfig @> array['lock_timeout=5s'],false) then
+      raise exception 'native120_scan_import_rpc_lock_timeout_missing';
+    end if;
+    foreach v_role in array v_denied loop
+      if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+        raise exception 'native120_scan_import_browser_rpc_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,
+        pg_catalog.acldefault('f',v_proc.proowner))) a where a.grantee=0 and a.privilege_type='EXECUTE') then
+      raise exception 'native120_scan_import_public_rpc_grant';
+    end if;
+  end loop;
+  if not exists(select 1 from pg_catalog.pg_trigger where tgrelid='edoc.company_seal_files'::regclass
+       and tgname='edoc_approved_native120_scan_file' and not tgisinternal and tgenabled='O' and tgtype=23
+       and tgfoid='edoc.edoc_enforce_approved_native120_scan_file()'::regprocedure and tgnargs=0 and tgattr=''::int2vector) then
+    raise exception 'native120_scan_import_attestation_trigger_mismatch';
+  end if;
+end;
+$approved_native120_scan_import_gate$;
+
 do $approved_original_scan_import_gate$
 declare
   v_table regclass := pg_catalog.to_regclass('edoc.approved_original_scan_import_batches');
@@ -34,7 +109,7 @@ begin
   end if;
   for v_expected in select * from (values
     ('edoc.edoc_approved_original_scan_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i','54e012d678441ef84bd399625a6d7895d011fe4e328dc2d1093f09e9197528dd'),
-    ('edoc.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i','45c41cc878273f4452dcef0c50bd99635cc3e68b18e84a170ee795c6e184c691'),
+    ('edoc.edoc_company_seal_file_dimensions_are_valid(text,text,text,text,text,integer,integer,numeric,numeric,numeric,text,boolean)',false,'i','6c876ebf3bc4aad4a43c4e0e318b3a281ff658e5f5549f4c346217460a474b24'),
     ('edoc.edoc_import_approved_original_scan_file(text,text,text,text,text,bigint,text,integer,integer,numeric,numeric,numeric,text,text,text,text)',true,'v','b0639ceadd5765b95d33bfd64d8cf9c0ee4b2f1e57d3a7a64b7b5b76f3d283ed')
   ) expected(signature,is_definer,volatility,body_sha256) loop
     select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_expected.signature);
@@ -337,7 +412,7 @@ checks(check_name, passed, observed) as (
       (select count(*) from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
-         and class_row.relkind in ('r','p','v','m')) = 98,
+         and class_row.relkind in ('r','p','v','m')) = 99,
       (select count(*)::text from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
@@ -345,7 +420,11 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 73
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 74
+      and exists(select 1 from edoc_private.shared_project_migration_ledger
+        where file_name='20261013125111_approved_native120_scan_exception.sql'
+          and source_sha256='6aabdb1587e82eb2e6c8124e1b18157c296662e84f58c10497b400585dd216c9'
+          and transformed_sha256='68e48b22e1374218d6351c6e9454eb7a8ffd30e049fe6440cef8e612e8a11a19')
       and exists(select 1 from edoc_private.shared_project_migration_ledger
         where file_name='20261013070841_approved_original_scan_exception.sql'
           and source_sha256='ce8c72275232d689afdeee7376a2d69ce6fd67282cfdfd4477da8bb9d2205565'

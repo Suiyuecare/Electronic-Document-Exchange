@@ -1787,7 +1787,7 @@ function companySealUsesManualRectangle(sealOrProfile) {
   const profile = sealOrProfile?.properties || {};
   const policy = sealOrProfile?.current_file?.dimension_policy_version || sealOrProfile?.currentFile?.dimension_policy_version
     || profile.dimensionPolicyVersion || profile.dimension_policy_version || sealOrProfile?.dimension_policy_version || "";
-  return ["official-seal-v1-calibrated", "continuous-seal-v1-calibrated", "original-scan-200dpi-20260914-v1"].includes(policy);
+  return ["official-seal-v1-calibrated", "continuous-seal-v1-calibrated", "original-scan-200dpi-20260914-v1", "native-scan-120dpi-20261013-v1"].includes(policy);
 }
 
 function companySealSizeType(sealOrSizeType, dimensionHintPt = 0) {
@@ -26651,29 +26651,34 @@ function simpleSealFileSize(bytes = 0) {
 
 async function approvedOriginalSealScan(file, records, companyId, category, sizeType) {
   if (!file || String(file.type || "").toLowerCase() !== "image/png") return null;
+  const sourceProfiles = {
+    "original-scan-200dpi-20260914-v1": { source: "95d90878c71f0efd874de4b0e812daebd536ec23435bb3a5ffb0dde9ed604b2e", dpi: 200, roundingMm: 0.000001 },
+    "native-scan-120dpi-20261013-v1": { source: "4426fcf11ca7cd45ed8d2e942b137c7f5f4ac6efc585ad87078faaadf941487c", dpi: 120, roundingMm: 0.000500000001 },
+  };
   const candidates = records.filter((seal) => seal.company_id === companyId && seal.seal_category === category
     && seal.seal_size_type === sizeType && seal.is_active !== false && seal.is_active !== 0)
     .flatMap((seal) => (Array.isArray(seal.approved_original_scans) ? seal.approved_original_scans : [])
       .filter((scan) => scan.seal_id === seal.id && scan.company_id === companyId
         && scan.seal_category === category && scan.seal_size_type === sizeType
-        && scan.dimension_policy_version === "original-scan-200dpi-20260914-v1"
-        && scan.source_pdf_sha256 === "95d90878c71f0efd874de4b0e812daebd536ec23435bb3a5ffb0dde9ed604b2e"
-        && scan.calibration_dpi === 200).map((scan) => ({ seal, scan })));
+        && Object.prototype.hasOwnProperty.call(sourceProfiles, scan.dimension_policy_version)
+        && scan.source_pdf_sha256 === sourceProfiles[scan.dimension_policy_version].source
+        && scan.calibration_dpi === sourceProfiles[scan.dimension_policy_version].dpi).map((scan) => ({ seal, scan })));
   if (!candidates.length) return null;
   const digest = (await hashBlob(file)).toLowerCase();
   const match = candidates.find(({ scan }) => scan.png_sha256 === digest);
   if (!match) return null;
   const dimensions = await decodeCompanySealImageDimensions(file);
   const widthMm = Number(match.scan.render_width_mm), heightMm = Number(match.scan.render_height_mm);
+  const sourceProfile = sourceProfiles[match.scan.dimension_policy_version];
   if (dimensions.width !== match.scan.pixel_width || dimensions.height !== match.scan.pixel_height
     || ![widthMm, heightMm].every((value) => Number.isFinite(value) && value >= 1 && value <= 200)
-    || Math.abs(widthMm - dimensions.width * 25.4 / 200) > 0.000001
-    || Math.abs(heightMm - dimensions.height * 25.4 / 200) > 0.000001) {
+    || Math.abs(widthMm - dimensions.width * 25.4 / sourceProfile.dpi) > sourceProfile.roundingMm
+    || Math.abs(heightMm - dimensions.height * 25.4 / sourceProfile.dpi) > sourceProfile.roundingMm) {
     throw new Error("原始印章檔與核准尺寸不一致；尚未上傳。");
   }
   return { ok: true, seal: match.seal, sealSizeType: sizeType, widthMm, heightMm,
     profile: { ...match.seal, dimension_policy_version: match.scan.dimension_policy_version },
-    message: `核准原始掃描 · ${formatCompanySealMeasurement(widthMm)} × ${formatCompanySealMeasurement(heightMm)} mm · 200 DPI，原圖不放大。` };
+    message: `核准原始掃描 · ${formatCompanySealMeasurement(widthMm)} × ${formatCompanySealMeasurement(heightMm)} mm · ${sourceProfile.dpi} DPI，原圖不放大。` };
 }
 
 async function renderSimpleSealFileSummary() {
