@@ -3285,25 +3285,34 @@ function refreshWorkspaceSupplementalData(target) {
   const scope = frontendSessionScope();
   const token = String(authState?.token || "");
   const previous = workspaceSupplementalReads.get(target);
-  if (previous?.scope === scope && previous.token === token && previous.pending.length) return previous.promise;
-  const entry = { scope, token, pending: ["通知"], errors: [], promise: null };
-  if (["electronicSeal", "contractSeal"].includes(target)) entry.pending.push("案件清單");
+  const reusePending = previous?.scope === scope && previous.token === token && previous.pending.length > 0;
+  if (reusePending && !previous.errors.length) return previous.promise;
+  const labels = reusePending ? [...previous.errors]
+    : ["通知", ...(["electronicSeal", "contractSeal"].includes(target) ? ["案件清單"] : [])];
+  const entry = reusePending ? previous : { scope, token, pending: [], errors: [], requests: new Map(), promise: null };
+  // Retry only the failed sources immediately; another source's slow request
+  // stays shared instead of postponing retry or issuing duplicate reads.
+  entry.errors = entry.errors.filter((label) => !labels.includes(label));
+  entry.pending = [...new Set([...entry.pending, ...labels])];
   workspaceSupplementalReads.set(target, entry);
   const current = () => workspaceSupplementalReads.get(target) === entry && scope === frontendSessionScope()
     && token === String(authState?.token || "") && hasAuthenticatedBackendSession();
   const read = async (label, action) => {
-    try { if (await action() === false) throw new Error("supplemental_read_failed"); }
+    try { if (await Promise.resolve().then(action) === false) throw new Error("supplemental_read_failed"); }
     catch (_error) { if (current()) entry.errors.push(label); }
     finally {
-      if (current()) { entry.pending = entry.pending.filter((name) => name !== label); renderWorkspaceLoadStatus(); }
+      if (current()) {
+        entry.pending = entry.pending.filter((name) => name !== label);
+        entry.requests.delete(label);
+        renderWorkspaceLoadStatus();
+      }
     }
   };
-  entry.promise = Promise.all([
-    read("通知", () => syncNotificationsFromBackend(true, { throwOnError: true })),
-    ...(["electronicSeal", "contractSeal"].includes(target) ? [read("案件清單", () => loadOfficialWorkflow(
-      officialWorkflowScope === "new" ? "all" : officialWorkflowScope,
-      { ...(officialWorkflowPage.query || {}), throwOnError: true }))] : [])
-  ]);
+  labels.forEach((label) => entry.requests.set(label, read(label, label === "通知"
+    ? () => syncNotificationsFromBackend(true, { throwOnError: true })
+    : () => loadOfficialWorkflow(officialWorkflowScope === "new" ? "all" : officialWorkflowScope,
+      { ...(officialWorkflowPage.query || {}), throwOnError: true }))));
+  entry.promise = Promise.all([...entry.requests.values()]);
   renderWorkspaceLoadStatus();
   return entry.promise;
 }

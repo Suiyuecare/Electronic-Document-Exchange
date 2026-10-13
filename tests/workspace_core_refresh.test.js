@@ -24,6 +24,7 @@ function harness() {
 }
 test('30-second supplemental reads do not block actual editor-core completion or overwrite input', async () => {
   const c = harness(); const first = c.refreshCurrentWorkspace(), same = c.refreshCurrentWorkspace();
+  await tick();
   assert.deepEqual(c.calls.map(x => x.name), ['loadRouteBackendData', 'syncNotificationsFromBackend', 'loadOfficialWorkflow']);
   assert.equal(c.nodes['#headerRefreshBtn'].disabled, true);
   c.calls[0].resolve(true); assert.equal(await first, true); assert.equal(await same, true);
@@ -37,13 +38,14 @@ test('30-second supplemental reads do not block actual editor-core completion or
 });
 test('supplemental error names its own source and leaves successful core catalog usable', async () => {
   const c = harness(), refresh = c.refreshCurrentWorkspace();
+  await tick();
   c.calls[0].resolve(true); c.calls[1].reject(Error('synthetic notification failure')); c.calls[2].resolve(); await refresh; await tick();
   assert.equal(c.routeBackendDataLoaded.has('electronicSeal'), true); assert.equal(c.routeBackendDataErrors.size, 0);
   assert.match(c.nodes['#workspaceLoadLabel'].textContent, /通知更新失敗/); assert.doesNotMatch(c.nodes['#workspaceLoadLabel'].textContent, /印章|權限/);
   assert.equal(c.nodes['#workspaceLoadRetryBtn'].hidden, false);
 });
 test('manual retry coalesces pending supplements and preserves core source-specific failures', async () => {
-  const c = harness(), first = c.refreshCurrentWorkspace(); c.calls[0].resolve(true); await first;
+  const c = harness(), first = c.refreshCurrentWorkspace(); await tick(); c.calls[0].resolve(true); await first;
   const retry = c.refreshCurrentWorkspace(); assert.equal(c.calls.length, 4);
   c.routeBackendDataErrors.set('electronicSeal', ['簽核設定']); c.calls[3].resolve(false); assert.equal(await retry, false);
   assert.deepEqual(Array.from(c.routeBackendDataErrors.get('electronicSeal')), ['簽核設定']);
@@ -51,9 +53,21 @@ test('manual retry coalesces pending supplements and preserves core source-speci
   c.calls[1].resolve(); c.calls[2].resolve(); await tick();
 });
 test('late supplemental response from previous session never displays private status in next session', async () => {
-  const c = harness(); const pending = c.refreshWorkspaceSupplementalData('electronicSeal');
+  const c = harness(); const pending = c.refreshWorkspaceSupplementalData('electronicSeal'); await tick();
   c.authState.token = 'new-session'; c.renderWorkspaceLoadStatus();
   assert.equal(c.nodes['#workspaceLoadStatus'].hidden, true);
   c.calls[0].reject(Error('old session')); c.calls[1].resolve(); await pending;
   assert.equal(c.nodes['#workspaceLoadStatus'].hidden, true); assert.equal(c.workspaceSupplementalReads.get('electronicSeal').errors.length, 0);
+});
+test('failed notification retries immediately while a slow case-list request remains shared', async () => {
+  const c = harness(), initial = c.refreshCurrentWorkspace(); await tick();
+  c.calls[0].resolve(true); c.calls[1].reject(Error('notification offline')); await initial; await tick();
+  assert.match(c.nodes['#workspaceLoadLabel'].textContent, /通知更新失敗/);
+  assert.equal(c.nodes['#workspaceLoadRetryBtn'].hidden, false);
+  const retry = c.refreshCurrentWorkspace(); await tick();
+  assert.deepEqual(c.calls.map(x => x.name), ['loadRouteBackendData', 'syncNotificationsFromBackend', 'loadOfficialWorkflow', 'loadRouteBackendData', 'syncNotificationsFromBackend']);
+  c.calls[3].resolve(true); c.calls[4].resolve(); await retry; await tick();
+  assert.match(c.nodes['#workspaceLoadLabel'].textContent, /案件清單背景更新中/);
+  assert.equal(c.nodes['#workspaceLoadRetryBtn'].hidden, true);
+  c.calls[2].resolve(); await tick(); assert.equal(c.nodes['#workspaceLoadStatus'].hidden, true);
 });
