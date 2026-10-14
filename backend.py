@@ -4464,14 +4464,17 @@ def _consume_http_error(exc: urllib.error.HTTPError, *, max_bytes: int = 4096) -
 def _safe_http_error_contract(
     exc: urllib.error.HTTPError,
     prefix: str,
+    *,
+    submission_rpc: bool = False,
 ) -> Tuple[str, str]:
-    """Return an opaque marker plus an allowlisted business-conflict code.
+    """Return an opaque marker plus an allowlisted machine error code.
 
     PostgREST forwards PostgreSQL ``message``, ``detail`` and ``hint`` fields.
     Those fields may contain document text or personal data, so callers may
     only receive a message when the HTTP status, provider code and exact
     immutable business code all match this service's PT409/legacy-23505
-    conflict contract.
+    conflict contract. The submission RPC additionally allowlists its exact
+    400/22023 rollback code when the caller explicitly identifies that route.
     """
     raw = _consume_http_error(exc)
     provider_code = ""
@@ -4491,6 +4494,15 @@ def _safe_http_error_contract(
                 and message in POSTGREST_23505_BUSINESS_CONFLICT_CODES
             ):
                 business_conflict = message
+        elif (
+            submission_rpc
+            and int(getattr(exc, "code", 0) or 0) == 400
+            and provider_code == "22023"
+            and message == "official_submission_invalid_payload"
+        ):
+            # This exact atomic-RPC failure guarantees rollback. Never pass
+            # arbitrary provider messages, details or row values to callers.
+            business_conflict = "official_submission_invalid_payload"
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
         # PostgREST error bodies can be much larger than the diagnostic read
         # limit. Extract only the bounded machine-code field from the prefix;
@@ -31198,6 +31210,14 @@ class SupabaseConfigurationError(RuntimeError):
     """Raised when Supabase mode is enabled but required runtime secrets are absent."""
 
 
+class OfficialSubmissionValidationError(RuntimeError):
+    """The atomic submission RPC rejected its payload without committing."""
+
+
+class OfficialSubmissionOutcomeUnknownError(RuntimeError):
+    """Submission may have committed; never invite a blind retry."""
+
+
 def provider_event_row(event: Dict[str, Any], document_id: str = "", signature_id: str = "") -> Dict[str, Any]:
     return {
         "id": event.get("id") or f"SPE-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
@@ -34963,7 +34983,13 @@ def supabase_request(method: str, path: str, body: Any = None, prefer: str = "re
         marker, business_conflict = _safe_http_error_contract(
             exc,
             "supabase_request_failed",
+            submission_rpc=(
+                method.upper() == "POST"
+                and path.lstrip("/") == "rpc/edoc_commit_official_document_submission"
+            ),
         )
+        if business_conflict == "official_submission_invalid_payload":
+            raise OfficialSubmissionValidationError("official_submission_validation_failed") from None
         if business_conflict:
             raise ValueError(business_conflict) from None
         raise RuntimeError(marker) from None
@@ -38226,6 +38252,7 @@ def supabase_create_official_workflow_steps(
             "comment": "",
             "approved_at": "",
             "review_started_at": None,
+            "decision_evidence_json": {},
             "created_at": timestamp,
             "updated_at": timestamp,
         })
@@ -38319,6 +38346,7 @@ def supabase_plan_official_workflow_submission(
             "comment": "",
             "approved_at": "",
             "review_started_at": None,
+            "decision_evidence_json": {},
             "created_at": timestamp,
             "updated_at": timestamp,
         })
@@ -41429,7 +41457,7 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
             if state == "conflict":
                 raise ValueError("official_submission_operation_conflict") from None
             if state == "unknown":
-                raise RuntimeError(
+                raise OfficialSubmissionOutcomeUnknownError(
                     "official_document_submit_commit_state_unknown"
                 ) from submit_error
             raise
@@ -51080,6 +51108,20 @@ class Handler(SimpleHTTPRequestHandler):
                 },
                 503,
             )
+        except OfficialSubmissionValidationError:
+            self.send_json({
+                "error": "official_submission_validation_failed",
+                "detail": "official_submission_validation_failed",
+                "retryable": False,
+                "submissionStatus": "not_submitted",
+            }, 500)
+        except OfficialSubmissionOutcomeUnknownError:
+            self.send_json({
+                "error": "official_document_submit_commit_state_unknown",
+                "detail": "official_document_submit_commit_state_unknown",
+                "retryable": False,
+                "submissionStatus": "unknown",
+            }, 503)
         except Exception as exc:
             internal_detail = redact_text(str(exc))[:500]
             # send_json emits a correlated, allowlisted event without upstream

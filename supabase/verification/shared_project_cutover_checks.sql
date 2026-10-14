@@ -420,7 +420,11 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 76
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 77
+      and exists(select 1 from edoc_private.shared_project_migration_ledger
+        where file_name='20261014031923_atomic_submission_step_evidence_defaults.sql'
+          and source_sha256='56d6f33e1ddfa2ef6107e6e15e97a93953fd234ea0d1961ac0d42aa404d57450'
+          and transformed_sha256='0ee3aa8966ec19a732d0aa89dac4ca9b94f26fa907806911a31a2132477bd578')
       and exists(select 1 from edoc_private.shared_project_migration_ledger
         where file_name='20261013172206_workspace_drafts_catalog.sql'
           and source_sha256='59fdfd9531323299db19b67822e0108cc883f45805ab69c0d602cc3b01e353bc'
@@ -452,6 +456,24 @@ checks(check_name, passed, observed) as (
           and source_sha256='40efe371be67265a846c1a67c8c9a7ff874beb14541c767fcc06a31c89867ad2'
           and transformed_sha256='ad0c1917f457b30815ee0d42e5be30c051518ecca824be0eb83b16a7aa3e8425'),
       (select count(*)::text from edoc_private.shared_project_migration_ledger)
+    ),
+    (
+      'atomic_submission_step_evidence_contract',
+      exists (
+        select 1 from pg_catalog.pg_proc function_row
+        where function_row.oid = pg_catalog.to_regprocedure('edoc.edoc_commit_official_document_submission(jsonb)')
+          and pg_catalog.strpos(function_row.prosrc, 'official_submission_step_evidence_defaults_v1') > 0
+          and pg_catalog.strpos(function_row.prosrc, 'insert into edoc.official_document_approval_steps select (v_step).*;') = 0
+          and pg_catalog.strpos(function_row.prosrc, 'coalesce(v_step.decision_evidence_json, ''{}''::jsonb)') > 0
+      )
+      and exists (
+        select 1 from pg_catalog.pg_attribute column_row
+        where column_row.attrelid = pg_catalog.to_regclass('edoc.official_document_approval_steps')
+          and column_row.attname = 'decision_evidence_json'
+          and column_row.atttypid = 'jsonb'::pg_catalog.regtype
+          and column_row.attnotnull and not column_row.attisdropped
+      ),
+      'pending-step metadata uses explicit columns; NOT NULL and evidence validation retained'
     ),
     (
       'editor_pdf_preflight_status_guard',

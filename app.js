@@ -22907,6 +22907,8 @@ async function backendAuthRequestWithTransientRetry(path, options = {}, retryOpt
 function friendlyBackendErrorMessage(message = "", status = 0) {
   const text = String(message || "");
   const map = {
+    official_submission_validation_failed: "尚未送出：系統送簽資料驗證失敗，申請內容與文件已保留。請通知系統管理員，不需重新上傳。",
+    official_document_submit_commit_state_unknown: "尚未確認送簽結果。請先到簽核紀錄查看案件狀態，勿重複送出；目前畫面內容仍保留。",
     demo_login_disabled: "正式站已關閉測試帳號，請使用公司正式帳號或 Logging Portal 登入。",
     supabase_not_configured: "正式站資料庫尚未完成設定，請 IT 補齊 eDoc Supabase production 環境變數後再登入。",
     supabase_runtime_env_missing: "正式站資料庫尚未完成設定，請 IT 補齊 eDoc Supabase production 環境變數後再登入。",
@@ -34168,6 +34170,11 @@ async function submitUploadedSealApplication() {
       renderUploadedSealApplicationSaveStatus();
     }
     addSealAudit("PDF V2 送簽失敗", error.message);
+    const submissionStatus = document.querySelector("#uploadedEditorPreflightStatus");
+    if (submissionStatus) {
+      submissionStatus.setAttribute("role", "status");
+      submissionStatus.textContent = error.message || "送簽未完成，目前內容仍保留。請查看簽核紀錄確認狀態。";
+    }
     showToast(`送簽失敗：${error.message}`);
   } finally {
     if (isCurrent()) {
