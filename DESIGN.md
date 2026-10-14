@@ -111,6 +111,22 @@ not destroy the user's current action focus or rebuild unchanged controls.
 
 ### Forms and overlays
 
+The approved October editor update puts company before department and uses one
+shared searchable, anchored Select presentation (Tom Select 2.6.2), retaining
+native field IDs and data contracts. Popups normally open downward, flip only
+for viewport collision, and remain inside an active dialog's focus boundary.
+They reuse Finance tokens and expose disabled, validation and selected states.
+The dedicated 草稿 sidebar count replaces compose-page recovery clutter;
+approval uses four concise primary tabs with secondary operational filters.
+
+The PDF remains the editor's dominant surface. Short toolbar actions, a visible
+draft-save action and conditional properties replace long instructions.
+Applicant seal positions are exact-size, labelled dashed geometry, not true
+seal images; seam placeholders show their actual visible strip. Images and text
+resize proportionally. New seams use only the right edge with a 10mm vertical
+safe margin and independent group height adjustments. These are approved
+workflow changes, not changes to existing locked approval artifacts.
+
 Preserve application prerequisites, file size/page limits, A4 conversion
 consent and the existing conflict/review workflow. Do not add duplicate forms.
 Compose and application autosave waits for committed IME text. The existing

@@ -1,0 +1,68 @@
+// Disposable browser DOM only: no real accounts, documents or hosted requests.
+import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
+const require = createRequire(`${process.env.HOME}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/package.json`);
+const { chromium } = require('playwright');
+const output = resolve(process.argv[2] || '../artifacts/workspace-select-20261014');
+await mkdir(output, { recursive: true });
+const browser = await chromium.launch({ executablePath: process.env.EDOC_TEST_BROWSER_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
+const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+const errors = []; page.on('pageerror', error => errors.push(error.message));
+const checks = [];
+function check(name, ok) { checks.push({ name, passed: Boolean(ok) }); if (!ok) throw new Error(name); }
+try {
+  await page.setContent(`<html lang="zh-Hant"><body><main class="app-shell" style="max-width:600px;margin:24px"><form id="testForm"><label>用印公司<select id="company" required><option value="">請選擇公司</option><option value="one" data-company="original">歲悅股份有限公司</option><option value="two">愛無限整合服務有限公司附設新北市私立愛無限居家長照機構</option><option value="denied" disabled>不可使用單位</option></select></label><label>部門<select id="department"><option value="a">行政部</option><option value="b">總務課</option></select></label><button type="reset">重設</button></form></main></body></html>`);
+  for (const file of ['styles.css', 'vendor/tom-select/tom-select.default.min.css', 'workspace-select.css']) await page.addStyleTag({ path: resolve(file) });
+  for (const file of ['vendor/tom-select/tom-select.complete.min.js', 'workspace-select.js']) await page.addScriptTag({ path: resolve(file) });
+  await page.waitForFunction(() => document.querySelector('#company').tomselect?.wrapper.classList.contains('edoc-select'));
+  await page.evaluate(() => { window.changes = 0; document.querySelector('#company').addEventListener('change', () => window.changes++); });
+  const input = page.locator('#company-ts-control');
+  await input.focus(); await page.keyboard.press('ArrowDown');
+  await page.waitForFunction(() => document.querySelector('#company').tomselect.isOpen);
+  check('anchored below native control', await page.evaluate(() => { const t = document.querySelector('#company').tomselect; const a=t.control.getBoundingClientRect(), b=t.dropdown.getBoundingClientRect(); return b.top >= a.bottom && Math.abs(a.left-b.left) < 1 && Math.abs(a.width-b.width) < 1; }));
+  await input.fill('愛無限'); await page.keyboard.press('Enter');
+  check('search commits exact native ID once', await page.evaluate(() => company.value === 'two' && window.changes === 1));
+  check('native order and metadata retained', await page.evaluate(() => [...company.options].map(x=>x.value).join(',') === ',one,two,denied' && company.options[1].dataset.company === 'original'));
+  await page.evaluate(() => { company.value = 'one'; });
+  await page.waitForFunction(() => company.tomselect.getValue() === 'one');
+  check('programmatic value sync emits no business event', await page.evaluate(() => changes === 1));
+  await page.evaluate(() => { company.innerHTML='<option value="">請選擇公司</option><option value="new" data-company="new">新單位</option>'; company.value='new'; });
+  await page.waitForFunction(() => company.tomselect.getValue()==='new' && !company.tomselect.options.one);
+  check('replaced catalog removes stale options and preserves native dataset', await page.evaluate(() => company.selectedOptions[0].dataset.company === 'new'));
+  await page.evaluate(() => { company.disabled = true; });
+  await page.waitForFunction(() => company.tomselect.isDisabled);
+  check('permission-disabled control closes dropdown', await page.evaluate(() => !company.tomselect.isOpen && company.tomselect.control_input.disabled));
+  await page.evaluate(() => { company.disabled=false; company.setAttribute('aria-invalid','true'); company.setAttribute('aria-describedby','validation'); });
+  await page.waitForFunction(() => !company.tomselect.isDisabled && company.tomselect.control_input.getAttribute('aria-describedby')==='validation');
+  check('visible control exposes validation', await input.getAttribute('aria-invalid') === 'true');
+  await page.evaluate(() => company.focus());
+  check('existing focus helper reaches authored control', await input.evaluate(el => document.activeElement===el));
+  await input.fill('新');
+  await input.dispatchEvent('compositionstart');
+  await input.dispatchEvent('keydown', { key:'Enter', isComposing:true, bubbles:true });
+  check('IME Enter does not select/close', await page.evaluate(() => company.tomselect.isOpen && changes===1));
+  await input.dispatchEvent('compositionend'); await page.keyboard.press('Escape');
+  check('Escape closes without committing search', await page.evaluate(() => !company.tomselect.isOpen && company.value==='new' && changes===1));
+  await page.evaluate(() => testForm.reset());
+  await page.waitForFunction(() => company.tomselect.getValue()==='');
+  check('form reset synchronized', true);
+  await page.setViewportSize({ width:390, height:844 });
+  await input.focus(); await page.keyboard.press('ArrowDown');
+  check('phone dropdown remains inside viewport', await page.evaluate(() => { const r=company.tomselect.dropdown.getBoundingClientRect(); return r.left>=0 && r.right<=innerWidth && r.width>200; }));
+  await page.screenshot({ path: `${output}/phone-select.png`, fullPage:true });
+  await page.evaluate(() => { company.tomselect.close(); document.querySelector('main').style.marginTop='650px'; });
+  await input.focus(); await page.keyboard.press('ArrowDown');
+  check('viewport collision flips upwards when necessary', await page.evaluate(() => { const t=company.tomselect, a=t.control.getBoundingClientRect(), b=t.dropdown.getBoundingClientRect(); return b.bottom<=a.top || b.bottom<=innerHeight; }));
+  await page.setViewportSize({ width:1440,height:1000 });
+  await page.evaluate(() => { company.tomselect.close(); document.querySelector('main').style.marginTop='24px'; document.body.insertAdjacentHTML('beforeend', '<div role="dialog" aria-modal="true"><label>處理方式<select id="modalSelect"><option value="a">退回上一關</option><option value="b">不通過</option></select></label></div>'); });
+  await page.waitForFunction(() => document.querySelector('#modalSelect').tomselect);
+  check('dialog dropdown stays inside modal focus boundary', await page.evaluate(() => modalSelect.tomselect.dropdown.parentElement.getAttribute('role')==='dialog'));
+  await page.evaluate(() => document.querySelector('[role="dialog"]').remove());
+  await page.waitForFunction(() => !document.querySelector('#modalSelect-ts-dropdown'));
+  check('removed controls clean up portal', true);
+  check('no browser exceptions', errors.length===0);
+} catch (error) { checks.push({ name:'failure',passed:false,error:String(error) }); }
+finally { await writeFile(`${output}/report.json`, JSON.stringify({ environment:'isolated_dom_browser', productionVerified:false, checks, errors }, null, 2)); await browser.close(); }
+console.log(JSON.stringify({ checks:checks.length, passed:checks.every(x=>x.passed), output }));
+if (checks.some(x=>!x.passed)) process.exitCode=1;

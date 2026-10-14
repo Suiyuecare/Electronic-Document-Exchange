@@ -142,7 +142,7 @@ APP_SECRET=<server-only>
 
 `EDOC_STORAGE_PUBLISHABLE_KEY` 只用於 Storage 的公開 client identification；上傳授權仍須由後端核發。共享模式的 `EDOC_STORAGE_SERVICE_ROLE_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 是同一把 `edoc_backend` custom secret，且只存在 server-side environment；獨立 project 模式仍必須使用各 project 自己的 server key 並分開輪替。
 
-PDF Editor 的 signed TUS 只可寫入 `editor/` 暫存路徑。Finalize 完成大小、SHA-256 與 PDF／圖片解析後，後端必須把已驗證 bytes 以 service role 建立在 `editor-final/<document>/<asset>/` 不可變路徑；圖片另須通過掃毒，來源 PDF／匯入 PDF 則須通過結構預檢並明確記錄為 `not_scanned`。migration `20260827194500_promote_editor_tus_staging_to_immutable.sql` 會在同一筆資料庫交易中將 asset 與 file object 綁到正式路徑，成功後才清除暫存。正式驗收不得把短效 Storage token 宣稱為密碼學上的一次性 token，而要用不同內容重播，確認正式檔案的路徑、hash 與下載內容完全不變。
+PDF Editor 的 signed TUS 只可寫入 `editor/` 暫存路徑。Finalize 完成大小、SHA-256 與 PDF／圖片解析後，後端必須把已驗證 bytes 以專用後端角色建立在 `editor-final/<document>/<asset>/` 不可變路徑；來源 PDF／匯入 PDF 與電子用印編輯器 PNG／JPEG 須通過結構預檢並明確記錄為 `not_scanned`，不執行病毒特徵掃描。一般附件與印章登錄的掃描規則不變。migration `20260827194500_promote_editor_tus_staging_to_immutable.sql` 會在同一筆資料庫交易中將 asset 與 file object 綁到正式路徑，成功後才清除暫存；圖片例外須先套用 `20261013171937_editor_images_skip_av_preflight_required.sql` 或相對應的 shared-schema forward，否則資料庫必須拒絕 finalize。正式驗收不得把短效 Storage token 宣稱為密碼學上的一次性 token，而要用不同內容重播，確認正式檔案的路徑、hash 與下載內容完全不變。
 
 正式通知的最低可上線基準是站內通知。Email 與 LINE 為選配，未提供並驗證下列環境變數時必須保持 disabled/pending，不可放假值或把「待驗證」視為成功：
 
@@ -229,6 +229,30 @@ vercel env add APP_SECRET production --sensitive --scope "$VERCEL_SCOPE"
 若未來使用 Pro／Enterprise 且 SLA 需要 15 分鐘頻率，再經容量測試與變更核准調整。設定 `CRON_SECRET` 後，Vercel Cron 會以 `Authorization: Bearer <CRON_SECRET>` 呼叫，系統必須驗證該 header。
 
 ## 5. 部署與上線後檢查
+
+### 單人 owner 核准流程（2026-10-14 核准調整）
+
+經系統 owner 明確同意，GitHub `main` 的
+`required_approving_review_count` 改為 `0`，不再要求第二人的 GitHub
+approval。這只移除第二人 review 門檻，不取消 PR、owner 發布核准、CI
+或其餘分支保護；不得冒用他人身分建立 review。
+
+1. 每次變更仍以 PR 留下範圍、驗收與回復方式，由 owner 核准發布範圍，
+   並在發布紀錄綁定該次 PR 與精確 commit。owner 可以是提交者；代理
+   執行者只能依 owner 已核准的範圍操作，不得自行宣稱取得核准。
+2. `Validate backend and frontend` 與 `Rebuild Supabase from migrations`
+   兩項 GitHub Actions checks 都必須在待合併版本成功。正式發布仍只採
+   已通過這兩項 CI 的核准 `main` commit；合併產生新 SHA 時，要確認
+   該精確 `main` SHA 的 CI，不沿用其他版本結果。
+3. `docs/release-protection-policy.json` 是本機政策，不是遠端已套用的
+   證據。發布前須讀回 GitHub 分支保護，確認 `strict=true`、
+   `enforce_admins=true`、兩項 checks 的來源 app 固定為 `15368`、
+   `allow_force_pushes=false`、`allow_deletions=false`、
+   `required_conversation_resolution=true`，其餘保護維持不變。
+   政策或 checks 不符時停止，不直接推送 `main`、不使用管理者 bypass。
+4. owner 核准及 CI 通過後，仍須完成本手冊的備份、資料庫 cutover 與
+   部署驗證。需要 staged build 的變更只 promotion 已驗證的精確 build；
+   測試通過或修改本機政策檔本身都不代表已正式上線。
 
 ```bash
 python3 -m py_compile backend.py api/index.py

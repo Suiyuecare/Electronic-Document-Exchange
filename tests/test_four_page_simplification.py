@@ -24,7 +24,7 @@ class FourPageSimplificationTests(unittest.TestCase):
         cls.css = (ROOT / "styles.css").read_text()
 
     def run_js(self, names, script):
-        source = "\n".join(function(self.js, name) for name in names)
+        source = "const officialHandoverController=null,officialHandoverFeatureEnabled=()=>false;\n" + "\n".join(function(self.js, name) for name in names)
         result = subprocess.run(["node", "-e", "const assert=require('node:assert/strict');\n" + source + "\n" + script], capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -118,7 +118,8 @@ const list=node(),detail=node(),full=node(),panel=node(),page=node(),layout=node
 const nodes={'#approvalLogList':list,'#approvalLogDetail':detail,'#approvalLogOpenWorkflowBtn':full,'#approvalLogCount':node(),'#approvalLogScope':node(),'#approvalLogDetailPanel':panel,'.approval-log-layout':layout,'#approvalLogBackBtn':back,'#approvalLog':page};
 const document={querySelector:s=>nodes[s]||null,querySelectorAll:()=>[]};
 const renderStableWorkflowMarkup=(host,html)=>{host.innerHTML=html},bindWorkflowActionOnce=()=>{};
-let selectedWorkflowTaskId='case1',approvalLogFilter='my_pending';
+let selectedWorkflowTaskId='case1',approvalLogFilter='pending';
+const normalizeApprovalProgressFilter=()=>{};
 const officialWorkflowPage={loading:false,error:false,hasMore:false};const hasAuthenticatedBackendSession=()=>true;
 const official={id:'case1',current_status:'pending',current_step:'manager',can_act:true,approval_steps:[{id:'step1',step_key:'manager',status:'pending'}]};
 let records=[{task:{id:'case1',title:'Synthetic',role:'Manager',step:'Manager',status:'待簽核'},doc:{subject:'Synthetic'},steps:[],officialDocument:official,requester:'Applicant'}];

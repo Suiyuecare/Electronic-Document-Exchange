@@ -588,6 +588,9 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "finance_organization_units",
             "official_document_rejection_jobs",
             "portal_handoff_nonces",
+            "company_seal_policies",
+            "approved_original_scan_import_batches",
+            "approved_native120_scan_import_batches",
         }
         select_block = re.search(
             r"grant select on table\s+(.*?)\s+to service_role;",
@@ -601,7 +604,13 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             for table in backend_tables
             if f"grant select, insert, update on table public.{table}" in EDITOR_IMMUTABLE_PROMOTION.read_text(encoding="utf-8").lower()
         }
-        self.assertEqual(granted_select | later_select, backend_tables | extra_tables)
+        later_select.add("company_seal_policies")
+        approved_scan_select = {"approved_original_scan_import_batches", "approved_native120_scan_import_batches"}
+        approved_scan_sql = (MIGRATIONS / "20261013070841_approved_original_scan_exception.sql").read_text(encoding="utf-8").lower()
+        self.assertIn("grant select on public.approved_original_scan_import_batches to service_role;", approved_scan_sql)
+        native_scan_sql = (MIGRATIONS / "20261013125111_approved_native120_scan_exception.sql").read_text(encoding="utf-8").lower()
+        self.assertIn("grant select on public.approved_native120_scan_import_batches to service_role;", native_scan_sql)
+        self.assertEqual(granted_select | later_select | approved_scan_select, backend_tables | extra_tables)
 
         matrix_smoke = SERVICE_ROLE_GRANT_SMOKE.read_text(encoding="utf-8").lower()
         expected_matrix = dict(
@@ -625,7 +634,9 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                     if table == "official_document_compose_drafts" else numbering_sql
                 )
                 self.assertIn(f"grant {privileges} on public.{table} to service_role;", forward_sql)
-        self.assertEqual(set(expected_matrix), granted_select | later_select | set(numbering_matrix))
+        self.assertEqual(set(expected_matrix), granted_select | later_select | approved_scan_select | set(numbering_matrix))
+        self.assertEqual(expected_matrix["approved_original_scan_import_batches"], "s")
+        self.assertEqual(expected_matrix["approved_native120_scan_import_batches"], "s")
         for privilege, marker in (("insert", "i"), ("update", "u"), ("delete", "d")):
             block = re.search(
                 rf"grant {privilege} on table\s+(.*?)\s+to service_role;",
@@ -674,6 +685,15 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "edoc_decline_official_document": "20261006154028_terminal_official_decline.sql",
             "edoc_confirm_official_document": "20260924154226_atomic_official_receipt_confirmation.sql",
             "edoc_list_official_document_candidates": "20260924154315_scoped_official_document_listing.sql",
+            "edoc_list_inbound_candidates": "20261011140824_complete_workflow_readiness_queries.sql",
+            "edoc_timeliness_candidates": "20261011140824_complete_workflow_readiness_queries.sql",
+            "edoc_set_company_seal_policy": "20261012114854_explicit_seal_owner_policy_and_continuous_geometry.sql",
+            "edoc_update_editor_application": "20261012115431_editor_application_final_snapshot.sql",
+            "edoc_save_editor_revision": "20261012115431_editor_application_final_snapshot.sql",
+            "edoc_commit_editor_preflight": "20261012115431_editor_application_final_snapshot.sql",
+            "edoc_import_approved_original_scan_file": "20261013070841_approved_original_scan_exception.sql",
+            "edoc_import_approved_native120_scan_file": "20261013125111_approved_native120_scan_exception.sql",
+            "edoc_workspace_drafts": "20261013172206_workspace_drafts_catalog.sql",
         }
         later_granted_rpc_names: set[str] = set()
         for rpc_name, migration_name in repair_rpcs.items():
@@ -700,12 +720,13 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                     r"grant execute on function public\.(edoc_[a-z0-9_]+)\([^;]*\)\s+to service_role;",
                     repair_sql,
                 ))
-        self.assertEqual(later_granted_rpc_names, set(repair_rpcs))
+        scan_helpers = {"edoc_approved_original_scan_dimensions_are_valid", "edoc_approved_native120_scan_dimensions_are_valid", "edoc_company_seal_file_dimensions_are_valid"}
+        self.assertEqual(later_granted_rpc_names - {"edoc_company_seal_dimensions_are_valid", "edoc_create_company_seal_file_version", "edoc_set_current_company_seal_file", "edoc_commit_official_document_submission"} - scan_helpers, set(repair_rpcs))
         self.assertEqual(
-            (granted_rpc_names - {"edoc_company_seal_dimensions_are_valid"}) | later_granted_rpc_names,
+            (granted_rpc_names | later_granted_rpc_names) - {"edoc_company_seal_dimensions_are_valid"} - scan_helpers,
             required_rpc_names,
         )
-        self.assertEqual(len(required_rpc_names), 30)
+        self.assertEqual(len(required_rpc_names), 39)
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
         fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
         self.assertIn("from information_schema.table_privileges", cutover)
@@ -771,6 +792,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "public.edoc_guard_official_number()",
             "public.edoc_guard_number_allocation()",
             "edoc_private.is_electronic_compose(public.official_documents)",
+            "edoc_private.assert_editor_application_scope(text,text,text,text,text)",
         }
         helper_block = smoke.split("-- these are exact invoker helpers", 1)[1].split(
             "if not pg_catalog.has_schema_privilege", 1

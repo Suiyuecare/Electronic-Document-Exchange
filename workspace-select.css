@@ -1,0 +1,33 @@
+/* App-owned visual tokens; keyboard/listbox semantics belong to pinned Tom Select. */
+.edoc-select { min-width: 0; width: 100%; margin: 0; font: inherit; color: var(--ink); }
+.edoc-select.single .ts-control {
+  min-height: 48px; padding: 11px 38px 11px 14px; border: 1px solid var(--line);
+  border-radius: 14px; background: var(--panel); box-shadow: none; color: var(--ink);
+  font: inherit; cursor: pointer; align-items: center; flex-wrap: nowrap; gap: 4px;
+}
+.edoc-select.single .ts-control::after, .edoc-select.single.dropdown-active .ts-control::after {
+  content: ''; position: absolute; right: 16px; top: 50%; width: 7px; height: 7px;
+  border: solid currentColor; border-width: 0 1.5px 1.5px 0; margin-top: 0; transform: translateY(-70%) rotate(45deg);
+}
+.edoc-select .ts-control > .item { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edoc-select .ts-control > input { font: inherit !important; font-size: 16px !important; color: var(--ink); min-height: 24px; }
+.edoc-select.focus .ts-control { border-color: var(--accent-strong); outline: 2px solid var(--line); outline-offset: 2px; box-shadow: none; }
+.edoc-select.invalid .ts-control { border-color: var(--rose); }
+.edoc-select.disabled .ts-control { background: var(--cream); color: var(--muted); opacity: .7; cursor: not-allowed; }
+.ts-dropdown.edoc-select-dropdown {
+  z-index: 850; margin: 0; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); color: var(--ink); box-shadow: var(--shadow); overflow: hidden;
+  font: inherit; font-size: 16px;
+}
+.edoc-select-dropdown .ts-dropdown-content { overscroll-behavior: contain; scrollbar-gutter: stable; padding: 4px; }
+.edoc-select-dropdown .option, .edoc-select-dropdown .no-results {
+  min-height: 44px; padding: 10px 12px; display: flex; align-items: center;
+  overflow-wrap: anywhere; white-space: normal; border-radius: 8px; line-height: 1.5;
+}
+.edoc-select-dropdown .active { background: var(--soft); color: var(--accent-readable); }
+.edoc-select-dropdown .selected { font-weight: 700; }
+.edoc-select-dropdown .selected::after { content: '✓'; margin-left: auto; padding-left: 10px; }
+.edoc-select-dropdown .option[aria-disabled="true"] { color: var(--muted); opacity: .6; }
+.edoc-select-dropdown .optgroup-header { background: var(--cream); color: var(--muted); padding: 8px 12px; font-weight: 700; }
+.edoc-select-dropdown .highlight { background: var(--soft); color: inherit; }
+@media (prefers-reduced-motion: reduce) { .edoc-select, .edoc-select-dropdown { transition: none; } }

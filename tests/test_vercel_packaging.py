@@ -22,6 +22,22 @@ PACKAGED_SUPABASE_FILES = {
 
 
 class VercelPackagingTestCase(unittest.TestCase):
+    def test_workspace_assets_and_pinned_select_library_are_deployable(self):
+        config = json.loads((ROOT / "vercel.json").read_text())
+        static = {row["src"] for row in config["builds"] if row["use"] == "@vercel/static"}
+        assets = {"editor-fluid.css", "workspace-navigation.css", "workspace-select.js", "workspace-select.css",
+                  "vendor/tom-select/tom-select.complete.min.js", "vendor/tom-select/tom-select.default.min.css", "vendor/tom-select/LICENSE"}
+        self.assertTrue(assets <= static)
+        for asset in assets:
+            self.assertTrue((ROOT / asset).is_file(), asset)
+        pinned = {"tom-select.complete.min.js": "8f9d7d3420e938c2c9817818b56df43ea46feae5bf1f5a2e828863c034df0e37",
+                  "tom-select.default.min.css": "b6224cdffdc74a0edd9d4b2f9700b5d2e3a9f4fc19d002d2d07953fc3854a98f",
+                  "LICENSE": "f15dc64ea1f373c8af0ee7c020064360497addf335c9c2bcf27c3a6f56a6f0bd"}
+        for name, digest in pinned.items():
+            self.assertEqual(hashlib.sha256((ROOT / "vendor/tom-select" / name).read_bytes()).hexdigest(), digest)
+        build = next(row for row in config["builds"] if row["src"] == "api/index.py")
+        self.assertIn("workspace_drafts.py", build["config"]["includeFiles"])
+
     def test_official_writing_rules_are_included_in_runtime_bundle(self) -> None:
         config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
         python_build = next(item for item in config["builds"] if item.get("src") == "api/index.py")

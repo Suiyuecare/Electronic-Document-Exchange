@@ -22,6 +22,7 @@ class SealFrontFrontendTest(unittest.TestCase):
       let scope="D";
       let uploadedSealEditorState={schemaVersion:2,revisionNo:3,manifestSha256:"old-manifest",pages:[{pageId:"P"}],elements:[]};
       const uploadedSealEditorRuntime={documentId:"D",revisionId:"R3",dirtyGeneration:0,currentPageId:"P",selectedIds:new Set()};
+      const uploadedSealApplicationRuntime={contentRevision:7},uploadedSealApplicationKey=()=>"Synthetic stable application";
       const finishUploadedEditorTextEdit=()=>true,ensureUploadedEditorPagesA4=()=>{},saveUploadedEditorState=async()=>{};
       const uploadedSealApplicationScopeSnapshot=()=>scope,uploadedSealApplicationScopeIsCurrent=value=>scope===value;
       const cloneUploadedEditorValue=structuredClone,emptyUploadedSealEditorState=()=>({schemaVersion:2,pages:[],elements:[]});

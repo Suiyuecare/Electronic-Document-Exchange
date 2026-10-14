@@ -20,7 +20,8 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
     AI_SETUP = '''
       let composeAiOperation=null, composeAiSuggestion=null, composeAiUndo=null, composeAiReview=null, scope="user-A", dirty=0;
       const nodes={"#subject":{value:"原主旨"},"#bodyText":{value:"原說明"},"#documentPurpose":{value:"六字以上的公文用途"},"#generateFromPurposeBtn":{textContent:"AI產生公文主旨與說明"},"#documentPurposeHint":{},"#composeAiSuggestion":{},"#composeAiSuggestionSubject":{},"#composeAiSuggestionBody":{},"#composeAiUndoBtn":{}};
-      global.document={querySelector:key=>nodes[key]};global.window={confirm:()=>true};
+      global.document={querySelector:key=>nodes[key]};global.window={};
+      let confirmation=true;const requestWorkspaceConfirmation=async()=>confirmation;
       const composeRequestScope=()=>scope, hasMinimumText=()=>true, setAiDraftStatus=()=>{}, composePayload=()=>({}), activeRole=()=>"員工", addDispatchAudit=()=>{},showToast=()=>{},markDraftDirty=()=>{dirty++};
       let resolve,reject;const backendRequest=()=>new Promise((yes,no)=>{resolve=yes;reject=no});
     '''
@@ -46,7 +47,7 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
         self.assertEqual(value, {"subject": "原主旨", "suggestion": None, "busy": False, "operation": None})
 
     def test_undo_refusal_preserves_post_ai_manual_changes(self):
-        value = self.run_js(self.AI, self.AI_SETUP, '''const p=generateAiDraft();resolve({subject:"AI主旨",body:"AI說明"});await p;nodes["#subject"].value="最後人工修改";window.confirm=()=>false;undoComposeAiSuggestion();console.log(JSON.stringify({subject:nodes["#subject"].value,undo:!!composeAiUndo}));''')
+        value = self.run_js(self.AI, self.AI_SETUP, '''const p=generateAiDraft();resolve({subject:"AI主旨",body:"AI說明"});await p;nodes["#subject"].value="最後人工修改";confirmation=false;await undoComposeAiSuggestion();console.log(JSON.stringify({subject:nodes["#subject"].value,undo:!!composeAiUndo}));''')
         self.assertEqual(value, {"subject": "最後人工修改", "undo": True})
 
     def test_ai_passes_document_date_issuer_and_attachment_description(self):
@@ -153,7 +154,8 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
           let composeAutosaveRestoredForIdentity="A",composeCloudDraftId="A";
           const composeAutosaveStorageKey="fixture",composeCloudRevisions=new Map(),composeCloudSavedSnapshots=new Map();
           global.document={querySelector:k=>k==="#attachments"?oldFiles:k==="#composeAttachmentUploadStatus"?status:{value:"B"}};
-          global.window={confirm:()=>true};global.localStorage={setItem:()=>{}};
+          const composeRequestScope=()=>"A",requestWorkspaceConfirmation=async()=>true;
+          global.window={};global.localStorage={setItem:()=>{}};
         '''
         value = self.run_js(["loadComposeCloudDraft"], setup, '''await loadComposeCloudDraft();console.log(JSON.stringify({fileValue:oldFiles.value,cleared:status.cleared,id:composeCloudDraftId,revision:composeCloudRevisions.get("B")}));''')
         self.assertEqual(value, {"fileValue": "", "cleared": True, "id": "B", "revision": 4})

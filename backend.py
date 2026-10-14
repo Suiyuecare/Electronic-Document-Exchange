@@ -51,7 +51,15 @@ from urllib.parse import parse_qs, unquote, urlparse
 from runtime_observability import capture_runtime_error, error_tracking_status
 from edoc_numbering import SQLITE_NUMBERING_SQL, install_sqlite_numbering
 from compose_resilience import SQLITE_COMPOSE_DRAFT_SQL, draft_payload as compose_draft_payload, public_draft, save_sqlite_draft, attachment_id, require_content_revision
-from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position
+from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position, require_grouped_company_seal, validate_seam_policy_transition
+from workflow_readiness import LIST_MAX_ROWS, TAIPEI, inbound_list_options, inbound_page, timeliness_report
+import official_handover_service
+import official_handover_followup
+import editor_application
+import seal_policy
+import seal_scan_exceptions
+import seal_operator_import
+import seal_operator_import_120
 
 from exchange_gateway import MockExchangeProvider, create_exchange_gateway, redact_sensitive, redact_text
 from finance_bridge import (
@@ -139,6 +147,7 @@ EDOC_AV_HTTP_INLINE_MAX_BYTES = min(8, max(1, int(os.getenv("EDOC_AV_HTTP_INLINE
 EDOC_AV_HMAC_MAX_AGE_SECONDS = 60
 EDOC_AV_SANDBOX_SNAPSHOT_ID = os.getenv("EDOC_AV_SANDBOX_SNAPSHOT_ID", "")
 EDOC_AV_SANDBOX_PROJECT_ID = os.getenv("EDOC_AV_SANDBOX_PROJECT_ID", "")
+EDOC_OFFBOARDING_HANDOVER_ENABLED = os.getenv("EDOC_OFFBOARDING_HANDOVER_ENABLED", "0") == "1"
 EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_apply_finance_organization_projection_v2",
     "edoc_apply_official_document_correction",
@@ -159,6 +168,8 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_finalize_editor_asset_v2",
     "edoc_finalize_official_document_resubmit",
     "edoc_list_official_document_candidates",
+    "edoc_list_inbound_candidates",
+    "edoc_timeliness_candidates",
     "edoc_mutate_inbound_document_v1",
     "edoc_mutate_official_workflow",
     "edoc_decline_official_document",
@@ -168,8 +179,15 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_revalidate_finance_session_v2",
     "edoc_revoke_official_workflow_delegation",
     "edoc_save_compose_draft",
+    "edoc_workspace_drafts",
     "edoc_save_official_workflow_config",
     "edoc_set_current_company_seal_file",
+    "edoc_set_company_seal_policy",
+    "edoc_import_approved_original_scan_file",
+    "edoc_import_approved_native120_scan_file",
+    "edoc_update_editor_application",
+    "edoc_save_editor_revision",
+    "edoc_commit_editor_preflight",
 )
 # These server-only tables are the minimum immutable PDF Editor V2 contract.
 # Checking only the RPC inventory is insufficient: PostgREST can still expose
@@ -178,6 +196,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
 # object existence and the explicit Data API grant without reading document
 # rows.
 EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES = (
+    "company_seal_policies",
     "file_objects",
     "official_documents",
     "official_document_files",
@@ -186,6 +205,9 @@ EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES = (
     "official_document_editor_revisions",
     "official_document_editor_storage_jobs",
 )
+if EDOC_OFFBOARDING_HANDOVER_ENABLED:
+    EDOC_READINESS_REQUIRED_RPC_NAMES += ("edoc_manage_official_handover",)
+    EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES += ("official_document_handovers", "official_document_followup_owners")
 EDOC_MAX_FILE_SIZE_MB = int(os.getenv("EDOC_MAX_FILE_SIZE_MB", "100"))
 EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB = min(3, max(1, int(os.getenv("EDOC_INLINE_JSON_UPLOAD_MAX_FILE_SIZE_MB", "3"))))
 EDOC_ALLOWED_MIME_TYPES = os.getenv("EDOC_ALLOWED_MIME_TYPES", "application/pdf,application/xml,text/xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pkcs7-mime,application/octet-stream")
@@ -264,6 +286,17 @@ EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
 # immutable, non-sensitive business codes may cross the transport boundary as
 # application errors.  Everything else remains an opaque machine-code marker.
 POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
+    "handover_operation_conflict",
+    "handover_pending_request_exists",
+    "handover_request_already_resolved",
+    "handover_version_conflict",
+    "handover_assignment_conflict",
+    "handover_workflow_irreversible",
+    "handover_followup_lineage_invalid",
+    "handover_original_not_correctable",
+    "handover_current_step_conflict",
+    "handover_pending_assignment_missing",
+    "handover_corrupt_active_generation",
     "official_workflow_config_conflict",
     "official_workflow_config_version_conflict",
     "official_workflow_action_conflict",
@@ -273,6 +306,7 @@ POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
     "official_workflow_irreversible",
     "editor_conflict_copy_request_conflict",
     "editor_locked_after_submit",
+    "editor_preflight_not_completed",
     "compose_draft_revision_conflict",
     "compose_content_revision_conflict",
     "finance_member_sync_event_id_conflict",
@@ -2101,6 +2135,15 @@ CREATE TABLE IF NOT EXISTS company_seal_files (
   FOREIGN KEY(file_object_id) REFERENCES file_objects(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS company_seal_policies (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL UNIQUE REFERENCES companies(id) ON DELETE RESTRICT,
+  owner_kind TEXT NOT NULL DEFAULT 'unclassified' CHECK (owner_kind IN ('company', 'institution', 'unclassified')),
+  updated_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS seal_permissions (
   id TEXT PRIMARY KEY,
   seal_id TEXT NOT NULL,
@@ -2263,6 +2306,43 @@ CREATE TABLE IF NOT EXISTS official_document_approval_logs (
   FOREIGN KEY(document_id) REFERENCES official_documents(id) ON DELETE CASCADE,
   FOREIGN KEY(step_id) REFERENCES official_document_approval_steps(id) ON DELETE SET NULL,
   FOREIGN KEY(file_id) REFERENCES official_document_files(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS official_document_handovers (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES official_documents(id) ON DELETE RESTRICT,
+  company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+  finance_tenant_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('pending_approver','followup_owner')),
+  former_user_id TEXT NOT NULL,
+  successor_user_id TEXT NOT NULL,
+  proposer_user_id TEXT NOT NULL,
+  confirmer_user_id TEXT,
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+  request_sha256 TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  expected_snapshot TEXT NOT NULL,
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(former_user_id <> successor_user_id),
+  CHECK(proposer_user_id <> successor_user_id),
+  CHECK(confirmer_user_id IS NULL OR confirmer_user_id <> proposer_user_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS official_handover_pending_assignment
+  ON official_document_handovers(document_id,kind,former_user_id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS official_handover_queue
+  ON official_document_handovers(company_id,finance_tenant_id,status,created_at,id);
+
+CREATE TABLE IF NOT EXISTS official_document_followup_owners (
+  document_id TEXT PRIMARY KEY REFERENCES official_documents(id) ON DELETE RESTRICT,
+  original_applicant_id TEXT NOT NULL,
+  process_owner_user_id TEXT NOT NULL,
+  handover_id TEXT NOT NULL UNIQUE REFERENCES official_document_handovers(id) ON DELETE RESTRICT,
+  company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+  finance_tenant_id TEXT NOT NULL,
+  correction_policy TEXT NOT NULL CHECK(correction_policy='linked_new_application'),
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS official_document_stamp_requests (
@@ -4384,14 +4464,17 @@ def _consume_http_error(exc: urllib.error.HTTPError, *, max_bytes: int = 4096) -
 def _safe_http_error_contract(
     exc: urllib.error.HTTPError,
     prefix: str,
+    *,
+    submission_rpc: bool = False,
 ) -> Tuple[str, str]:
-    """Return an opaque marker plus an allowlisted business-conflict code.
+    """Return an opaque marker plus an allowlisted machine error code.
 
     PostgREST forwards PostgreSQL ``message``, ``detail`` and ``hint`` fields.
     Those fields may contain document text or personal data, so callers may
     only receive a message when the HTTP status, provider code and exact
     immutable business code all match this service's PT409/legacy-23505
-    conflict contract.
+    conflict contract. The submission RPC additionally allowlists its exact
+    400/22023 rollback code when the caller explicitly identifies that route.
     """
     raw = _consume_http_error(exc)
     provider_code = ""
@@ -4411,6 +4494,15 @@ def _safe_http_error_contract(
                 and message in POSTGREST_23505_BUSINESS_CONFLICT_CODES
             ):
                 business_conflict = message
+        elif (
+            submission_rpc
+            and int(getattr(exc, "code", 0) or 0) == 400
+            and provider_code == "22023"
+            and message == "official_submission_invalid_payload"
+        ):
+            # This exact atomic-RPC failure guarantees rollback. Never pass
+            # arbitrary provider messages, details or row values to callers.
+            business_conflict = "official_submission_invalid_payload"
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
         # PostgREST error bodies can be much larger than the diagnostic read
         # limit. Extract only the bounded machine-code field from the prefix;
@@ -10083,13 +10175,17 @@ def current_seal_vault_readiness_report(conn: sqlite3.Connection | None = None) 
         company_groups.append({
             "company_id": company.get("company_id"),
             "company_name": company.get("company_name") or company.get("company_id"),
-            "ready": not missing,
+            "owner_kind": company.get("owner_kind") or "unclassified",
+            "classification_required": bool(company.get("classification_required")),
+            "conditional_slots": company.get("conditional_slots") or [],
+            "physical_inventory_verified": False,
+            "ready": not missing and not company.get("classification_required"),
             "missingCount": len(missing),
             "currentCount": sum(1 for seal in required if seal.get("active") and seal.get("currentFile")),
             "requiredCount": len(required),
             "nextCategory": next_missing.get("seal_category") or "",
             "nextSealId": next_missing.get("seal_id") or "",
-            "nextAction": next_missing.get("required_action") or "已具備 current 版本",
+            "nextAction": "先設定印章所屬公司／機構種類" if company.get("classification_required") else next_missing.get("required_action") or "已具備 current 版本",
             "missing": missing,
         })
 
@@ -10112,6 +10208,7 @@ def current_seal_vault_readiness_report(conn: sqlite3.Connection | None = None) 
     ]
 
     source_blockers: List[str] = []
+    source_blockers.extend(f"{group['company_name']} 尚未明確設定公司／機構印章種類。" for group in company_groups if group.get("classification_required"))
     if is_production() and not readiness_checks.get("supabase"):
         source_blockers.append("Seal Vault readiness 無法使用 Supabase production 資料庫驗證公司與印章資料。")
     if is_production() and not company_checks:
@@ -11341,6 +11438,8 @@ def company_seal_dimension_profile(
     render_height_mm: Any = None,
 ) -> Dict[str, Any]:
     """Validate one immutable calibration against the institution-seal policy."""
+    if str(seal_size_type) == seal_policy.CONTINUOUS_SIZE:
+        return seal_policy.rectangular_geometry(str(seal_size_type), render_width_mm, render_height_mm, dpi=EDOC_SEAL_CALIBRATION_DPI)
     policy = EDOC_SEAL_DIMENSION_PROFILES.get(str(seal_size_type or "").strip())
     if not policy:
         raise ValueError("seal_dimension_profile_missing")
@@ -11413,16 +11512,17 @@ def validate_company_seal_raster_dimensions(
     inspection: Dict[str, Any],
     render_width_mm: Any = None,
     render_height_mm: Any = None,
+    seal_category: str = "",
 ) -> Dict[str, Any]:
     """Bind decoded raster geometry to one immutable physical calibration."""
-    profile = company_seal_dimension_profile(
+    profile = seal_policy.rectangular_geometry(str(seal_size_type), render_width_mm, render_height_mm, dpi=EDOC_SEAL_CALIBRATION_DPI) if seal_category in {"official_seal", seal_policy.CONTINUOUS_CATEGORY} else company_seal_dimension_profile(
         seal_size_type,
         render_width_mm,
         render_height_mm,
     )
     width = int(inspection.get("width") or 0)
     height = int(inspection.get("height") or 0)
-    if min(width, height) < profile["min_short_edge_px"]:
+    if width < profile.get("min_width_px", profile["min_short_edge_px"]) or height < profile.get("min_height_px", profile["min_short_edge_px"]):
         raise ValueError("seal_image_resolution_too_low")
     source_ratio = width / height if height else float("inf")
     expected_ratio = profile["width_mm"] / profile["height_mm"]
@@ -11441,7 +11541,7 @@ def validate_company_seal_raster_dimensions(
     }
 
 
-def normalize_company_seal_upload_dimensions(payload: Dict[str, Any]) -> Tuple[Any, Any]:
+def normalize_company_seal_upload_dimensions(payload: Dict[str, Any], seal_category: str = "") -> Tuple[Any, Any]:
     """Normalize the single physical-size API onto the immutable square fields.
 
     ``render_size_mm`` is the preferred upload input.  The two historical
@@ -11480,6 +11580,7 @@ def normalize_company_seal_upload_dimensions(payload: Dict[str, Any]) -> Tuple[A
         width_mm is not None
         and height_mm is not None
         and abs(width_mm - height_mm) > 0.000001
+        and seal_category not in {"official_seal", seal_policy.CONTINUOUS_CATEGORY}
     ):
         # Historical two-field clients remain accepted, but they must still
         # describe one exact physical size.  The database's 0.01 mm tolerance
@@ -11492,6 +11593,10 @@ def company_seal_file_dimension_is_valid(file_row: Dict[str, Any], seal_size_typ
     """Verify persisted attestation fields; never infer them for a legacy file."""
     if not bool(file_row.get("dimension_validated")):
         return False
+    if seal_scan_exceptions.is_native_policy(file_row.get("dimension_policy_version")):
+        return seal_scan_exceptions.file_entry(file_row, seal_size_type) is not None
+    if file_row.get("dimension_policy_version") in {seal_policy.CONTINUOUS_POLICY, seal_policy.OFFICIAL_POLICY}:
+        return seal_policy.rectangular_file_dimensions_valid(file_row, str(seal_size_type))
     try:
         pixel_width = int(file_row.get("pixel_width") or 0)
         pixel_height = int(file_row.get("pixel_height") or 0)
@@ -11533,7 +11638,8 @@ def require_company_seal_file_dimensions(file_row: Dict[str, Any], seal_size_typ
         )
     if not company_seal_file_dimension_is_valid(file_row, seal_size_type):
         raise ValueError("seal_file_dimension_metadata_invalid")
-    if current and str(file_row.get("dimension_policy_version") or "") != EDOC_SEAL_DIMENSION_POLICY_VERSION:
+    allowed_current_policies = {seal_policy.CONTINUOUS_POLICY} if str(seal_size_type) == seal_policy.CONTINUOUS_SIZE else {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, *seal_scan_exceptions.POLICIES}
+    if current and str(file_row.get("dimension_policy_version") or "") not in allowed_current_policies:
         raise ValueError("current_seal_file_dimension_policy_upgrade_required")
     return file_row
 
@@ -11546,6 +11652,10 @@ def company_seal_file_dimension_profile(
 ) -> Dict[str, Any]:
     """Return the immutable physical calibration stored on one Seal Vault file."""
     require_company_seal_file_dimensions(file_row, seal_size_type, current=current)
+    if seal_scan_exceptions.is_native_policy(file_row.get("dimension_policy_version")):
+        return seal_scan_exceptions.profile(seal_scan_exceptions.file_entry(file_row, seal_size_type))
+    if file_row.get("dimension_policy_version") in {seal_policy.CONTINUOUS_POLICY, seal_policy.OFFICIAL_POLICY}:
+        return seal_policy.rectangular_geometry(str(seal_size_type), file_row.get("render_width_mm"), file_row.get("render_height_mm"), dpi=EDOC_SEAL_CALIBRATION_DPI)
     if str(file_row.get("dimension_policy_version") or "") == EDOC_SEAL_LEGACY_DIMENSION_POLICY_VERSION:
         return legacy_company_seal_dimension_profile(seal_size_type)
     return company_seal_dimension_profile(
@@ -11563,9 +11673,10 @@ def canonical_company_seal_dimensions_pt(
     render_width_mm: Any = None,
     render_height_mm: Any = None,
     allow_unspecified: bool = False,
+    dimension_policy_version: str = "",
 ) -> Tuple[float, float]:
     """Accept conversion noise only, then restore the file version's exact size."""
-    profile = company_seal_dimension_profile(
+    profile = seal_scan_exceptions.geometry_profile(seal_size_type, render_width_mm, render_height_mm, policy=dimension_policy_version) if seal_scan_exceptions.is_native_policy(dimension_policy_version) else seal_policy.rectangular_geometry(str(seal_size_type), render_width_mm, render_height_mm, dpi=EDOC_SEAL_CALIBRATION_DPI) if dimension_policy_version in {seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY} else company_seal_dimension_profile(
         seal_size_type,
         render_width_mm,
         render_height_mm,
@@ -11601,6 +11712,7 @@ def validate_locked_company_seal_position(
         position.get("height", position.get("h")),
         render_width_mm=profile["width_mm"],
         render_height_mm=profile["height_mm"],
+        dimension_policy_version=profile["dimension_policy_version"],
     )
     try:
         locked_width = float(position.get("locked_render_width_pt"))
@@ -11616,7 +11728,14 @@ def validate_locked_company_seal_position(
     return width, height
 
 
-def clamp_pdf_rect(x: float, y: float, width: float, height: float) -> Tuple[float, float, float, float]:
+def clamp_pdf_rect(x: float, y: float, width: float, height: float, *, preserve_size: bool = False,
+                   page_width: float = A4_WIDTH_PT, page_height: float = A4_HEIGHT_PT) -> Tuple[float, float, float, float]:
+    if preserve_size:
+        if any(not math.isfinite(value) for value in (x, y, width, height, page_width, page_height)) or min(width, height) <= 0 or width > page_width or height > page_height:
+            raise ValueError("locked_seal_geometry_outside_page")
+        # A calibrated file may be only 1 mm wide. Move it inside the page,
+        # never enlarge/shrink it to the legacy placeholder's 12 pt minimum.
+        return round(max(0.0, min(x, page_width - width)), 2), round(max(0.0, min(y, page_height - height)), 2), width, height
     width = max(12.0, min(width, A4_WIDTH_PT - 24.0))
     height = max(12.0, min(height, A4_HEIGHT_PT - 24.0))
     x = max(12.0, min(x, A4_WIDTH_PT - width - 12.0))
@@ -12684,6 +12803,7 @@ def launch_smoke_stamp_positions(
         render_width_mm=profile["width_mm"],
         render_height_mm=profile["height_mm"],
         allow_unspecified=True,
+        dimension_policy_version=profile["dimension_policy_version"],
     )
     return [
         {"page": 1, "x": 420, "y": 640, "width": width, "height": height, "order_index": 1},
@@ -12709,6 +12829,8 @@ def register_sqlite_functions(conn: sqlite3.Connection) -> None:
         lambda value: hashlib.sha256(str(value or "").encode("utf-8")).hexdigest(),
         deterministic=True,
     )
+    conn.create_function("edoc_approved_original_scan_matches", 12,
+                         seal_scan_exceptions.metadata_valid, deterministic=True)
 
 
 def local_company_seal_position_triggers_sql() -> str:
@@ -12719,6 +12841,7 @@ def local_company_seal_position_triggers_sql() -> str:
       AND NEW.locked_render_width_pt IS NULL
       AND NEW.locked_render_height_pt IS NULL
       AND COALESCE(NEW.locked_dimension_policy_version, '') = ''
+      AND seal.seal_category NOT IN ('official_seal', 'continuous_seal')
       AND EXISTS (
         SELECT 1
         FROM official_document_stamp_requests request
@@ -12749,7 +12872,7 @@ def local_company_seal_position_triggers_sql() -> str:
           OR (
             COALESCE(NEW.locked_seal_file_id, '') = ''
             AND file.is_current = 1
-            AND file.dimension_policy_version = '{EDOC_SEAL_DIMENSION_POLICY_VERSION}'
+            AND file.dimension_policy_version IN ('{EDOC_SEAL_DIMENSION_POLICY_VERSION}', '{seal_policy.OFFICIAL_POLICY}', '{seal_policy.CONTINUOUS_POLICY}', '{seal_scan_exceptions.POLICY}', '{seal_scan_exceptions.NATIVE120_POLICY}')
           )
         )
         AND file.dimension_validated = 1
@@ -12763,11 +12886,15 @@ def local_company_seal_position_triggers_sql() -> str:
           ((1.0 * file.pixel_width / file.pixel_height) /
            (1.0 * file.render_width_mm / file.render_height_mm)) - 1.0
         ) <= {EDOC_SEAL_SOURCE_ASPECT_TOLERANCE}
-        AND min(file.pixel_width, file.pixel_height) >=
-            (max(file.render_width_mm, file.render_height_mm) / 25.4 * {EDOC_SEAL_CALIBRATION_DPI})
+        AND ((file.pixel_width >= (file.render_width_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI})
+              AND file.pixel_height >= (file.render_height_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI}))
+             OR edoc_approved_original_scan_matches(seal.id,seal.company_id,seal.seal_category,seal.seal_size_type,
+                  file.file_hash,file.pixel_width,file.pixel_height,file.source_aspect_ratio,
+                  file.render_width_mm,file.render_height_mm,file.dimension_policy_version,file.dimension_validated))
         AND (
           (
             file.dimension_policy_version = '{EDOC_SEAL_LEGACY_DIMENSION_POLICY_VERSION}'
+            AND seal.seal_category <> 'continuous_seal'
             AND (
               (seal.seal_size_type = 'large_seal'
                AND abs(file.render_width_mm - 30.0) <= 0.000001
@@ -12781,6 +12908,7 @@ def local_company_seal_position_triggers_sql() -> str:
           OR
           (
             file.dimension_policy_version = '{EDOC_SEAL_DIMENSION_POLICY_VERSION}'
+            AND seal.seal_category <> 'continuous_seal'
             AND abs(file.render_width_mm - file.render_height_mm) <= {EDOC_SEAL_PHYSICAL_SQUARE_TOLERANCE_MM}
             AND (
               (seal.seal_size_type = 'large_seal'
@@ -12792,10 +12920,31 @@ def local_company_seal_position_triggers_sql() -> str:
                AND file.render_height_mm BETWEEN 15.0 AND 22.0)
             )
           )
+          OR (
+            file.dimension_policy_version = '{seal_policy.OFFICIAL_POLICY}'
+            AND seal.seal_category = 'official_seal'
+            AND seal.seal_size_type IN ('large_seal', 'small_seal')
+            AND file.render_width_mm BETWEEN 1.0 AND 200.0
+            AND file.render_height_mm BETWEEN 1.0 AND 200.0
+          )
+          OR (
+            file.dimension_policy_version = '{seal_policy.CONTINUOUS_POLICY}'
+            AND seal.seal_category = 'continuous_seal'
+            AND seal.seal_size_type = 'single_seal'
+            AND file.render_width_mm BETWEEN 1.0 AND 200.0
+            AND file.render_height_mm BETWEEN 1.0 AND 200.0
+          )
+          OR edoc_approved_original_scan_matches(seal.id,seal.company_id,seal.seal_category,seal.seal_size_type,
+              file.file_hash,file.pixel_width,file.pixel_height,file.source_aspect_ratio,
+              file.render_width_mm,file.render_height_mm,file.dimension_policy_version,file.dimension_validated)
         )
         AND EXISTS (
           SELECT 1 FROM file_objects object
           WHERE object.id = file.file_object_id
+            AND object.sha256 = file.file_hash
+            AND object.size_bytes = file.file_size
+            AND object.mime_type = file.file_mime_type
+            AND object.storage_key = file.file_storage_key
             AND lower(COALESCE(object.scan_status, '')) IN ('已通過', 'clean', 'passed')
         )
         AND abs(NEW.width - (file.render_width_mm * 72.0 / 25.4)) <= {EDOC_SEAL_DIMENSION_TOLERANCE_PT}
@@ -12840,12 +12989,36 @@ def local_company_seal_position_triggers_sql() -> str:
             WHERE file.id = position.locked_seal_file_id
               AND file.seal_id = position.seal_id
               AND file.file_hash = position.locked_seal_sha256
-              AND file.dimension_policy_version = '{EDOC_SEAL_DIMENSION_POLICY_VERSION}'
+              AND (
+                (file.dimension_policy_version = '{EDOC_SEAL_DIMENSION_POLICY_VERSION}'
+                 AND seal.seal_category <> 'continuous_seal'
+                 AND abs(file.render_width_mm - file.render_height_mm) <= {EDOC_SEAL_PHYSICAL_SQUARE_TOLERANCE_MM}
+                 AND ((seal.seal_size_type='large_seal' AND file.render_width_mm BETWEEN 25 AND 35)
+                   OR (seal.seal_size_type='small_seal' AND file.render_width_mm BETWEEN 15 AND 22)))
+                OR (file.dimension_policy_version = '{seal_policy.OFFICIAL_POLICY}'
+                    AND seal.seal_category='official_seal' AND seal.seal_size_type IN ('large_seal','small_seal')
+                    AND file.render_width_mm BETWEEN 1 AND 200 AND file.render_height_mm BETWEEN 1 AND 200)
+                OR (file.dimension_policy_version = '{seal_policy.CONTINUOUS_POLICY}'
+                    AND seal.seal_category='continuous_seal' AND seal.seal_size_type='single_seal'
+                    AND file.render_width_mm BETWEEN 1 AND 200 AND file.render_height_mm BETWEEN 1 AND 200)
+                OR edoc_approved_original_scan_matches(seal.id,seal.company_id,seal.seal_category,seal.seal_size_type,
+                    file.file_hash,file.pixel_width,file.pixel_height,file.source_aspect_ratio,
+                    file.render_width_mm,file.render_height_mm,file.dimension_policy_version,file.dimension_validated)
+              )
               AND file.dimension_validated = 1
               AND file.pixel_width > 0
               AND file.pixel_height > 0
               AND abs(file.source_aspect_ratio - (1.0 * file.pixel_width / file.pixel_height)) <= 0.000001
-              AND abs(file.render_width_mm - file.render_height_mm) <= {EDOC_SEAL_PHYSICAL_SQUARE_TOLERANCE_MM}
+              AND ((file.pixel_width >= file.render_width_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI}
+                    AND file.pixel_height >= file.render_height_mm / 25.4 * {EDOC_SEAL_CALIBRATION_DPI})
+                   OR edoc_approved_original_scan_matches(seal.id,seal.company_id,seal.seal_category,seal.seal_size_type,
+                        file.file_hash,file.pixel_width,file.pixel_height,file.source_aspect_ratio,
+                        file.render_width_mm,file.render_height_mm,file.dimension_policy_version,file.dimension_validated))
+              AND abs(((1.0 * file.pixel_width / file.pixel_height) / (1.0 * file.render_width_mm / file.render_height_mm)) - 1.0) <= {EDOC_SEAL_SOURCE_ASPECT_TOLERANCE}
+              AND object.sha256 = file.file_hash
+              AND object.size_bytes = file.file_size
+              AND object.mime_type = file.file_mime_type
+              AND object.storage_key = file.file_storage_key
               AND lower(COALESCE(object.scan_status, '')) IN ('已通過', 'clean', 'passed')
               AND abs(position.width - (file.render_width_mm * 72.0 / 25.4)) <= {EDOC_SEAL_DIMENSION_TOLERANCE_PT}
               AND abs(position.height - (file.render_height_mm * 72.0 / 25.4)) <= {EDOC_SEAL_DIMENSION_TOLERANCE_PT}
@@ -12953,13 +13126,22 @@ def ensure_local_company_seal_file_integrity(conn: sqlite3.Connection) -> None:
         ensure_column(conn, "official_document_stamp_positions", "locked_render_width_pt", "REAL")
         ensure_column(conn, "official_document_stamp_positions", "locked_render_height_pt", "REAL")
         ensure_column(conn, "official_document_stamp_positions", "locked_dimension_policy_version", "TEXT")
-    # A v1 row remains immutable evidence for locked historical cases, but it
-    # may not be selected by a new draft or submission after the v2 rollout.
-    conn.execute(
-        "UPDATE company_seal_files SET is_current = 0 "
-        "WHERE is_current = 1 AND COALESCE(dimension_policy_version, '') <> ?",
-        (EDOC_SEAL_DIMENSION_POLICY_VERSION,),
-    )
+    # Historical versions remain immutable. Retire only invalid current
+    # selections, not explicitly calibrated rectangular official/continuous
+    # files introduced by the category-specific policies.
+    current_rows = conn.execute(
+        "SELECT f.*, s.seal_category, s.seal_size_type FROM company_seal_files f "
+        "JOIN company_seals s ON s.id = f.seal_id WHERE f.is_current = 1"
+    ).fetchall()
+    for current_row in current_rows:
+        item = row_to_dict(current_row)
+        try:
+            require_company_seal_file_dimensions(item, item.get("seal_size_type"), current=True)
+            valid = seal_policy.category_policy_valid(item.get("seal_category"), item.get("seal_size_type"), item)
+        except ValueError:
+            valid = False
+        if not valid:
+            conn.execute("UPDATE company_seal_files SET is_current = 0 WHERE id = ? AND is_current = 1", (item["id"],))
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_company_seal_files_version "
         "ON company_seal_files(seal_id, version)"
@@ -12978,6 +13160,14 @@ def ensure_local_company_seal_file_integrity(conn: sqlite3.Connection) -> None:
         ON company_seal_files
         BEGIN
           SELECT RAISE(ABORT, 'company_seal_file_version_immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_company_seal_category_locked
+        BEFORE UPDATE OF seal_category ON company_seals
+        WHEN NEW.seal_category IS NOT OLD.seal_category
+          AND EXISTS (SELECT 1 FROM company_seal_files WHERE seal_id=OLD.id)
+        BEGIN
+          SELECT RAISE(ABORT, 'seal_category_locked_after_upload');
         END;
 
         CREATE TRIGGER IF NOT EXISTS trg_seal_usage_request_evidence_locked
@@ -14073,13 +14263,15 @@ def mm_to_pdf_points(value: Any, fallback: float = 20.0) -> float:
 def seed_company_seal_module(conn: sqlite3.Connection) -> None:
     ts = now()
     reference_rows = [
-        ("category", "establishment_seal", "公司設立印鑑", "公司設立、變更、重大治理文件", 10),
+        ("category", "establishment_seal", "公司章", "公司設立、變更、重大治理文件", 10),
         ("category", "bank_seal", "銀行印鑑章", "銀行開戶、授權、往來文件", 20),
         ("category", "general_seal", "便章", "日常公文、一般函稿、例行文件", 30),
-        ("category", "official_seal", "關防印", "正式公文、機關往來與高敏感文件", 35),
+        ("category", "official_seal", "圖記章", "機構圖記用印", 35),
+        ("category", "continuous_seal", "連續章", "明確校準寬高的單枚連續章", 40),
         ("category", "other", "其他章", "使用者自行新增或特殊用途印章", 90),
         ("size", "large_seal", "大章", "公司或組織大章", 10),
         ("size", "small_seal", "小章", "負責人章、授權小章", 20),
+        ("size", "single_seal", "單枚", "連續章，不套用大小章尺寸", 30),
         ("usage_type", "official_document", "公文", "電子公文發文或回覆", 10),
         ("usage_type", "contract", "合約", "電子合約或契約文件", 20),
         ("usage_type", "bank_document", "銀行文件", "銀行帳戶、授權、付款相關文件", 30),
@@ -14546,6 +14738,8 @@ def patch_row(conn: sqlite3.Connection, table: str, row_id: str, payload: Dict[s
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
     data = row_to_dict(row) if isinstance(row, sqlite3.Row) else dict(row)
     data.pop("password_hash", None)
+    # Server-owned gate; stale browser/user metadata cannot enable it.
+    data["feature_offboarding_handover"] = EDOC_OFFBOARDING_HANDOVER_ENABLED is True
     return data
 
 
@@ -15802,7 +15996,7 @@ def current_session(conn: sqlite3.Connection, token: str) -> Dict[str, Any] | No
     return {
         "sessionId": row["session_id"],
         "expiresAt": row["expires_at"],
-        "user": user,
+        "user": public_user(user),
         "permissions": role_permission_codes(conn, user["role"]),
     }
 
@@ -15935,6 +16129,77 @@ def official_operational_report(
         if len(data) > OFFICIAL_OPERATIONAL_REPORT_MAX_ROWS:
             raise ValueError("operational_report_window_too_large")
     return official_operational_report_from_rows(data, period=period, period_start=period_start, unit=unit, agency=agency)
+
+
+def official_timeliness_report(session: Dict[str, Any] | None, *, conn: sqlite3.Connection | None = None,
+                              generated_at: datetime | None = None) -> Dict[str, Any]:
+    if not session_has_any_permission(session, ["reports.operational_view"]):
+        raise PermissionError("operational_report_forbidden")
+    user = official_session_user(session) if conn is not None else supabase_official_session_user(session)
+    scope = local_inbound_finance_user_scope(conn, user) if conn is not None else inbound_finance_user_scope(user)
+    rows, errors = [], []
+    complete = True
+    if conn is not None:
+        rows = [row_to_dict(row) for row in conn.execute("""
+          SELECT 'inbound' AS source,d.id,d.created_at AS entered_at,d.due_at FROM inbound_documents d
+          WHERE d.company_id=:company AND d.finance_tenant_id=:tenant AND coalesce(d.closed_at,'')=''
+           AND d.status NOT IN ('closed','archived','cancelled')
+          UNION ALL
+          SELECT 'reply',r.id,r.created_at,x.due_at FROM internal_dispatch_recipients r
+          JOIN internal_dispatches x ON x.id=r.dispatch_id
+          LEFT JOIN inbound_documents i ON i.id=x.inbound_document_id
+          LEFT JOIN official_documents o ON o.id=x.official_document_id
+          LEFT JOIN companies c ON c.id=o.company_id LEFT JOIN users sender ON sender.id=x.sender_user_id
+          WHERE r.action_required=1 AND coalesce(r.replied_at,'')='' AND coalesce(x.closed_at,'')=''
+           AND x.status NOT IN ('closed','archived','cancelled') AND
+           CASE WHEN coalesce(x.inbound_document_id,'')<>'' THEN i.company_id=:company AND i.finance_tenant_id=:tenant
+            WHEN coalesce(x.official_document_id,'')<>'' THEN o.company_id=:company AND c.finance_tenant_id=:tenant
+            ELSE sender.company_id=:company AND sender.finance_tenant_id=:tenant AND sender.status='啟用' END
+          UNION ALL
+          SELECT 'approval',s.id,CASE WHEN s.step_order=1 THEN s.created_at
+           WHEN (SELECT p.approved_at FROM official_document_approval_steps p WHERE p.document_id=o.id
+             AND p.workflow_generation=s.workflow_generation AND p.step_order<s.step_order ORDER BY p.step_order DESC LIMIT 1) IS NULL THEN ''
+           ELSE max(s.created_at,(SELECT p.approved_at FROM official_document_approval_steps p WHERE p.document_id=o.id
+             AND p.workflow_generation=s.workflow_generation AND p.step_order<s.step_order ORDER BY p.step_order DESC LIMIT 1)) END,''
+          FROM official_documents o JOIN companies c ON c.id=o.company_id
+          JOIN official_document_approval_steps s ON s.document_id=o.id AND s.step_key=o.current_step AND s.status='pending'
+          WHERE o.company_id=:company AND c.finance_tenant_id=:tenant AND s.step_key<>'applicant_confirm'
+           AND substr(o.current_status,1,8)='pending_'
+           AND s.workflow_generation=(SELECT max(g.workflow_generation) FROM official_document_approval_steps g WHERE g.document_id=o.id)
+          ORDER BY source,id LIMIT :maximum
+        """, {"company": scope["company_id"], "tenant": scope["finance_tenant_id"], "maximum": LIST_MAX_ROWS + 1})]
+        if len(rows) > LIST_MAX_ROWS:
+            rows = rows[:LIST_MAX_ROWS]
+            complete, errors = False, ["timeliness_scan_limit_reached"]
+    else:
+        after = None
+        seen = set()
+        try:
+            while True:
+                request = {**scope, "actor_id": user["id"], "limit": 501}
+                if after:
+                    request.update({"after_source": after[0], "after_id": after[1]})
+                response = supabase_request("POST", "rpc/edoc_timeliness_candidates", {"p_request": request})
+                if not isinstance(response, dict) or not isinstance(response.get("items"), list) or len(response["items"]) > 501:
+                    raise RuntimeError("timeliness_response_invalid")
+                batch = response["items"]
+                for row in batch[:500]:
+                    key = (row.get("source"), row.get("id")) if isinstance(row, dict) else (None, None)
+                    if key[0] not in {"inbound", "reply", "approval"} or not isinstance(key[1], str) or not key[1] or key in seen or (after and key <= after):
+                        raise RuntimeError("timeliness_response_invalid")
+                    if len(rows) >= LIST_MAX_ROWS:
+                        raise RuntimeError("timeliness_scan_limit_reached")
+                    rows.append(row)
+                    seen.add(key)
+                    after = key
+                if len(batch) <= 500:
+                    break
+        except Exception as exc:
+            complete = False
+            errors = [str(exc) if str(exc) == "timeliness_scan_limit_reached" else "timeliness_scan_incomplete"]
+    return timeliness_report(rows, generated_at=generated_at or datetime.now(TAIPEI),
+                             scope={"companyId": scope["company_id"], "financeTenantId": scope["finance_tenant_id"]},
+                             data_complete=complete, errors=errors, system_timezone=datetime.now().astimezone().tzinfo)
 
 
 def dashboard(conn: sqlite3.Connection, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -17011,6 +17276,51 @@ FILE_AV_CLEAN_STATUSES = frozenset({"已通過", "clean", "passed"})
 SEAL_FILE_AV_CLEAN_STATUSES = FILE_AV_CLEAN_STATUSES
 
 
+def local_seal_backing_exists(file_object: Dict[str, Any]) -> bool:
+    """Check existence without reading or disclosing original seal bytes."""
+    try:
+        key = str(file_object.get("storage_key") or "")
+        root = STORAGE_DIR.resolve()
+        path = root / key
+        if not key or Path(key).is_absolute() or any(part in {"..", "."} for part in Path(key).parts):
+            return False
+        if not path.resolve().is_relative_to(root) or path.is_symlink() or not path.is_file():
+            return False
+        return path.stat().st_size > 0
+    except (OSError, ValueError):
+        return False
+
+
+def company_seal_owner_kind(conn: sqlite3.Connection, company_id: str) -> str:
+    row = conn.execute("SELECT owner_kind FROM company_seal_policies WHERE company_id = ?", (company_id,)).fetchone()
+    return seal_policy.owner_kind(row["owner_kind"] if row else None)
+
+
+def company_seal_policy_report(conn: sqlite3.Connection, company_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    editor = session is not None and session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"])
+    if editor:
+        assert_editor_seal_catalog_company(official_session_user(session), company_id, session, conn)
+    else:
+        assert_sqlite_seal_company_access(conn, company_id, session)
+    seals = list_company_seals(conn, company_id, session, editor=editor)
+    return seal_policy.inventory(company_id, company_seal_owner_kind(conn, company_id), seals)
+
+
+def patch_company_seal_policy(conn: sqlite3.Connection, company_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    require_seal_custodian_role(session)
+    if session is not None and "seals.manage" not in session_permissions(session):
+        raise PermissionError("seal_policy_manage_required")
+    assert_sqlite_seal_company_access(conn, company_id, session)
+    if set(payload) != {"owner_kind"}:
+        raise ValueError("invalid_seal_policy_fields")
+    kind = seal_policy.owner_kind(payload["owner_kind"])
+    actor, timestamp = seal_actor(session), now()
+    before = company_seal_owner_kind(conn, company_id)
+    conn.execute("INSERT INTO company_seal_policies (id,company_id,owner_kind,updated_by,created_at,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(company_id) DO UPDATE SET owner_kind=excluded.owner_kind,updated_by=excluded.updated_by,updated_at=excluded.updated_at", (company_id, company_id, kind, actor, timestamp, timestamp))
+    log_seal_usage(conn, action="classify_seal_owner", actor_id=actor, detail=f"company_id={company_id};owner_kind={before}->{kind}")
+    return company_seal_policy_report(conn, company_id, session)
+
+
 def file_object_av_is_clean(file_object: Dict[str, Any] | sqlite3.Row | None) -> bool:
     if not file_object:
         return False
@@ -17039,20 +17349,27 @@ def seal_file_with_backing_status(
     item["last_scan_at"] = file_object["last_scan_at"] if file_object else ""
     item["av_clean"] = seal_file_av_is_clean(file_object)
     seal = conn.execute(
-        "SELECT seal_size_type FROM company_seals WHERE id = ?",
+        "SELECT seal_size_type, seal_category, company_id FROM company_seals WHERE id = ?",
         (item.get("seal_id") or "",),
     ).fetchone()
     try:
         item["dimension_valid"] = bool(
             seal and company_seal_file_dimension_is_valid(item, seal["seal_size_type"])
+            and seal_policy.category_policy_valid(seal["seal_category"], seal["seal_size_type"], item)
+            and (not seal_scan_exceptions.is_native_policy(item.get("dimension_policy_version"))
+                 or seal_scan_exceptions.file_entry(item, seal["seal_size_type"])["company_id"] == seal["company_id"])
         )
     except ValueError:
         item["dimension_valid"] = False
+    item["backing_metadata_valid"] = seal_policy.backing_metadata_matches(item, row_to_dict(file_object) if file_object else None)
+    item["backing_storage_exists"] = local_seal_backing_exists(row_to_dict(file_object)) if file_object and item["backing_metadata_valid"] else False
     item["usable"] = bool(
         item.get("is_current")
         and item.get("file_object_id")
         and item["av_clean"]
         and item["dimension_valid"]
+        and item["backing_metadata_valid"]
+        and item["backing_storage_exists"]
     )
     return item
 
@@ -17081,10 +17398,14 @@ def require_current_company_seal_file(conn: sqlite3.Connection, seal_id: str) ->
         raise ValueError("seal_file_object_required")
     if not item.get("av_clean"):
         raise ValueError("current_seal_file_antivirus_required")
-    seal = conn.execute("SELECT seal_size_type FROM company_seals WHERE id = ?", (seal_id,)).fetchone()
+    seal = conn.execute("SELECT seal_size_type, seal_category FROM company_seals WHERE id = ?", (seal_id,)).fetchone()
     if not seal:
         raise ValueError("seal_not_found")
     require_company_seal_file_dimensions(item, seal["seal_size_type"], current=True)
+    if not seal_policy.category_policy_valid(seal["seal_category"], seal["seal_size_type"], item):
+        raise ValueError("seal_category_dimension_policy_mismatch")
+    if not item.get("backing_metadata_valid") or not item.get("backing_storage_exists"):
+        raise ValueError("current_seal_backing_unavailable")
     return item
 
 
@@ -17095,20 +17416,47 @@ def require_seal_file_av_clean(conn: sqlite3.Connection, file_row: Dict[str, Any
     if not item.get("av_clean"):
         raise ValueError("seal_file_antivirus_required")
     seal = conn.execute(
-        "SELECT seal_size_type FROM company_seals WHERE id = ?",
+        "SELECT seal_size_type, seal_category FROM company_seals WHERE id = ?",
         (item.get("seal_id") or "",),
     ).fetchone()
     if not seal:
         raise ValueError("seal_not_found")
     require_company_seal_file_dimensions(item, seal["seal_size_type"])
+    if not seal_policy.category_policy_valid(seal["seal_category"], seal["seal_size_type"], item):
+        raise ValueError("seal_category_dimension_policy_mismatch")
     return item
 
 
 def company_seal_api_dimension_metadata(
     seal_size_type: Any,
     current_file: Dict[str, Any] | None,
+    seal_category: str = "",
 ) -> Dict[str, Any]:
     """Expose current-version geometry separately from the calibration policy."""
+    if current_file and seal_scan_exceptions.is_native_policy(current_file.get("dimension_policy_version")):
+        profile = company_seal_file_dimension_profile(seal_size_type, current_file, current=True)
+        return {"render_size_mm": None, "render_width_mm": profile["width_mm"],
+                "render_height_mm": profile["height_mm"], "render_width_pt": profile["width_pt"],
+                "render_height_pt": profile["height_pt"], "dimension_policy_version": profile["dimension_policy_version"],
+                "calibration_dpi": profile["calibration_dpi"], "calibration_required": False, "size_locked": True,
+                "original_scan_exception": True}
+    manual = seal_category in {"official_seal", seal_policy.CONTINUOUS_CATEGORY}
+    if manual:
+        profile = company_seal_file_dimension_profile(seal_size_type, current_file, current=True) if current_file else None
+        return {
+            "render_size_mm": None,
+            "render_width_mm": profile["width_mm"] if profile else None,
+            "render_height_mm": profile["height_mm"] if profile else None,
+            "render_width_pt": profile["width_pt"] if profile else None,
+            "render_height_pt": profile["height_pt"] if profile else None,
+            "dimension_policy_version": (profile or {}).get("dimension_policy_version") or (seal_policy.CONTINUOUS_POLICY if seal_category == seal_policy.CONTINUOUS_CATEGORY else seal_policy.OFFICIAL_POLICY),
+            "calibration_required": True, "size_locked": True,
+            "dimension_policy": {"default_width_mm": None, "default_height_mm": None,
+                                 "min_width_mm": 1.0, "min_height_mm": 1.0,
+                                 "max_width_mm": 200.0, "max_height_mm": 200.0,
+                                 "calibration_dpi": EDOC_SEAL_CALIBRATION_DPI,
+                                 "technical_bounds_only": True},
+        }
     policy = company_seal_dimension_profile(seal_size_type)
     current_profile = (
         company_seal_file_dimension_profile(seal_size_type, current_file, current=True)
@@ -17151,7 +17499,7 @@ def company_seal_api_dimension_metadata(
     }
 
 
-def company_seal_row(conn: sqlite3.Connection, seal_id: str) -> Dict[str, Any]:
+def company_seal_row(conn: sqlite3.Connection, seal_id: str, *, owner_kind_value: str | None = None) -> Dict[str, Any]:
     row = conn.execute(
         """
         SELECT s.*, c.name AS company_name, c.tax_id AS company_tax_id
@@ -17169,12 +17517,18 @@ def company_seal_row(conn: sqlite3.Connection, seal_id: str) -> Dict[str, Any]:
         designated_current
         if designated_current
         and designated_current.get("usable")
-        and str(designated_current.get("dimension_policy_version") or "") == EDOC_SEAL_DIMENSION_POLICY_VERSION
+        and str(designated_current.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, *seal_scan_exceptions.POLICIES}
         else None
     )
-    data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current))
+    data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current, data.get("seal_category") or ""))
     data["current_file"] = seal_file_metadata(usable_current) if usable_current else None
     data["current_file_status"] = seal_file_metadata(designated_current) if designated_current else None
+    data["approved_original_scans"] = seal_scan_exceptions.approved_metadata(data)
+    data["owner_kind"] = owner_kind_value if owner_kind_value is not None else company_seal_owner_kind(conn, data["company_id"])
+    data["display_label"] = seal_policy.category_label(data.get("seal_category"))
+    category_allowed = seal_policy.application_category_allowed(data["owner_kind"], data.get("seal_category"))
+    data["selectable"] = bool(data.get("is_active") and usable_current and category_allowed)
+    data["availability_reason"] = "classification_required" if data["owner_kind"] == "unclassified" else "unsupported_application_category" if data.get("seal_category") in {"bank_seal", "other"} else "owner_policy_mismatch" if not category_allowed else "ready" if data["selectable"] else "inactive" if not data.get("is_active") else "unusable_current" if designated_current else "missing_current"
     return data
 
 
@@ -17191,6 +17545,7 @@ def validate_official_document_seal(
         raise ValueError("inactive_seal_cannot_be_requested")
     current_file = seal.get("current_file")
     if require_current:
+        seal_policy.require_application_category(seal.get("owner_kind"), seal.get("seal_category"))
         if not current_file:
             current_file = require_current_company_seal_file(conn, seal_id)
         if not current_file.get("file_object_id"):
@@ -17199,43 +17554,16 @@ def validate_official_document_seal(
 
 
 def launch_smoke_current_official_seal(conn: sqlite3.Connection, company_id: str = "") -> Dict[str, Any]:
-    params: List[Any] = []
-    where = [
-        "s.is_active = 1",
-        "f.is_current = 1",
-        "f.file_object_id IS NOT NULL",
-        "f.dimension_validated = 1",
-        "f.dimension_policy_version = ?",
-        "LOWER(COALESCE(fo.scan_status, '')) IN ('已通過', 'clean', 'passed')",
-    ]
-    params.append(EDOC_SEAL_DIMENSION_POLICY_VERSION)
-    if company_id:
-        where.append("s.company_id = ?")
-        params.append(company_id)
-    row = conn.execute(
-        f"""
-        SELECT s.id
-        FROM company_seals s
-        JOIN company_seal_files f ON f.seal_id = s.id
-        JOIN file_objects fo ON fo.id = f.file_object_id
-        WHERE {" AND ".join(where)}
-        ORDER BY
-          CASE s.seal_category
-            WHEN 'general_seal' THEN 1
-            WHEN 'official_seal' THEN 2
-            WHEN 'establishment_seal' THEN 3
-            WHEN 'bank_seal' THEN 4
-            ELSE 9
-          END,
-          s.company_id,
-          f.version DESC
-        LIMIT 1
-        """,
-        params,
-    ).fetchone()
-    if not row:
-        raise ValueError("launch_smoke_current_seal_required")
-    return company_seal_row(conn, row["id"])
+    rows = conn.execute(
+        """SELECT id FROM company_seals WHERE is_active=1 AND (?='' OR company_id=?)
+           ORDER BY CASE seal_category WHEN 'general_seal' THEN 1 WHEN 'official_seal' THEN 2 WHEN 'establishment_seal' THEN 3 ELSE 9 END, company_id,created_at LIMIT 500""",
+        (company_id, company_id),
+    ).fetchall()
+    for candidate in rows:
+        seal = company_seal_row(conn, candidate["id"])
+        if seal.get("selectable") and seal.get("current_file"):
+            return seal
+    raise ValueError("launch_smoke_current_seal_required")
 
 
 def create_uploaded_pdf_launch_smoke_document(
@@ -17415,6 +17743,7 @@ def seal_file_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
         "pixel_width", "pixel_height", "source_aspect_ratio", "render_width_mm",
         "render_height_mm", "dimension_policy_version", "dimension_validated", "dimension_valid",
         "scan_status", "scan_engine", "last_scan_at", "av_clean", "usable",
+        "backing_metadata_valid", "backing_storage_exists",
     }
     metadata = {key: row.get(key) for key in allowed if key in row}
     try:
@@ -17609,7 +17938,8 @@ def list_company_seals(
         """,
         (company_id,),
     ).fetchall()
-    result = [company_seal_row(conn, row["id"]) for row in rows]
+    owner = company_seal_owner_kind(conn, company_id)
+    result = [company_seal_row(conn, row["id"], owner_kind_value=owner) for row in rows]
     return [editor_seal_catalog_metadata(row) for row in result if row.get("is_active")] if editor else result
 
 
@@ -17626,7 +17956,7 @@ def editor_seal_catalog_metadata(seal: Dict[str, Any]) -> Dict[str, Any]:
     """Applicant picker metadata, never Vault locations, uploads or admin data."""
     fields = {"id", "company_id", "seal_name", "seal_category", "seal_size_type", "is_active",
               "render_size_mm", "render_width_mm", "render_height_mm", "render_width_pt",
-              "render_height_pt", "dimension_policy_version", "size_locked"}
+              "render_height_pt", "dimension_policy_version", "size_locked", "display_label", "owner_kind", "selectable", "availability_reason", "calibration_required"}
     file_fields = {"id", "seal_id", "file_hash", "version", "is_current", "render_width_mm",
                    "render_height_mm", "render_width_pt", "render_height_pt",
                    "dimension_policy_version", "dimension_validated", "usable"}
@@ -17652,6 +17982,7 @@ def create_company_seal(conn: sqlite3.Connection, company_id: str, payload: Dict
     assert_sqlite_seal_company_access(conn, company_id, session)
     category = payload.get("seal_category") or payload.get("category") or "other"
     size_type = payload.get("seal_size_type") or payload.get("size_type") or "large_seal"
+    seal_policy.validate_category_size(category, size_type)
     if category not in seal_reference_codes(conn, "category"):
         raise ValueError("invalid_seal_category")
     if size_type not in seal_reference_codes(conn, "size"):
@@ -17704,6 +18035,10 @@ def patch_company_seal(conn: sqlite3.Connection, seal_id: str, payload: Dict[str
         raise ValueError("invalid_seal_category")
     if "seal_size_type" in update and update["seal_size_type"] not in seal_reference_codes(conn, "size"):
         raise ValueError("invalid_seal_size_type")
+    seal_policy.validate_category_size(update.get("seal_category", current_seal["seal_category"]), update.get("seal_size_type", current_seal["seal_size_type"]))
+    if ("seal_category" in update and update["seal_category"] != current_seal["seal_category"]
+            and conn.execute("SELECT 1 FROM company_seal_files WHERE seal_id=? LIMIT 1", (seal_id,)).fetchone()):
+        raise ValueError("seal_category_locked_after_upload")
     if (
         "seal_size_type" in update
         and str(update["seal_size_type"]) != str(current_seal.get("seal_size_type") or "")
@@ -17797,6 +18132,8 @@ def validate_seal_file_upload(
     seal_size_type: str = "",
     render_width_mm: Any = None,
     render_height_mm: Any = None,
+    seal_category: str = "",
+    seal: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     configured_mime_types = {item.strip().lower() for item in EDOC_SEAL_ALLOWED_MIME_TYPES.split(",") if item.strip()}
     suffix = Path(file_name).suffix.lower().lstrip(".")
@@ -17821,12 +18158,21 @@ def validate_seal_file_upload(
     if len(data) > max_bytes:
         raise ValueError("seal_file_too_large")
     inspection = verify_seal_raster_image(data, normalized_mime)
+    approved = seal_scan_exceptions.upload_match(seal or {}, sha256_bytes(data), inspection["width"], inspection["height"], render_width_mm, render_height_mm)
+    if approved:
+        if normalized_mime != "image/png":
+            raise ValueError("approved_original_scan_format_mismatch")
+        return {**inspection, "pixel_width": inspection["width"], "pixel_height": inspection["height"],
+                "source_aspect_ratio": inspection["width"] / inspection["height"],
+                "render_width_mm": approved["render_width_mm"], "render_height_mm": approved["render_height_mm"],
+                "dimension_policy_version": approved["dimension_policy_version"], "dimension_validated": True}
     return (
         validate_company_seal_raster_dimensions(
             seal_size_type,
             inspection,
             render_width_mm,
             render_height_mm,
+            seal_category,
         )
         if seal_size_type
         else inspection
@@ -17852,7 +18198,8 @@ def upload_company_seal_file(conn: sqlite3.Connection, seal_id: str, payload: Di
     data = decode_seal_file_content(content)
     file_name = Path(payload.get("file_name") or f"{seal_id}.png").name
     mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "image/png"
-    render_width_mm, render_height_mm = normalize_company_seal_upload_dimensions(payload)
+    known_scan = any(entry["png_sha256"] == sha256_bytes(data).lower() for entry in seal_scan_exceptions.approved_metadata(seal))
+    render_width_mm, render_height_mm = normalize_company_seal_upload_dimensions(payload, "official_seal" if known_scan else str(seal.get("seal_category") or ""))
     image_info = validate_seal_file_upload(
         file_name,
         mime_type,
@@ -17860,6 +18207,8 @@ def upload_company_seal_file(conn: sqlite3.Connection, seal_id: str, payload: Di
         str(seal.get("seal_size_type") or ""),
         render_width_mm,
         render_height_mm,
+        str(seal.get("seal_category") or ""),
+        seal,
     )
     scan_status, scan_signature = scan_seal_upload_bytes(data, file_name)
     actor = seal_actor(session, payload)
@@ -17930,7 +18279,7 @@ def upload_company_seal_file(conn: sqlite3.Connection, seal_id: str, payload: Di
                 f"version={next_version} hash={row['file_hash']} "
                 f"pixels={image_info['pixel_width']}x{image_info['pixel_height']} "
                 f"render_mm={image_info['render_width_mm']}x{image_info['render_height_mm']} "
-                f"policy={EDOC_SEAL_DIMENSION_POLICY_VERSION} av={scan_signature}"
+                f"policy={image_info['dimension_policy_version']} av={scan_signature}"
             ),
         )
         if owns_transaction:
@@ -18091,6 +18440,7 @@ def canonicalize_company_seal_usage_positions(
             position.get("h"),
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
+            dimension_policy_version=profile["dimension_policy_version"],
         )
         position.update({
             "seal_id": seal_id,
@@ -18250,6 +18600,7 @@ def create_seal_usage_request(conn: sqlite3.Connection, document_id: str, payloa
         raise ValueError("seal_id_required")
     assert_sqlite_seal_access(conn, seal_id, session)
     seal = company_seal_row(conn, seal_id)
+    seal_policy.require_application_category(seal.get("owner_kind"), seal.get("seal_category"))
     if not seal.get("is_active"):
         raise ValueError("inactive_seal_cannot_be_requested")
     seal_file = require_current_company_seal_file(conn, seal_id)
@@ -19734,66 +20085,15 @@ def internal_launch_companies(conn: sqlite3.Connection) -> Tuple[List[Dict[str, 
 
 def internal_launch_company_seal_checks(conn: sqlite3.Connection) -> Tuple[List[Dict[str, Any]], List[str]]:
     companies, scope, all_companies = internal_launch_companies(conn)
-    blockers: List[str] = launch_company_scope_blockers(all_companies, scope)
-    checks: List[Dict[str, Any]] = []
+    blockers = launch_company_scope_blockers(all_companies, scope)
+    checks = []
     if blockers and not companies:
         return checks, blockers
     for company in companies:
-        company_check = {
-            "company_id": company["id"],
-            "company_name": company.get("name") or company["id"],
-            "launchScopeIncluded": True,
-            "requiredSeals": [],
-        }
-        for category, label in INTERNAL_LAUNCH_REQUIRED_SEAL_CATEGORIES.items():
-            rows = conn.execute(
-                """
-                SELECT s.id, s.seal_name, s.seal_category,
-                       EXISTS (
-                         SELECT 1
-                         FROM company_seal_files f
-                         JOIN file_objects fo ON fo.id = f.file_object_id
-                         WHERE f.seal_id = s.id AND f.is_current = 1
-                           AND LOWER(COALESCE(fo.scan_status, '')) IN ('已通過', 'clean', 'passed')
-                       ) AS has_current_file,
-                       EXISTS (
-                         SELECT 1 FROM company_seal_files f
-                         WHERE f.seal_id = s.id AND f.is_current = 1
-                       ) AS has_designated_current
-                FROM company_seals s
-                WHERE s.company_id = ? AND s.is_active = 1 AND s.seal_category = ?
-                ORDER BY s.seal_size_type, s.created_at
-                """,
-                (company["id"], category),
-            ).fetchall()
-            has_active = bool(rows)
-            has_current = any(bool(row["has_current_file"]) for row in rows)
-            has_unscanned_current = any(bool(row["has_designated_current"]) and not bool(row["has_current_file"]) for row in rows)
-            current_row = next((row for row in rows if bool(row["has_current_file"])), None)
-            company_check["requiredSeals"].append({
-                "category": category,
-                "label": label,
-                "active": has_active,
-                "currentFile": has_current,
-                "sealCount": len(rows),
-                "sealIds": [row["id"] for row in rows],
-                "firstSealId": rows[0]["id"] if rows else "",
-                "currentSealId": current_row["id"] if current_row else "",
-                "nextAction": (
-                    "已具備 AV 通過的 current 版本"
-                    if has_current
-                    else "完成 Seal Vault 防毒掃描後再設為 current"
-                    if has_unscanned_current
-                    else "上傳 Seal Vault current 版本"
-                    if has_active
-                    else "建立啟用印章並上傳 current 版本"
-                ),
-            })
-            if not has_active:
-                blockers.append(f"{company_check['company_name']} 缺少啟用的{label}。")
-            elif not has_current:
-                blockers.append(f"{company_check['company_name']} 的{label}尚無 AV 通過的 Seal Vault current 版本。")
-        checks.append(company_check)
+        seals = list_company_seals(conn, company["id"])
+        report, failures = seal_policy.launch_inventory(company["id"], company.get("name") or company["id"], company_seal_owner_kind(conn, company["id"]), seals)
+        checks.append(report)
+        blockers.extend(failures)
     return checks, blockers
 
 
@@ -20203,7 +20503,7 @@ def canonicalize_official_company_seal_positions(
                     raise ValueError("current_seal_file_required")
                 seal_file = None
         if seal_file is not None:
-            if str(seal_file.get("dimension_policy_version") or "") != EDOC_SEAL_DIMENSION_POLICY_VERSION:
+            if not seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), seal_file):
                 raise ValueError("official_seal_file_policy_upgrade_required")
             profile = company_seal_file_dimension_profile(
                 seal.get("seal_size_type"),
@@ -20227,6 +20527,7 @@ def canonicalize_official_company_seal_positions(
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
             allow_unspecified=not width_supplied and not height_supplied,
+            dimension_policy_version=profile["dimension_policy_version"],
         )
         position["width"] = width
         position["height"] = height
@@ -20902,7 +21203,7 @@ def lock_official_stamp_seal_versions(
         )
         if selected_file_id and selected_hash != str(seal_file.get("file_hash") or ""):
             raise ValueError("official_seal_file_hash_mismatch")
-        if str(seal_file.get("dimension_policy_version") or "") != EDOC_SEAL_DIMENSION_POLICY_VERSION:
+        if not seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), seal_file):
             raise ValueError("official_seal_file_policy_upgrade_required")
         profile = company_seal_file_dimension_profile(seal.get("seal_size_type"), seal_file)
         width, height = canonical_company_seal_dimensions_pt(
@@ -20912,6 +21213,7 @@ def lock_official_stamp_seal_versions(
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
             allow_unspecified=not selected_file_id,
+            dimension_policy_version=profile["dimension_policy_version"],
         )
         conn.execute(
             """
@@ -21142,7 +21444,7 @@ def official_dispatch_route_notification_payload(
             "body": f"{completed_version}，請完成寄發並回填寄送日期與證明。",
         }
     if owner_type == "applicant":
-        target = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+        target = official_followup_notification_actor(document, conn=conn)
         return {
             "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
             "type": "發文寄發待辦",
@@ -21153,7 +21455,7 @@ def official_dispatch_route_notification_payload(
             "priority": "高",
             "body": f"{completed_version}，請完成寄送並回填寄送日期與證明。",
         }
-    target = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+    target = official_followup_notification_actor(document, conn=conn)
     return {
         "id": f"NTF-DISPATCH-ROUTE-{record['id']}",
         "type": "發文申請人確認",
@@ -21195,6 +21497,7 @@ def can_manage_official_dispatch(
     record: Dict[str, Any] | None,
     session: Dict[str, Any] | None = None,
     workflow_steps: Iterable[Dict[str, Any]] | None = None,
+    *, followup_binding: Dict[str, Any] | None = None,
 ) -> bool:
     if not user:
         return False
@@ -21211,8 +21514,28 @@ def can_manage_official_dispatch(
         return user_id == owner_id == workflow_owner_id
     if owner_type == "applicant":
         applicant_id = str(document.get("applicant_id") or "").strip()
-        return bool(applicant_id and user_id == applicant_id and owner_id == applicant_id)
+        return bool(applicant_id and owner_id == applicant_id and (user_id == applicant_id or (
+            followup_binding and followup_binding.get("document_id") == document.get("id")
+            and followup_binding.get("original_applicant_id") == applicant_id
+            and followup_binding.get("process_owner_user_id") == user_id)))
     return False
+
+
+def official_dispatch_actor_allowed(user, document, record, session, steps, *, conn=None):
+    binding = official_document_followup_binding(document, user, conn=conn)
+    return can_manage_official_dispatch(user, document, record, session, steps, followup_binding=binding)
+
+
+def official_followup_notification_actor(document, *, conn=None):
+    """Resolve responsibility without changing the original applicant identity."""
+    actor = (active_user_by_id(conn, document.get("applicant_id") or "") if conn is not None
+             else supabase_get("users", document.get("applicant_id") or ""))
+    if actor and actor.get("status") == "啟用":
+        return actor
+    binding = official_handover_followup.load(sys.modules[__name__], document, conn=conn)
+    if binding:
+        return binding["owner"]
+    raise ValueError("official_followup_handover_required")
 
 
 def official_dispatch_record_editable(record: Dict[str, Any] | None) -> bool:
@@ -21333,7 +21656,7 @@ def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, 
     document = official_document_row(conn, document_id)
     steps = official_document_steps(conn, document_id)
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_followup_binding(document, user, conn=conn) and not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
         raise PermissionError("official_dispatch_access_denied")
     record = official_dispatch_record(conn, document_id)
     if not record:
@@ -21345,10 +21668,10 @@ def update_official_dispatch_record(conn: sqlite3.Connection, document_id: str, 
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_update_forbidden")
         record = upsert_official_dispatch_record(conn, document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
         raise PermissionError("official_dispatch_update_forbidden")
     require_official_dispatch_record_editable(record)
     if "proof_file_id" in payload:
@@ -21389,7 +21712,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
                 "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
                 "dispatch_owner_user_id": owner.get("id") or "",
             }
-            if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+            if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
                 raise PermissionError("official_dispatch_complete_forbidden")
             record = upsert_official_dispatch_record(conn, document, method, user)
             enqueue_official_dispatch_route(
@@ -21399,7 +21722,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
                 user,
                 str(document.get("stamped_file_id") or ""),
             )
-        if not can_manage_official_dispatch(user, document, record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_complete_forbidden")
         if record.get("dispatch_owner_type") == "general_affairs" and document.get("current_status") != "pending_general_affairs_dispatch":
             raise ValueError("official_document_not_pending_general_affairs_dispatch")
@@ -21456,7 +21779,7 @@ def complete_official_dispatch(conn: sqlite3.Connection, document_id: str, paylo
             ip_address=payload.get("ip_address") or "",
             user_agent=payload.get("user_agent") or "",
         )
-        applicant = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+        applicant = official_followup_notification_actor(document, conn=conn)
         create_notification(conn, {
             "id": f"NTF-DISPATCH-COMPLETE-{record['id']}",
             "type": "發文申請人確認",
@@ -21487,10 +21810,10 @@ def upload_official_dispatch_proof_file(conn: sqlite3.Connection, document_id: s
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps, conn=conn):
             raise PermissionError("official_dispatch_proof_upload_forbidden")
         record = upsert_official_dispatch_record(conn, document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps, conn=conn):
         raise PermissionError("official_dispatch_proof_upload_forbidden")
     require_official_dispatch_record_editable(record)
     content = payload.get("content_base64") or ""
@@ -22011,6 +22334,15 @@ def canDownloadOfficialDocument(
     return user_id in official_document_participant_ids(document, steps, actor_snapshots)
 
 
+def official_document_followup_binding(document, user, *, conn=None):
+    """Server-only confirmed responsibility; does not rewrite participation."""
+    if (not user or user.get("id") == document.get("applicant_id")
+            or user.get("account_source") != "finance"
+            or user.get("company_id") != document.get("company_id")):
+        return None
+    return official_handover_followup.load(sys.modules[__name__], document, conn=conn, actor_id=user.get("id"))
+
+
 def official_document_active_read_delegation(
     document: Dict[str, Any],
     steps: Iterable[Dict[str, Any]],
@@ -22171,12 +22503,13 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
     user = session.get("user") if session else None
     is_participant = bool(user and canDownloadOfficialDocument(user, document, all_steps, actor_snapshots))
+    followup_binding = official_document_followup_binding(document, user, conn=conn)
     current_step = next((
         step for step in steps
         if step.get("step_key") == document.get("current_step") and step.get("status") == "pending"
     ), None)
     active_delegation = official_document_active_read_delegation(document, all_steps, user, conn=conn)
-    if user and not is_participant and not active_delegation:
+    if user and not is_participant and not active_delegation and not followup_binding:
         if not official_document_user_same_company(user, document) or not str(user.get("company_id") or "").strip():
             raise PermissionError("official_document_company_forbidden")
         if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
@@ -22198,6 +22531,7 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
     }
     return {
         **document,
+        **official_editor_application_capabilities(document, session, has_history=bool(all_steps or actor_snapshots or any(item.get("action") == "submit" for item in logs)), stamp_request=stamp_request),
         "metadata": parse_json_field(document.get("metadata_json")),
         "official_seal": package.get("official_seal"),
         "document_category": package.get("document_category") or "",
@@ -22218,10 +22552,12 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         **official_workflow_action_capabilities(document, steps, user, active_delegation, stamp_request),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
-        "can_download": bool(is_participant or active_delegation),
-        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
+        "can_download": bool(is_participant or active_delegation or followup_binding),
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
+        "can_create_linked_application": bool(followup_binding and document.get("current_status") in {"draft", "rejected"}),
+        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps, followup_binding=followup_binding)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
-        "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
+        "can_confirm": bool(user and (user.get("id") == document.get("applicant_id") or followup_binding) and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
         "can_act": bool(user and current_step and current_step.get("status") == "pending" and (current_step.get("approver_user_id") == user.get("id") or active_delegation)),
         "acting_for_user_id": current_step.get("approver_user_id") if active_delegation and current_step else "",
         "delegation_id": active_delegation.get("id") if active_delegation else "",
@@ -22457,6 +22793,23 @@ def save_compose_draft(conn: sqlite3.Connection, draft_id: str, payload: Dict[st
     return save_sqlite_draft(conn, draft_id, payload, compose_draft_user(session), now())
 
 
+def get_compose_draft(draft_id: str, session: Dict[str, Any] | None, conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    user = compose_draft_user(session)
+    filters = {"id": draft_id, "applicant_id": user["id"], "company_id": user["company_id"], "archived": False}
+    rows = ([dict(r) for r in conn.execute("SELECT * FROM official_document_compose_drafts WHERE id=? AND applicant_id=? AND company_id=? AND archived=0", (draft_id, user["id"], user["company_id"]))]
+            if conn is not None else supabase_filter_rows("official_document_compose_drafts", filters, limit=1))
+    if not rows:
+        raise PermissionError("compose_draft_scope_forbidden")
+    result = public_draft(rows[0])
+    linked_id = result["snapshot"].get("officialDocumentId") or result["snapshot"].get("draftRequestId")
+    if linked_id:
+        linked = ([dict(r) for r in conn.execute("SELECT id,applicant_id,current_status FROM official_documents WHERE id=?", (linked_id,))]
+                  if conn is not None else supabase_filter_rows("official_documents", {"id": linked_id}, limit=1))
+        if linked and (linked[0].get("applicant_id") != user["id"] or linked[0].get("current_status") not in {"draft", "rejected"}):
+            raise ValueError("compose_draft_no_longer_editable")
+    return result
+
+
 def supabase_list_compose_drafts(session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = compose_draft_user(session)
     rows = supabase_filter_rows("official_document_compose_drafts", {"applicant_id": user["id"], "company_id": user["company_id"], "archived": False}, limit=20, order="updated_at.desc")
@@ -22689,6 +23042,7 @@ OFFICIAL_CORRECTION_METADATA_TEXT_FIELDS = {
     "priority": 40,
     "large_seal_type": 80,
     "small_seal_type": 80,
+    "continuous_seal_type": 80,
     "purpose": 2000,
     "attachment_details": 5000,
     "contact_address": 1000,
@@ -22733,7 +23087,7 @@ def _official_correction_client_metadata(payload: Dict[str, Any]) -> Dict[str, A
     placements = source.get("seal_placements")
     if isinstance(placements, dict):
         safe_placements: Dict[str, Dict[str, float | int]] = {}
-        for kind in ("large", "small"):
+        for kind in ("large", "small", "single"):
             item = placements.get(kind)
             if not isinstance(item, dict):
                 continue
@@ -23066,6 +23420,8 @@ def update_official_document_correction(
 ) -> Dict[str, Any]:
     user = official_session_user(session)
     document = official_document_row(conn, document_id)
+    if _editor_application_update_requested(document, payload):
+        return update_official_editor_application(conn, document_id, payload, session)
     if document.get("applicant_id") != user.get("id"):
         raise PermissionError("only_applicant_can_correct")
     if document.get("current_status") not in {"draft", "rejected"}:
@@ -23413,6 +23769,9 @@ def submit_official_document(conn: sqlite3.Connection, document_id: str, payload
             if workflow_lock_metadata is not None:
                 workflow_lock_metadata["electronic_output"] = source_lock
     if workflow_lock_metadata is not None:
+        if parse_json_field(document.get("metadata_json")).get("pdf_editor_v2"):
+            workflow_lock_metadata["editor_submission_application"] = {"content_revision": expected_content_revision,
+                "snapshot_sha256": canonical_json_hash(editor_application.application_snapshot(document))}
         document["metadata_json"] = json.dumps(workflow_lock_metadata, ensure_ascii=False)
         conn.execute(
             "UPDATE official_documents SET metadata_json = ?, updated_at = ? WHERE id = ?",
@@ -24380,7 +24739,7 @@ def reject_official_document(conn: sqlite3.Connection, document_id: str, payload
         decision_evidence=rejection_evidence,
     )
     editor_revision = clone_official_editor_revision_after_reject(conn, document_id, user)
-    applicant = active_user_by_id(conn, document.get("applicant_id") or "") or {}
+    applicant = official_followup_notification_actor(document, conn=conn)
     create_and_deliver_notification(conn, {
         "type": "發文退回",
         "title": f"{document['title']} 已駁回",
@@ -24571,7 +24930,8 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
     if action not in {"withdraw", "decline"}:
         next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
-        if not next_step or not active_user_by_id(conn, str(next_step.get("approver_user_id") or "")):
+        if not next_step or not (active_user_by_id(conn, str(next_step.get("approver_user_id") or ""))
+                or (next_step.get("step_key") == "applicant_confirm" and official_handover_followup.load(sys.modules[__name__], document, conn=conn))):
             raise ValueError("official_workflow_next_approver_inactive")
     savepoint = "workflow_mutation_" + secrets.token_hex(4)
     conn.execute(f"SAVEPOINT {savepoint}")
@@ -24596,7 +24956,9 @@ def mutate_official_workflow(conn: sqlite3.Connection, document_id: str, action:
                 insert_row(conn, "official_document_editor_revisions", {**clone, "editor_state_json": json.dumps(clone["editor_state_json"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))})
         insert_row(conn, "official_document_approval_logs", {**plan["approval_log"], "decision_evidence_json": json.dumps(plan["approval_log"]["decision_evidence_json"], ensure_ascii=False)})
         recipient_id = document["applicant_id"] if action in {"withdraw", "decline"} else next(row["approver_user_id"] for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"])
-        recipient = active_user_by_id(conn, recipient_id) or {}
+        recipient = (official_followup_notification_actor(document, conn=conn) if recipient_id == document["applicant_id"]
+                     else active_user_by_id(conn, recipient_id) or {})
+        recipient_id = recipient.get("id") or recipient_id
         create_notification(conn, {"id": "NTF-WORKFLOW-" + sha256_bytes(operation_id.encode())[:32], "type": "簽核流程異動", "title": "案件不通過，已終止" if action == "decline" else "簽核流程已更新", "target_user_id": recipient_id, "target_company_id": recipient.get("company_id") or "", "channel": "Email + 系統通知", "source": document_id, "body": plan["approval_log"]["comment"] if action == "decline" else "請至簽核紀錄查看待處理案件。", "created_at": plan["timestamp"]})
         log_audit(conn, actor["id"], action, "official_documents", document_id, f"generation={plan['workflow_generation']};operation_id={operation_id}", actor_user_id=actor["id"], request_id=operation_id, metadata={"request_sha256": request_hash, "workflow_generation": plan["workflow_generation"]})
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -24674,11 +25036,12 @@ def confirm_official_document(conn: sqlite3.Connection, document_id: str, payloa
     conn.execute(f"SAVEPOINT {savepoint}")
     try:
         document = official_document_row(conn, document_id)
-        if document["applicant_id"] != user["id"]:
+        followup_binding = official_document_followup_binding(document, user, conn=conn)
+        if document["applicant_id"] != user["id"] and not followup_binding:
             raise PermissionError("only_applicant_can_confirm")
         steps = current_official_document_steps(conn, document_id)
         receipts = [item for item in steps if item.get("step_key") == "applicant_confirm"]
-        if len(receipts) != 1 or receipts[0].get("approver_user_id") != user["id"]:
+        if len(receipts) != 1 or receipts[0].get("approver_user_id") != document["applicant_id"]:
             raise ValueError("official_document_receipt_step_conflict")
         step = receipts[0]
         existing = conn.execute(
@@ -24703,9 +25066,10 @@ def confirm_official_document(conn: sqlite3.Connection, document_id: str, payloa
             evidence = {**(parse_json_any(step.get("decision_evidence_json"), {}) or {}),
                         "schema_version": 1, "decision_type": "confirm", "expected_step_id": step["id"],
                         "workflow_generation": int(step.get("workflow_generation") or 1),
-                        "decision_actor_user_id": user["id"], "principal_actor_id": user["id"], "confirmed_at": timestamp}
+                        "decision_actor_user_id": user["id"], "principal_actor_id": document["applicant_id"], "confirmed_at": timestamp,
+                        **({"followup_handover_id": followup_binding["handover_id"]} if followup_binding else {})}
             log = insert_official_log(conn, document_id, "confirm", user, payload.get("comment") or "申請人確認已用印版本",
-                                     step_id=step["id"], principal_actor_id=user["id"], decision_evidence=evidence,
+                                     step_id=step["id"], principal_actor_id=document["applicant_id"], decision_evidence=evidence,
                                      ip_address=payload.get("ip_address") or "", user_agent=payload.get("user_agent") or "")
             evidence["confirmation_log_id"] = log["id"]
             changed = conn.execute(
@@ -24849,23 +25213,39 @@ def stamp_prepared_pdf_with_locked_seals(locked: Dict[str, Any]) -> Tuple[bytes,
             seam_element = seam_element_for_position(locked.get("state") or {}, position)
             seal_data = asset["data"]
             seal_mime = str(asset.get("mime_type") or "image/png")
-            transformed, transformed_width, transformed_height = _editor_transformed_image(
-                seal_data,
-                seal_mime,
-                float(rect.width),
-                float(rect.height),
-                pdf_safe_float(position.get("rotation"), 0),
-                max(0.0, min(1.0, pdf_safe_float(position.get("opacity"), 1))),
-            )
-            if seam_element:
-                transformed = split_seal_raster(transformed, seam_element["properties"]["seamPartIndex"], int(ordered_pages[page_index].get("rotation") or 0))
-            placed_rect = _editor_centered_rect(rect, transformed_width, transformed_height)
-            page.insert_image(
-                placed_rect,
-                stream=transformed,
-                keep_proportion=False,
-                overlay=True,
-            )
+            opacity = max(0.0, min(1.0, pdf_safe_float(position.get("opacity"), 1)))
+            if seam_element and seam_element["properties"].get("seamMode") == "grouped":
+                seam_properties = seam_element["properties"]
+                transformed = split_seal_raster(
+                    _editor_native_seal_png(seal_data, seal_mime, opacity),
+                    seam_properties["seamPartIndex"],
+                    int(ordered_pages[page_index].get("rotation") or 0),
+                    part_count=seam_properties["seamPartCount"],
+                    edge=seam_properties["seamEdge"],
+                )
+                # Keep the original native pixel canvas and physical footprint;
+                # no 216 DPI thumbnail/padding or post-rotation aspect squeeze.
+                placed_rect = rect
+                page.insert_image(placed_rect, stream=transformed, keep_proportion=False, overlay=True)
+            elif not seam_element and seal_scan_exceptions.is_native_policy(position.get("locked_dimension_policy_version")):
+                placed_rect = _editor_insert_native_seal(
+                    page, rect, seal_data, seal_mime,
+                    pdf_safe_float(position.get("rotation"), 0), opacity,
+                )
+            else:
+                # Historical square pair manifests retain their established
+                # upright rendering behavior and ordinary legacy version bytes.
+                transformed, transformed_width, transformed_height = _editor_transformed_image(
+                    seal_data, seal_mime, float(rect.width), float(rect.height),
+                    pdf_safe_float(position.get("rotation"), 0), opacity,
+                )
+                if seam_element:
+                    transformed = split_seal_raster(
+                        transformed, seam_element["properties"]["seamPartIndex"],
+                        int(ordered_pages[page_index].get("rotation") or 0),
+                    )
+                placed_rect = _editor_centered_rect(rect, transformed_width, transformed_height)
+                page.insert_image(placed_rect, stream=transformed, keep_proportion=False, overlay=True)
             seal_rects_by_page.setdefault(page_index, []).append(placed_rect)
 
         # Locked V3 revisions guarantee entered / replacement text is the highest
@@ -25431,7 +25811,7 @@ def official_document_download_file(conn: sqlite3.Connection, document_id: str, 
     document = official_document_row(conn, document_id)
     steps = official_document_steps(conn, document_id)
     actor_snapshots = official_document_actor_snapshots(conn, document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, conn=conn):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, conn=conn) and not official_document_followup_binding(document, user, conn=conn):
         raise PermissionError("official_document_download_forbidden")
     # A clean stamped derivative must not become a bypass for an unscanned or
     # later-quarantined original/attachment that remains part of the package.
@@ -25639,6 +26019,7 @@ def local_editor_seal_file_context(
     element["properties"] = properties
     seal_id = str(properties.get("sealId") or properties.get("seal_id") or element.get("sealId") or "")
     seal = validate_official_document_seal(conn, seal_id, company_id, require_current=False)
+    require_grouped_company_seal(element, seal)
     file_id = str(properties.get("sealFileId") or properties.get("seal_file_id") or "")
     expected_hash = str(properties.get("sealFileSha256") or properties.get("seal_file_sha256") or "")
     if bool(file_id) != bool(expected_hash):
@@ -25661,7 +26042,7 @@ def local_editor_seal_file_context(
         current_file = require_current_company_seal_file(conn, seal_id)
         if str(seal_file.get("id") or "") != str(current_file.get("id") or ""):
             raise ValueError("editor_seal_file_must_be_current")
-    if str(seal_file.get("dimension_policy_version") or "") != EDOC_SEAL_DIMENSION_POLICY_VERSION:
+    if not seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), seal_file):
         raise ValueError("editor_seal_file_policy_upgrade_required")
     profile = company_seal_file_dimension_profile(seal.get("seal_size_type"), seal_file)
     properties.update({
@@ -25687,6 +26068,7 @@ def supabase_editor_seal_file_context(
     element["properties"] = properties
     seal_id = str(properties.get("sealId") or properties.get("seal_id") or element.get("sealId") or "")
     seal = supabase_validate_official_document_seal(seal_id, company_id, require_current=False)
+    require_grouped_company_seal(element, seal)
     file_id = str(properties.get("sealFileId") or properties.get("seal_file_id") or "")
     expected_hash = str(properties.get("sealFileSha256") or properties.get("seal_file_sha256") or "")
     if bool(file_id) != bool(expected_hash):
@@ -25710,7 +26092,7 @@ def supabase_editor_seal_file_context(
         current_file = supabase_require_current_company_seal_file(seal_id)
         if str(seal_file.get("id") or "") != str(current_file.get("id") or ""):
             raise ValueError("editor_seal_file_must_be_current")
-    if str(seal_file.get("dimension_policy_version") or "") != EDOC_SEAL_DIMENSION_POLICY_VERSION:
+    if not seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), seal_file):
         raise ValueError("editor_seal_file_policy_upgrade_required")
     profile = company_seal_file_dimension_profile(seal.get("seal_size_type"), seal_file)
     properties.update({
@@ -25752,6 +26134,7 @@ def validate_editor_seal_placements(
 ) -> None:
     """Fail closed before persisting or preparing a placement for an unusable seal."""
     editor_state_seal_ids(state)
+    validate_seam_policy_transition(state, previous_state)
     previous_bindings = editor_state_seal_binding_map(previous_state)
     for element in state.get("elements") or []:
         if not isinstance(element, dict) or element.get("kind") != "seal":
@@ -25786,6 +26169,7 @@ def validate_editor_seal_placements(
             seal.get("seal_size_type"), element.get("width"), element.get("height"),
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
+            dimension_policy_version=seal_file.get("dimension_policy_version"),
         )
         # EditorState geometry is canonicalized to four decimals by
         # validate_editor_state. Keep seal calibration on the same grid so a
@@ -25803,6 +26187,7 @@ def validate_supabase_editor_seal_placements(
     previous_state: Dict[str, Any] | None = None,
 ) -> None:
     editor_state_seal_ids(state)
+    validate_seam_policy_transition(state, previous_state)
     previous_bindings = editor_state_seal_binding_map(previous_state)
     for element in state.get("elements") or []:
         if not isinstance(element, dict) or element.get("kind") != "seal":
@@ -25836,6 +26221,7 @@ def validate_supabase_editor_seal_placements(
             seal.get("seal_size_type"), element.get("width"), element.get("height"),
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
+            dimension_policy_version=seal_file.get("dimension_policy_version"),
         )
         element["width"] = round(width, 4)
         element["height"] = round(height, 4)
@@ -26081,9 +26467,13 @@ def inspect_editor_image(data: bytes, mime_type: str) -> Dict[str, Any]:
         with Image.open(io.BytesIO(data)) as image:
             actual_format = str(image.format or "").upper()
             width, height = image.size
+            if actual_format != expected_format or width <= 0 or height <= 0 or width * height > 40_000_000:
+                raise ValueError("editor_image_invalid")
             image.verify()
-        if actual_format != expected_format or width <= 0 or height <= 0 or width * height > 40_000_000:
-            raise ValueError("editor_image_invalid")
+        # verify() checks the container; load() also rejects truncated pixel
+        # streams before an image can enter the immutable editor asset set.
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
         return {"ok": True, "format": actual_format, "widthPx": width, "heightPx": height, "pages": [], "pageCount": 0, "flags": {"executable": False}}
     except ValueError:
         raise
@@ -26114,6 +26504,50 @@ def _editor_rect_center(rect: Any) -> Any:
     import fitz  # type: ignore
 
     return fitz.Point((float(rect.x0) + float(rect.x1)) / 2, (float(rect.y0) + float(rect.y1)) / 2)
+
+
+def _editor_native_seal_png(data: bytes, mime_type: str, opacity: float = 1.0) -> bytes:
+    """Temporary native-pixel seal derivative; no resize, padding, or redraw."""
+    from PIL import Image, ImageEnhance  # type: ignore
+
+    if mime_type.lower() not in {"image/png", "image/jpeg", "image/webp"}:
+        raise ValueError("editor_native_seal_raster_required")
+    if not math.isfinite(opacity) or opacity < 0 or opacity > 1:
+        raise ValueError("editor_element_style_invalid")
+    if mime_type.lower() == "image/png" and opacity == 1:
+        return data
+    with Image.open(io.BytesIO(data)) as opened:
+        image = opened.convert("RGBA")
+        if opacity < 1:
+            image.putalpha(ImageEnhance.Brightness(image.getchannel("A")).enhance(opacity))
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+
+def _editor_insert_native_seal(page: Any, rect: Any, data: bytes, mime_type: str, rotation: float, opacity: float) -> Any:
+    """Place calibrated pixels through PDF affine rotation, never bitmap warp."""
+    import fitz  # type: ignore
+
+    png = _editor_native_seal_png(data, mime_type, opacity)
+    angle = float(rotation or 0) % 360
+    if not math.isfinite(angle):
+        raise ValueError("editor_element_style_invalid")
+    if angle == 0:
+        page.insert_image(rect, stream=png, keep_proportion=False, overlay=True)
+        return rect
+    radians = math.radians(angle)
+    width = abs(math.cos(radians)) * rect.width + abs(math.sin(radians)) * rect.height
+    height = abs(math.sin(radians)) * rect.width + abs(math.cos(radians)) * rect.height
+    placed_rect = _editor_centered_rect(rect, width, height)
+    overlay = fitz.open()
+    try:
+        base = overlay.new_page(width=rect.width, height=rect.height)
+        base.insert_image(base.rect, stream=png, keep_proportion=False, overlay=True)
+        page.show_pdf_page(placed_rect, overlay, 0, rotate=-angle, keep_proportion=True, overlay=True)
+    finally:
+        overlay.close()
+    return placed_rect
 
 
 def _editor_transformed_image(
@@ -26435,7 +26869,7 @@ def render_editor_prepared_pdf(state: Dict[str, Any], asset_bytes_by_id: Dict[st
         output.close()
 
 
-def generate_editor_seal_preview(seal_bytes: bytes, mime_type: str) -> bytes:
+def generate_editor_seal_preview(seal_bytes: bytes, mime_type: str, *, preserve_canvas_aspect: bool = False) -> bytes:
     """Generate a low resolution, visibly watermarked preview; never return vault bytes."""
     import fitz  # type: ignore
 
@@ -26459,8 +26893,19 @@ def generate_editor_seal_preview(seal_bytes: bytes, mime_type: str) -> bytes:
         source_page = converted[0]
         source_rect = source_page.rect
         scale = min(1.0, 320.0 / max(float(source_rect.width), float(source_rect.height), 1.0))
-        width = max(96.0, float(source_rect.width) * scale)
-        height = max(96.0, float(source_rect.height) * scale)
+        if preserve_canvas_aspect:
+            # The approved native originals have explicit non-square physical
+            # geometry. Enlarge/reduce this watermarked preview uniformly only;
+            # independently clamping axes would add a false square canvas.
+            native_width = max(1.0, float(source_rect.width))
+            native_height = max(1.0, float(source_rect.height))
+            scale = min(320.0 / max(native_width, native_height),
+                        max(scale, 96.0 / min(native_width, native_height)))
+            width, height = native_width * scale, native_height * scale
+        else:
+            # Keep historical square-policy previews byte-compatible.
+            width = max(96.0, float(source_rect.width) * scale)
+            height = max(96.0, float(source_rect.height) * scale)
         page = preview_doc.new_page(width=width, height=height)
         page.show_pdf_page(page.rect, converted, 0, keep_proportion=True)
         for offset in range(-int(height), int(width) + int(height), 28):
@@ -26473,6 +26918,22 @@ def generate_editor_seal_preview(seal_bytes: bytes, mime_type: str) -> bytes:
         preview_doc.close()
         converted.close()
         image_doc.close()
+
+
+def generate_editor_seal_placeholder(seal_file: Dict[str, Any], seal_size_type: str) -> bytes:
+    """Compatibility preview contains geometry only, never private Seal Vault pixels."""
+    import fitz  # type: ignore
+
+    profile = company_seal_file_dimension_profile(seal_size_type, seal_file)
+    width, height = float(profile["width_pt"]), float(profile["height_pt"])
+    document = fitz.open()
+    try:
+        page = document.new_page(width=width, height=height)
+        page.draw_rect(page.rect + (1, 1, -1, -1), color=(0.76, 0.34, 0.05), width=1, dashes="[3 2]")
+        page.insert_textbox(page.rect + (2, height * .35, -2, -2), "PLACEHOLDER", fontsize=min(8, width / 8), align=1, color=(0.76, 0.34, 0.05))
+        return page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=True).tobytes("png")
+    finally:
+        document.close()
 
 
 def editor_state_references_seal_file(
@@ -26544,17 +27005,14 @@ def local_editor_seal_preview(
         # Once any binding field is present the request must pass the strict
         # branch above and can never silently fall back to current.
         seal_file = require_current_company_seal_file(conn, seal_id)
-    _, data = read_file_object_bytes(conn, seal_file["file_object_id"])
-    if sha256_bytes(data) != seal_file["file_hash"]:
-        raise ValueError("seal_file_hash_mismatch")
     log_seal_usage(
         conn,
         action="editor_seal_preview",
         actor_id=user.get("id") or "",
         seal_id=seal_id,
-        detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};watermarked=true",
+        detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};placeholder=true;private_pixels=false",
     )
-    return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png")
+    return generate_editor_seal_placeholder(seal_file, seal.get("seal_size_type") or "large_seal")
 
 
 def _editor_revision_public(row: Dict[str, Any] | sqlite3.Row, locked_revision_id: str = "") -> Dict[str, Any]:
@@ -26621,20 +27079,22 @@ def _editor_assert_document_access(
     user = official_session_user(session)
     user_company_id = str(user.get("company_id") or "")
     if write:
+        if document.get("applicant_id") != user.get("id"):
+            raise PermissionError("official_editor_write_forbidden")
+        if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
+            raise PermissionError("official_document_create_forbidden")
         require_official_document_application_company(user, document, conn)
         metadata = parse_json_field(document.get("metadata_json"))
         if not metadata.get("pdf_editor_v2"):
             raise ValueError("editor_legacy_document_read_only")
         if not pdf_editor_v2_enabled_for_company(str(document.get("company_id") or "")):
             raise PermissionError("pdf_editor_v2_not_enabled_for_company")
-        if document.get("applicant_id") != user.get("id"):
-            raise PermissionError("official_editor_write_forbidden")
         if document.get("current_status") not in {"draft", "rejected"}:
             raise ValueError("editor_locked_after_submit")
     else:
         steps = official_document_steps(conn, document["id"])
         actor_snapshots = official_document_actor_snapshots(conn, document["id"])
-        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots)
+        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots) or official_document_followup_binding(document, user, conn=conn)
         active_delegation = None if is_participant else official_document_active_read_delegation(document, steps, user, conn=conn)
         if not is_participant and not active_delegation:
             if (
@@ -26699,6 +27159,119 @@ def official_editor_draft_metadata(
     return metadata, seal_context, workflow_template_key
 
 
+def _editor_application_update_requested(document: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    return bool(document.get("source_type") == "uploaded_pdf"
+                and parse_json_field(document.get("metadata_json")).get("pdf_editor_v2")
+                and not OFFICIAL_CORRECTION_FILE_FIELDS.intersection(payload)
+                and not OFFICIAL_CORRECTION_STAMP_FIELDS.intersection(payload)
+                and ("company_id" in payload or "expected_editor_revision_id" in payload
+                     or "expected_editor_manifest_sha256" in payload))
+
+
+def official_editor_application_capabilities(document: Dict[str, Any], session: Dict[str, Any] | None,
+                                            *, has_history: bool, stamp_request: Dict[str, Any] | None = None) -> Dict[str, bool]:
+    is_v2 = parse_json_field(document.get("metadata_json")).get("pdf_editor_v2") is True
+    actor = (session or {}).get("user") or {}
+    editable = bool(is_v2 and document.get("source_type") == "uploaded_pdf"
+                    and document.get("current_status") in {"draft", "rejected"}
+                    and actor.get("id") == document.get("applicant_id")
+                    and session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]))
+    irreversible = bool(document.get("stamped_file_id") or (stamp_request or {}).get("stamped_file_id")
+                        or (stamp_request or {}).get("claim_token")
+                        or (stamp_request or {}).get("status") in {"stamping", "stamped", "completed"})
+    return {"application_metadata_editable": editable,
+            "application_company_editable": editable and editor_application.company_editable(document, is_v2=is_v2, has_history=has_history, irreversible=irreversible)}
+
+
+def _local_editor_application_has_history(conn: sqlite3.Connection, document_id: str) -> bool:
+    return bool(conn.execute("SELECT 1 FROM official_document_approval_steps WHERE document_id=? LIMIT 1", (document_id,)).fetchone()
+                or official_document_actor_snapshots(conn, document_id)
+                or conn.execute("SELECT 1 FROM official_document_approval_logs WHERE document_id=? AND action='submit' LIMIT 1", (document_id,)).fetchone())
+
+
+def _editor_application_plan(document: Dict[str, Any], payload: Dict[str, Any], user: Dict[str, Any],
+                             latest: Dict[str, Any], company: Dict[str, Any], department: Dict[str, str],
+                             seal_lookup: Any, capabilities: Dict[str, bool]) -> Dict[str, Any]:
+    patch = editor_application.application_patch(payload)
+    content_revision, editor_id, editor_manifest = editor_application.expected_versions(payload)
+    if content_revision != int(document.get("content_revision") or 0):
+        raise ValueError("compose_content_revision_conflict")
+    if latest.get("id") != editor_id or latest.get("manifest_sha256") != editor_manifest:
+        raise ValueError("editor_revision_conflict")
+    company_changed = str(company["id"]) != str(document.get("company_id") or "")
+    if company_changed and not capabilities.get("application_company_editable"):
+        raise PermissionError("official_document_company_forbidden")
+    category = patch.get("document_category") or (official_seal_context_from_document(document) or {}).get("document_category")
+    context = require_official_seal_classification({"document_category": category})
+    updates = {key: value for key, value in patch.items() if key in {"title", "subject", "description", "request_reason", "handler_name"}}
+    if "title" in updates:
+        updates["subject"] = updates["title"]
+    updates.update({"company_id": company["id"], "applicant_department_id": department["id"],
+                    "applicant_department_name": department["name"], "dispatch_unit": department["name"],
+                    "workflow_template_key": context["workflow_template_key"]})
+    metadata = _official_correction_metadata(document, context, "", {})
+    metadata["future_rule_inputs"] = {**(metadata.get("future_rule_inputs") or {}), "company_id": company["id"], "department": department["name"]}
+    # A workflow snapshot belongs only to a completed submit operation, never
+    # to the currently editable classification selection.
+    metadata.pop("editor_submission_application", None)
+    metadata.pop("submission_intent", None)
+    if company_changed:
+        metadata["company_name"] = str(company.get("name") or "")
+        if isinstance(metadata.get("extra"), dict):
+            metadata["extra"]["company_name"] = metadata["company_name"]
+    updates["metadata_json"] = json.dumps(metadata, ensure_ascii=False)
+    before_context = official_seal_context_from_document(document) or {}
+    changed_fields = sorted(key for key in updates if key != "metadata_json" and str(document.get(key) or "") != str(updates[key] or ""))
+    if context["document_category"] != before_context.get("document_category"):
+        changed_fields.append("document_category")
+    state = parse_json_any(latest.get("editor_state_json"), {}) or {}
+    state, removed = editor_application.remove_foreign_seals(state, str(company["id"]), seal_lookup) if company_changed else (state, [])
+    return {"updates": updates, "state": state, "removed": removed, "company_changed": company_changed,
+            "changed_fields": sorted(set(changed_fields)), "expected_content_revision": content_revision,
+            "expected_editor_revision_id": editor_id, "expected_editor_manifest_sha256": editor_manifest}
+
+
+def update_official_editor_application(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    document = official_document_row(conn, document_id)
+    user = _editor_assert_document_access(conn, document, session, write=True)
+    patch = editor_application.application_patch(payload)
+    expected, editor_id, manifest = editor_application.expected_versions(payload)
+    company = official_editor_company(user, patch.get("company_id") or document["company_id"], conn)
+    if not pdf_editor_v2_enabled_for_company(company["id"]):
+        raise PermissionError("pdf_editor_v2_not_enabled_for_company")
+    selection = {"applicant_department_id": document.get("applicant_department_id"),
+                 "applicant_department_name": document.get("applicant_department_name"), **patch}
+    department = authoritative_editor_applicant_department(user, selection, company, conn)
+    conn.execute("SAVEPOINT editor_application_update")
+    try:
+        claimed = conn.execute("UPDATE official_documents SET content_revision=content_revision WHERE id=? AND applicant_id=? AND content_revision=? AND current_status IN ('draft','rejected')", (document_id, user["id"], expected))
+        if claimed.rowcount != 1:
+            raise ValueError("compose_content_revision_conflict")
+        document = official_document_row(conn, document_id)
+        latest = _editor_latest_revision_row(conn, document_id)
+        if not latest:
+            raise ValueError("editor_revision_not_found")
+        capabilities = official_editor_application_capabilities(document, session, has_history=_local_editor_application_has_history(conn, document_id), stamp_request=official_document_stamp_request(conn, document_id))
+        plan = _editor_application_plan(document, payload, user, latest, company, department, lambda identity: company_seal_row(conn, identity), capabilities)
+        revision = latest
+        if plan["changed_fields"]:
+            assignments = ",".join(f"{key}=?" for key in plan["updates"])
+            conn.execute(f"UPDATE official_documents SET {assignments},content_revision=content_revision+1,updated_at=? WHERE id=?", [*plan["updates"].values(), now(), document_id])
+            if plan["removed"]:
+                revision = _insert_editor_revision(conn, document_id, plan["state"], user, latest["id"])
+            if plan["company_changed"]:
+                conn.execute("UPDATE official_document_stamp_requests SET status='cancelled',error_message='cleared_by_company_change',updated_at=? WHERE document_id=? AND status NOT IN ('stamping','stamped','completed')", (now(), document_id))
+            insert_official_log(conn, document_id, "editor_application_update", user, "申請資訊更新", decision_evidence={"updated_fields": plan["changed_fields"], "removed_seal_element_ids": plan["removed"], "content_revision": expected+1, "editor_revision_id": revision["id"], "before_company_id": document["company_id"], "company_id": company["id"]})
+        conn.execute("RELEASE SAVEPOINT editor_application_update")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT editor_application_update")
+        conn.execute("RELEASE SAVEPOINT editor_application_update")
+        raise
+    public = _editor_revision_public(revision)
+    return {**official_document_detail(conn, document_id, session), "editor_revision": public, "editor_state": public["state"],
+            "removed_seal_element_ids": plan["removed"], "application_changed": bool(plan["changed_fields"])}
+
+
 def create_official_editor_draft(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
     if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
@@ -26758,7 +27331,9 @@ def create_official_editor_draft(conn: sqlite3.Connection, payload: Dict[str, An
     revision = _insert_editor_revision(conn, document_id, initial_state, user)
     insert_official_log(conn, document_id, "create_editor_draft", user, f"revision_id={revision['id']};schema=2;renderer={EDOC_EDITOR_RENDERER_VERSION}")
     public_revision = _editor_revision_public(revision)
-    return {"id": document_id, "document_id": document_id, "company_id": company["id"], "editor_revision": public_revision, "editor_state": public_revision["state"]}
+    return {"id": document_id, "document_id": document_id, "company_id": company["id"], "content_revision": 0,
+            "application_metadata_editable": True, "application_company_editable": True,
+            "editor_revision": public_revision, "editor_state": public_revision["state"]}
 
 
 def _editor_conflict_copy_identity(document_id: str, payload: Dict[str, Any], user: Dict[str, Any]) -> Tuple[str, str]:
@@ -26834,8 +27409,14 @@ def _editor_conflict_copy_bundle(document: Dict[str, Any], payload: Dict[str, An
     new_assets, new_objects, new_files = [], [], []
     for index, asset in enumerate(assets):
         original_object = object_by_id[asset["file_object_id"]]
+        # A conflict copy is a new upload lineage, not a legacy commitment.
+        # Use the same opaque v2 paths as all new immutable editor assets.
+        copied_metadata = {**remap(parse_json_field(asset.get("metadata_json"))), "storage_key_version": 2}
+        copied_path = _supabase_editor_immutable_storage_path(new_id, {
+            **asset, "id": asset_map[asset["id"]], "metadata_json": copied_metadata,
+        }, str(asset["sha256"]))
         new_object = {**original_object, "id": f"FILE-COPY-{suffix}-{index}", "document_id": new_id,
-                      "storage_key": f"editor-final/{new_id}/{asset_map[asset['id']]}/{asset['sha256'].upper()}-{Path(asset['file_name']).name}", "created_by": user["id"], "created_at": ts,
+                      "storage_key": copied_path, "created_by": user["id"], "created_at": ts,
                       "signed_url_expires_at": None, "last_download_at": None}
         new_objects.append(new_object)
         original_file = file_by_id.get(asset.get("official_file_id"))
@@ -26846,7 +27427,7 @@ def _editor_conflict_copy_bundle(document: Dict[str, Any], payload: Dict[str, An
             new_files.append(new_file)
         new_asset = {**asset, "id": asset_map[asset["id"]], "document_id": new_id, "editor_revision_id": revision_id, "file_object_id": new_object["id"],
                      "official_file_id": new_file["id"] if new_file else None, "storage_path": new_object["storage_key"], "created_by": user["id"], "created_at": ts,
-                     "metadata_json": json.dumps(remap(parse_json_field(asset.get("metadata_json"))), ensure_ascii=False)}
+                     "metadata_json": json.dumps(copied_metadata, ensure_ascii=False)}
         new_assets.append(new_asset)
     return {"source_document_id": document["id"], "actor_id": user["id"], "request_hash": request_hash, "document": new_document, "revision": revision,
             "assets": new_assets, "file_objects": new_objects, "files": new_files}
@@ -26988,6 +27569,7 @@ def create_official_editor_upload_intent(conn: sqlite3.Connection, document_id: 
 
 
 EDITOR_PDF_NO_AV_ASSET_KINDS = frozenset({"source_pdf", "import_pdf"})
+EDITOR_UPLOAD_NO_AV_ASSET_KINDS = EDITOR_PDF_NO_AV_ASSET_KINDS | {"image"}
 
 
 def editor_asset_preflight_is_ready(asset: Dict[str, Any]) -> bool:
@@ -26997,7 +27579,7 @@ def editor_asset_preflight_is_ready(asset: Dict[str, Any]) -> bool:
     scan_status = str(asset.get("scan_status") or "").strip().lower()
     if scan_status in {"passed", "已通過", "clean"}:
         return True
-    return str(asset.get("asset_kind") or "") in EDITOR_PDF_NO_AV_ASSET_KINDS and scan_status == "not_scanned"
+    return str(asset.get("asset_kind") or "") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS and scan_status == "not_scanned"
 
 
 def _editor_source_file_matches_unscanned_preflight(
@@ -27146,7 +27728,7 @@ def _local_editor_asset_failure(
     target = _local_editor_upload_path(asset)
     if target.exists():
         target.unlink()
-    failed_scan_status = "not_scanned" if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending"
+    failed_scan_status = "not_scanned" if asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending"
     conn.execute(
         """
         UPDATE official_document_editor_assets
@@ -27529,7 +28111,7 @@ def finalize_official_editor_upload(conn: sqlite3.Connection, document_id: str, 
     if not latest or int(metadata.get("base_revision_no") or 0) != int(latest.get("revision_no") or 0):
         _local_editor_asset_failure(conn, asset, "editor_revision_conflict")
         raise ValueError("editor_revision_conflict")
-    if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS:
+    if asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS:
         scan_status, signature = "not_scanned", ""
     else:
         scan_status, signature = editor_scan_bytes_for_threats(data, asset["file_name"])
@@ -27705,14 +28287,14 @@ def get_official_editor_state(conn: sqlite3.Connection, document_id: str, sessio
         raise ValueError("editor_locked_prepared_file_incomplete")
     prepared_asset = conn.execute(
         """
-        SELECT official_file_id, sha256 FROM official_document_editor_assets
+        SELECT official_file_id, sha256, metadata_json FROM official_document_editor_assets
         WHERE document_id = ? AND editor_revision_id = ? AND asset_kind = 'prepared_pdf'
           AND upload_status = 'finalized' AND preflight_status = 'passed'
         ORDER BY created_at DESC, id DESC LIMIT 1
         """,
         (document_id, latest["id"]),
     ).fetchone()
-    if prepared_asset and prepared_asset["official_file_id"]:
+    if prepared_asset and prepared_asset["official_file_id"] and editor_preflight_application_matches(document, row_to_dict(prepared_asset)):
         prepared_url = official_editor_file_authorized_url(document_id, prepared_asset["official_file_id"])
         public.update({
             "preparedFileId": prepared_asset["official_file_id"],
@@ -27748,9 +28330,25 @@ def save_official_editor_state(conn: sqlite3.Connection, document_id: str, paylo
         state,
         previous_state=previous_state,
     )
-    revision = _insert_editor_revision(conn, document_id, state, user, latest["id"])
-    insert_official_log(conn, document_id, "save_editor_revision", user, f"revision_id={revision['id']};revision_no={revision['revision_no']};manifest={revision['manifest_sha256']};elements={len((parse_json_any(revision['editor_state_json'], {}) or {}).get('elements') or [])}")
-    return _editor_revision_public(revision)
+    content_revision = payload.get("expected_content_revision", int(document.get("content_revision") or 0))
+    if type(content_revision) is not int or content_revision < 0:
+        raise ValueError("compose_content_revision_required")
+    conn.execute("SAVEPOINT editor_revision_save")
+    try:
+        claimed = conn.execute("UPDATE official_documents SET content_revision=content_revision WHERE id=? AND content_revision=? AND current_status IN ('draft','rejected')", (document_id, content_revision))
+        if claimed.rowcount != 1:
+            raise ValueError("compose_content_revision_conflict")
+        current = _editor_latest_revision_row(conn, document_id)
+        if not current or current["id"] != latest["id"] or current["manifest_sha256"] != expected_manifest:
+            raise ValueError("editor_revision_conflict")
+        revision = _insert_editor_revision(conn, document_id, state, user, latest["id"])
+        insert_official_log(conn, document_id, "save_editor_revision", user, f"revision_id={revision['id']};revision_no={revision['revision_no']};manifest={revision['manifest_sha256']};elements={len((parse_json_any(revision['editor_state_json'], {}) or {}).get('elements') or [])}")
+        conn.execute("RELEASE SAVEPOINT editor_revision_save")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT editor_revision_save")
+        conn.execute("RELEASE SAVEPOINT editor_revision_save")
+        raise
+    return {**_editor_revision_public(revision), "contentRevision": content_revision}
 
 
 def _editor_local_asset_bytes(conn: sqlite3.Connection, document_id: str, state: Dict[str, Any]) -> Tuple[Dict[str, bytes], List[Dict[str, Any]]]:
@@ -27782,6 +28380,7 @@ def _editor_local_asset_bytes(conn: sqlite3.Connection, document_id: str, state:
 def preflight_official_editor(conn: sqlite3.Connection, document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     document = official_document_row(conn, document_id)
     user = _editor_assert_document_access(conn, document, session, write=True)
+    content_revision = require_content_revision(document, payload) if "expected_content_revision" in payload else int(document.get("content_revision") or 0)
     latest = _editor_latest_revision_row(conn, document_id)
     if not latest:
         raise ValueError("editor_revision_not_found")
@@ -27804,7 +28403,8 @@ def preflight_official_editor(conn: sqlite3.Connection, document_id: str, payloa
         previous_state=state,
     )
     if canonical_json_hash(state) != state_before_binding or latest.get("renderer_version") != EDOC_EDITOR_RENDERER_VERSION:
-        latest = _insert_editor_revision(conn, document_id, state, user, latest["id"])
+        saved = save_official_editor_state(conn, document_id, {"revisionNo": latest["revision_no"], "baseManifestSha256": latest["manifest_sha256"], "state": state, "expected_content_revision": content_revision}, session)
+        latest = _editor_latest_revision_row(conn, document_id)
         state = parse_json_any(latest["editor_state_json"], {}) or {}
         revision_id = latest["id"]
         manifest = latest["manifest_sha256"]
@@ -27818,6 +28418,12 @@ def preflight_official_editor(conn: sqlite3.Connection, document_id: str, payloa
     asset_bytes, assets = _editor_local_asset_bytes(conn, document_id, state)
     prepared = render_editor_prepared_pdf(state, asset_bytes)
     prepared_sha256 = sha256_bytes(prepared)
+    claimed = conn.execute("UPDATE official_documents SET content_revision=content_revision WHERE id=? AND content_revision=? AND current_status IN ('draft','rejected')", (document_id, content_revision))
+    current = _editor_latest_revision_row(conn, document_id)
+    if claimed.rowcount != 1:
+        raise ValueError("compose_content_revision_conflict")
+    if not current or current["id"] != latest["id"] or current["manifest_sha256"] != manifest:
+        raise ValueError("editor_revision_conflict")
     prepared_file = store_official_pdf_file(conn, document_id, "prepared_pdf", f"{document_id}-prepared-r{latest['revision_no']}.pdf", prepared, official_actor_name(user))
     prepared_asset = {
         "id": f"ODASSET-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}",
@@ -27837,7 +28443,9 @@ def preflight_official_editor(conn: sqlite3.Connection, document_id: str, payloa
         "scan_status": "passed",
         "preflight_status": "passed",
         "page_count": len(state.get("pages") or []),
-        "metadata_json": json.dumps({"source_asset_hashes": sorted(asset["sha256"] for asset in assets), "manifest_sha256": manifest, "element_count": len(state.get("elements") or []), "renderer_version": EDOC_EDITOR_RENDERER_VERSION}, ensure_ascii=False),
+        "metadata_json": json.dumps({"source_asset_hashes": sorted(asset["sha256"] for asset in assets), "manifest_sha256": manifest, "element_count": len(state.get("elements") or []), "renderer_version": EDOC_EDITOR_RENDERER_VERSION,
+                                    "application_content_revision": content_revision, "application_company_id": document["company_id"],
+                                    "application_snapshot": editor_application.application_snapshot(document)}, ensure_ascii=False),
         "created_by": user.get("id") or "",
         "created_at": now(),
         "finalized_at": now(),
@@ -27850,6 +28458,7 @@ def preflight_official_editor(conn: sqlite3.Connection, document_id: str, payloa
         "documentId": document_id,
         "editorRevisionId": latest["id"],
         "revisionNo": int(latest["revision_no"]),
+        "contentRevision": content_revision,
         "manifestSha256": manifest,
         "preparedFileId": prepared_file["id"],
         "preparedSha256": prepared_sha256,
@@ -27935,6 +28544,14 @@ def require_current_editor_preflight(revision: Dict[str, Any], prepared_asset: D
         raise ValueError("editor_preflight_not_completed")
 
 
+def editor_preflight_application_matches(document: Dict[str, Any], prepared_asset: Dict[str, Any]) -> bool:
+    try:
+        editor_application.require_preflight_application_version(document, parse_json_field(prepared_asset.get("metadata_json")))
+        return True
+    except ValueError:
+        return False
+
+
 def lock_official_editor_submission(conn: sqlite3.Connection, document: Dict[str, Any], payload: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
     metadata = parse_json_field(document.get("metadata_json"))
     if not metadata.get("pdf_editor_v2"):
@@ -27969,6 +28586,7 @@ def lock_official_editor_submission(conn: sqlite3.Connection, document: Dict[str
     if not asset_row:
         raise ValueError("editor_preflight_not_completed")
     require_current_editor_preflight(latest, row_to_dict(asset_row))
+    editor_application.require_preflight_application_version(document, parse_json_field(asset_row["metadata_json"]))
     state = parse_json_any(latest["editor_state_json"], {}) or {}
     validate_editor_seal_placements(
         conn,
@@ -27997,6 +28615,7 @@ def lock_official_editor_submission(conn: sqlite3.Connection, document: Dict[str
             seal.get("seal_size_type"), element.get("width"), element.get("height"),
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
+            dimension_policy_version=seal_file.get("dimension_policy_version"),
         )
         positions.append({
             "seal_id": seal_id,
@@ -28019,6 +28638,8 @@ def lock_official_editor_submission(conn: sqlite3.Connection, document: Dict[str
     if bool(document.get("requires_stamp", 1)) and not positions:
         raise ValueError("editor_seal_position_required")
     stamp_request = official_document_stamp_request(conn, document["id"])
+    if stamp_request and (stamp_request.get("company_id") != document["company_id"] or stamp_request.get("error_message") == "cleared_by_company_change"):
+        stamp_request = None
     first = positions[0] if positions else {"seal_id": "", "page": 1, "x": 0, "y": 0, "width": 1, "height": 1}
     timestamp = now()
     if stamp_request:
@@ -28239,18 +28860,22 @@ def inbound_document_download_attachment(
 def list_inbound_documents(conn: sqlite3.Connection, query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = official_session_user(session)
     scope = local_inbound_finance_user_scope(conn, user)
+    company_wide = session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"])
+    options = inbound_list_options(query, {**scope, "actor_id": user["id"], "company_wide": company_wide})
     where: List[str] = []
     params: List[Any] = []
-    query = query or {}
-    if query.get("status"):
+    if options["status"]:
         where.append("status = ?")
-        params.append(query["status"][0])
-    if query.get("assignee_user_id"):
+        params.append(options["status"])
+    if options["assignee_user_id"]:
         where.append("assignee_user_id = ?")
-        params.append(query["assignee_user_id"][0])
+        params.append(options["assignee_user_id"])
+    if options["q"]:
+        where.append("instr(lower(coalesce(subject,'')||' '||coalesce(receive_no,'')||' '||coalesce(sender_name,'')),lower(?)) > 0")
+        params.append(options["q"])
     where.append("company_id = ? AND finance_tenant_id = ?")
     params.extend([scope["company_id"], scope["finance_tenant_id"]])
-    if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"]):
+    if not company_wide:
         where.append(
             """
             (
@@ -28267,11 +28892,17 @@ def list_inbound_documents(conn: sqlite3.Connection, query: Dict[str, List[str]]
             """
         )
         params.extend([user.get("id"), user.get("id"), user.get("id")])
-    sql = "SELECT * FROM inbound_documents"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY created_at DESC LIMIT 300"
-    return [inbound_document_detail(conn, row["id"]) for row in conn.execute(sql, params).fetchall()]
+    base = " FROM inbound_documents WHERE " + " AND ".join(where)
+    count = int(conn.execute("SELECT count(*)" + base, params).fetchone()[0])
+    if not options["paginated"] and count > LIST_MAX_ROWS:
+        raise ValueError("inbound_list_pagination_required")
+    if options["after"]:
+        base += " AND (created_at,id)<(?,?)"
+        params.extend(options["after"])
+    limit = options["page_size"] + 1 if options["paginated"] else LIST_MAX_ROWS
+    rows = conn.execute("SELECT id" + base + " ORDER BY created_at DESC,id DESC LIMIT ?", [*params, limit]).fetchall()
+    items = [inbound_document_detail(conn, row["id"]) for row in rows]
+    return inbound_page(items, count, options) if options["paginated"] else items
 
 
 def inbound_idempotency_key(payload: Dict[str, Any]) -> str:
@@ -29487,6 +30118,7 @@ def lock_seal_application_company_positions(
             position.get("h"),
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
+            dimension_policy_version=profile["dimension_policy_version"],
         )
         position.update({
             "w": width,
@@ -29549,6 +30181,7 @@ def validate_seal_application_company_positions(
             assets[file_id] = {
                 "data": data,
                 "mime_type": seal_file.get("file_mime_type") or file_object.get("mime_type") or "image/png",
+                "_locked_render_size_pt": [float(seal_file["render_width_mm"]) * 72.0 / 25.4, float(seal_file["render_height_mm"]) * 72.0 / 25.4],
             }
     return validated, assets
 
@@ -29674,11 +30307,22 @@ def write_asset_stamp_overlay_pdf(
             for stamp in stamps:
                 if stamp.get("page") not in {page_index, "all"}:
                     continue
+                locked_size = seal_asset.get("_locked_render_size_pt")
+                supplied_width = pdf_safe_float(stamp.get("w"), 56)
+                supplied_height = pdf_safe_float(stamp.get("h"), 56)
+                if locked_size is not None:
+                    if not isinstance(locked_size, (list, tuple)) or len(locked_size) != 2 or any(not isinstance(value, (float, int)) or not math.isfinite(value) for value in locked_size):
+                        raise ValueError("seal_size_locked")
+                    if abs(supplied_width - locked_size[0]) > EDOC_SEAL_DIMENSION_TOLERANCE_PT or abs(supplied_height - locked_size[1]) > EDOC_SEAL_DIMENSION_TOLERANCE_PT:
+                        raise ValueError("seal_size_locked")
+                    supplied_width, supplied_height = locked_size
                 x, y, width, height = clamp_pdf_rect(
                     pdf_safe_float(stamp.get("x"), 0),
                     pdf_safe_float(stamp.get("y"), 0),
-                    pdf_safe_float(stamp.get("w"), 56),
-                    pdf_safe_float(stamp.get("h"), 56),
+                    supplied_width,
+                    supplied_height,
+                    preserve_size=locked_size is not None,
+                    page_width=page_width, page_height=page_height,
                 )
                 if x + width > page_width:
                     x = max(0, page_width - width)
@@ -29870,7 +30514,7 @@ def stamp_legacy_pdf_with_locked_seals(
             [{**position, "stamp_no": stamp_no}],
             stamp_no,
             text_overlays if index == (0 if seal_on_top else len(layers) - 1) else [],
-            {"data": seal_bytes, "mime_type": seal_file.get("file_mime_type") or ""},
+            {"data": seal_bytes, "mime_type": seal_file.get("file_mime_type") or "", **({"_locked_render_size_pt": [float(seal_file["render_width_mm"]) * 72.0 / 25.4, float(seal_file["render_height_mm"]) * 72.0 / 25.4]} if seal_file.get("dimension_validated") else {})},
             source_text_on_top=source_text_on_top,
             seal_on_top=seal_on_top,
         )
@@ -30564,6 +31208,14 @@ class SignatureProviderError(RuntimeError):
 
 class SupabaseConfigurationError(RuntimeError):
     """Raised when Supabase mode is enabled but required runtime secrets are absent."""
+
+
+class OfficialSubmissionValidationError(RuntimeError):
+    """The atomic submission RPC rejected its payload without committing."""
+
+
+class OfficialSubmissionOutcomeUnknownError(RuntimeError):
+    """Submission may have committed; never invite a blind retry."""
 
 
 def provider_event_row(event: Dict[str, Any], document_id: str = "", signature_id: str = "") -> Dict[str, Any]:
@@ -31499,14 +32151,48 @@ def notification_delivery_context_error(item: Dict[str, Any], conn: sqlite3.Conn
         return "overdue_reminder_scope_unavailable"
 
 
+def supabase_scan_rows(table: str, *, page_size: int = 500) -> Iterable[Dict[str, Any]]:
+    """Backend-only stable keyset scan; never infer completeness from a 500 cap."""
+    if table not in {"documents", "inbound_documents", "exchange_tasks"} or not 1 <= page_size <= 500:
+        raise ValueError("workflow_scan_filter_invalid")
+    after = ""
+    scanned = 0
+    while True:
+        params = {"select": "*", "order": "id.asc", "limit": str(page_size)}
+        if after:
+            params["id"] = 'gt."' + after.replace('\\', '\\\\').replace('"', '\\"') + '"'
+        batch = supabase_request("GET", table + "?" + urllib.parse.urlencode(params))
+        if not isinstance(batch, list) or len(batch) > page_size:
+            raise RuntimeError("workflow_scan_response_invalid")
+        for row in batch:
+            row_id = roster_text(row.get("id")) if isinstance(row, dict) else ""
+            if not row_id or row_id <= after:
+                raise RuntimeError("workflow_scan_response_invalid")
+            if scanned >= LIST_MAX_ROWS:
+                raise RuntimeError("workflow_scan_limit_reached")
+            after, scanned = row_id, scanned + 1
+            yield row
+        if len(batch) < page_size:
+            return
+
+
+def overdue_scan_rows(source_type: str, payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    try:
+        yield from supabase_scan_rows(source_type)
+    except Exception:
+        # Partial work stays durable. A rerun rescans and immutable IDs dedupe
+        # already-delivered reminders; scan failure is never a successful job.
+        payload["blocked"] += 1
+        payload["dataComplete"] = False
+        payload["errors"].append({"sourceType": source_type, "code": "overdue_reminder_scan_incomplete"})
+
+
 def execute_overdue_reminders(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
-    payload = {"overdue": 0, "created": 0, "reminded": 0, "deduplicated": 0, "blocked": 0, "errors": [], "externalAttempted": 0}
+    payload = {"overdue": 0, "created": 0, "reminded": 0, "deduplicated": 0, "blocked": 0, "errors": [], "externalAttempted": 0, "scanned": 0, "dataComplete": True}
     for source_type in ("documents", "inbound_documents"):
-        documents = [row_to_dict(row) for row in conn.execute(f"SELECT * FROM {source_type}")] if conn is not None else supabase_list(source_type, {})
-        if conn is None and len(documents) >= 500:
-            payload["blocked"] += 1
-            payload["errors"].append({"sourceType": source_type, "code": "overdue_reminder_scan_incomplete"})
+        documents = (row_to_dict(row) for row in conn.execute(f"SELECT * FROM {source_type} ORDER BY id")) if conn is not None else overdue_scan_rows(source_type, payload)
         for document in documents:
+            payload["scanned"] += 1
             try:
                 due = overdue_reminder_due(document, source_type)
                 if not due:
@@ -31548,6 +32234,49 @@ def execute_overdue_reminders(conn: sqlite3.Connection | None = None) -> Dict[st
     return {"status": status, "message": f"{status}：站內提醒 {payload['reminded']} 件，新增 {payload['created']} 件，去重 {payload['deduplicated']} 件，阻擋 {payload['blocked']} 件", "payload": payload}
 
 
+def execute_legacy_next_day_check(conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
+    """Read persisted gateway evidence only; never manufacture a government receipt.
+
+    RealExchangeProvider has no agency-approved receipt verifier yet. Even a
+    status string '已送達' or a mock receipt cannot establish formal receipt.
+    This job is deliberately fail-closed until that verifier is implemented.
+    """
+    checked, blocked, errors = 0, 0, []
+    tasks = (row_to_dict(r) for r in conn.execute("SELECT * FROM exchange_tasks WHERE direction='發文' ORDER BY id")) if conn is not None else supabase_scan_rows("exchange_tasks")
+    try:
+        for task in tasks:
+            if task.get("direction") != "發文":
+                continue
+            checked += 1
+            outbox_id = str(task.get("id") or "")[5:] if str(task.get("id") or "").startswith("TASK-") else ""
+            row = conn.execute("SELECT * FROM exchange_outbox WHERE id=?", (outbox_id,)).fetchone() if conn is not None and outbox_id else None
+            outbox = (row_to_dict(row) if row else None) if conn is not None else (supabase_get("exchange_outbox", outbox_id) if outbox_id else None)
+            code = "exchange_formal_receipt_unverified"
+            if outbox and outbox.get("document_id") == task.get("document_id") and outbox.get("package_id") == task.get("package_id"):
+                code = "exchange_sandbox_receipt_not_formal" if outbox.get("provider") != "real" or outbox.get("environment") != "production" else "exchange_formal_receipt_verifier_unavailable"
+            # Existing failure/return facts remain intact; unsupported legacy
+            # success labels become explicitly uncertain without erasing logs.
+            status = task.get("status") if task.get("status") in {"交換失敗", "退回補正", "失敗", "退文", "已達重送上限"} else "待查核"
+            event = {"id": f"EVT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", "task_id": task["id"],
+                     "document_id": task.get("document_id"), "event_type": "next_day_check_blocked",
+                     "message": "尚無可驗證正式收文回條，保留待查核或原失敗狀態。",
+                     "payload_json": json.dumps({"code": code, "receiptConfirmed": False, "externalAttempted": 0})}
+            update = {"status": status, "updated_at": now(), "next_check_at": compute_next_run_at("每日 09:00")}
+            if conn is not None:
+                conn.execute("UPDATE exchange_tasks SET status=:status,updated_at=:updated_at,next_check_at=:next_check_at WHERE id=:id", {**update, "id": task["id"]})
+                insert_row(conn, "exchange_events", {**event, "created_at": now()})
+            else:
+                supabase_patch("exchange_tasks", task["id"], update)
+                supabase_insert("exchange_events", {**event, "created_at": now()})
+            blocked += 1
+    except Exception:
+        blocked += 1
+        errors.append("exchange_next_day_check_incomplete")
+    state = "待處理" if blocked else "成功"
+    return {"status": state, "message": f"{state}：查核 {checked} 筆；正式收文確認 0 筆",
+            "payload": {"checked": checked, "confirmed": 0, "blocked": blocked, "errors": errors, "externalAttempted": 0}}
+
+
 def execute_job_logic(conn: sqlite3.Connection, job: Dict[str, Any]) -> Dict[str, Any]:
     job_type = job["job_type"]
     if job_type == "pullInbound":
@@ -31565,17 +32294,7 @@ def execute_job_logic(conn: sqlite3.Connection, job: Dict[str, Any]) -> Dict[str
         return {"message": f"成功：重送 {result['count']} 筆交換失敗公文", "payload": result}
 
     if job_type == "nextDayCheck":
-        rows = conn.execute("SELECT * FROM exchange_tasks WHERE direction = '發文'").fetchall()
-        checked = 0
-        for row in rows:
-            checked += 1
-            status = "已確認收文" if row["status"] not in {"交換失敗", "退回補正"} else row["status"]
-            conn.execute("UPDATE exchange_tasks SET status = ?, updated_at = ?, next_check_at = ? WHERE id = ?", (status, now(), compute_next_run_at("每日 09:00"), row["id"]))
-            conn.execute(
-                "INSERT INTO exchange_events (id, task_id, document_id, event_type, message, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (f"EVT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", row["id"], row["document_id"], "next_day_check", "背景任務完成發文翌日查核。", "{}", now()),
-            )
-        return {"message": f"成功：完成 {checked} 筆發文翌日查核", "payload": {"checked": checked}}
+        return execute_legacy_next_day_check(conn)
 
     if job_type == "tokenCheck":
         active_sessions = scalar_int(conn, "SELECT COUNT(*) FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > ?", (now(),))
@@ -33622,7 +34341,7 @@ def supabase_mark_notification_read(notification_id: str, session: Dict[str, Any
     return updated
 
 
-UI_USAGE_EVENT_TYPES = frozenset({"session_started", "route_view", "guidance_used", "search_result"})
+UI_USAGE_EVENT_TYPES = frozenset({"session_started", "route_view", "guidance_used", "search_result", "performance"})
 UI_USAGE_DEVICE_CLASSES = frozenset({"desktop", "tablet", "mobile"})
 UI_USAGE_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{12,80}$")
 UI_USAGE_ROUTE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
@@ -33656,7 +34375,7 @@ def normalize_ui_usage_payload(payload: Dict[str, Any], session: Dict[str, Any] 
         raise ValueError("ui_usage_result_count_invalid") from exc
     if result_count < 0 or result_count > 1000:
         raise ValueError("ui_usage_result_count_invalid")
-    return {
+    event = {
         "schemaVersion": 1,
         "eventType": event_type,
         "sessionId": session_id,
@@ -33667,6 +34386,26 @@ def normalize_ui_usage_payload(payload: Dict[str, Any], session: Dict[str, Any] 
         "companyId": company_id[:80],
         "privacySafe": True,
     }
+    if event_type == "performance":
+        if set(payload) - {"eventType", "sessionId", "deviceClass", "route", "resultCount", "resultEmpty", "performance"}:
+            raise ValueError("ui_performance_fields_invalid")
+        performance = payload.get("performance")
+        allowed = {
+            "stage": {"workspace_visible", "workspace_core_ready", "pdf_local_editable", "pdf_cloud_saved", "file_reopen", "file_download"},
+            "outcome": {"success", "failure", "timeout", "cancelled"},
+            "fileSizeBucket": {"none", "0_1mb", "1_10mb", "10_50mb"},
+            "pageCountBucket": {"none", "1", "2_25", "26_100", "101_300"},
+            "cacheState": {"warm", "cold", "unknown"},
+        }
+        if not isinstance(performance, dict) or set(performance) != {*allowed, "durationMs"}:
+            raise ValueError("ui_performance_fields_invalid")
+        if any(not isinstance(performance[key], str) or performance[key] not in values for key, values in allowed.items()):
+            raise ValueError("ui_performance_value_invalid")
+        duration = performance["durationMs"]
+        if isinstance(duration, bool) or not isinstance(duration, int) or not 0 <= duration <= 120000:
+            raise ValueError("ui_performance_duration_invalid")
+        event["performance"] = dict(performance)
+    return event
 
 
 def record_ui_usage(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -34244,7 +34983,13 @@ def supabase_request(method: str, path: str, body: Any = None, prefer: str = "re
         marker, business_conflict = _safe_http_error_contract(
             exc,
             "supabase_request_failed",
+            submission_rpc=(
+                method.upper() == "POST"
+                and path.lstrip("/") == "rpc/edoc_commit_official_document_submission"
+            ),
         )
+        if business_conflict == "official_submission_invalid_payload":
+            raise OfficialSubmissionValidationError("official_submission_validation_failed") from None
         if business_conflict:
             raise ValueError(business_conflict) from None
         raise RuntimeError(marker) from None
@@ -34990,26 +35735,121 @@ def supabase_log_seal_usage(
 
 
 def supabase_seal_file_with_backing_status(file_row: Dict[str, Any]) -> Dict[str, Any]:
+    file_object = supabase_get("file_objects", file_row.get("file_object_id") or "") if file_row.get("file_object_id") else None
+    seal = supabase_get("company_seals", file_row.get("seal_id") or "")
+    return _supabase_seal_file_status_from_rows(file_row, seal, file_object, verify_storage=True)
+
+
+def _supabase_seal_file_status_from_rows(
+    file_row: Dict[str, Any], seal: Dict[str, Any] | None,
+    file_object: Dict[str, Any] | None, *, verify_storage: bool,
+) -> Dict[str, Any]:
+    """Validate one immutable registration; catalog choice is not a byte check.
+
+    Catalogs may show a registered file without fetching every private blob.
+    Preview, preflight and stamping use the public strict helper above, which
+    always checks Storage afresh. An unperformed check is explicitly unknown,
+    never evidence that a registered file is absent (or that bytes exist).
+    """
     item = dict(file_row)
-    file_object = supabase_get("file_objects", item.get("file_object_id") or "") if item.get("file_object_id") else None
     item["scan_status"] = file_object.get("scan_status") if file_object else "檔案不存在"
     item["scan_engine"] = file_object.get("scan_engine") if file_object else ""
     item["last_scan_at"] = file_object.get("last_scan_at") if file_object else ""
     item["av_clean"] = seal_file_av_is_clean(file_object)
-    seal = supabase_get("company_seals", item.get("seal_id") or "")
     try:
         item["dimension_valid"] = bool(
             seal and company_seal_file_dimension_is_valid(item, seal.get("seal_size_type"))
+            and seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), item)
+            and (not seal_scan_exceptions.is_native_policy(item.get("dimension_policy_version"))
+                 or seal_scan_exceptions.file_entry(item, seal.get("seal_size_type"))["company_id"] == seal.get("company_id"))
         )
     except ValueError:
         item["dimension_valid"] = False
-    item["usable"] = bool(
+    item["backing_metadata_valid"] = seal_policy.backing_metadata_matches(item, file_object)
+    if item["backing_metadata_valid"] and not verify_storage:
+        key = str(file_object.get("storage_key") or "")
+        item["backing_metadata_valid"] = bool(
+            str(file_object.get("bucket") or EDOC_SEAL_STORAGE_BUCKET) == EDOC_SEAL_STORAGE_BUCKET
+            and key and not Path(key).is_absolute() and ".." not in Path(key).parts
+        )
+    metadata_ready = bool(
         item.get("is_current")
         and item.get("file_object_id")
         and item["av_clean"]
         and item["dimension_valid"]
+        and item["backing_metadata_valid"]
     )
+    if verify_storage:
+        item["backing_storage_exists"] = supabase_seal_backing_exists(file_object) if file_object and item["backing_metadata_valid"] else False
+        item["storage_verification"] = "verified" if item["backing_storage_exists"] else "unavailable"
+        item["usable"] = bool(metadata_ready and item["backing_storage_exists"])
+    else:
+        item["backing_storage_exists"] = None
+        item["storage_verification"] = "required_on_use"
+        item["usable"] = metadata_ready
     return item
+
+
+_seal_storage_probe_budget = contextvars.ContextVar("seal_storage_probe_budget", default=None)
+
+
+def supabase_seal_backing_exists(file_object: Dict[str, Any]) -> bool:
+    """Probe one private byte, not Storage metadata; never disclose or retain it."""
+    base = object_storage_endpoint()
+    bucket = str(file_object.get("bucket") or EDOC_SEAL_STORAGE_BUCKET)
+    key = str(file_object.get("storage_key") or "")
+    if not base or not key or bucket != EDOC_SEAL_STORAGE_BUCKET or Path(key).is_absolute() or ".." in Path(key).parts:
+        return False
+    budget = _seal_storage_probe_budget.get()
+    timeout = min(2.0, max(0.0, budget - time.monotonic())) if budget else 2.0
+    if timeout < 0.05:
+        return False
+    url = f"{base.rstrip('/')}/object/{urllib.parse.quote(bucket, safe='')}/{urllib.parse.quote(key, safe='/')}"
+    request = urllib.request.Request(url, headers=supabase_storage_headers({"Range": "bytes=0-0"}), method="GET")
+    try:
+        with _urlopen_no_redirect(request, timeout=timeout) as response:
+            if int(response.status) != 206:
+                return False  # A provider ignoring Range must not download the file.
+            content_range = str(response.headers.get("Content-Range") or "")
+            match = re.fullmatch(r"bytes 0-0/([1-9][0-9]*)", content_range)
+            if not match or int(match.group(1)) != int(file_object.get("size_bytes") or 0):
+                return False
+            # Reading at most two bytes detects an invalid oversized range body.
+            # The byte is immediately discarded; no URL/image data reaches API/logs.
+            return len(response.read(2)) == 1
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return False
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+
+
+def supabase_company_seal_owner_kind(company_id: str) -> str:
+    rows = supabase_filter_rows("company_seal_policies", {"company_id": company_id}, limit=1, select="owner_kind")
+    return seal_policy.owner_kind(rows[0].get("owner_kind") if rows else None)
+
+
+def supabase_company_seal_policy_report(company_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    editor = session is not None and session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"])
+    if editor:
+        assert_editor_seal_catalog_company(supabase_official_session_user(session), company_id, session)
+    else:
+        assert_supabase_seal_company_access(company_id, session)
+    seals = supabase_list_company_seals(company_id, session, editor=editor)
+    return seal_policy.inventory(company_id, supabase_company_seal_owner_kind(company_id), seals)
+
+
+def supabase_patch_company_seal_policy(company_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    require_seal_custodian_role(session)
+    if session is not None and "seals.manage" not in session_permissions(session):
+        raise PermissionError("seal_policy_manage_required")
+    assert_supabase_seal_company_access(company_id, session)
+    if set(payload) != {"owner_kind"}:
+        raise ValueError("invalid_seal_policy_fields")
+    kind = seal_policy.owner_kind(payload["owner_kind"])
+    actor = seal_actor(session)
+    supabase_request("POST", "rpc/edoc_set_company_seal_policy", {"p_company_id": company_id, "p_owner_kind": kind, "p_actor": actor})
+    return supabase_company_seal_policy_report(company_id, session)
 
 
 def supabase_current_company_seal_file(seal_id: str, *, require_usable: bool = True) -> Dict[str, Any] | None:
@@ -35032,6 +35872,10 @@ def supabase_require_current_company_seal_file(seal_id: str) -> Dict[str, Any]:
     if not seal:
         raise ValueError("seal_not_found")
     require_company_seal_file_dimensions(item, seal.get("seal_size_type"), current=True)
+    if not seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), item):
+        raise ValueError("seal_category_dimension_policy_mismatch")
+    if not item.get("backing_metadata_valid") or not item.get("backing_storage_exists"):
+        raise ValueError("current_seal_backing_unavailable")
     return item
 
 
@@ -35045,27 +35889,19 @@ def supabase_require_seal_file_av_clean(file_row: Dict[str, Any]) -> Dict[str, A
     if not seal:
         raise ValueError("seal_not_found")
     require_company_seal_file_dimensions(item, seal.get("seal_size_type"))
+    if not seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), item):
+        raise ValueError("seal_category_dimension_policy_mismatch")
     return item
 
 
-def supabase_company_seal_row(seal_id: str) -> Dict[str, Any]:
+def supabase_company_seal_row(seal_id: str, *, owner_kind_value: str | None = None) -> Dict[str, Any]:
     seal = supabase_get("company_seals", seal_id)
     if not seal:
         raise ValueError("seal_not_found")
     company = supabase_get("companies", seal.get("company_id", "")) or {}
     designated_current = supabase_current_company_seal_file(seal_id, require_usable=False)
-    data = {**seal, "company_name": company.get("name", ""), "company_tax_id": company.get("tax_id", "")}
-    usable_current = (
-        designated_current
-        if designated_current
-        and designated_current.get("usable")
-        and str(designated_current.get("dimension_policy_version") or "") == EDOC_SEAL_DIMENSION_POLICY_VERSION
-        else None
-    )
-    data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current))
-    data["current_file"] = seal_file_metadata(usable_current) if usable_current else None
-    data["current_file_status"] = seal_file_metadata(designated_current) if designated_current else None
-    return data
+    owner = owner_kind_value if owner_kind_value is not None else supabase_company_seal_owner_kind(seal["company_id"])
+    return _supabase_seal_catalog_row(seal, company, owner, designated_current)
 
 
 def supabase_validate_official_document_seal(
@@ -35080,6 +35916,7 @@ def supabase_validate_official_document_seal(
         raise ValueError("inactive_seal_cannot_be_requested")
     current_file = seal.get("current_file")
     if require_current:
+        seal_policy.require_application_category(seal.get("owner_kind"), seal.get("seal_category"))
         if not current_file:
             current_file = supabase_require_current_company_seal_file(seal_id)
         if not current_file.get("file_object_id"):
@@ -35096,7 +35933,7 @@ def supabase_launch_smoke_current_official_seal(company_id: str = "") -> Dict[st
     seals.sort(key=lambda item: (priority.get(item.get("seal_category"), 9), item.get("company_id") or "", item.get("id") or ""))
     for seal in seals:
         row = supabase_company_seal_row(seal["id"])
-        if row.get("current_file"):
+        if row.get("selectable") and row.get("current_file"):
             return row
     raise ValueError("launch_smoke_current_seal_required")
 
@@ -35249,9 +36086,91 @@ def supabase_list_company_seals(
         assert_editor_seal_catalog_company(supabase_official_session_user(session), company_id, session)
     else:
         assert_supabase_seal_company_access(company_id, session)
-    rows = supabase_filter_rows("company_seals", {"company_id": company_id}, order="is_active.desc,seal_category.asc,seal_size_type.asc,created_at.desc", limit=500)
-    result = [supabase_company_seal_row(row["id"]) for row in rows]
-    return [editor_seal_catalog_metadata(row) for row in result if row.get("is_active")] if editor else result
+    # One FK-embedded snapshot replaces 3-5 REST requests per stamp. In
+    # particular, a large catalog must not consume a shared Storage deadline
+    # before its later (otherwise valid) stamps have even been inspected.
+    params = {
+        "select": "id,name,tax_id,owner_policy:company_seal_policies(owner_kind),seals:company_seals(*,files:company_seal_files(*,backing:file_objects(*)))",
+        "id": f"eq.{company_id}", "limit": "1",
+        "seals.order": "is_active.desc,seal_category.asc,seal_size_type.asc,created_at.desc",
+        "seals.limit": "501", "seals.files.is_current": "eq.true",
+        "seals.files.order": "version.desc", "seals.files.limit": "2",
+    }
+    if editor:
+        params["seals.is_active"] = "eq.true"
+        params["seals.seal_category"] = "in.(establishment_seal,official_seal,general_seal,continuous_seal)"
+    snapshot = supabase_request("GET", f"companies?{urllib.parse.urlencode(params)}")
+    if not isinstance(snapshot, list):
+        raise RuntimeError("seal_catalog_response_invalid")
+    if not snapshot:
+        raise ValueError("company_not_found")
+    company = snapshot[0]
+    if not isinstance(company, dict) or company.get("id") != company_id or not isinstance(company.get("seals"), list):
+        raise RuntimeError("seal_catalog_response_invalid")
+    rows = company["seals"]
+    if len(rows) > 500:
+        raise RuntimeError("seal_catalog_limit_exceeded")
+    policy = company.get("owner_policy")
+    # PostgREST returns an object for the unique company_id relationship;
+    # accept a singleton array as well for older schema-cache representations.
+    if isinstance(policy, list):
+        if len(policy) > 1:
+            raise RuntimeError("seal_catalog_owner_conflict")
+        policy = policy[0] if policy else None
+    if policy is not None and not isinstance(policy, dict):
+        raise RuntimeError("seal_catalog_response_invalid")
+    owner = seal_policy.owner_kind((policy or {}).get("owner_kind"))
+    result = []
+    for seal in rows:
+        if not isinstance(seal, dict) or seal.get("company_id") != company_id:
+            raise RuntimeError("seal_catalog_response_invalid")
+        if editor and (not seal.get("is_active") or seal.get("seal_category") not in {"establishment_seal", "official_seal", "general_seal", "continuous_seal"}):
+            continue
+        files = seal.get("files")
+        if not isinstance(files, list) or len(files) > 1:
+            raise RuntimeError("seal_catalog_current_conflict" if isinstance(files, list) else "seal_catalog_response_invalid")
+        current = None
+        if files:
+            file_row = files[0]
+            if not isinstance(file_row, dict) or file_row.get("seal_id") != seal.get("id") or file_row.get("is_current") is not True:
+                raise RuntimeError("seal_catalog_response_invalid")
+            backing = file_row.get("backing")
+            if backing is not None and not isinstance(backing, dict):
+                raise RuntimeError("seal_catalog_response_invalid")
+            current = _supabase_seal_file_status_from_rows(
+                {key: value for key, value in file_row.items() if key != "backing"},
+                seal, backing, verify_storage=not editor,
+            )
+        row = _supabase_seal_catalog_row(seal, company, owner, current)
+        if editor:
+            row = {**editor_seal_catalog_metadata(row),
+                   "availability_basis": "registered_metadata",
+                   "storage_verification": "required_on_use"}
+        result.append(row)
+    return result
+
+
+def _supabase_seal_catalog_row(
+    seal: Dict[str, Any], company: Dict[str, Any], owner: str,
+    designated_current: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Assemble a catalog row without additional REST calls or private fields."""
+    data = {key: value for key, value in seal.items() if key != "files"}
+    data.update(company_name=company.get("name", ""), company_tax_id=company.get("tax_id", ""))
+    usable_current = designated_current if designated_current and designated_current.get("usable") and str(designated_current.get("dimension_policy_version") or "") in {
+        EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY,
+        seal_policy.CONTINUOUS_POLICY, *seal_scan_exceptions.POLICIES,
+    } else None
+    data.update(company_seal_api_dimension_metadata(data.get("seal_size_type"), usable_current, data.get("seal_category") or ""))
+    data["current_file"] = seal_file_metadata(usable_current) if usable_current else None
+    data["current_file_status"] = seal_file_metadata(designated_current) if designated_current else None
+    data["approved_original_scans"] = seal_scan_exceptions.approved_metadata(data)
+    data["owner_kind"] = owner
+    data["display_label"] = seal_policy.category_label(data.get("seal_category"))
+    category_allowed = seal_policy.application_category_allowed(owner, data.get("seal_category"))
+    data["selectable"] = bool(data.get("is_active") and usable_current and category_allowed)
+    data["availability_reason"] = "classification_required" if owner == "unclassified" else "unsupported_application_category" if data.get("seal_category") in {"bank_seal", "other"} else "owner_policy_mismatch" if not category_allowed else "ready" if data["selectable"] else "inactive" if not data.get("is_active") else "unusable_current" if designated_current else "missing_current"
+    return data
 
 
 def supabase_create_company_seal(company_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -35259,6 +36178,7 @@ def supabase_create_company_seal(company_id: str, payload: Dict[str, Any], sessi
     assert_supabase_seal_company_access(company_id, session)
     category = payload.get("seal_category") or payload.get("category") or "other"
     size_type = payload.get("seal_size_type") or payload.get("size_type") or "large_seal"
+    seal_policy.validate_category_size(category, size_type)
     if category not in supabase_reference_codes("category"):
         raise ValueError("invalid_seal_category")
     if size_type not in supabase_reference_codes("size"):
@@ -35297,6 +36217,10 @@ def supabase_patch_company_seal(seal_id: str, payload: Dict[str, Any], session: 
         raise ValueError("invalid_seal_category")
     if "seal_size_type" in update and update["seal_size_type"] not in supabase_reference_codes("size"):
         raise ValueError("invalid_seal_size_type")
+    seal_policy.validate_category_size(update.get("seal_category", current_seal["seal_category"]), update.get("seal_size_type", current_seal["seal_size_type"]))
+    if ("seal_category" in update and update["seal_category"] != current_seal["seal_category"]
+            and supabase_filter_rows("company_seal_files", {"seal_id": seal_id}, limit=1)):
+        raise ValueError("seal_category_locked_after_upload")
     if (
         "seal_size_type" in update
         and str(update["seal_size_type"]) != str(current_seal.get("seal_size_type") or "")
@@ -35331,7 +36255,8 @@ def supabase_upload_company_seal_file(seal_id: str, payload: Dict[str, Any], ses
     data = decode_seal_file_content(content)
     file_name = Path(payload.get("file_name") or f"{seal_id}.png").name
     mime_type = payload.get("file_mime_type") or payload.get("mime_type") or "image/png"
-    render_width_mm, render_height_mm = normalize_company_seal_upload_dimensions(payload)
+    known_scan = any(entry["png_sha256"] == sha256_bytes(data).lower() for entry in seal_scan_exceptions.approved_metadata(seal))
+    render_width_mm, render_height_mm = normalize_company_seal_upload_dimensions(payload, "official_seal" if known_scan else str(seal.get("seal_category") or ""))
     image_info = validate_seal_file_upload(
         file_name,
         mime_type,
@@ -35339,6 +36264,8 @@ def supabase_upload_company_seal_file(seal_id: str, payload: Dict[str, Any], ses
         str(seal.get("seal_size_type") or ""),
         render_width_mm,
         render_height_mm,
+        str(seal.get("seal_category") or ""),
+        seal,
     )
     scan_status, scan_signature = scan_seal_upload_bytes(data, file_name)
     actor = seal_actor(session, payload)
@@ -35398,7 +36325,8 @@ def supabase_upload_company_seal_file(seal_id: str, payload: Dict[str, Any], ses
                 and int(item.get("pixel_height") or 0) == image_info["pixel_height"]
                 and abs(float(item.get("render_width_mm") or 0) - image_info["render_width_mm"]) <= 0.000001
                 and abs(float(item.get("render_height_mm") or 0) - image_info["render_height_mm"]) <= 0.000001
-                and str(item.get("dimension_policy_version") or "") == EDOC_SEAL_DIMENSION_POLICY_VERSION
+                and seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), item)
+                and str(item.get("dimension_policy_version") or "") in {EDOC_SEAL_DIMENSION_POLICY_VERSION, seal_policy.OFFICIAL_POLICY, seal_policy.CONTINUOUS_POLICY, *seal_scan_exceptions.POLICIES}
                 and bool(item.get("is_current"))
                 and int(item.get("version") or 0) >= 1
             )
@@ -35612,6 +36540,7 @@ def supabase_create_seal_usage_request(document_id: str, payload: Dict[str, Any]
         raise ValueError("seal_id_required")
     assert_supabase_seal_access(seal_id, session)
     seal = supabase_company_seal_row(seal_id)
+    seal_policy.require_application_category(seal.get("owner_kind"), seal.get("seal_category"))
     if not seal.get("is_active"):
         raise ValueError("inactive_seal_cannot_be_requested")
     seal_file = supabase_require_current_company_seal_file(seal_id)
@@ -36074,56 +37003,16 @@ def supabase_internal_launch_finance_applicants_by_company(
 
 def supabase_internal_launch_company_seal_checks() -> Tuple[List[Dict[str, Any]], List[str]]:
     companies, scope, all_companies = supabase_scoped_internal_launch_companies()
-    blockers: List[str] = launch_company_scope_blockers(all_companies, scope)
-    checks: List[Dict[str, Any]] = []
+    blockers = launch_company_scope_blockers(all_companies, scope)
+    checks = []
     if blockers and not companies:
         return checks, blockers
     for company in companies:
-        company_name = company.get("name") or company.get("id") or "未命名公司"
-        company_check = {
-            "company_id": company.get("id"),
-            "company_name": company_name,
-            "launchScopeIncluded": True,
-            "requiredSeals": [],
-        }
-        for category, label in INTERNAL_LAUNCH_REQUIRED_SEAL_CATEGORIES.items():
-            seals = supabase_filter_rows("company_seals", {"company_id": company.get("id"), "seal_category": category, "is_active": True}, order="seal_size_type.asc,created_at.asc", limit=20)
-            has_active = bool(seals)
-            has_current = False
-            has_unscanned_current = False
-            current_seal_id = ""
-            for seal in seals:
-                designated = supabase_current_company_seal_file(seal.get("id") or "", require_usable=False)
-                if designated and designated.get("usable"):
-                    has_current = True
-                    current_seal_id = seal.get("id") or ""
-                    break
-                if designated:
-                    has_unscanned_current = True
-            company_check["requiredSeals"].append({
-                "category": category,
-                "label": label,
-                "active": has_active,
-                "currentFile": has_current,
-                "sealCount": len(seals),
-                "sealIds": [seal.get("id") for seal in seals if seal.get("id")],
-                "firstSealId": (seals[0].get("id") if seals else "") or "",
-                "currentSealId": current_seal_id,
-                "nextAction": (
-                    "已具備 AV 通過的 current 版本"
-                    if has_current
-                    else "完成 Seal Vault 防毒掃描後再設為 current"
-                    if has_unscanned_current
-                    else "上傳 Seal Vault current 版本"
-                    if has_active
-                    else "建立啟用印章並上傳 current 版本"
-                ),
-            })
-            if not has_active:
-                blockers.append(f"{company_name} 缺少啟用的{label}。")
-            elif not has_current:
-                blockers.append(f"{company_name} 的{label}尚無 AV 通過的 Seal Vault current 版本。")
-        checks.append(company_check)
+        company_id = str(company.get("id") or "")
+        seals = supabase_list_company_seals(company_id)
+        report, failures = seal_policy.launch_inventory(company_id, company.get("name") or company_id, supabase_company_seal_owner_kind(company_id), seals)
+        checks.append(report)
+        blockers.extend(failures)
     return checks, blockers
 
 
@@ -36515,7 +37404,7 @@ def supabase_plan_official_stamp_seal_versions(
         )
         if selected_file_id and selected_hash != str(seal_file.get("file_hash") or ""):
             raise ValueError("official_seal_file_hash_mismatch")
-        if str(seal_file.get("dimension_policy_version") or "") != EDOC_SEAL_DIMENSION_POLICY_VERSION:
+        if not seal_policy.category_policy_valid(seal.get("seal_category"), seal.get("seal_size_type"), seal_file):
             raise ValueError("official_seal_file_policy_upgrade_required")
         profile = company_seal_file_dimension_profile(seal.get("seal_size_type"), seal_file)
         width, height = canonical_company_seal_dimensions_pt(
@@ -36525,6 +37414,7 @@ def supabase_plan_official_stamp_seal_versions(
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
             allow_unspecified=not selected_file_id,
+            dimension_policy_version=profile["dimension_policy_version"],
         )
         position.update({
             "id": str(position.get("id") or f"ODPOS-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"),
@@ -36841,10 +37731,10 @@ def supabase_update_official_dispatch_record(document_id: str, payload: Dict[str
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_update_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_update_forbidden")
     require_official_dispatch_record_editable(record)
     if "proof_file_id" in payload:
@@ -36873,10 +37763,10 @@ def supabase_complete_official_dispatch(document_id: str, payload: Dict[str, Any
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_complete_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_complete_forbidden")
     if record.get("dispatch_owner_type") == "general_affairs" and document.get("current_status") != "pending_general_affairs_dispatch":
         raise ValueError("official_document_not_pending_general_affairs_dispatch")
@@ -36924,10 +37814,10 @@ def supabase_upload_official_dispatch_proof_file(document_id: str, payload: Dict
             "dispatch_owner_type": OFFICIAL_DISPATCH_METHODS[method]["owner_type"],
             "dispatch_owner_user_id": owner.get("id") or "",
         }
-        if not can_manage_official_dispatch(user, document, prospective_record, session, steps):
+        if not official_dispatch_actor_allowed(user, document, prospective_record, session, steps):
             raise PermissionError("official_dispatch_proof_upload_forbidden")
         record = supabase_upsert_official_dispatch_record(document, method, user)
-    if not can_manage_official_dispatch(user, document, record, session, steps):
+    if not official_dispatch_actor_allowed(user, document, record, session, steps):
         raise PermissionError("official_dispatch_proof_upload_forbidden")
     require_official_dispatch_record_editable(record)
     content = payload.get("content_base64") or ""
@@ -37362,6 +38252,7 @@ def supabase_create_official_workflow_steps(
             "comment": "",
             "approved_at": "",
             "review_started_at": None,
+            "decision_evidence_json": {},
             "created_at": timestamp,
             "updated_at": timestamp,
         })
@@ -37455,6 +38346,7 @@ def supabase_plan_official_workflow_submission(
             "comment": "",
             "approved_at": "",
             "review_started_at": None,
+            "decision_evidence_json": {},
             "created_at": timestamp,
             "updated_at": timestamp,
         })
@@ -37497,12 +38389,13 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
     actor_snapshots = supabase_official_document_actor_snapshots(document_id)
     user = session.get("user") if session else None
     is_participant = bool(user and canDownloadOfficialDocument(user, document, all_steps, actor_snapshots))
+    followup_binding = official_document_followup_binding(document, user)
     current_step = next((
         step for step in steps
         if step.get("step_key") == document.get("current_step") and step.get("status") == "pending"
     ), None)
     active_delegation = official_document_active_read_delegation(document, all_steps, user, supabase_mode=True)
-    if user and not is_participant and not active_delegation:
+    if user and not is_participant and not active_delegation and not followup_binding:
         if not official_document_user_same_company(user, document) or not str(user.get("company_id") or "").strip():
             raise PermissionError("official_document_company_forbidden")
         if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
@@ -37525,6 +38418,7 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
     }
     return {
         **document,
+        **official_editor_application_capabilities(document, session, has_history=bool(all_steps or actor_snapshots or any(item.get("action") == "submit" for item in logs)), stamp_request=stamp_request),
         "metadata": parse_json_field(document.get("metadata_json")),
         "official_seal": package.get("official_seal"),
         "document_category": package.get("document_category") or "",
@@ -37545,10 +38439,12 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         **official_workflow_action_capabilities(document, steps, user, active_delegation, stamp_request),
         "can_correct": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") in {"draft", "rejected"}),
         "can_resubmit": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_status") == "rejected"),
-        "can_download": bool(is_participant or active_delegation),
-        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps)),
+        "can_download": bool(is_participant or active_delegation or followup_binding),
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
+        "can_create_linked_application": bool(followup_binding and document.get("current_status") in {"draft", "rejected"}),
+        "can_manage_dispatch": bool(user and official_dispatch_record_editable(dispatch_record) and can_manage_official_dispatch(user, document, dispatch_record, session, steps, followup_binding=followup_binding)),
         "can_retry_stamp": bool(user and official_stamp_recoverable(document, stamp_request) and can_retry_official_stamp(user, steps)),
-        "can_confirm": bool(user and user.get("id") == document.get("applicant_id") and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
+        "can_confirm": bool(user and (user.get("id") == document.get("applicant_id") or followup_binding) and document.get("current_step") == "applicant_confirm" and document.get("current_status") in {"stamped", "dispatched", "sent_by_applicant"}),
         "can_act": bool(user and current_step and current_step.get("status") == "pending" and (current_step.get("approver_user_id") == user.get("id") or active_delegation)),
         "acting_for_user_id": current_step.get("approver_user_id") if active_delegation and current_step else "",
         "delegation_id": active_delegation.get("id") if active_delegation else "",
@@ -37569,20 +38465,22 @@ def _supabase_editor_assert_document_access(document: Dict[str, Any], session: D
     user = supabase_official_session_user(session)
     user_company_id = str(user.get("company_id") or "")
     if write:
+        if document.get("applicant_id") != user.get("id"):
+            raise PermissionError("official_editor_write_forbidden")
+        if not session_has_any_permission(session, ["official_documents.compose", "official_documents.all_todo"]):
+            raise PermissionError("official_document_create_forbidden")
         require_official_document_application_company(user, document)
         metadata = parse_json_field(document.get("metadata_json"))
         if not metadata.get("pdf_editor_v2"):
             raise ValueError("editor_legacy_document_read_only")
         if not pdf_editor_v2_enabled_for_company(str(document.get("company_id") or "")):
             raise PermissionError("pdf_editor_v2_not_enabled_for_company")
-        if document.get("applicant_id") != user.get("id"):
-            raise PermissionError("official_editor_write_forbidden")
         if document.get("current_status") not in {"draft", "rejected"}:
             raise ValueError("editor_locked_after_submit")
     else:
         steps = supabase_official_document_steps(document["id"])
         actor_snapshots = supabase_official_document_actor_snapshots(document["id"])
-        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots)
+        is_participant = canDownloadOfficialDocument(user, document, steps, actor_snapshots) or official_document_followup_binding(document, user)
         active_delegation = None if is_participant else official_document_active_read_delegation(document, steps, user, supabase_mode=True)
         if not is_participant and not active_delegation:
             if (
@@ -37686,7 +38584,50 @@ def supabase_create_official_editor_draft(payload: Dict[str, Any], session: Dict
     revision = _supabase_insert_editor_revision(document_id, {"schemaVersion": 2, "revisionNo": 1, "sourceFiles": [], "pages": [], "elements": [], "manifestSha256": ""}, user)
     supabase_insert_official_log(document_id, "create_editor_draft", user, f"revision_id={revision['id']};schema=2;renderer={EDOC_EDITOR_RENDERER_VERSION}")
     public = _editor_revision_public(revision)
-    return {"id": document_id, "document_id": document_id, "company_id": company["id"], "editor_revision": public, "editor_state": public["state"]}
+    return {"id": document_id, "document_id": document_id, "company_id": company["id"], "content_revision": 0,
+            "application_metadata_editable": True, "application_company_editable": True,
+            "editor_revision": public, "editor_state": public["state"]}
+
+
+def supabase_update_official_editor_application(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    require_production_editor_runtime_ready()
+    document = supabase_official_document_row(document_id)
+    user = _supabase_editor_assert_document_access(document, session, write=True)
+    patch = editor_application.application_patch(payload)
+    editor_application.expected_versions(payload)
+    company = official_editor_company(user, patch.get("company_id") or document["company_id"])
+    if not pdf_editor_v2_enabled_for_company(company["id"]):
+        raise PermissionError("pdf_editor_v2_not_enabled_for_company")
+    selection = {"applicant_department_id": document.get("applicant_department_id"),
+                 "applicant_department_name": document.get("applicant_department_name"), **patch}
+    department = authoritative_editor_applicant_department(user, selection, company)
+    latest = _supabase_editor_latest_revision(document_id)
+    if not latest:
+        raise ValueError("editor_revision_not_found")
+    history = bool(supabase_filter_rows("official_document_approval_steps", {"document_id": document_id}, limit=1)
+                   or supabase_official_document_actor_snapshots(document_id)
+                   or supabase_filter_rows("official_document_approval_logs", {"document_id": document_id, "action": "submit"}, limit=1))
+    capabilities = official_editor_application_capabilities(document, session, has_history=history, stamp_request=supabase_official_document_stamp_request(document_id))
+    plan = _editor_application_plan(document, payload, user, latest, company, department, supabase_company_seal_row, capabilities)
+    revision = _supabase_editor_revision_payload(document_id, plan["state"], user, latest=latest, parent_revision_id=latest["id"]) if plan["removed"] else None
+    operation_id = f"ODAPP-{secrets.token_hex(16).upper()}"
+    request = {"document_id": document_id, "actor_id": user["id"], "company_id": company["id"],
+               "expected_content_revision": plan["expected_content_revision"], "expected_editor_revision_id": plan["expected_editor_revision_id"],
+               "expected_editor_manifest_sha256": plan["expected_editor_manifest_sha256"], "patch": plan["updates"],
+               "revision": revision, "updated_fields": plan["changed_fields"], "removed_seal_element_ids": plan["removed"],
+               "log_id": operation_id, "actor_name": official_actor_name(user), "timestamp": now()}
+    raw = supabase_request("POST", "rpc/edoc_update_editor_application", {"p_request": request})
+    result = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+    if not isinstance(result, dict) or result.get("document_id") != document_id or type(result.get("content_revision")) is not int or result.get("editor_revision_id") != (revision or latest)["id"]:
+        raise RuntimeError("editor_application_invalid_response")
+    # Read the committed exact revision, not an unrelated later autosave.
+    committed = revision or latest
+    public = _editor_revision_public(committed)
+    detail = supabase_official_document_detail(document_id, session)
+    if int(detail.get("content_revision") or 0) != result["content_revision"]:
+        raise ValueError("compose_content_revision_conflict")
+    return {**detail, "editor_revision": public, "editor_state": public["state"],
+            "removed_seal_element_ids": result.get("removed_seal_element_ids") or [], "application_changed": result.get("changed") is True}
 
 
 def _supabase_storage_direct_tus_url() -> str:
@@ -37911,7 +38852,7 @@ def _supabase_editor_asset_failure(
         "upload_status": current_status,
     }, {
         "upload_status": "quarantined" if quarantine else "failed",
-        "scan_status": "not_scanned" if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending",
+        "scan_status": "not_scanned" if asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS else "failed" if quarantine else "pending",
         "preflight_status": "blocked" if quarantine else "failed",
         "metadata_json": json.dumps(metadata, ensure_ascii=False),
         "finalized_at": now(),
@@ -38411,7 +39352,7 @@ def supabase_finalize_official_editor_upload(document_id: str, upload_id: str, p
         if failed_asset.get("upload_status") == "finalized":
             return _supabase_finalized_editor_upload_result(document_id, failed_asset, session)
         raise ValueError("editor_revision_conflict")
-    if asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS:
+    if asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS:
         scan_status, signature = "not_scanned", ""
     else:
         try:
@@ -38788,7 +39729,7 @@ def supabase_get_official_editor_state(document_id: str, session: Dict[str, Any]
         order="created_at.desc,id.desc",
         limit=1,
     )
-    if prepared_assets and prepared_assets[0].get("official_file_id"):
+    if prepared_assets and prepared_assets[0].get("official_file_id") and editor_preflight_application_matches(document, prepared_assets[0]):
         prepared_url = official_editor_file_authorized_url(document_id, prepared_assets[0]["official_file_id"])
         public.update({
             "preparedFileId": prepared_assets[0]["official_file_id"],
@@ -38834,9 +39775,24 @@ def supabase_save_official_editor_state(document_id: str, payload: Dict[str, Any
         state,
         previous_state=previous_state,
     )
-    revision = _supabase_insert_editor_revision(document_id, state, user, latest["id"])
+    content_revision = payload.get("expected_content_revision", int(document.get("content_revision") or 0))
+    if type(content_revision) is not int or content_revision < 0:
+        raise ValueError("compose_content_revision_required")
+    revision = _supabase_commit_editor_revision(document, latest, state, user, content_revision)
     supabase_insert_official_log(document_id, "save_editor_revision", user, f"revision_id={revision['id']};revision_no={revision['revision_no']};manifest={revision['manifest_sha256']};elements={len((parse_json_any(revision['editor_state_json'], {}) or {}).get('elements') or [])}")
-    return _editor_revision_public(revision)
+    return {**_editor_revision_public(revision), "contentRevision": content_revision}
+
+
+def _supabase_commit_editor_revision(document: Dict[str, Any], latest: Dict[str, Any], state: Dict[str, Any], user: Dict[str, Any], content_revision: int) -> Dict[str, Any]:
+    revision = _supabase_editor_revision_payload(document["id"], state, user, latest=latest, parent_revision_id=latest["id"])
+    raw = supabase_request("POST", "rpc/edoc_save_editor_revision", {"p_request": {
+        "document_id": document["id"], "actor_id": user["id"], "expected_content_revision": content_revision,
+        "expected_editor_revision_id": latest["id"], "expected_editor_manifest_sha256": latest["manifest_sha256"], "revision": revision,
+    }})
+    result = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+    if not isinstance(result, dict) or result.get("id") != revision["id"] or result.get("document_id") != document["id"] or result.get("manifest_sha256") != revision["manifest_sha256"]:
+        raise RuntimeError("editor_revision_invalid_response")
+    return result
 
 
 def _supabase_editor_asset_bytes(document_id: str, state: Dict[str, Any]) -> Tuple[Dict[str, bytes], List[Dict[str, Any]]]:
@@ -38881,6 +39837,7 @@ def supabase_preflight_official_editor(document_id: str, payload: Dict[str, Any]
     require_production_editor_runtime_ready()
     document = supabase_official_document_row(document_id)
     user = _supabase_editor_assert_document_access(document, session, write=True)
+    content_revision = require_content_revision(document, payload) if "expected_content_revision" in payload else int(document.get("content_revision") or 0)
     latest = _supabase_editor_latest_revision(document_id)
     if not latest:
         raise ValueError("editor_revision_not_found")
@@ -38900,7 +39857,7 @@ def supabase_preflight_official_editor(document_id: str, payload: Dict[str, Any]
         previous_state=state,
     )
     if canonical_json_hash(state) != state_before_binding or latest.get("renderer_version") != EDOC_EDITOR_RENDERER_VERSION:
-        latest = _supabase_insert_editor_revision(document_id, state, user, latest["id"])
+        latest = _supabase_commit_editor_revision(document, latest, state, user, content_revision)
         state = parse_json_any(latest["editor_state_json"], {}) or {}
         revision_id = latest["id"]
         manifest = latest["manifest_sha256"]
@@ -38914,7 +39871,7 @@ def supabase_preflight_official_editor(document_id: str, payload: Dict[str, Any]
     prepared = render_editor_prepared_pdf(state, asset_bytes)
     prepared_hash = sha256_bytes(prepared)
     prepared_file = supabase_store_official_pdf_file(document_id, "prepared_pdf", f"{document_id}-prepared-r{latest['revision_no']}.pdf", prepared, official_actor_name(user))
-    prepared_asset = supabase_insert("official_document_editor_assets", {
+    prepared_asset = {
         "id": f"ODASSET-{int(time.time() * 1000)}-{secrets.token_hex(4).upper()}",
         "document_id": document_id,
         "editor_revision_id": latest["id"],
@@ -38932,14 +39889,23 @@ def supabase_preflight_official_editor(document_id: str, payload: Dict[str, Any]
         "scan_status": "passed",
         "preflight_status": "passed",
         "page_count": len(state.get("pages") or []),
-        "metadata_json": json.dumps({"source_asset_hashes": sorted(asset["sha256"] for asset in assets), "manifest_sha256": manifest, "element_count": len(state.get("elements") or []), "renderer_version": EDOC_EDITOR_RENDERER_VERSION}, ensure_ascii=False),
+        "metadata_json": json.dumps({"source_asset_hashes": sorted(asset["sha256"] for asset in assets), "manifest_sha256": manifest, "element_count": len(state.get("elements") or []), "renderer_version": EDOC_EDITOR_RENDERER_VERSION,
+                                    "application_content_revision": content_revision, "application_company_id": document["company_id"],
+                                    "application_snapshot": editor_application.application_snapshot(document)}, ensure_ascii=False),
         "created_by": user.get("id") or "",
         "created_at": now(),
         "finalized_at": now(),
-    })
+    }
+    raw = supabase_request("POST", "rpc/edoc_commit_editor_preflight", {"p_request": {
+        "document_id": document_id, "actor_id": user["id"], "expected_content_revision": content_revision,
+        "expected_editor_revision_id": latest["id"], "expected_editor_manifest_sha256": manifest, "asset": prepared_asset,
+    }})
+    committed_asset = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+    if not isinstance(committed_asset, dict) or committed_asset.get("id") != prepared_asset["id"] or committed_asset.get("editor_revision_id") != latest["id"] or committed_asset.get("sha256") != prepared_hash:
+        raise RuntimeError("editor_preflight_invalid_response")
     supabase_insert_official_log(document_id, "editor_preflight", user, f"revision_id={latest['id']};manifest={manifest};prepared_file_id={prepared_file['id']};prepared_sha256={prepared_hash};pages={prepared_asset['page_count']};elements={len(state.get('elements') or [])};renderer={EDOC_EDITOR_RENDERER_VERSION}", file_id=prepared_file["id"])
     prepared_url = official_editor_file_authorized_url(document_id, prepared_file["id"])
-    return {"status": "prepared", "documentId": document_id, "editorRevisionId": latest["id"], "revisionNo": int(latest["revision_no"]), "manifestSha256": manifest, "preparedFileId": prepared_file["id"], "preparedSha256": prepared_hash, "preparedUrl": prepared_url, "authorizedUrl": prepared_url, "rendererVersion": EDOC_EDITOR_RENDERER_VERSION, "pageCount": prepared_asset["page_count"], "revision": _editor_revision_public(latest)}
+    return {"status": "prepared", "documentId": document_id, "editorRevisionId": latest["id"], "revisionNo": int(latest["revision_no"]), "contentRevision": content_revision, "manifestSha256": manifest, "preparedFileId": prepared_file["id"], "preparedSha256": prepared_hash, "preparedUrl": prepared_url, "authorizedUrl": prepared_url, "rendererVersion": EDOC_EDITOR_RENDERER_VERSION, "pageCount": prepared_asset["page_count"], "revision": _editor_revision_public(latest)}
 
 
 def supabase_official_editor_change_summary(document_id: str, session: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -39020,14 +39986,8 @@ def supabase_editor_seal_preview(
             raise ValueError("editor_seal_file_hash_mismatch")
     else:
         seal_file = supabase_require_current_company_seal_file(seal_id)
-    objects = supabase_filter_rows("file_objects", {"id": seal_file.get("file_object_id")}, limit=1)
-    if not objects:
-        raise ValueError("seal_file_object_required")
-    data = supabase_storage_download(objects[0]["storage_key"], objects[0].get("bucket") or EDOC_SEAL_STORAGE_BUCKET)
-    if sha256_bytes(data) != seal_file["file_hash"]:
-        raise ValueError("seal_file_hash_mismatch")
-    supabase_log_seal_usage(action="editor_seal_preview", actor_id=user.get("id") or "", seal_id=seal_id, detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};watermarked=true")
-    return generate_editor_seal_preview(data, seal_file.get("file_mime_type") or "image/png")
+    supabase_log_seal_usage(action="editor_seal_preview", actor_id=user.get("id") or "", seal_id=seal_id, detail=f"seal_file_id={seal_file['id']};ttl={EDOC_EDITOR_PREVIEW_TTL_SECONDS};placeholder=true;private_pixels=false")
+    return generate_editor_seal_placeholder(seal_file, seal.get("seal_size_type") or "large_seal")
 
 
 def supabase_editor_asset_download(document_id: str, asset_id: str, expires: int, token: str, session: Dict[str, Any] | None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -39047,7 +40007,7 @@ def supabase_editor_asset_download(document_id: str, asset_id: str, expires: int
     if not file_object:
         raise ValueError("editor_asset_file_object_missing")
     if not file_object_av_is_clean(file_object) and not (
-        asset.get("asset_kind") in EDITOR_PDF_NO_AV_ASSET_KINDS
+        asset.get("asset_kind") in EDITOR_UPLOAD_NO_AV_ASSET_KINDS
         and str(asset.get("scan_status") or "").strip().lower() == "not_scanned"
         and str(file_object.get("scan_status") or "").strip().lower() == "not_scanned"
     ):
@@ -39122,6 +40082,7 @@ def supabase_lock_official_editor_submission(
     if not preflight_assets:
         raise ValueError("editor_preflight_not_completed")
     require_current_editor_preflight(latest, preflight_assets[0])
+    editor_application.require_preflight_application_version(document, parse_json_field(preflight_assets[0].get("metadata_json")))
     state = parse_json_any(latest["editor_state_json"], {}) or {}
     validate_supabase_editor_seal_placements(
         str(document.get("company_id") or ""),
@@ -39149,6 +40110,7 @@ def supabase_lock_official_editor_submission(
             seal.get("seal_size_type"), element.get("width"), element.get("height"),
             render_width_mm=profile["width_mm"],
             render_height_mm=profile["height_mm"],
+            dimension_policy_version=seal_file.get("dimension_policy_version"),
         )
         positions.append({"seal_id": seal_id, "page": page_numbers.get(str(element.get("pageId") or ""), 0), "page_ref": str(element.get("pageId") or ""), "x": element.get("x"), "y": element.get("y"), "width": width, "height": height, "rotation": element.get("rotation") or 0, "opacity": element.get("opacity") if element.get("opacity") is not None else 1, "z_index": element.get("zIndex") or index, "locked_seal_file_id": seal_file["id"], "locked_seal_sha256": seal_file["file_hash"], "locked_render_width_pt": profile["width_pt"], "locked_render_height_pt": profile["height_pt"], "locked_dimension_policy_version": profile["dimension_policy_version"], "order_index": index})
     if bool(document.get("requires_stamp", True)) and not positions:
@@ -39156,6 +40118,8 @@ def supabase_lock_official_editor_submission(
     first = positions[0] if positions else {"seal_id": "", "page": 1, "x": 0, "y": 0, "width": 1, "height": 1}
     timestamp = now()
     request = supabase_official_document_stamp_request(document["id"])
+    if request and (request.get("company_id") != document["company_id"] or request.get("error_message") == "cleared_by_company_change"):
+        request = None
     lock_fields = {"seal_id": first["seal_id"], "stamp_page": first["page"], "stamp_x": first["x"], "stamp_y": first["y"], "stamp_width": first["width"], "stamp_height": first["height"], "locked_editor_revision_id": revision_id, "locked_source_sha256": source_hash, "prepared_file_id": prepared_file_id, "prepared_sha256": prepared_sha256, "editor_manifest_sha256": manifest, "editor_schema_version": EDOC_EDITOR_SCHEMA_VERSION, "renderer_version": EDOC_EDITOR_RENDERER_VERSION, "editor_locked_at": timestamp, "status": "pending", "error_message": "", "updated_at": timestamp}
     request_id = str((request or {}).get("id") or "") or f"ODSTAMP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
     request_row = {
@@ -39667,6 +40631,8 @@ def supabase_update_official_document_correction(
 ) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
     document = supabase_official_document_row(document_id)
+    if _editor_application_update_requested(document, payload):
+        return supabase_update_official_editor_application(document_id, payload, session)
     if document.get("applicant_id") != user.get("id"):
         raise PermissionError("only_applicant_can_correct")
     if document.get("current_status") not in {"draft", "rejected"}:
@@ -39987,7 +40953,7 @@ def supabase_resubmit_official_document(
         raise PermissionError("only_applicant_can_resubmit")
     require_official_document_application_company(user, document)
     if document.get("current_status") != "rejected":
-        if _supabase_committed_resubmit_operation_id(document_id, user["id"]):
+        if _supabase_committed_resubmit_operation_id(document_id, user["id"], payload):
             return supabase_official_document_detail(document_id, session)
         raise ValueError("official_document_not_rejected")
     requested_at = str(document.get("correction_requested_at") or "")
@@ -40007,11 +40973,33 @@ def supabase_resubmit_official_document(
     return supabase_submit_official_document(document_id, payload, session)
 
 
+def _official_submission_intent(document: Dict[str, Any], payload: Dict[str, Any], workflow_generation: int) -> Dict[str, Any]:
+    expected = require_content_revision(document, payload)
+    intent = {"schema_version": 1, "document_id": document["id"], "applicant_id": document["applicant_id"],
+              "company_id": document["company_id"], "content_revision": expected,
+              "application_sha256": canonical_json_hash(editor_application.application_snapshot(document)),
+              "workflow_generation": workflow_generation}
+    if parse_json_field(document.get("metadata_json")).get("pdf_editor_v2"):
+        fields = {"editor_revision_id": "editorRevisionId", "manifest_sha256": "manifestSha256",
+                  "prepared_file_id": "preparedFileId", "prepared_sha256": "preparedSha256"}
+        for key, source in fields.items():
+            value = payload.get(source)
+            if not isinstance(value, str) or not value:
+                raise ValueError("editor_preflight_fields_required")
+            intent[key] = value
+    return intent
+
+
+def _submission_intents_equal(actual: Any, expected: Dict[str, Any]) -> bool:
+    return bool(isinstance(actual, dict) and canonical_json_hash(actual) == canonical_json_hash(expected))
+
+
 def _supabase_official_submission_operation_ids(
     document: Dict[str, Any],
     applicant_id: str,
     *,
     workflow_generation: int | None = None,
+    submission_intent: Dict[str, Any] | None = None,
 ) -> Tuple[str, str, str, str]:
     generation_key = (
         str(document.get("correction_requested_at") or "")
@@ -40024,9 +41012,16 @@ def _supabase_official_submission_operation_ids(
     # bind their actual immutable generation, including withdraw/resubmit.
     if workflow_generation:
         generation_key += f"\nworkflow_generation={workflow_generation}"
-    digest = hashlib.sha256(
-        f"{document['id']}\n{applicant_id}\n{generation_key}".encode("utf-8")
-    ).hexdigest().upper()
+    if submission_intent is None:
+        stored = parse_json_field(document.get("metadata_json")).get("submission_intent")
+        submission_intent = stored if isinstance(stored, dict) else None
+    identity = f"{document['id']}\n{applicant_id}\n{generation_key}"
+    if submission_intent is not None:
+        # Correction timestamps clear after the atomic commit. The typed
+        # intent itself contains the immutable generation and must therefore
+        # remain the same operation key after resubmission completes.
+        identity = f"{document['id']}\n{applicant_id}\nintent=v1:" + canonical_json_hash(submission_intent)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest().upper()
     return (
         f"ODSUB-{digest[:32]}",
         f"AUDSUB-{digest[:32]}",
@@ -40039,6 +41034,7 @@ def _supabase_official_submission_commit_state(
     document_id: str,
     applicant_id: str,
     operation_id: str,
+    expected_intent: Dict[str, Any] | None = None,
 ) -> str:
     try:
         document = supabase_official_document_row(document_id)
@@ -40054,6 +41050,27 @@ def _supabase_official_submission_commit_state(
         return "unknown"
     if logs:
         evidence = parse_json_any(logs[0].get("decision_evidence_json"), {}) or {}
+        committed_intent = evidence.get("submission_intent")
+        if expected_intent is None or not isinstance(committed_intent, dict):
+            # A historical status/log alone cannot prove the caller's exact
+            # final content. It remains visible but is never invented success.
+            return "unknown"
+        if not _submission_intents_equal(committed_intent, expected_intent):
+            return "conflict"
+        if (str(evidence.get("operation_id") or "") != operation_id
+                or str(document.get("company_id") or "") != expected_intent.get("company_id")
+                or int(document.get("content_revision") or 0) != expected_intent.get("content_revision")
+                or canonical_json_hash(editor_application.application_snapshot(document)) != expected_intent.get("application_sha256")):
+            return "conflict"
+        if expected_intent.get("editor_revision_id"):
+            try:
+                request = supabase_get("official_document_stamp_requests", str(evidence.get("stamp_request_id") or ""))
+            except Exception:
+                return "unknown"
+            matches = {"locked_editor_revision_id": "editor_revision_id", "editor_manifest_sha256": "manifest_sha256",
+                       "prepared_file_id": "prepared_file_id", "prepared_sha256": "prepared_sha256"}
+            if not request or request.get("document_id") != document_id or request.get("company_id") != expected_intent.get("company_id") or request.get("requested_by") != applicant_id or any(request.get(key) != expected_intent.get(value) for key, value in matches.items()):
+                return "conflict"
         first_step_id = str(evidence.get("first_step_id") or "")
         workflow_generation = int(evidence.get("workflow_generation") or 0)
         committed_first = next(
@@ -40069,6 +41086,7 @@ def _supabase_official_submission_commit_state(
         )
         if (
             str(logs[0].get("actor_id") or "") == applicant_id
+            and workflow_generation == expected_intent.get("workflow_generation")
             and document.get("current_status") not in {"draft", "rejected"}
             and committed_first
         ):
@@ -40076,12 +41094,15 @@ def _supabase_official_submission_commit_state(
         return "unknown"
     if document.get("current_status") in {"draft", "rejected"}:
         return "not_committed"
+    if expected_intent is not None and not _submission_intents_equal(parse_json_field(document.get("metadata_json")).get("submission_intent"), expected_intent):
+        return "conflict"
     return "unknown"
 
 
 def _supabase_committed_resubmit_operation_id(
     document_id: str,
     applicant_id: str,
+    payload: Dict[str, Any],
 ) -> str:
     """Return a database-backed resubmit witness after correction fields clear."""
     logs = supabase_filter_rows(
@@ -40093,11 +41114,14 @@ def _supabase_committed_resubmit_operation_id(
     for item in logs:
         evidence = parse_json_any(item.get("decision_evidence_json"), {}) or {}
         if evidence.get("resubmitted") is True:
+            document = supabase_official_document_row(document_id)
+            expected_intent = _official_submission_intent(document, payload, int(evidence.get("workflow_generation") or 0))
             operation_id = str(evidence.get("operation_id") or item.get("id") or "")
             if operation_id and _supabase_official_submission_commit_state(
                 document_id,
                 applicant_id,
                 operation_id,
+                expected_intent,
             ) == "committed":
                 return operation_id
     return ""
@@ -40152,11 +41176,18 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
     if document["applicant_id"] != user["id"]:
         raise PermissionError("only_applicant_can_submit")
     if document["current_status"] not in {"draft", "rejected"}:
-        operation_id, _, _, _ = _supabase_official_submission_operation_ids(document, user["id"])
+        stored_intent = parse_json_field(document.get("metadata_json")).get("submission_intent")
+        if not isinstance(stored_intent, dict):
+            raise ValueError("official_document_not_submittable")
+        expected_intent = _official_submission_intent(document, payload, int(stored_intent.get("workflow_generation") or 0))
+        if not _submission_intents_equal(stored_intent, expected_intent):
+            raise ValueError("official_submission_operation_conflict")
+        operation_id, _, _, _ = _supabase_official_submission_operation_ids(document, user["id"], submission_intent=expected_intent)
         if _supabase_official_submission_commit_state(
             document_id,
             user["id"],
             operation_id,
+            expected_intent,
         ) == "committed":
             return supabase_official_document_detail(document_id, session)
         raise ValueError("official_document_not_submittable")
@@ -40266,12 +41297,18 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
     first_status = official_step_status(first["step_key"])
     if not first_status:
         raise ValueError("official_workflow_existing_steps_invalid")
+    submission_intent = _official_submission_intent(document, payload, workflow_plan["workflow_generation"])
     operation_id, audit_id, resubmit_log_id, resubmit_audit_id = (
-        _supabase_official_submission_operation_ids(document, user["id"], workflow_generation=workflow_plan["workflow_generation"])
+        _supabase_official_submission_operation_ids(document, user["id"], workflow_generation=workflow_plan["workflow_generation"], submission_intent=submission_intent)
     )
+    workflow_lock_metadata["submission_intent"] = submission_intent
     workflow_lock_metadata["official_seal"]["submission_generation"] = workflow_plan["workflow_generation"]
+    if parse_json_field(document.get("metadata_json")).get("pdf_editor_v2"):
+        workflow_lock_metadata["editor_submission_application"] = {"content_revision": expected_content_revision,
+            "snapshot_sha256": canonical_json_hash(editor_application.application_snapshot(document))}
     comment = str(payload.get("comment") or "送出發文用印簽核")[:2000]
     decision_evidence = {
+        "submission_intent": submission_intent,
         "operation_id": operation_id,
         "first_step_id": first["id"],
         "first_step_key": first["step_key"],
@@ -40414,10 +41451,13 @@ def supabase_submit_official_document(document_id: str, payload: Dict[str, Any],
             document_id,
             user["id"],
             operation_id,
+            submission_intent,
         )
         if state != "committed":
+            if state == "conflict":
+                raise ValueError("official_submission_operation_conflict") from None
             if state == "unknown":
-                raise RuntimeError(
+                raise OfficialSubmissionOutcomeUnknownError(
                     "official_document_submit_commit_state_unknown"
                 ) from submit_error
             raise
@@ -40889,7 +41929,8 @@ def supabase_mutate_official_workflow(document_id: str, action: str, payload: Di
     plan = plan_official_workflow_mutation(document, steps, actor, action, payload, decision_evidence=evidence, target=target, stamp_request=stamp_request, editor_clone=clone)
     if action not in {"withdraw", "decline"}:
         next_step = next((row for row in plan["steps"] if row["id"] == plan["action_result"]["current_step_id"]), None)
-        if not next_step or not supabase_user_by_id(str(next_step.get("approver_user_id") or "")):
+        if not next_step or not (supabase_user_by_id(str(next_step.get("approver_user_id") or ""))
+                or (next_step.get("step_key") == "applicant_confirm" and official_handover_followup.load(sys.modules[__name__], document))):
             raise ValueError("official_workflow_next_approver_inactive")
     raw = supabase_request("POST", "rpc/edoc_decline_official_document" if action == "decline" else "rpc/edoc_mutate_official_workflow", {"p_request": plan})
     response = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
@@ -40925,7 +41966,8 @@ def supabase_cancel_official_document(document_id: str, payload: Dict[str, Any],
 def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
     document = supabase_official_document_row(document_id)
-    if document["applicant_id"] != user["id"]:
+    followup_binding = official_document_followup_binding(document, user)
+    if document["applicant_id"] != user["id"] and not followup_binding:
         raise PermissionError("only_applicant_can_confirm")
     all_steps = supabase_official_document_steps(document_id)
     generation = max((int(row.get("workflow_generation") or 1) for row in all_steps), default=0)
@@ -40937,6 +41979,7 @@ def supabase_confirm_official_document(document_id: str, payload: Dict[str, Any]
     raw = supabase_request("POST", "rpc/edoc_confirm_official_document", {"p_request": {
         "document_id": document_id, "actor_id": user["id"], "expected_step_id": step["id"],
         "workflow_generation": generation, "comment": payload.get("comment") or "申請人確認已用印版本",
+        "followup_handover_id": (followup_binding or {}).get("handover_id") or "",
         "dispatch": {key: payload.get(key) for key in ("external_official_document_number", "dispatch_date", "recipient", "recipient_contact", "dispatch_note")},
         "ip_address": payload.get("ip_address") or "", "user_agent": (payload.get("user_agent") or "")[:180],
     }})
@@ -41260,7 +42303,7 @@ def supabase_official_document_download_file(document_id: str, file_id: str, ses
     document = supabase_official_document_row(document_id)
     steps = supabase_official_document_steps(document_id)
     actor_snapshots = supabase_official_document_actor_snapshots(document_id)
-    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, supabase_mode=True):
+    if not canDownloadOfficialDocument(user, document, steps, actor_snapshots) and not official_document_active_read_delegation(document, steps, user, supabase_mode=True) and not official_document_followup_binding(document, user):
         raise PermissionError("official_document_download_forbidden")
     supabase_assert_official_document_uploads_av_clean(document)
     rows = supabase_filter_rows("official_document_files", {"id": file_id, "document_id": document_id}, limit=1)
@@ -41458,43 +42501,43 @@ def supabase_inbound_related_rows(table: str, column: str, ids: List[str], *, se
 def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     user = supabase_official_session_user(session)
     scope = inbound_finance_user_scope(user)
-    rows = supabase_filter_rows(
-        "inbound_documents",
-        {
-            "company_id": scope["company_id"],
-            "finance_tenant_id": scope["finance_tenant_id"],
-        },
-        order="created_at.desc",
-        limit=300,
-    )
-    status = (query or {}).get("status", [""])[0] if query else ""
-    assignee_user_id = (query or {}).get("assignee_user_id", [""])[0] if query else ""
     company_wide = session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo", "official_documents.receive"])
-    linked_inbound_ids: set[str] = set()
-    if not company_wide:
-        recipient_rows = supabase_filter_rows(
-            "internal_dispatch_recipients",
-            {"recipient_user_id": user.get("id") or ""},
-            limit=1000,
-        )
-        for dispatch in supabase_inbound_related_rows("internal_dispatches", "id", [row.get("dispatch_id") or "" for row in recipient_rows]):
-            if dispatch.get("inbound_document_id"):
-                linked_inbound_ids.add(dispatch["inbound_document_id"])
+    options = inbound_list_options(query, {**scope, "actor_id": user["id"], "company_wide": company_wide})
+    request = {**scope, "actor_id": user["id"], "company_wide": company_wide,
+               "status": options["status"], "assignee_user_id": options["assignee_user_id"], "q": options["q"]}
+    after = options["after"]
     scoped: List[Dict[str, Any]] = []
-    for row in rows:
-        if (
-            roster_text(row.get("company_id")) != scope["company_id"]
-            or roster_text(row.get("finance_tenant_id")) != scope["finance_tenant_id"]
-        ):
-            continue
-        if status and row.get("status") != status:
-            continue
-        if assignee_user_id and row.get("assignee_user_id") != assignee_user_id:
-            continue
-        if not company_wide:
-            if row.get("assignee_user_id") != user.get("id") and row.get("created_by") != user.get("id") and row.get("id") not in linked_inbound_ids:
-                continue
-        scoped.append(dict(row))
+    seen: set[str] = set()
+    count = 0
+    while True:
+        size = options["page_size"] + 1 if options["paginated"] else 101
+        page_request = {**request, "limit": size}
+        if after:
+            page_request.update({"after_created_at": after[0], "after_id": after[1]})
+        response = supabase_request("POST", "rpc/edoc_list_inbound_candidates", {"p_request": page_request})
+        if not isinstance(response, dict) or not isinstance(response.get("items"), list) or isinstance(response.get("count"), bool) or not isinstance(response.get("count"), int) or response["count"] < 0:
+            raise RuntimeError("inbound_list_response_invalid")
+        count = response["count"]
+        if not options["paginated"] and count > LIST_MAX_ROWS:
+            raise ValueError("inbound_list_pagination_required")
+        batch = response["items"]
+        if len(batch) > size:
+            raise RuntimeError("inbound_list_response_invalid")
+        previous = after
+        for row in batch:
+            if not isinstance(row, dict) or not row.get("id") or not row.get("created_at"):
+                raise RuntimeError("inbound_list_response_invalid")
+            key = (str(row["created_at"]), str(row["id"]))
+            if row["id"] in seen or (previous and key >= previous) or row.get("company_id") != scope["company_id"] or row.get("finance_tenant_id") != scope["finance_tenant_id"]:
+                raise RuntimeError("inbound_list_response_invalid")
+            seen.add(row["id"])
+            previous = key
+            scoped.append(dict(row))
+        if options["paginated"] or len(batch) < size:
+            break
+        if len(scoped) > LIST_MAX_ROWS:
+            raise ValueError("inbound_list_pagination_required")
+        after = previous
     attachments = supabase_inbound_related_rows("inbound_document_attachments", "inbound_document_id", [row["id"] for row in scoped])
     assignees = {row["id"]: row for row in supabase_inbound_related_rows("users", "id", [row.get("assignee_user_id") or "" for row in scoped], select="id,status,company_id,finance_tenant_id")}
     by_document: Dict[str, List[Dict[str, Any]]] = {}
@@ -41504,7 +42547,7 @@ def supabase_list_inbound_documents(query: Dict[str, List[str]] | None, session:
         row["metadata"] = parse_json_any(row.get("metadata_json"), {}) or {}
         row["attachments"] = sorted(by_document.get(row["id"], []), key=lambda item: str(item.get("created_at") or ""), reverse=True)
         row["handover_required"] = inbound_handover_required(row, assignees.get(row.get("assignee_user_id") or ""))
-    return scoped
+    return inbound_page(scoped, count, options) if options["paginated"] else scoped
 
 
 def supabase_create_inbound_document(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -42374,7 +43417,7 @@ def supabase_create_finance_login_session(
     return {
         "token": token,
         "expiresAt": expires,
-        "user": bundle["user"],
+        "user": public_user(bundle["user"]),
         "permissions": bundle["permissions"],
     }
 
@@ -42513,7 +43556,7 @@ def supabase_authenticate(payload: Dict[str, Any], ip: str, device: str) -> Tupl
     supabase_patch("users", user["id"], {"last_login_at": now()})
     supabase_insert("login_events", {"id": f"LOGIN-{int(time.time() * 1000)}", "user_id": user["id"], "email": email, "provider": provider, "ip": ip, "device": device, "status": "成功", "reason": "帳密驗證通過"})
     user.pop("password_hash", None)
-    return {"token": token, "expiresAt": expires, "user": user, "permissions": supabase_role_permissions(user.get("role", ""))}, 200
+    return {"token": token, "expiresAt": expires, "user": public_user(user), "permissions": supabase_role_permissions(user.get("role", ""))}, 200
 
 
 def supabase_upsert_finance_manager_placeholder(
@@ -44722,7 +45765,7 @@ def supabase_authenticate_logging_bridge(payload: Dict[str, Any], ip: str, devic
         return {
             "token": token,
             "expiresAt": expires,
-            "user": user,
+            "user": public_user(user),
             "permissions": permissions,
             "bridge": {
                 "sourceSystem": "finance",
@@ -44841,7 +45884,7 @@ def supabase_current_session(token: str) -> Dict[str, Any] | None:
     return {
         "sessionId": session_row["id"],
         "expiresAt": session_row["expires_at"],
-        "user": user,
+        "user": public_user(user),
         "permissions": permissions,
     }
 
@@ -45126,21 +46169,7 @@ def supabase_execute_job_logic(job: Dict[str, Any]) -> Dict[str, Any]:
         expiring = [item for item in active if item.get("expires_at", "") <= expiring_before]
         return {"message": f"成功：有效 session {len(active)}，1 小時內到期 {len(expiring)}", "payload": {"active_sessions": len(active), "expiring": len(expiring)}}
     if job_type == "nextDayCheck":
-        tasks = supabase_list("exchange_tasks", {})
-        checked = 0
-        for task in [item for item in tasks if item.get("direction") == "發文"]:
-            checked += 1
-            status = task.get("status") if task.get("status") in {"交換失敗", "退回補正"} else "已確認收文"
-            supabase_patch("exchange_tasks", task["id"], {"status": status, "next_check_at": compute_next_run_at("每日 09:00")})
-            supabase_insert("exchange_events", {
-                "id": f"EVT-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
-                "task_id": task["id"],
-                "document_id": task.get("document_id"),
-                "event_type": "next_day_check",
-                "message": "Vercel Cron 完成發文翌日查核。",
-                "payload_json": "{}",
-            })
-        return {"message": f"成功：完成 {checked} 筆發文翌日查核", "payload": {"checked": checked}}
+        return execute_legacy_next_day_check()
     if job_type == "exchangeSync":
         assert_formal_exchange_allowed({})
         sent_outboxes = supabase_list("exchange_outbox", {"status": ["已送出"]})
@@ -47225,6 +48254,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
         self.send_header("X-EDOC-Preview-Expires-In", str(EDOC_EDITOR_PREVIEW_TTL_SECONDS))
+        self.send_header("X-EDOC-Seal-Preview", "geometry-only")
         self.end_headers()
         self.wfile.write(data)
 
@@ -47758,9 +48788,85 @@ class Handler(SimpleHTTPRequestHandler):
         expected = f"Bearer {secret}"
         return len(provided) == len(expected) and hmac.compare_digest(provided, expected)
 
+    def handle_handover_api(self, method, parts, query, session, conn=None):
+        if len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "linked-application":
+            service = official_handover_followup.LinkedApplication(sys.modules[__name__], session, conn)
+            if method == "GET":
+                context, _, _ = service.context(parts[1])
+                result = {key: value for key, value in context.items() if key != "snapshot"}
+            elif method == "POST":
+                result = service.create(parts[1], self.read_json())
+                if conn is not None:
+                    conn.commit()
+            else:
+                self.send_json({"error": "method_not_allowed"}, 405)
+                return True
+            self.send_json(result)
+            return True
+        is_queue = parts == ["official-handovers"]
+        is_context = len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "handover-context"
+        is_proposal = len(parts) == 3 and parts[0] == "official-documents" and parts[2] == "handovers"
+        is_resolution = len(parts) == 3 and parts[0] == "official-handovers" and parts[2] in {"confirm", "reject"}
+        if not (is_queue or is_context or is_proposal or is_resolution):
+            return False
+        service = official_handover_service.Service(sys.modules[__name__], session, conn)
+        if method == "GET" and is_queue:
+            result = service.queue(query)
+        elif method == "GET" and is_context:
+            result = service.context(parts[1], query)
+        elif method == "POST" and is_proposal:
+            result = service.propose(parts[1], self.read_json())
+        elif method == "POST" and is_resolution:
+            result = service.resolve(parts[1], parts[2], self.read_json())
+        else:
+            self.send_json({"error": "method_not_allowed"}, 405)
+            return True
+        if conn is not None and method == "POST":
+            conn.commit()
+        self.send_json(result)
+        return True
+
     def handle_api(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
         parts = [part for part in path.split("/") if part][1:]
         try:
+            if parts == ["admin", "approved-native120-seal-import"]:
+                if method != "POST":
+                    self.send_json({"error": "method_not_allowed"}, 405)
+                    return
+                try:
+                    context = seal_operator_import_120.authorize(self.headers.get(seal_operator_import_120.HEADER, ""), os.environ)
+                except PermissionError:
+                    self.send_json({"error": "unauthorized"}, 401)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if not 0 < length <= 4 * 1024 * 1024:
+                    self.send_json({"error": "approved_scan_import_payload_invalid"}, 413)
+                    return
+                result = seal_operator_import_120.import_one(sys.modules[__name__], context, self.read_json())
+                self.send_json(result)
+                return
+            if parts == ["admin", "approved-original-seal-import"]:
+                if method != "POST":
+                    self.send_json({"error": "method_not_allowed"}, 405)
+                    return
+                try:
+                    context = seal_operator_import.authorize(self.headers.get(seal_operator_import.HEADER, ""), os.environ)
+                except PermissionError:
+                    self.send_json({"error": "unauthorized"}, 401)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if not 0 < length <= 4 * 1024 * 1024:
+                    self.send_json({"error": "approved_scan_import_payload_invalid"}, 413)
+                    return
+                result = seal_operator_import.import_one(sys.modules[__name__], context, self.read_json())
+                self.send_json(result)
+                return
             if method == "POST" and parts == ["auth", "handoff"]:
                 self.handle_portal_handoff()
                 return
@@ -47929,6 +49035,8 @@ class Handler(SimpleHTTPRequestHandler):
                         return
                 if method == "GET" and parts == ["finance-directory"]:
                     self.send_json(supabase_finance_directory(session))
+                    return
+                if parts and parts[0] != "cron" and self.handle_handover_api(method, parts, query, session):
                     return
                 if is_operations_maintenance_endpoint(method, parts):
                     session = supabase_current_session(self.bearer_token())
@@ -48152,6 +49260,10 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if method == "GET" and parts == ["dashboard"]:
                     self.send_json(supabase_dashboard())
+                    return
+                if method == "GET" and parts == ["reports", "timeliness"]:
+                    session = supabase_current_session(self.bearer_token())
+                    self.send_json(official_timeliness_report(session))
                     return
                 if method == "GET" and parts == ["reports", "operational-summary"]:
                     session = supabase_current_session(self.bearer_token())
@@ -48385,6 +49497,14 @@ class Handler(SimpleHTTPRequestHandler):
                     results = [supabase_deliver_notification(str(notification_id), "系統通知") for notification_id in ids]
                     self.send_json({"count": len(results), "results": results}, 201)
                     return
+                if len(parts) == 3 and parts[0] == "companies" and parts[2] == "seal-policy" and method in {"GET", "PATCH"}:
+                    session = supabase_current_session(self.bearer_token())
+                    if not session:
+                        self.send_json({"error": "unauthorized"}, 401)
+                        return
+                    result = supabase_company_seal_policy_report(parts[1], session) if method == "GET" else supabase_patch_company_seal_policy(parts[1], self.read_json(), session)
+                    self.send_json(result)
+                    return
                 if method == "GET" and len(parts) == 3 and parts[0] == "company-seals" and parts[2] == "editor-preview":
                     session = supabase_current_session(self.bearer_token())
                     self.send_editor_seal_preview(parts[1], session=session, supabase_mode=True)
@@ -48404,6 +49524,13 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if parts == ["compose-drafts"] and method == "GET":
                     self.send_json(supabase_list_compose_drafts(supabase_current_session(self.bearer_token())))
+                    return
+                if parts == ["workspace-drafts"] and method == "GET":
+                    from workspace_drafts import list_supabase as list_workspace_drafts
+                    self.send_json(list_workspace_drafts(sys.modules[__name__], query, supabase_current_session(self.bearer_token())))
+                    return
+                if len(parts) == 2 and parts[0] == "compose-drafts" and method == "GET":
+                    self.send_json(get_compose_draft(parts[1], supabase_current_session(self.bearer_token())))
                     return
                 if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
                     self.send_json(supabase_save_compose_draft(parts[1], self.read_json(), supabase_current_session(self.bearer_token())))
@@ -48715,7 +49842,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json({"options": rows, "grouped": grouped})
                     return
                 if len(parts) == 3 and parts[0] == "companies" and parts[2] == "seals":
-                    session = supabase_current_session(self.bearer_token())
+                    # The authenticated dispatcher above already resolved this
+                    # request's session. Do not repeat the remote SSO lookup.
                     if method == "GET":
                         if not self.require_table_access(session, "company_seals"):
                             return
@@ -48935,6 +50063,8 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["finance-directory"]:
                     self.send_json(local_finance_directory(conn, session))
                     return
+                if parts and parts[0] != "cron" and self.handle_handover_api(method, parts, query, session, conn):
+                    return
                 if is_operations_maintenance_endpoint(method, parts):
                     session = current_session(conn, self.bearer_token())
                     if not self.require_operations_maintenance_access(session):
@@ -49059,6 +50189,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if method == "GET" and parts == ["dashboard"]:
                     session = current_session(conn, self.bearer_token())
                     self.send_json(dashboard(conn, session))
+                    return
+                if method == "GET" and parts == ["reports", "timeliness"]:
+                    session = current_session(conn, self.bearer_token())
+                    self.send_json(official_timeliness_report(session, conn=conn))
                     return
                 if method == "GET" and parts == ["reports", "operational-summary"]:
                     session = current_session(conn, self.bearer_token())
@@ -49436,6 +50570,15 @@ class Handler(SimpleHTTPRequestHandler):
                     rows = list_rows(conn, "seal_usage_logs", query)
                     self.send_json(rows)
                     return
+                if len(parts) == 3 and parts[0] == "companies" and parts[2] == "seal-policy" and method in {"GET", "PATCH"}:
+                    session = current_session(conn, self.bearer_token())
+                    if not session:
+                        self.send_json({"error": "unauthorized"}, 401)
+                        return
+                    result = company_seal_policy_report(conn, parts[1], session) if method == "GET" else patch_company_seal_policy(conn, parts[1], self.read_json(), session)
+                    conn.commit()
+                    self.send_json(result)
+                    return
                 if method == "GET" and len(parts) == 3 and parts[0] == "company-seals" and parts[2] == "editor-preview":
                     session = current_session(conn, self.bearer_token())
                     self.send_editor_seal_preview(parts[1], session=session, conn=conn, supabase_mode=False)
@@ -49455,6 +50598,13 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if parts == ["compose-drafts"] and method == "GET":
                     self.send_json(list_compose_drafts(conn, current_session(conn, self.bearer_token())))
+                    return
+                if parts == ["workspace-drafts"] and method == "GET":
+                    from workspace_drafts import list_sqlite as list_workspace_drafts
+                    self.send_json(list_workspace_drafts(sys.modules[__name__], conn, query, current_session(conn, self.bearer_token())))
+                    return
+                if len(parts) == 2 and parts[0] == "compose-drafts" and method == "GET":
+                    self.send_json(get_compose_draft(parts[1], current_session(conn, self.bearer_token()), conn))
                     return
                 if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
                     result = save_compose_draft(conn, parts[1], self.read_json(), current_session(conn, self.bearer_token()))
@@ -49958,6 +51108,20 @@ class Handler(SimpleHTTPRequestHandler):
                 },
                 503,
             )
+        except OfficialSubmissionValidationError:
+            self.send_json({
+                "error": "official_submission_validation_failed",
+                "detail": "official_submission_validation_failed",
+                "retryable": False,
+                "submissionStatus": "not_submitted",
+            }, 500)
+        except OfficialSubmissionOutcomeUnknownError:
+            self.send_json({
+                "error": "official_document_submit_commit_state_unknown",
+                "detail": "official_document_submit_commit_state_unknown",
+                "retryable": False,
+                "submissionStatus": "unknown",
+            }, 503)
         except Exception as exc:
             internal_detail = redact_text(str(exc))[:500]
             # send_json emits a correlated, allowlisted event without upstream

@@ -113,7 +113,8 @@ class SimplifiedEditorControlsTest(unittest.TestCase):
             self.assertIn(guard, mutation)
         page_action = javascript_function(self.js, "runUploadedEditorPageAction")
         self.assertIn("commitUploadedEditorMutation", page_action)
-        self.assertIn("confirm", page_action)
+        self.assertIn("await requestWorkspaceConfirmation", page_action)
+        self.assertNotIn("window.confirm", page_action)
         self.assertIn("commitUploadedEditorMutation", javascript_function(self.js, "addUploadedSeamGroups"))
         submission = javascript_function(self.js, "uploadedEditorSubmissionPreviewIsCurrent")
         self.assertIn("uploadedEditorSubmissionFingerprint()", submission)
@@ -171,9 +172,13 @@ function normalizeEditorDegrees(value){return (value+360)%360;}
 function showToast(){}
 function finishUploadedEditorTextEdit(){return true;}
 function ensureUploadedEditorTextFont(){return true;}
+function cloneUploadedEditorValue(value){return structuredClone(value);}
+function uploadedSealApplicationScopeSnapshot(){return {documentId:uploadedSealEditorRuntime.documentId};}
+function uploadedSealApplicationScopeIsCurrent(scope){return scope.documentId===uploadedSealEditorRuntime.documentId;}
+async function requestWorkspaceConfirmation(){counts.confirms++;return window.confirm();}
 '''
         result = subprocess.run(
-            [node, "-e", harness + functions + "\n" + case],
+            [node, "-e", harness + functions + "\n(async()=>{\n" + case + "\n})().catch(error=>{console.error(error);process.exitCode=1;});"],
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -254,17 +259,17 @@ assert.equal(uploadedSealEditorState.revisionNo,7);
     def test_page_delete_confirmation_precedes_single_mutation_and_preserves_original(self) -> None:
         self.run_javascript(r'''
 const before=JSON.stringify(uploadedSealEditorState);
-window.confirm=()=>{counts.confirms++;return false;};
-runUploadedEditorPageAction('delete');
+window.confirm=()=>false;
+await runUploadedEditorPageAction('delete');
 assert.equal(counts.commits,0);assert.equal(JSON.stringify(uploadedSealEditorState),before);
-window.confirm=()=>{counts.confirms++;return true;};
-runUploadedEditorPageAction('delete');
+window.confirm=()=>true;
+await runUploadedEditorPageAction('delete');
 assert.equal(counts.commits,1);
 assert.deepEqual(uploadedSealEditorState.pages.map(p=>p.pageId),['p2']);
 assert.equal(uploadedSealEditorRuntime.currentPageId,'p2');
 assert.equal(uploadedSealEditorState.sourceFiles[0].sha256,'immutable-source');
 assert.equal(uploadedSealEditorState.elements.length,0);
-runUploadedEditorPageAction('delete');
+await runUploadedEditorPageAction('delete');
 assert.equal(counts.commits,1);assert.equal(counts.confirms,2);
 ''')
 

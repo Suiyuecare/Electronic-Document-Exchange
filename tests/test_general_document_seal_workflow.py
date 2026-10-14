@@ -31,7 +31,9 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
         self.session = self.fixture._session_for_user_id(self.fixture.applicant_ids[0])
         self.large = self.fixture.seal_id
         self.small = self._seal_id("establishment_seal", "small_seal")
-        self.bank = self._seal_id("bank_seal", "large_seal")
+        # Preserve the three-family/multiple-version fixture, but new frontline
+        # selection may not borrow bank seals as a company seal.
+        self.bank = self._seal_id("establishment_seal", "large_seal")
         self._upload(self.small, (0, 0, 190, 255))
         self._upload(self.bank, (180, 0, 180, 255))
 
@@ -101,8 +103,9 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
             for part in range(2):
                 page = state["pages"][group + part]
                 element = self._element(f"BANK-SEAM-{group}-{part}", self.bank, page, 0, 0,
-                    seamGroupId=f"GENERAL-SEAM-{group}", seamMode="pair", seamPartCount=2, seamPartIndex=part)
-                element["x"] = round(page["widthPt"] - element["width"], 4) if part == 0 else 0
+                    seamGroupId=f"GENERAL-SEAM-{group}", seamMode="grouped", seamPartCount=2, seamPartIndex=part,
+                    seamEdge="right", seamPolicyVersion="right-edge-10mm-v2")
+                element["x"] = round(page["widthPt"] - element["width"], 4)
                 element["y"] = round(page["heightPt"] - top - element["height"], 4)
                 element["zIndex"] = 20 + group * 2 + part
                 state["elements"].append(element)
@@ -146,6 +149,7 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
         stack.enter_context(mock.patch.object(backend, "supabase_filter_rows", side_effect=rows))
         stack.enter_context(mock.patch.object(backend, "supabase_get", side_effect=get))
         stack.enter_context(mock.patch.object(backend, "supabase_storage_download", side_effect=download))
+        stack.enter_context(mock.patch.object(backend, "supabase_seal_backing_exists", side_effect=backend.local_seal_backing_exists))
         return stack
 
     def _assert_rendered_placements(self, output, state):
@@ -159,7 +163,7 @@ class GeneralDocumentSealWorkflowTest(unittest.TestCase):
                 props = element["properties"]
                 x = element["x"] + element["width"] / 2
                 if "seamPartIndex" in props:
-                    x = element["x"] + element["width"] * (0.75 if props["seamPartIndex"] == 0 else 0.25)
+                    x = element["x"] + element["width"] * 0.75
                 y = state["pages"][page_index]["heightPt"] - element["y"] - element["height"] / 2
                 r, g, b = raster.getpixel((round(x), round(y)))
                 if props["sealId"] == self.large:

@@ -25,6 +25,7 @@ class EditorApplicationAutosaveTest(unittest.TestCase):
             'startUploadedSealApplicationComposition', 'finishUploadedSealApplicationComposition',
             'syncUploadedSealApplicationDraft', 'flushUploadedSealDraftBeforeSwitch',
             'invalidateUploadedEditorSubmissionPreview', 'uploadedEditorSubmissionFingerprint',
+            'invalidateUploadedEditorApplicationReview', 'uploadedSealApplicationMetadataReadOnly',
             'uploadedEditorSubmissionPreviewIsCurrent',
             'uploadedSealApplicationScopeSnapshot', 'uploadedSealApplicationScopeIsCurrent',
             'resetUploadedSealApplicationSaving', 'ensureUploadedEditorDraft', 'uploadedEditorDraftPrerequisiteIssue',
@@ -46,15 +47,17 @@ const frontendSessionScope=()=>sessionScope;
 const hasAuthenticatedBackendSession=()=>true;
 const window={clearTimeout:(id)=>timers.delete(id),setTimeout:(fn)=>{timers.set(++nextTimer,fn);return nextTimer;}};
 const navigator={onLine:true};
-const draft={title:'Original',description:'Reason',request_reason:'Reason',handler_name:'Test person',dispatch_unit:'Test unit'};
+const PDF_EDITOR_SCHEMA_VERSION=2;
+const draft={company_id:'COMPANY-ONE',title:'Original',description:'Reason',request_reason:'Reason',handler_name:'Test person',dispatch_unit:'Test unit'};
 const document={querySelector:()=>({value:draft.title})};
-const uploadedSealEditorRuntime={documentId:'OD-TEST',locked:false,saving:false,dirtyGeneration:0,savedGeneration:0,conflict:null};
-const uploadedSealEditorState={revisionNo:1,manifestSha256:'manifest-one'};
-const uploadedSealApplicationRuntime={documentId:'OD-TEST',savedKey:'',timer:0,promise:null,error:'',editable:true,retryCount:0,epoch:0,contentRevision:0,conflict:false};
+const uploadedSealEditorRuntime={documentId:'OD-TEST',revisionId:'REV-ONE',locked:false,saving:false,dirtyGeneration:0,savedGeneration:0,conflict:null};
+const uploadedSealEditorState={schemaVersion:2,revisionNo:1,manifestSha256:'manifest-one'};
+const uploadedSealApplicationRuntime={documentId:'OD-TEST',savedKey:'',timer:0,promise:null,error:'',editable:true,metadataEditable:true,companyEditable:true,companyId:'COMPANY-ONE',retryCount:0,epoch:0,contentRevision:0,conflict:false};
 const officialWorkflowItems=[{id:'OD-TEST'}];
 const editorDraftPayload=()=>({...draft,document_category:category});
 function renderUploadedSealApplicationSaveStatus(){statusRenders++;}
 function renderUploadedEditorSubmissionActions(){}
+function renderUploadedSealWorkbench(){}
 function finishUploadedEditorTextEdit(){return true;} // Inline lifecycle has its own behavioral tests.
 function finishUploadedEditorPointerAction(){}
 function handleUploadedEditorConflict(error){uploadedSealEditorRuntime.conflict={};}
@@ -65,7 +68,8 @@ let category='test';
 const approvalSelectionForSelect=()=>({documentCategory:category,approvalRouteCode:'A'});
 function rememberUploadedEditorSavedSealBindings(){}
 function setUploadedEditorSaveStatus(){}
-let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(options.body)});return {id:'OD-TEST',...JSON.parse(options.body),content_revision:uploadedSealApplicationRuntime.contentRevision+1}};
+function metadataReply(extra={}) { return {id:'OD-TEST',company_id:'COMPANY-ONE',application_metadata_editable:true,application_company_editable:true,editor_revision:{id:'REV-ONE',manifestSha256:'manifest-one',state:uploadedSealEditorState},editor_state:uploadedSealEditorState,...extra}; }
+let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(options.body)});return metadataReply({...JSON.parse(options.body),content_revision:uploadedSealApplicationRuntime.contentRevision+1})};
 '''
         script = harness + functions + "\nuploadedSealApplicationRuntime.savedKey=uploadedSealApplicationKey();\n(async()=>{\n" + case + "\n})().catch(error=>{console.error(error);process.exitCode=1});"
         result = subprocess.run([node, '-e', script], capture_output=True, text=True, timeout=20)
@@ -75,15 +79,57 @@ let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(option
         self.run_javascript('''
 draft.title='Edited';await syncUploadedSealApplicationDraft();
 assert.equal(calls.length,1);assert.equal(calls[0].path,'/official-documents/OD-TEST');
-assert.deepEqual(Object.keys(calls[0].body),['title','subject','description','request_reason','handler_name','dispatch_unit','applicant_department_id','applicant_department_name','document_category','expected_content_revision']);
+assert.deepEqual(Object.keys(calls[0].body),['company_id','title','subject','description','request_reason','handler_name','dispatch_unit','applicant_department_id','applicant_department_name','document_category','expected_content_revision','expected_editor_revision_id','expected_editor_manifest_sha256']);
+assert.equal(calls[0].body.company_id,'COMPANY-ONE');assert.equal(calls[0].body.expected_editor_revision_id,'REV-ONE');assert.equal(calls[0].body.expected_editor_manifest_sha256,'manifest-one');
 assert.equal(calls[0].body.expected_content_revision,0);assert.equal(uploadedSealApplicationRuntime.contentRevision,1);
 assert.equal(calls[0].body.title,'Edited');assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
 assert.equal(savePdfCalls,0);
 ''')
 
+    def test_transfer_and_finalization_queue_latest_metadata_without_freezing_fields(self):
+        self.run_javascript('''
+for(const phase of ['uploading','finalizingAsset','pendingEditorSave']) {
+  uploadedSealEditorRuntime[phase]=true;draft.title='Latest '+phase;
+  assert.equal(uploadedSealApplicationMetadataReadOnly(),false);
+  await syncUploadedSealApplicationDraft();assert.equal(calls.length,0);
+  assert.equal(uploadedSealApplicationRuntime.queued,true);
+  uploadedSealEditorRuntime[phase]=false;
+}
+await syncUploadedSealApplicationDraft();assert.equal(calls.length,1);
+assert.equal(calls[0].body.title,'Latest pendingEditorSave');
+assert.equal(uploadedSealApplicationHasUnsavedChanges(),false);
+''')
+
+    def test_server_readonly_flag_cannot_be_bypassed_by_background_autosave(self):
+        self.run_javascript('''
+uploadedSealApplicationRuntime.metadataEditable=false;draft.title='Forbidden edit';
+assert.equal(uploadedSealApplicationMetadataReadOnly(),true);
+await syncUploadedSealApplicationDraft();assert.equal(calls.length,0);
+assert.equal(uploadedSealApplicationHasUnsavedChanges(),true);
+''')
+
+    def test_malformed_metadata_response_keeps_input_and_saved_version(self):
+        self.run_javascript('''
+draft.title='Retained latest';const key=uploadedSealApplicationRuntime.savedKey;
+backendRequest=async()=>({content_revision:1,company_id:'COMPANY-ONE'});
+await assert.rejects(syncUploadedSealApplicationDraft(),/完整申請與 PDF 版本/);
+assert.equal(draft.title,'Retained latest');assert.equal(uploadedSealApplicationRuntime.savedKey,key);
+assert.equal(uploadedSealApplicationRuntime.contentRevision,0);
+''')
+
+    def test_metadata_change_destroys_prepared_pdf_and_returns_to_editor(self):
+        self.run_javascript('''
+let destroyed=0;uploadedSealEditorRuntime.reviewMode='prepared';
+uploadedSealEditorRuntime.preparedPdfDocument={destroy:()=>destroyed++};
+uploadedSealEditorRuntime.preparedFileId='PREPARED';uploadedSealEditorRuntime.preparedSha256='OLD';
+draft.title='New metadata';scheduleUploadedSealApplicationSave();
+assert.equal(destroyed,1);assert.equal(uploadedSealEditorRuntime.preparedPdfDocument,null);
+assert.equal(uploadedSealEditorRuntime.reviewMode,'edited');assert.equal(uploadedSealEditorRuntime.preparedFileId,'');
+''')
+
     def test_edit_during_inflight_save_is_flushed_as_a_second_patch(self):
         self.run_javascript('''
-let release;backendRequest=async(path,options)=>{calls.push(JSON.parse(options.body));if(calls.length===1)await new Promise(resolve=>release=resolve);return {id:'OD-TEST',content_revision:uploadedSealApplicationRuntime.contentRevision+1}};
+let release;backendRequest=async(path,options)=>{calls.push(JSON.parse(options.body));if(calls.length===1)await new Promise(resolve=>release=resolve);return metadataReply({content_revision:uploadedSealApplicationRuntime.contentRevision+1})};
 draft.title='First change';const saving=syncUploadedSealApplicationDraft();
 draft.title='Latest change';release();await saving;
 assert.equal(calls.length,2);assert.equal(calls[0].title,'First change');assert.equal(calls[1].title,'Latest change');
@@ -146,7 +192,7 @@ assert.equal(uploadedSealApplicationHasUnsavedChanges(),true);
 draft.title='Offline';navigator.onLine=false;
 await assert.rejects(flushUploadedSealDraftBeforeSwitch(),/離線/);assert.equal(calls.length,0);
 navigator.onLine=true;uploadedSealEditorRuntime.dirtyGeneration=2;uploadedSealEditorRuntime.conflict={};
-await assert.rejects(flushUploadedSealDraftBeforeSwitch(),/尚未保存完成/);assert.equal(savePdfCalls,1);
+await assert.rejects(flushUploadedSealDraftBeforeSwitch(),/PDF 變更尚未保存/);assert.equal(savePdfCalls,1);
 assert.equal(uploadedSealEditorRuntime.documentId,'OD-TEST');
 ''')
 
@@ -299,7 +345,7 @@ assert.equal(calls.length,1);assert.equal(calls[0].body.title,'Committed latest'
 let release;backendRequest=(path,options)=>{calls.push(JSON.parse(options.body));return new Promise(resolve=>release=resolve);};
 draft.title='Committed old';const saving=syncUploadedSealApplicationDraft();
 startUploadedSealApplicationComposition();draft.title='Partial new';scheduleUploadedSealApplicationSave({isComposing:true});
-release({content_revision:1});await assert.rejects(saving,/文字輸入/);
+release(metadataReply({content_revision:1}));await assert.rejects(saving,/文字輸入/);
 assert.equal(calls.length,1);assert.equal(timers.size,0);assert.equal(uploadedSealApplicationHasUnsavedChanges(),true);
 draft.title='Committed new';finishUploadedSealApplicationComposition();assert.equal(timers.size,1);
 ''')

@@ -240,7 +240,7 @@ function workflowDownloadHarness(fetch) {
     clearTimeout(id) { timers.delete(id); },
   };
   const c = {
-    AbortController, ...clock, window: { ...clock }, backendApiBase: '/api',
+    AbortController, performance, recordUiPerformance() {}, ...clock, window: { ...clock }, backendApiBase: '/api',
     authState: { token: 'synthetic-token' }, isHeaderSafeToken: () => true,
     frontendSessionScope: () => scope, showToast: message => notices.push(message),
     fetch: async (...args) => { calls.push(args); return fetch(...args); },
@@ -364,7 +364,7 @@ function uncertainUploadHarness() {
   };
   const uncertain = Object.assign(new Error('Mutation response lost; reload to confirm'), { outcomeUnknown: true, retryable: true, code: 'request_timeout' });
   const c = {
-    File, performance, console, PDF_EDITOR_MAX_FILE_BYTES: 50 * 1024 * 1024,
+    File, performance, recordUiPerformance() {}, console, PDF_EDITOR_MAX_FILE_BYTES: 50 * 1024 * 1024,
     document: { querySelector: node }, window: { location: { reload: () => { reloads += 1; } } },
     uploadedSealEditorRuntime: { documentId: '', reviewMode: 'edited', savedGeneration: 0, dirtyGeneration: 0 },
     uploadedSealEditorState: { pages: [] }, uploadedSealApplicationRuntime: {},
@@ -372,8 +372,9 @@ function uncertainUploadHarness() {
     uploadedEditorV2FeatureEnabled: () => true, editorDraftPayload: () => ({ synthetic: true }),
     uploadedSealApplicationScopeSnapshot: () => ({ session: 'fixture' }), uploadedSealApplicationScopeIsCurrent: () => true,
     backendRequest: async path => { calls.push(path); throw uncertain; }, hashBlob: async () => 'synthetic-sha',
-    confirmUploadedPdfConversion: async () => ({ report: { valid: true }, sha256: 'synthetic-sha' }),
+    confirmUploadedPdfConversion: async () => ({ report: { valid: false }, sha256: 'synthetic-sha' }),
     saveUploadedEditorState: async () => {}, discardUploadedPdfPreparation() {},
+    uploadedSealApplicationHasUnsavedChanges: () => false,
     assertEditorUploadCurrent() {},
     renderUploadedSealWorkbench() {}, setUploadedPdfUploadProgress() {}, setUploadedPdfA4Status() {}, setUploadedEditorSaveStatus() {},
     showToast() {}, pdfA4UiErrorMessage: error => error.message,

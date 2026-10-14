@@ -13,7 +13,7 @@ class OfficialSealPickerCurrentOnlyTest(unittest.TestCase):
     def test_missing_seal_files_are_hidden_not_disabled_choices(self):
         source = (ROOT / "app.js").read_text()
         functions = []
-        for name in ("renderOfficialSealOptions", "officialSealHasCurrentFile", "selectedOfficialSealOption", "updateOfficialSealCurrentHint"):
+        for name in ("companySealSelectable", "renderOfficialSealOptions", "officialSealHasCurrentFile", "selectedOfficialSealOption", "updateOfficialSealCurrentHint"):
             match = re.search(r"^(?:async )?function " + re.escape(name) + r"\([^\n]*\) \{\n.*?^\}", source, re.M | re.S)
             self.assertIsNotNone(match, name)
             functions.append(match.group())
@@ -21,7 +21,8 @@ class OfficialSealPickerCurrentOnlyTest(unittest.TestCase):
 const assert=require('node:assert/strict');
 const select={value:'',innerHTML:'',options:[],set innerHTML(html){this._html=html;this.options=[...html.matchAll(/<option value="([^"]*)"([^>]*)>(.*?)<\/option>/g)].map(m=>({value:m[1],disabled:m[2].includes('disabled'),textContent:m[3]}));this.value=this.options.find(o=>!o.disabled)?.value||''},get innerHTML(){return this._html}};
 const hint={};const document={querySelector:s=>s==='#officialSealSelect'?select:s==='#officialSealHint'?hint:null};
-const escapeDraftHtml=s=>String(s);let officialSealOptions=[{id:'available',seal_name:'可用大章',current_file_id:'file-1'},{id:'missing',seal_name:'尚未上傳的小章'}];
+const escapeDraftHtml=s=>String(s);const ready={id:'available',seal_name:'可用大章',owner_kind:'company',selectable:true,is_active:true,seal_category:'general_seal',seal_size_type:'large_seal',current_file:{id:'file-1',usable:true,is_current:true}};
+let officialSealOptions=[ready,{id:'missing',seal_name:'尚未上傳的小章'},{...ready,id:'unclassified',owner_kind:'unclassified'},{...ready,id:'bank',seal_category:'bank_seal'},{...ready,id:'unusable',current_file:{id:'broken',usable:false,is_current:true}},{...ready,id:'old',current_file:{id:'old',usable:true,is_current:false}}];
 const setOfficialFieldValidity=(...args)=>{hint.args=args};const lockOfficialStampPositionSizesToSelectedSeal=()=>{};
 """ + "\n".join(functions) + r"""
 renderOfficialSealOptions();

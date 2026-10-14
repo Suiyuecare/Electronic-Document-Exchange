@@ -209,6 +209,34 @@ class FiveAccountHttpAcceptanceTest(unittest.TestCase):
         )
         cls.server_thread.start()
         cls.tokens_by_email: dict[str, str] = {}
+        try:
+            cls._classify_synthetic_company_seal_owners()
+        except BaseException:
+            cls.tearDownClass()
+            raise
+
+    @classmethod
+    def _classify_synthetic_company_seal_owners(cls) -> None:
+        """Exercise the real custodian API; never infer kind in product code."""
+        for company_id in cls.seals:
+            with backend.connect() as conn:
+                row = conn.execute("SELECT finance_entity_id FROM companies WHERE id=?", (company_id,)).fetchone()
+            if not row or not row["finance_entity_id"]:
+                raise AssertionError("synthetic_seal_company_identity_missing")
+            entity_id = str(row["finance_entity_id"])
+            candidates = [email for email, snapshot in cls.snapshots_by_email.items()
+                          if snapshot["identity"]["role"] == "ceo"
+                          and str(snapshot["company"]["entityId"]) == entity_id
+                          and "ordinal" not in cls.identity_by_email[email]]
+            if len(candidates) != 1:
+                raise AssertionError("synthetic_seal_custodian_identity_ambiguous")
+            token = cls._portal_session(candidates[0])
+            result = cls._expect_json("PATCH", f"/api/companies/{company_id}/seal-policy", 200,
+                                     token=token, json_body={"owner_kind": "company"})
+            if result.get("owner_kind") != "company" or result.get("classification_required") is not False:
+                raise AssertionError("synthetic_seal_owner_classification_failed")
+            if len(result.get("required_slots") or []) != 5:
+                raise AssertionError("synthetic_seal_owner_slot_inventory_invalid")
 
     @classmethod
     def tearDownClass(cls) -> None:

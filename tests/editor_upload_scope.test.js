@@ -23,8 +23,10 @@ const scopedFunctions = [
   'hydrateUploadedEditorAuthorizedAssets', 'handleUploadedSealPdfChange',
   'uploadedEditorDraftPrerequisiteIssue', 'uploadedPdfUploadBlockingMessage',
   'handleUploadedEditorImportPdf', 'handleUploadedEditorImage', 'finishPendingEditorPdfFinalization',
+  'uploadedEditorImageGeometry', 'uploadedEditorPendingImageIsCurrent', 'syncUploadedEditorPendingImage', 'mapUploadedEditorLocalImage', 'discardUploadedEditorPendingImage',
   'runUploadedEditorPageAction',
   'transferPendingEditorPdf', 'cancelUploadedPdfTransfer',
+  'bindUploadedEditorLocalAsset', 'preparePendingEditorPdfIntent',
 ];
 const deferred = () => {
   let resolve, reject;
@@ -41,6 +43,7 @@ function harness() {
     uploading: false, locked: false, dirtyGeneration: 0, savedGeneration: 0,
     selectedIds: new Set(), pdfDocuments: new Map(), assetFiles: new Map(),
     pageProxies: new Map(), assetUrls: new Map(), imageUrls: new Map(),
+    undoStack: [], redoStack: [], clipboard: [],
   };
   const context = {
     console, File, Blob, TextEncoder, Uint8Array, Map, Set, AbortController, crypto: require('node:crypto').webcrypto,
@@ -76,6 +79,7 @@ function harness() {
     applyEditorRevisionFromResponse: value => { events.push(['revision', value]); context.uploadedSealEditorState.revisionNo = value.editor_revision?.revisionNo || 3; },
     markUploadedEditorDirty: () => events.push(['dirty']),
     saveUploadedEditorState: async () => events.push(['save']),
+    uploadedSealApplicationHasUnsavedChanges: () => false,
     syncLegacyUploadedEditorCollections: () => events.push(['sync']),
     pushUploadedEditorHistory: () => events.push(['history']),
     clearUploadedEditorUploadError: () => events.push(['clearError']),
@@ -92,11 +96,14 @@ function harness() {
     addSealAudit: () => events.push(['audit']),
     rememberUploadedEditorSavedSealBindings: () => {},
     discardUploadedPdfPreparation: () => {},
+    recordUiPerformance: (...args) => events.push(['performance', ...args]),
     openUploadedPdfPicker() {},
     currentUploadedEditorPage: () => context.uploadedSealEditorState.pages[0],
+    readUploadedEditorImageSize: async () => ({ width: 300, height: 200 }),
+    renderUploadedEditorImageSync() {}, renderUploadedEditorSubmissionActions() {}, scheduleUploadedSealApplicationSave() {},
     currentUploadedEditorPageIndex: () => context.uploadedSealEditorState.pages.findIndex(page => page.pageId === runtime.currentPageId),
-    commitUploadedEditorMutation: mutate => mutate(context.uploadedSealEditorState),
-    editorDefaultElement: () => ({ id: 'IMAGE', kind: 'image' }),
+    commitUploadedEditorMutation: mutate => { mutate(context.uploadedSealEditorState); return true; },
+    editorDefaultElement: (kind, page, point, properties) => ({ id: 'IMAGE', kind, pageId: page.pageId, properties }),
   };
   vm.createContext(context);
   vm.runInContext(scopedFunctions.map(implementation).join('\n'), context);
@@ -347,8 +354,8 @@ test('image finalize after logout cannot apply a revision or release a newer upl
   h.context.requestEditorUpload = async () => h.intent();
   h.context.finalizeEditorUpload = () => (reached = true, gate.promise);
   const pending = h.context.handleUploadedEditorImage(new File(['png'], 'test.png', { type: 'image/png' }));
-  await settle(); assert.equal(reached, true); h.switchScope();
-  gate.resolve({ asset: { id: 'OLD-IMAGE' } }); await pending;
+  await settle(); assert.equal(reached, true); const syncing = h.runtime.pendingImage.promise; h.switchScope();
+  gate.resolve({ asset: { id: 'OLD-IMAGE' } }); await pending; await syncing;
   noSensitiveRuntime(h); assert.equal(h.runtime.uploading, true); assert.equal(h.events.length, 0);
 });
 

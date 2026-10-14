@@ -26,23 +26,24 @@ const funcs=JSON.parse(process.argv[1]);
 function setup(){
  const nodes={};
  for(const id of ['#inboundLoadNotice','#inboundReloadBtn','#inboundCount','#inboundRows'])nodes[id]={hidden:true,disabled:false,textContent:'',innerHTML:'',classList:{toggle(){}},addEventListener(){}};
- const c={console,Promise,Error,Array,Number,Boolean,hasAuthenticatedBackendSession:()=>c.authenticated,frontendSessionScope:()=>c.scope,
+ const c={console,Promise,Error,Array,Number,Boolean,URLSearchParams,inboundSearchTerm:'',inboundFilter:'all',hasAuthenticatedBackendSession:()=>c.authenticated,frontendSessionScope:()=>c.scope,
  document:{querySelector:s=>nodes[s]||null,querySelectorAll:()=>[]},
- inboundDocs:[],inboundDocumentLoadState:{scope:'',status:'idle',request:null,generation:0},selectedInboundId:'',routeBackendDataLoaded:new Set(['inbound']),
+ inboundDocs:[],inboundDocumentLoadState:{scope:'',status:'idle',request:null,generation:0,cursor:'',pageHistory:[]},selectedInboundId:'',routeBackendDataLoaded:new Set(['inbound']),
  scope:'employee:company-a',authenticated:true,calls:[],notices:[],nodes,
  escapeHtml:s=>String(s||''),safeHtmlClassToken:s=>s,badgeClass:()=>'',inboundSourceLabel:()=>'',
- renderInboundDetail(){},openInboundModal(){},renderInternalDispatchDocumentOptions(){},refreshDashboardWorkEntryPoints(){},
+ renderInboundDetail(){},renderInboundPagination(){},openInboundModal(){},renderInternalDispatchDocumentOptions(){},refreshDashboardWorkEntryPoints(){},
  showToast:s=>c.notices.push(s),filteredInboundDocs:()=>c.inboundDocs,
- backendRequest:p=>{c.calls.push(p);return Promise.resolve([])},
+ backendRequest:p=>{c.calls.push(p);return Promise.resolve(page([]))},
  applyPersistentInboundDocuments:rows=>{c.inboundDocs.splice(0,c.inboundDocs.length,...rows);c.renderInboundRows()}};
  vm.createContext(c);vm.runInContext(funcs,c);return c;
 }
 function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject}}
+function page(items){return {items,hasMore:false,nextCursor:null,count:items.length,scopeComplete:true}}
 (async()=>{
  let passed=0,c=setup();let d=deferred();c.backendRequest=p=>{c.calls.push(p);return d.promise};
  let first=c.loadInboundDocuments(),second=c.loadInboundDocuments();
- assert.equal(c.calls.length,1);assert.equal(c.calls[0],'/inbound-documents');assert.equal(c.nodes['#inboundReloadBtn'].disabled,true);
- d.resolve([{id:'IN-1',subject:'synthetic'}]);await Promise.all([first,second]);
+ assert.equal(c.calls.length,1);assert.equal(c.calls[0],'/inbound-documents?paginated=1&page_size=50');assert.equal(c.nodes['#inboundReloadBtn'].disabled,true);
+ d.resolve(page([{id:'IN-1',subject:'synthetic'}]));await Promise.all([first,second]);
  assert.equal(c.inboundDocs.length,1);assert.equal(c.inboundDocumentLoadState.status,'loaded');assert.equal(c.nodes['#inboundReloadBtn'].disabled,false);passed++;
 
  c.backendRequest=()=>Promise.reject(new Error('offline'));
@@ -53,14 +54,14 @@ function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve
  c=setup();c.backendRequest=()=>Promise.reject(new Error('offline'));await assert.rejects(c.loadInboundDocuments());
  assert.equal(c.nodes['#inboundCount'].textContent,'尚未載入');assert.match(c.nodes['#inboundRows'].innerHTML,/載入失敗/);
  assert.doesNotMatch(c.nodes['#inboundRows'].innerHTML,/目前沒有/);assert.match(c.nodes['#inboundLoadNotice'].textContent,/不代表沒有/);passed++;
- c.backendRequest=()=>Promise.resolve([{id:'IN-RETRY'}]);await c.loadInboundDocuments();assert.equal(c.inboundDocs[0].id,'IN-RETRY');assert.equal(c.nodes['#inboundLoadNotice'].hidden,true);passed++;
+ c.backendRequest=()=>Promise.resolve(page([{id:'IN-RETRY'}]));await c.loadInboundDocuments();assert.equal(c.inboundDocs[0].id,'IN-RETRY');assert.equal(c.nodes['#inboundLoadNotice'].hidden,true);passed++;
 
  c=setup();d=deferred();c.backendRequest=()=>d.promise;first=c.loadInboundDocuments();c.scope='employee:company-b';
- let newer=deferred();c.backendRequest=()=>newer.promise;second=c.loadInboundDocuments();newer.resolve([{id:'IN-B'}]);await second;
- d.resolve([{id:'IN-A'}]);await first;assert.equal(c.inboundDocs.length,1);assert.equal(c.inboundDocs[0].id,'IN-B');passed++;
+ let newer=deferred();c.backendRequest=()=>newer.promise;second=c.loadInboundDocuments();newer.resolve(page([{id:'IN-B'}]));await second;
+ d.resolve(page([{id:'IN-A'}]));await first;assert.equal(c.inboundDocs.length,1);assert.equal(c.inboundDocs[0].id,'IN-B');passed++;
 
  c=setup();d=deferred();c.backendRequest=()=>d.promise;first=c.loadInboundDocuments();c.authenticated=false;
- d.resolve([{id:'IN-OLD'}]);await first;assert.equal(c.inboundDocs.length,0);passed++;
+ d.resolve(page([{id:'IN-OLD'}]));await first;assert.equal(c.inboundDocs.length,0);passed++;
 
  c=setup();c.backendRequest=()=>Promise.resolve({rows:[]});await assert.rejects(c.loadInboundDocuments(),/inbound_list_response_invalid/);
  assert.equal(c.inboundDocumentLoadState.status,'error');passed++;

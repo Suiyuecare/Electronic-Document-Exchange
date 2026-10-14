@@ -24,10 +24,11 @@ class CiWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("curl --fail http://127.0.0.1:5174/api/cron/run-due", self.workflow)
 
     def test_actions_use_node24_compatible_runtimes(self) -> None:
-        self.assertIn("actions/checkout@v5", self.workflow)
-        self.assertIn("actions/setup-python@v6", self.workflow)
-        self.assertIn("actions/setup-node@v5", self.workflow)
-        self.assertIn("actions/upload-artifact@v6", self.workflow)
+        # Reviewed official major versions, pinned to immutable commit SHAs.
+        self.assertIn("actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09", self.workflow)
+        self.assertIn("actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1", self.workflow)
+        self.assertIn("actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444", self.workflow)
+        self.assertIn("actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f", self.workflow)
         self.assertIn("package-manager-cache: false", self.workflow)
         for retired_action in (
             "actions/checkout@v4",
@@ -36,6 +37,13 @@ class CiWorkflowContractTest(unittest.TestCase):
             "actions/upload-artifact@v4",
         ):
             self.assertNotIn(retired_action, self.workflow)
+
+    def test_validation_is_read_only_and_new_database_gates_actually_execute(self) -> None:
+        self.assertIn("permissions:\n  contents: read", self.workflow)
+        self.assertNotIn("contents: write", self.workflow)
+        self.assertIn("tests.test_workflow_readiness_postgres", self.workflow)
+        self.assertIn("tests.test_official_handover_postgres", self.workflow)
+        self.assertIn("node tests/handover_feature_gate.js", self.workflow)
 
 
 if __name__ == "__main__":

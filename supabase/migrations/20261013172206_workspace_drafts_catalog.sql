@@ -1,0 +1,157 @@
+-- Bounded draft metadata and exact deduplicated counts; snapshots fetched only on open.
+create index if not exists idx_workspace_drafts_owner on public.official_documents(applicant_id,current_status,updated_at desc,id desc);
+create or replace function public.edoc_workspace_drafts(p_request jsonb)
+returns jsonb language plpgsql stable security invoker set search_path='' as $function$
+declare
+  v_actor text := nullif(p_request->>'actor_id','');
+  v_company text := nullif(p_request->>'company_id','');
+  v_size integer := coalesce((p_request->>'page_size')::integer,25);
+  v_search text := coalesce(p_request->>'search','');
+  v_result jsonb;
+begin
+  if v_actor is null or v_company is null or v_size not between 1 and 100 or length(v_search)>200 then
+    raise exception using errcode='22023',message='workspace_drafts_filter_invalid';
+  end if;
+  if not exists(select 1 from public.users where id=v_actor and company_id=v_company and status='啟用') then
+    raise exception using errcode='42501',message='workspace_drafts_actor_inactive';
+  end if;
+  with cloud_linked as (
+    select c.*,d.id as linked_id,d.current_status as linked_status,d.source_type as linked_source,
+      row_number() over(partition by coalesce(d.id,'cloud:'||c.id) order by c.updated_at desc,c.id desc) as position
+    from public.official_document_compose_drafts c
+    left join public.official_documents d on d.applicant_id=c.applicant_id
+      and d.id=coalesce(nullif(c.snapshot_json->>'officialDocumentId',''),nullif(c.snapshot_json->>'draftRequestId',''))
+    where c.applicant_id=v_actor and c.company_id=v_company and not c.archived
+  ), cloud as (
+    select 'cloud:'||id as key,id,'cloud'::text as kind,coalesce(linked_source,'blank_editor') as source_type,
+      coalesce(linked_status,'draft') as status,coalesce(linked_id,'') as official_id,
+      coalesce(nullif(snapshot_json->'values'->>'#subject',''),nullif(snapshot_json->'values'->>'#documentPurpose',''),'未命名公文') as title,updated_at
+    from cloud_linked where position=1 and (linked_id is null or linked_status in ('draft','rejected'))
+  ), drafts as (
+    select * from cloud
+    union all
+    select 'official:'||d.id,d.id,'official',d.source_type,d.current_status,d.id,coalesce(nullif(d.subject,''),nullif(d.title,''),'未命名文件'),d.updated_at
+    from public.official_documents d where d.applicant_id=v_actor and d.current_status in ('draft','rejected')
+      and not exists(select 1 from cloud where cloud.official_id=d.id)
+  ), filtered as materialized (
+    select * from drafts where v_search='' or strpos(lower(title),lower(v_search))>0 or strpos(lower(id),lower(v_search))>0
+  ), page as (
+    select * from filtered where not coalesce((p_request->>'summary')::boolean,false)
+      and (coalesce(p_request->>'after_at','')='' or (updated_at,key)<(p_request->>'after_at',p_request->>'after_key'))
+    order by updated_at desc,key desc limit v_size+1
+  ) select pg_catalog.jsonb_build_object('total',(select count(*) from filtered),
+    'items',coalesce((select pg_catalog.jsonb_agg(pg_catalog.to_jsonb(page) order by updated_at desc,key desc) from page),'[]'::jsonb)) into v_result;
+  return v_result;
+end;
+$function$;
+revoke all on function public.edoc_workspace_drafts(jsonb) from public,anon,authenticated;
+grant execute on function public.edoc_workspace_drafts(jsonb) to service_role;
+
+-- Retain all actual approval decisions for the acted tab, including delegation.
+create index if not exists idx_official_list_acted_logs on public.official_document_approval_logs(actor_id,document_id)
+  where action in ('approve','reject','add_sign','return_previous','decline');
+create index if not exists idx_official_list_acted_steps on public.official_document_approval_steps(decision_actor_user_id,document_id)
+  where status in ('approved','rejected') and step_key<>'applicant_confirm';
+create or replace function public.edoc_list_official_document_candidates(p_request jsonb)
+returns jsonb language plpgsql stable security invoker set search_path='' as $function$
+declare
+  v_actor_id text := nullif(pg_catalog.btrim(p_request->>'actor_id'),'');
+  v_actor_company text;
+  v_limit integer := coalesce((p_request->>'limit')::integer,100);
+  v_scope text := coalesce(p_request->>'scope','');
+  v_view text := coalesce(p_request->>'view','');
+  v_company_wide boolean := coalesce((p_request->>'company_wide')::boolean,false);
+  v_after_created text := nullif(p_request->>'after_created_at','');
+  v_after_id text := nullif(p_request->>'after_id','');
+  v_result jsonb;
+begin
+  if v_actor_id is null or v_limit not between 1 and 100
+     or (v_after_created is null) <> (v_after_id is null) then
+    raise exception using errcode='22023',message='official_list_filter_invalid';
+  end if;
+  select u.company_id into v_actor_company from public.users u where u.id=v_actor_id and u.status='啟用';
+  if not found then raise exception using errcode='42501',message='official_list_actor_inactive'; end if;
+
+  with candidates as materialized (
+    select d.* from public.official_documents d
+    where (nullif(p_request->>'status','') is null or d.current_status=p_request->>'status')
+      and (nullif(p_request->>'company_id','') is null or d.company_id=p_request->>'company_id')
+      and (nullif(p_request->>'applicant_id','') is null or d.applicant_id=p_request->>'applicant_id')
+      and (v_scope<>'mine' or d.applicant_id=v_actor_id)
+      -- Necessary candidates only; Python independently checks authorization
+      -- and current delegation/dispatch/retry qualification after hydration.
+      and (v_view<>'mine' or d.applicant_id=v_actor_id)
+      and (v_view<>'rejected' or d.current_status in ('rejected','declined'))
+      and (v_view<>'acted' or
+        exists(select 1 from public.official_document_approval_logs l where l.document_id=d.id
+          and l.actor_id=v_actor_id and l.action in ('approve','reject','add_sign','return_previous','decline'))
+        or exists(select 1 from public.official_document_approval_steps s where s.document_id=d.id
+          and s.decision_actor_user_id=v_actor_id and s.status in ('approved','rejected')
+          and s.step_key<>'applicant_confirm'))
+      and (v_view<>'pending' or d.current_status in ('draft','rejected','approved','stamping','stamping_failed')
+        or (d.current_step='applicant_confirm' and d.current_status in ('stamped','dispatched','sent_by_applicant'))
+        or exists(select 1 from public.official_document_approval_steps s where s.document_id=d.id
+          and s.step_key=d.current_step and s.status='pending' and s.step_key<>'applicant_confirm')
+        or exists(select 1 from public.official_document_dispatch_records r where r.document_id=d.id
+          and r.dispatch_status in ('pending','failed') and coalesce(r.completed_at,'')=''))
+      and (v_after_created is null or (d.created_at,d.id)<(v_after_created,v_after_id))
+      and (
+        d.applicant_id=v_actor_id
+        or (v_company_wide and nullif(v_actor_company,'') is not null and d.company_id=v_actor_company)
+        or exists(select 1 from public.official_document_approval_steps s where s.document_id=d.id
+          and (s.approver_user_id=v_actor_id or s.decision_actor_user_id=v_actor_id))
+        or exists(select 1 from public.approval_step_actor_snapshots a where a.source_id=d.id
+          and a.source_type in ('official_document','official_documents','official_document_application')
+          and a.approver_user_id=v_actor_id)
+        or exists(
+          select 1 from public.official_workflow_delegations x
+          join public.official_document_approval_steps s on s.document_id=d.id
+            and s.approver_user_id=x.principal_user_id and s.step_key=d.current_step and s.status='pending'
+            and s.step_key<>'applicant_confirm'
+          where x.company_id=d.company_id and x.delegate_user_id=v_actor_id and x.status='active'
+            and x.starts_at::timestamp<=localtimestamp and x.ends_at::timestamp>localtimestamp
+            and s.workflow_generation=(select max(g.workflow_generation) from public.official_document_approval_steps g where g.document_id=d.id)
+        )
+      )
+    order by d.created_at desc,d.id desc limit v_limit
+  ), bundles as (
+    select d.created_at,d.id,pg_catalog.jsonb_build_object(
+      'document',pg_catalog.to_jsonb(d),
+      'steps',coalesce((select pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s) order by s.workflow_generation,s.step_order,s.id)
+        from public.official_document_approval_steps s where s.document_id=d.id),'[]'::jsonb),
+      'snapshots',coalesce((select pg_catalog.jsonb_agg(pg_catalog.to_jsonb(a) order by a.created_at,a.id)
+        from public.approval_step_actor_snapshots a where a.source_id=d.id
+          and a.source_type in ('official_document','official_documents','official_document_application')),'[]'::jsonb),
+      'dispatch_record',pg_catalog.to_jsonb(dispatch),
+      'stamp_request',pg_catalog.to_jsonb(stamp),
+      'decision_logs',coalesce((select pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) order by l.created_at,l.id)
+        from public.official_document_approval_logs l where l.document_id=d.id
+          and l.action in ('approve','add_sign','reject','confirm','return_previous','decline')),'[]'::jsonb),
+      'delegations',coalesce((select pg_catalog.jsonb_agg(pg_catalog.to_jsonb(x) order by x.starts_at,x.id)
+        from public.official_workflow_delegations x where x.company_id=d.company_id
+          and x.delegate_user_id=v_actor_id and x.status='active'),'[]'::jsonb),
+      -- Only current Finance qualification fields are needed, never passwords,
+      -- session material, email, or a complete users-table record.
+      'delegation_users',coalesce((select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+          'id',u.id,'name',u.name,'status',u.status,'company_id',u.company_id,'account_source',u.account_source,
+          'auth_user_id',u.auth_user_id,'finance_employee_id',u.finance_employee_id,'title',u.title,
+          'logging_role_key',u.logging_role_key,'role',u.role,'job_level',u.job_level) order by u.id)
+        from public.users u where u.id=v_actor_id or exists(
+          select 1 from public.official_workflow_delegations x where x.company_id=d.company_id
+            and x.delegate_user_id=v_actor_id and x.status='active' and x.principal_user_id=u.id)),'[]'::jsonb),
+      'dispatch_owner_name',(select u.name from public.users u where u.id=dispatch.dispatch_owner_user_id),
+      'dispatch_proof',(select pg_catalog.to_jsonb(f) from public.official_document_files f
+        where f.document_id=d.id and f.id=dispatch.proof_file_id)
+    ) as item
+    from candidates d
+    left join lateral (select r.* from public.official_document_dispatch_records r where r.document_id=d.id
+      order by r.created_at desc,r.id desc limit 1) dispatch on true
+    left join lateral (select r.* from public.official_document_stamp_requests r where r.document_id=d.id
+      order by r.created_at desc,r.id desc limit 1) stamp on true
+  )
+  select pg_catalog.jsonb_build_object('items',coalesce(pg_catalog.jsonb_agg(item order by created_at desc,id desc),'[]'::jsonb))
+    into v_result from bundles;
+  return v_result;
+end $function$;
+revoke all on function public.edoc_list_official_document_candidates(jsonb) from public,anon,authenticated;
+grant execute on function public.edoc_list_official_document_candidates(jsonb) to service_role;

@@ -1,0 +1,351 @@
+-- Private, same-document draft context updates and final dual-version witnesses.
+-- No source file, immutable asset, number allocation or actor identity is moved.
+create or replace function edoc_private.assert_editor_application_scope(
+  p_document_id text, p_actor_id text, p_company_id text,
+  p_department_id text default '', p_department_name text default ''
+) returns void language plpgsql security invoker set search_path='' as $$
+declare
+  v_document public.official_documents%rowtype;
+  v_actor public.users%rowtype;
+  v_company public.companies%rowtype;
+  v_unit public.finance_organization_units%rowtype;
+  v_scope boolean;
+begin
+  select * into v_document from public.official_documents where id=p_document_id;
+  select * into v_actor from public.users where id=p_actor_id and status='啟用';
+  if v_actor.id is null or v_document.applicant_id is distinct from p_actor_id then
+    raise exception using errcode='42501',message='official_editor_write_forbidden';
+  end if;
+  if v_document.source_type is distinct from 'uploaded_pdf'
+     or coalesce(v_document.metadata_json::jsonb->>'pdf_editor_v2','false') <> 'true'
+     or v_document.current_status not in ('draft','rejected') then
+    raise exception using errcode='PT409',message='editor_locked_after_submit';
+  end if;
+  select * into v_company from public.companies where id=p_company_id;
+  if v_company.id is null or coalesce(v_company.status,'') not in ('active','啟用') or (
+    nullif(btrim(v_actor.finance_tenant_id::text),'') is not null and (
+      v_company.finance_tenant_id is distinct from v_actor.finance_tenant_id
+      or v_company.source_system is distinct from 'finance'
+      or coalesce(v_company.status,'') not in ('active','啟用')
+      or nullif(btrim(v_company.finance_entity_id),'') is null
+    )
+  ) or (nullif(btrim(v_actor.finance_tenant_id::text),'') is null and v_company.id is distinct from v_actor.company_id) then
+    raise exception using errcode='42501',message='official_editor_company_forbidden';
+  end if;
+  if p_department_id='' and p_department_name='' then return; end if;
+  if p_department_id='' or p_department_name='' then
+    raise exception using errcode='42501',message='finance_unit_projection_unavailable';
+  end if;
+  if nullif(btrim(v_actor.finance_tenant_id::text),'') is null then
+    if not exists(select 1 from public.department_registry where id=p_department_id
+      and name=p_department_name and company_name=v_company.name and status in ('active','啟用'))
+      and (coalesce(v_actor.unit,'')<>p_department_name or p_department_id<>p_department_name) then
+      raise exception using errcode='42501',message='finance_unit_projection_unavailable';
+    end if;
+    return;
+  end if;
+  select * into v_unit from public.finance_organization_units
+    where finance_tenant_id=v_actor.finance_tenant_id and upper(code)=upper(p_department_id)
+      and name=p_department_name and status in ('active','啟用')
+      and unit_type in ('division','department','section','team');
+  if not found or (select count(*) from public.finance_organization_units
+    where finance_tenant_id=v_actor.finance_tenant_id and upper(code)=upper(p_department_id)
+      and status in ('active','啟用')) <> 1 then
+    raise exception using errcode='42501',message='finance_unit_projection_unavailable';
+  end if;
+  with recursive scope_chain as (
+    select unit.*,0 as depth,array[unit.finance_unit_id::text] as visited
+      from public.finance_organization_units unit where unit.id=v_unit.id
+    union all
+    select parent.*,child.depth+1,child.visited||parent.finance_unit_id::text
+      from scope_chain child join public.finance_organization_units parent
+        on parent.finance_tenant_id=child.finance_tenant_id and parent.finance_unit_id=child.parent_finance_unit_id
+      where child.entity_scope_mode='inherit' and child.depth<31 and parent.status in ('active','啟用')
+        and not parent.finance_unit_id::text=any(child.visited)
+  ) select case entity_scope_mode when 'all' then true
+      when 'explicit' then coalesce(entity_codes::jsonb,'[]'::jsonb) ? v_company.finance_entity_id else false end
+    into v_scope from scope_chain where entity_scope_mode in ('all','explicit') order by depth limit 1;
+  if v_scope is distinct from true then
+    raise exception using errcode='42501',message='finance_unit_company_mismatch';
+  end if;
+end $$;
+
+create or replace function public.edoc_update_editor_application(p_request jsonb)
+returns jsonb language plpgsql security invoker set search_path='' set lock_timeout='5s' as $$
+declare
+  v_document public.official_documents%rowtype;
+  v_latest public.official_document_editor_revisions%rowtype;
+  v_revision public.official_document_editor_revisions%rowtype;
+  v_patch jsonb := p_request->'patch';
+  v_meta jsonb;
+  v_state jsonb;
+  v_retained jsonb;
+  v_removed jsonb;
+  v_company text := p_request->>'company_id';
+  v_changed boolean;
+  v_time text := p_request->>'timestamp';
+begin
+  if jsonb_typeof(p_request) is distinct from 'object' or jsonb_typeof(v_patch) is distinct from 'object'
+     or jsonb_typeof(p_request->'expected_content_revision') is distinct from 'number'
+     or coalesce(p_request->>'expected_content_revision','') !~ '^(0|[1-9][0-9]*)$'
+     or jsonb_typeof(p_request->'updated_fields') is distinct from 'array'
+     or jsonb_typeof(p_request->'removed_seal_element_ids') is distinct from 'array'
+     or nullif(p_request->>'log_id','') is null or nullif(v_time,'') is null
+     or (v_patch-array['company_id','title','subject','description','request_reason','handler_name',
+       'applicant_department_id','applicant_department_name','dispatch_unit','workflow_template_key','metadata_json']) <> '{}'::jsonb
+     or v_patch->>'company_id' is distinct from v_company then
+    raise exception using errcode='22023',message='editor_application_fields_invalid';
+  end if;
+  select * into v_document from public.official_documents where id=p_request->>'document_id' for update;
+  if not found then raise exception using errcode='P0002',message='official_document_not_found'; end if;
+  perform edoc_private.assert_editor_application_scope(v_document.id,p_request->>'actor_id',v_company,
+    v_patch->>'applicant_department_id',v_patch->>'applicant_department_name');
+  if v_document.content_revision is distinct from (p_request->>'expected_content_revision')::integer then
+    raise exception using errcode='PT409',message='compose_content_revision_conflict';
+  end if;
+  select * into v_latest from public.official_document_editor_revisions
+    where document_id=v_document.id order by revision_no desc limit 1;
+  if not found or v_latest.id is distinct from p_request->>'expected_editor_revision_id'
+     or v_latest.manifest_sha256 is distinct from p_request->>'expected_editor_manifest_sha256' then
+    raise exception using errcode='PT409',message='editor_revision_conflict';
+  end if;
+  if v_company is distinct from v_document.company_id and (
+    v_document.current_status<>'draft' or nullif(btrim(v_document.dispatch_no),'') is not null
+    or nullif(v_document.stamped_file_id,'') is not null
+    or exists(select 1 from public.official_document_approval_steps where document_id=v_document.id)
+    or exists(select 1 from public.approval_step_actor_snapshots where source_type in ('official_document','official_documents','official_document_application') and source_id=v_document.id)
+    or exists(select 1 from public.official_document_approval_logs where document_id=v_document.id and action='submit')
+    or exists(select 1 from public.official_document_stamp_requests where document_id=v_document.id
+      and (status in ('stamping','stamped','completed') or nullif(claim_token,'') is not null or nullif(stamped_file_id,'') is not null))
+  ) then raise exception using errcode='42501',message='official_document_company_forbidden'; end if;
+  v_meta := (v_patch->>'metadata_json')::jsonb;
+  if jsonb_typeof(v_meta) is distinct from 'object' or octet_length(v_meta::text)>65536
+     or coalesce(v_meta->>'pdf_editor_v2','false')<>'true'
+     or v_meta#>>'{future_rule_inputs,company_id}' is distinct from v_company
+     or v_meta#>>'{future_rule_inputs,department}' is distinct from v_patch->>'applicant_department_name'
+     or v_meta#>>'{official_seal,workflow_template_key}' is distinct from v_patch->>'workflow_template_key'
+     or coalesce(v_meta#>>'{official_seal,approval_route_code}','') not in ('A','B','C','D') then
+    raise exception using errcode='22023',message='official_document_metadata_invalid';
+  end if;
+  -- Never let a caller-labelled no-op hide an actual application change.
+  v_changed := v_company is distinct from v_document.company_id
+    or coalesce(v_patch->>'title',v_document.title) is distinct from v_document.title
+    or coalesce(v_patch->>'subject',v_document.subject) is distinct from v_document.subject
+    or coalesce(v_patch->>'description',v_document.description) is distinct from v_document.description
+    or coalesce(v_patch->>'request_reason',v_document.request_reason) is distinct from v_document.request_reason
+    or coalesce(v_patch->>'handler_name',v_document.handler_name) is distinct from v_document.handler_name
+    or v_patch->>'applicant_department_id' is distinct from v_document.applicant_department_id
+    or v_patch->>'applicant_department_name' is distinct from v_document.applicant_department_name
+    or v_patch->>'workflow_template_key' is distinct from v_document.workflow_template_key
+    or v_meta#>>'{official_seal,document_category}' is distinct from v_document.metadata_json::jsonb#>>'{official_seal,document_category}';
+  v_state := v_latest.editor_state_json::jsonb;
+  if v_company is distinct from v_document.company_id then
+    with invalid as (
+      select item from jsonb_array_elements(v_state->'elements') item
+      where item->>'kind'='seal' and not exists(select 1 from public.company_seals
+        where id=coalesce(item#>>'{properties,sealId}',item#>>'{properties,seal_id}',item->>'sealId') and company_id=v_company)
+    ), removed as (
+      select item from jsonb_array_elements(v_state->'elements') item where item->>'id' in (select item->>'id' from invalid)
+       or nullif(item#>>'{properties,seamGroupId}','') in (select item#>>'{properties,seamGroupId}' from invalid)
+    ) select coalesce(jsonb_agg(item->>'id' order by item->>'id'),'[]'::jsonb) into v_removed from removed;
+  else v_removed:='[]'::jsonb; end if;
+  if v_removed is distinct from p_request->'removed_seal_element_ids' then
+    raise exception using errcode='22023',message='editor_application_seal_prune_invalid';
+  end if;
+  if v_removed<>'[]'::jsonb then
+    select coalesce(jsonb_agg(item order by ordinal),'[]'::jsonb) into v_retained
+      from jsonb_array_elements(v_state->'elements') with ordinality as items(item,ordinal)
+      where not v_removed ? (item->>'id');
+    v_revision := jsonb_populate_record(null::public.official_document_editor_revisions,p_request->'revision');
+    if v_revision.id is null or v_revision.document_id is distinct from v_document.id
+       or v_revision.created_by is distinct from p_request->>'actor_id'
+       or v_revision.parent_revision_id is distinct from v_latest.id
+       or v_revision.revision_no is distinct from v_latest.revision_no+1
+       or v_revision.manifest_sha256 !~ '^[a-fA-F0-9]{64}$'
+       or v_revision.editor_state_json::jsonb->'elements' is distinct from v_retained
+       or (v_revision.editor_state_json::jsonb-'elements'-'revisionNo'-'manifestSha256') is distinct from (v_state-'elements'-'revisionNo'-'manifestSha256')
+       or v_revision.editor_state_json::jsonb->>'manifestSha256' is distinct from v_revision.manifest_sha256
+       or v_revision.editor_state_json::jsonb->>'revisionNo' is distinct from v_revision.revision_no::text then
+      raise exception using errcode='22023',message='editor_application_seal_prune_invalid';
+    end if;
+  elsif p_request->'revision' is distinct from 'null'::jsonb then
+    raise exception using errcode='22023',message='editor_application_seal_prune_invalid';
+  end if;
+  if v_changed then
+    update public.official_documents set company_id=v_company,
+      title=coalesce(v_patch->>'title',title),subject=coalesce(v_patch->>'subject',subject),
+      description=coalesce(v_patch->>'description',description),request_reason=coalesce(v_patch->>'request_reason',request_reason),
+      handler_name=coalesce(v_patch->>'handler_name',handler_name),
+      applicant_department_id=v_patch->>'applicant_department_id',applicant_department_name=v_patch->>'applicant_department_name',
+      dispatch_unit=v_patch->>'dispatch_unit',workflow_template_key=v_patch->>'workflow_template_key',
+      metadata_json=v_patch->>'metadata_json',content_revision=content_revision+1,updated_at=v_time where id=v_document.id;
+    if v_removed<>'[]'::jsonb then
+      insert into public.official_document_editor_revisions select (v_revision).*;
+    else v_revision:=v_latest; end if;
+    if v_company is distinct from v_document.company_id then
+      update public.official_document_stamp_requests set status='cancelled',error_message='cleared_by_company_change',updated_at=v_time
+        where document_id=v_document.id and status not in ('stamping','stamped','completed');
+    end if;
+    insert into public.official_document_approval_logs(id,document_id,actor_id,actor_name,action,comment,decision_evidence_json,created_at)
+      values(p_request->>'log_id',v_document.id,p_request->>'actor_id',p_request->>'actor_name','editor_application_update','申請資訊更新',
+       jsonb_build_object('updated_fields',p_request->'updated_fields','removed_seal_element_ids',v_removed,
+         'content_revision',v_document.content_revision+1,'editor_revision_id',v_revision.id,
+         'before_company_id',v_document.company_id,'company_id',v_company),v_time);
+  else v_revision:=v_latest; end if;
+  return jsonb_build_object('document_id',v_document.id,'content_revision',v_document.content_revision+case when v_changed then 1 else 0 end,
+    'editor_revision_id',v_revision.id,'removed_seal_element_ids',v_removed,'changed',v_changed);
+end $$;
+
+create or replace function public.edoc_save_editor_revision(p_request jsonb)
+returns jsonb language plpgsql security invoker set search_path='' set lock_timeout='5s' as $$
+declare
+  v_document public.official_documents%rowtype;
+  v_latest public.official_document_editor_revisions%rowtype;
+  v_revision public.official_document_editor_revisions%rowtype;
+begin
+  if jsonb_typeof(p_request) is distinct from 'object'
+     or jsonb_typeof(p_request->'expected_content_revision') is distinct from 'number'
+     or coalesce(p_request->>'expected_content_revision','') !~ '^(0|[1-9][0-9]*)$' then
+    raise exception using errcode='22023',message='editor_application_fields_invalid';
+  end if;
+  select * into v_document from public.official_documents where id=p_request->>'document_id' for update;
+  if not found then raise exception using errcode='P0002',message='official_document_not_found'; end if;
+  perform edoc_private.assert_editor_application_scope(v_document.id,p_request->>'actor_id',v_document.company_id);
+  if v_document.content_revision is distinct from (p_request->>'expected_content_revision')::integer then
+    raise exception using errcode='PT409',message='compose_content_revision_conflict';
+  end if;
+  select * into v_latest from public.official_document_editor_revisions where document_id=v_document.id order by revision_no desc limit 1;
+  v_revision:=jsonb_populate_record(null::public.official_document_editor_revisions,p_request->'revision');
+  if not found or v_latest.id is distinct from p_request->>'expected_editor_revision_id'
+     or v_latest.manifest_sha256 is distinct from p_request->>'expected_editor_manifest_sha256'
+     or v_revision.id is null or v_revision.document_id is distinct from v_document.id
+     or v_revision.created_by is distinct from p_request->>'actor_id'
+     or v_revision.parent_revision_id is distinct from v_latest.id or v_revision.revision_no is distinct from v_latest.revision_no+1
+     or v_revision.editor_state_json::jsonb->>'revisionNo' is distinct from v_revision.revision_no::text
+     or v_revision.editor_state_json::jsonb->>'manifestSha256' is distinct from v_revision.manifest_sha256
+     or v_revision.manifest_sha256 !~ '^[a-fA-F0-9]{64}$' then
+    raise exception using errcode='PT409',message='editor_revision_conflict';
+  end if;
+  if exists(select 1 from jsonb_array_elements(v_revision.editor_state_json::jsonb->'elements') item
+    where item->>'kind'='seal' and not exists(select 1 from public.company_seals seal join public.company_seal_files file on file.seal_id=seal.id
+      where seal.company_id=v_document.company_id and seal.is_active is true
+        and seal.id=item#>>'{properties,sealId}' and file.id=item#>>'{properties,sealFileId}'
+        and file.file_hash=item#>>'{properties,sealFileSha256}')) then
+    raise exception using errcode='42501',message='official_document_seal_company_mismatch';
+  end if;
+  insert into public.official_document_editor_revisions select (v_revision).*;
+  return to_jsonb(v_revision);
+end $$;
+
+create or replace function public.edoc_commit_editor_preflight(p_request jsonb)
+returns jsonb language plpgsql security invoker set search_path='' set lock_timeout='5s' as $$
+declare
+  v_document public.official_documents%rowtype;
+  v_latest public.official_document_editor_revisions%rowtype;
+  v_asset public.official_document_editor_assets%rowtype;
+  v_meta jsonb;
+begin
+  if jsonb_typeof(p_request) is distinct from 'object'
+     or jsonb_typeof(p_request->'expected_content_revision') is distinct from 'number'
+     or coalesce(p_request->>'expected_content_revision','') !~ '^(0|[1-9][0-9]*)$' then
+    raise exception using errcode='22023',message='editor_application_fields_invalid';
+  end if;
+  select * into v_document from public.official_documents where id=p_request->>'document_id' for update;
+  if not found then raise exception using errcode='P0002',message='official_document_not_found'; end if;
+  perform edoc_private.assert_editor_application_scope(v_document.id,p_request->>'actor_id',v_document.company_id);
+  select * into v_latest from public.official_document_editor_revisions where document_id=v_document.id order by revision_no desc limit 1;
+  if v_document.content_revision is distinct from (p_request->>'expected_content_revision')::integer then
+    raise exception using errcode='PT409',message='compose_content_revision_conflict';
+  end if;
+  if not found or v_latest.id is distinct from p_request->>'expected_editor_revision_id'
+     or v_latest.manifest_sha256 is distinct from p_request->>'expected_editor_manifest_sha256' then
+    raise exception using errcode='PT409',message='editor_revision_conflict';
+  end if;
+  v_asset:=jsonb_populate_record(null::public.official_document_editor_assets,p_request->'asset');
+  v_meta:=v_asset.metadata_json::jsonb;
+  if v_asset.id is null or v_asset.document_id is distinct from v_document.id or v_asset.editor_revision_id is distinct from v_latest.id
+     or v_asset.asset_kind is distinct from 'prepared_pdf' or v_asset.created_by is distinct from p_request->>'actor_id'
+     or v_asset.upload_status is distinct from 'finalized' or v_asset.preflight_status is distinct from 'passed'
+     or jsonb_typeof(v_meta->'application_content_revision') is distinct from 'number'
+     or (v_meta->>'application_content_revision')::integer is distinct from v_document.content_revision
+     or v_meta->>'application_company_id' is distinct from v_document.company_id
+     or v_meta->'application_snapshot' is distinct from jsonb_build_object(
+       'company_id',coalesce(v_document.company_id,''),'applicant_id',coalesce(v_document.applicant_id,''),
+       'applicant_department_id',coalesce(v_document.applicant_department_id,''),'applicant_department_name',coalesce(v_document.applicant_department_name,''),
+       'title',coalesce(v_document.title,''),'subject',coalesce(v_document.subject,''),'description',coalesce(v_document.description,''),
+       'request_reason',coalesce(v_document.request_reason,''),'document_category',coalesce(v_document.metadata_json::jsonb#>>'{official_seal,document_category}',''))
+     or v_meta->>'manifest_sha256' is distinct from v_latest.manifest_sha256
+     or v_meta->>'renderer_version' is distinct from v_latest.renderer_version
+     or not exists(select 1 from public.official_document_files file join public.file_objects object on object.id=file.file_object_id
+       where file.id=v_asset.official_file_id and file.document_id=v_document.id and file.file_type='prepared_pdf'
+         and file.file_hash=v_asset.sha256 and file.file_size=v_asset.size_bytes
+         and object.document_id=v_document.id and object.id=v_asset.file_object_id
+         and object.storage_key=v_asset.storage_path and object.sha256=v_asset.sha256
+         and object.size_bytes=v_asset.size_bytes and object.mime_type='application/pdf' and object.bucket=v_asset.storage_bucket) then
+    raise exception using errcode='22023',message='editor_preflight_not_completed';
+  end if;
+  insert into public.official_document_editor_assets select (v_asset).*;
+  return to_jsonb(v_asset);
+end $$;
+
+-- The existing submission RPC already locks the document before creating any
+-- approval row. Recheck BOTH mutable revisions and the prepared witness there.
+do $migration$
+declare
+  v_sql text:=pg_get_functiondef('public.edoc_commit_official_document_submission(jsonb)'::regprocedure);
+  v_old text:='  v_stamp := pg_catalog.jsonb_populate_record';
+begin
+  if strpos(v_sql,v_old)=0 then raise exception 'editor_application_submission_anchor_drift'; end if;
+  v_sql:=replace(v_sql,v_old,$snippet$
+  if v_document.source_type='uploaded_pdf' and coalesce(v_document.metadata_json::jsonb->>'pdf_editor_v2','false')='true' then
+    if not exists(select 1 from public.official_document_editor_revisions revision
+      where revision.document_id=v_document_id
+        and revision.id=p_request#>>'{stamp_request,locked_editor_revision_id}'
+        and revision.manifest_sha256=p_request#>>'{stamp_request,editor_manifest_sha256}'
+        and revision.revision_no=(select max(revision_no) from public.official_document_editor_revisions where document_id=v_document_id)) then
+      raise exception using errcode='PT409',message='editor_revision_conflict';
+    end if;
+    if not exists(select 1 from public.official_document_editor_assets asset
+      where asset.document_id=v_document_id and asset.editor_revision_id=p_request#>>'{stamp_request,locked_editor_revision_id}'
+        and asset.asset_kind='prepared_pdf' and asset.upload_status='finalized' and asset.preflight_status='passed'
+        and asset.official_file_id=p_request#>>'{stamp_request,prepared_file_id}' and asset.sha256=p_request#>>'{stamp_request,prepared_sha256}'
+        and jsonb_typeof(asset.metadata_json::jsonb->'application_content_revision')='number'
+        and asset.metadata_json::jsonb->>'application_content_revision'=v_document.content_revision::text
+        and asset.metadata_json::jsonb->>'application_company_id'=v_document.company_id
+        and asset.metadata_json::jsonb->'application_snapshot'=jsonb_build_object(
+          'company_id',coalesce(v_document.company_id,''),'applicant_id',coalesce(v_document.applicant_id,''),
+          'applicant_department_id',coalesce(v_document.applicant_department_id,''),'applicant_department_name',coalesce(v_document.applicant_department_name,''),
+          'title',coalesce(v_document.title,''),'subject',coalesce(v_document.subject,''),'description',coalesce(v_document.description,''),
+          'request_reason',coalesce(v_document.request_reason,''),'document_category',coalesce(v_document.metadata_json::jsonb#>>'{official_seal,document_category}',''))
+        and asset.metadata_json::jsonb->>'manifest_sha256'=p_request#>>'{stamp_request,editor_manifest_sha256}') then
+      raise exception using errcode='PT409',message='editor_preflight_not_completed';
+    end if;
+  end if;
+  v_stamp := pg_catalog.jsonb_populate_record
+$snippet$);
+  v_old:='       and v_existing_log.decision_evidence_json->>''operation_id'' = v_operation_id';
+  if strpos(v_sql,v_old)=0 then raise exception 'editor_application_submission_replay_anchor_drift'; end if;
+  v_sql:=replace(v_sql,v_old,v_old||$snippet$
+       and v_existing_log.decision_evidence_json->'submission_intent' is not distinct from p_request#>'{submit_log,decision_evidence_json,submission_intent}'
+       and (not (p_request ? 'expected_content_revision') or v_document.content_revision=(p_request->>'expected_content_revision')::integer)
+       and (nullif(p_request#>>'{stamp_request,locked_editor_revision_id}','') is null or exists (
+         select 1 from public.official_document_stamp_requests replay_stamp
+         where replay_stamp.id=p_request#>>'{stamp_request,id}' and replay_stamp.document_id=v_document_id
+           and replay_stamp.company_id=v_company_id and replay_stamp.requested_by=v_applicant_id
+           and replay_stamp.locked_editor_revision_id=p_request#>>'{stamp_request,locked_editor_revision_id}'
+           and replay_stamp.editor_manifest_sha256=p_request#>>'{stamp_request,editor_manifest_sha256}'
+           and replay_stamp.prepared_file_id=p_request#>>'{stamp_request,prepared_file_id}'
+           and replay_stamp.prepared_sha256=p_request#>>'{stamp_request,prepared_sha256}'
+       ))
+$snippet$);
+  execute v_sql;
+end $migration$;
+
+revoke all on function edoc_private.assert_editor_application_scope(text,text,text,text,text) from public,anon,authenticated;
+grant execute on function edoc_private.assert_editor_application_scope(text,text,text,text,text) to service_role;
+revoke all on function public.edoc_update_editor_application(jsonb) from public,anon,authenticated;
+revoke all on function public.edoc_save_editor_revision(jsonb) from public,anon,authenticated;
+revoke all on function public.edoc_commit_editor_preflight(jsonb) from public,anon,authenticated;
+grant execute on function public.edoc_update_editor_application(jsonb) to service_role;
+grant execute on function public.edoc_save_editor_revision(jsonb) to service_role;
+grant execute on function public.edoc_commit_editor_preflight(jsonb) to service_role;

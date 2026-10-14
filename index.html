@@ -13,6 +13,10 @@
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260713" />
     <link id="interfaceFontStylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800;900&display=swap" rel="stylesheet" media="print" />
     <link rel="stylesheet" href="styles.css?v=20260928-compose-submit-r1" />
+    <link rel="stylesheet" href="vendor/tom-select/tom-select.default.min.css?v=2.6.2" />
+    <link rel="stylesheet" href="workspace-select.css?v=20261014-r1" />
+    <link rel="stylesheet" href="workspace-navigation.css?v=20261014-r1" />
+    <link rel="stylesheet" href="editor-fluid.css?v=20261014-r1" />
   </head>
   <body>
     <div class="module-entry-screen app" id="moduleEntryProgress" role="status" aria-live="polite" aria-busy="true" aria-label="正在進入公文收發電子用印系統" data-progress-state="loading">
@@ -63,6 +67,10 @@
           <button class="nav-item" data-target="electronicSeal" data-icon="章">
             <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 13h8M9 13V9a3 3 0 0 1 6 0v4M6 13h12v4H6zM5 20h14"></path></svg></span>
             <span class="nav-label">電子用印</span>
+          </button>
+          <button class="nav-item" data-target="drafts" data-icon="稿">
+            <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7zM14 3v5h5M10 13h6M10 17h4"></path></svg></span>
+            <span class="nav-label">草稿編輯</span><span class="draft-nav-count" id="draftNavCount" aria-label="草稿數量尚未載入">—</span>
           </button>
           <p class="nav-section-label">流程管理</p>
           <button class="nav-item" data-target="approvalLog" data-icon="簽">
@@ -393,7 +401,7 @@
 
         <section class="view" id="search">
           <section class="panel search-panel">
-            <form class="search-form" id="searchForm">
+            <form class="search-form" id="searchForm" novalidate>
               <label class="search-keyword-field">關鍵字<input id="searchQuery" type="search" placeholder="文號、機關、主旨或附件名稱" /></label>
               <label>類型<select id="searchCategory"><option value="all">全部</option><option value="documents">公文</option><option value="approval_records">簽核進度</option><option value="contracts">合約</option><option value="attachments">附件</option></select></label>
               <label>狀態<select id="searchStatus"><option value="">全部</option><option value="草稿">草稿</option><option value="待">待處理</option><option value="退回">已退回</option><option value="已寄送">已寄送</option><option value="完成">已完成</option></select></label>
@@ -428,13 +436,28 @@
 
           <div class="inbound-toolbar panel">
             <div class="inbound-simple-flow" role="tablist" aria-label="簽核進度篩選">
-              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="my_pending">待我處理</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="delegated">代理待簽</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="overdue">逾期</button>
-              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="processed">其他紀錄</button>
+              <button class="flow-step-chip active" type="button" role="tab" data-approval-log-filter="pending">待簽核</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="mine">我申請的</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="acted">已簽核</button>
+              <button class="flow-step-chip" type="button" role="tab" data-approval-log-filter="rejected">被退件</button>
             </div>
+            <label class="approval-task-filter">待辦篩選<select id="approvalTaskFilter"><option value="">全部</option><option value="delegated">代理待簽</option><option value="overdue">逾期</option><option value="operations">寄發・收件・用印重試</option></select></label>
             <label class="toolbar-search compact">搜尋<input id="approvalLogSearch" type="search" placeholder="文號、主旨、角色、狀態" /></label>
+            <button class="secondary-button" id="officialHandoverOpenBtn" type="button" hidden aria-expanded="false" aria-controls="officialHandoverPanel">離職案件交接</button>
           </div>
+
+          <section class="panel" id="officialHandoverPanel" hidden aria-labelledby="officialHandoverTitle">
+            <div class="panel-heading"><h3 id="officialHandoverTitle">離職案件交接</h3><button class="text-button" id="officialHandoverCloseBtn" type="button">收合</button></div>
+            <div class="form-actions" aria-label="交接清單">
+              <button class="secondary-button" type="button" data-handover-view="needs" aria-pressed="true">待交接</button>
+              <button class="secondary-button" type="button" data-handover-view="pending" aria-pressed="false">待確認</button>
+              <button class="secondary-button" type="button" data-handover-view="history" aria-pressed="false">交接紀錄</button>
+            </div>
+            <p id="officialHandoverStatus" role="status" aria-live="polite"></p>
+            <div id="officialHandoverList" class="address-results"></div>
+            <div class="form-actions"><button class="secondary-button" id="officialHandoverPreviousBtn" type="button" disabled>上一頁</button><span id="officialHandoverPage">第 1 頁</span><button class="secondary-button" id="officialHandoverNextBtn" type="button" disabled>下一頁</button><button class="text-button" id="officialHandoverRetryBtn" type="button">重新整理</button></div>
+            <section id="officialHandoverDetail" class="official-handover-detail" hidden aria-label="交接案件"></section>
+          </section>
 
           <div class="approval-log-layout">
             <section class="panel approval-log-list-panel">
@@ -541,7 +564,7 @@
                 <h3>起案資料</h3>
                 <button class="text-button" id="contractDraftBtn" type="button">儲存草稿</button>
               </div>
-              <form class="compact-form" id="contractForm">
+              <form class="compact-form" id="contractForm" novalidate>
                 <label>公司行號<select id="contractCompanyInput"></select></label>
                 <label>文件/用印類別<select id="contractTypeInput">
                   <optgroup label="1. 合約類（勿選）">
@@ -568,8 +591,8 @@
                 <label>續約提醒<select id="contractRenewalDaysInput"><option value="30">30 天前</option><option value="45">45 天前</option><option value="60" selected>60 天前</option><option value="90">90 天前</option></select></label>
                 <label>保密等級<select id="contractConfidentialityInput"><option>普通</option><option>限閱</option><option>密</option></select></label>
                 <label>用印需求<select id="contractSealInput"><option>無</option><option selected>一般章</option><option>公司設立章</option><option>銀行印鑑章</option><option>圖記章</option></select></label>
-                <label>附件清單<textarea id="contractAttachmentsInput" rows="3">合約草案.pdf、報價單.pdf</textarea></label>
-                <label>合約摘要<textarea id="contractSummaryInput" rows="4">請填寫合作內容、履約範圍、付款條件與重要時程。</textarea></label>
+                <label>附件清單<textarea class="resize-none" id="contractAttachmentsInput" rows="3">合約草案.pdf、報價單.pdf</textarea></label>
+                <label>合約摘要<textarea class="resize-none" id="contractSummaryInput" rows="4">請填寫合作內容、履約範圍、付款條件與重要時程。</textarea></label>
               </form>
             </section>
 
@@ -733,7 +756,7 @@
               </div>
               <span class="status-pill">歸檔留存</span>
             </div>
-            <form class="compact-form inbound-archive-form" id="inboundArchiveForm">
+            <form class="compact-form inbound-archive-form" id="inboundArchiveForm" novalidate>
               <div class="inline-fields">
                 <label>收錄來源<select id="inboundArchiveSourceType">
                   <option value="general_affairs_email">總務收到 Email</option>
@@ -749,7 +772,7 @@
                 <label>文別<select id="inboundArchiveDocumentType"><option>公文</option><option>信件</option><option>通知</option><option>其他</option></select></label>
               </div>
               <label>主旨<input id="inboundArchiveSubject" required placeholder="請填寫信件或公文主旨" /></label>
-              <label>內容摘要／備註<textarea id="inboundArchiveBody" rows="4" placeholder="填寫內容摘要、後續注意事項或紙本保管位置"></textarea></label>
+              <label>內容摘要／備註<textarea class="resize-none" id="inboundArchiveBody" rows="4" placeholder="填寫內容摘要、後續注意事項或紙本保管位置"></textarea></label>
               <div class="inline-fields">
                 <label>速別<select id="inboundArchivePriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
                 <label>密等<select id="inboundArchiveSecurity"><option>普通</option><option>密</option><option>機密</option></select></label>
@@ -769,10 +792,10 @@
             </div>
             <div class="internal-dispatch-layout">
               <div id="internalDispatchCreateArea">
-                <form class="compact-form internal-dispatch-form" id="internalDispatchForm">
+                <form class="compact-form internal-dispatch-form" id="internalDispatchForm" novalidate>
                   <label>關聯收錄公文<select id="internalDispatchDocumentSelect"></select></label>
                   <label>主旨<input id="internalDispatchTitleInput" placeholder="請輸入派發主旨" /></label>
-                  <label>內容<textarea id="internalDispatchBodyInput" rows="4" placeholder="請輸入辦理事項或注意內容"></textarea></label>
+                  <label>內容<textarea class="resize-none" id="internalDispatchBodyInput" rows="4" placeholder="請輸入辦理事項或注意內容"></textarea></label>
                   <fieldset class="internal-dispatch-recipient-fieldset">
                     <legend>收件人與處理要求</legend>
                     <div class="internal-dispatch-recipient-picker" id="internalDispatchRecipientsPicker"></div>
@@ -804,11 +827,11 @@
                   <button class="text-button" id="saveRegisterDraftBtn" type="button">暫存</button>
                 </div>
               </div>
-              <form class="compact-form" id="registerForm">
+              <form class="compact-form" id="registerForm" novalidate>
                 <label>收文日期<input id="registerDate" type="date" value="2026-05-22" /></label>
                 <label>承辦單位<select id="registerDept"><option>總管理處</option><option>居家照顧課</option><option>日間照顧課</option><option>教育品管課</option></select></label>
                 <label>保存年限<select id="retentionYears"><option>10 年</option><option>15 年</option><option>永久保存</option></select></label>
-                <label>登錄備註<textarea id="registerNote" rows="3">已由 jAgent 拉取電子來文，待確認附件完整性。</textarea></label>
+                <label>登錄備註<textarea class="resize-none" id="registerNote" rows="3">已由 jAgent 拉取電子來文，待確認附件完整性。</textarea></label>
                 <button class="primary-button" type="submit">完成收文登錄</button>
               </form>
             </section>
@@ -818,10 +841,10 @@
                 <h3>分派承辦</h3>
                 <span class="status-pill">角色權限</span>
               </div>
-              <form class="compact-form" id="assignForm">
+              <form class="compact-form" id="assignForm" novalidate>
                 <label>承辦人<select id="assignOwner"><option value="">正在載入在職人員</option></select></label>
                 <label>處理期限<input id="assignDueDate" type="date" /></label>
-                <label>分派意見<textarea id="assignNote" rows="3">請依來文主旨辦理，並於期限前回覆處理進度。</textarea></label>
+                <label>分派意見<textarea class="resize-none" id="assignNote" rows="3">請依來文主旨辦理，並於期限前回覆處理進度。</textarea></label>
                 <button class="primary-button" type="submit">確認分派</button>
               </form>
             </section>
@@ -831,10 +854,10 @@
                 <h3>異常處理</h3>
                 <span class="status-pill">誤送 / 漏送</span>
               </div>
-              <form class="compact-form" id="exceptionForm">
+              <form class="compact-form" id="exceptionForm" novalidate>
                 <label>異常類型<select id="exceptionType"><option>誤送</option><option>漏送</option><option>附件缺漏</option><option>格式錯誤</option></select></label>
                 <label>通知對象<input id="exceptionTarget" value="原發文機關文書窗口" /></label>
-                <label>處理說明<textarea id="exceptionNote" rows="3">請確認交換紀錄與附件清冊，並回覆補送或撤回處理。</textarea></label>
+                <label>處理說明<textarea class="resize-none" id="exceptionNote" rows="3">請確認交換紀錄與附件清冊，並回覆補送或撤回處理。</textarea></label>
                 <button class="primary-button" type="submit">建立異常通知</button>
               </form>
             </section>
@@ -950,7 +973,7 @@
               <section class="official-workflow-detail" id="officialWorkflowDetail"></section>
             </div>
 
-            <form class="official-workflow-form official-document-entry hidden" id="officialWorkflowForm">
+            <form class="official-workflow-form official-document-entry hidden" id="officialWorkflowForm" novalidate>
               <div class="panel-heading tight">
                 <h3 id="officialWorkflowFormTitle">新增發文申請單</h3>
                 <span class="status-pill" id="officialWorkflowFormMode">兩種來源</span>
@@ -992,8 +1015,8 @@
                 <label>承辦人<input id="officialHandlerInput" placeholder="承辦人" /></label>
               </div>
               <label>主旨<input id="officialSubjectInput" placeholder="請輸入發文主旨" /><span class="field-hint" id="officialSubjectHint"></span></label>
-              <label id="officialDescriptionField">說明<textarea id="officialDescriptionInput" rows="4" placeholder="說明內容"></textarea><span class="field-hint" id="officialDescriptionHint"></span></label>
-              <label>辦法<textarea id="officialMethodInput" rows="3" placeholder="辦法內容"></textarea></label>
+              <label id="officialDescriptionField">說明<textarea class="resize-none" id="officialDescriptionInput" rows="4" placeholder="說明內容"></textarea><span class="field-hint" id="officialDescriptionHint"></span></label>
+              <label>辦法<textarea class="resize-none" id="officialMethodInput" rows="3" placeholder="辦法內容"></textarea></label>
               <label>用印原因<input id="officialReasonInput" placeholder="請填寫用印原因" /><span class="field-hint" id="officialReasonHint"></span></label>
               <label>補充附件<input id="officialAttachmentsInput" type="file" multiple /><span class="field-hint">附件會存入這張發文申請單，後續每一位指定簽核人都可在附件區檢視與下載。目前一般附件單檔上限 3 MB；大型 PDF 請使用電子用印 PDF 編輯器的私密直傳。</span></label>
               <div class="inline-fields">
@@ -1046,6 +1069,14 @@
           </div>
         </section>
 
+        <section class="view" id="drafts" aria-labelledby="workspaceDraftTitle">
+          <div class="section-header"><h3 id="workspaceDraftTitle">草稿編輯</h3><button type="button" class="primary-button" id="draftNewComposeBtn">寫新公文</button></div>
+          <div class="panel draft-workspace-toolbar"><label>搜尋草稿<input id="workspaceDraftSearch" type="search" placeholder="主旨或案件編號" /></label><button type="button" class="secondary-button" id="workspaceDraftRefreshBtn">重新整理</button><span id="workspaceDraftCount" role="status" aria-live="polite">正在載入…</span></div>
+          <section class="panel draft-local-recovery" id="workspaceLocalDraft" hidden aria-label="此裝置未同步草稿"></section>
+          <div class="workspace-draft-list" id="workspaceDraftList" aria-live="polite"></div>
+          <div class="official-list-pagination" id="workspaceDraftPagination"></div>
+        </section>
+
         <section class="view" id="compose">
           <div class="section-header">
             <div>
@@ -1063,14 +1094,14 @@
             <button type="button" class="secondary-button" id="composeCloudRetryBtn">重試保存</button>
             <button type="button" class="secondary-button" id="composeKeepNewDraftBtn" hidden>保留我的內容為新草稿</button>
           </div>
-          <section class="compose-resume-draft" id="composeResumeDraft" hidden aria-labelledby="composeResumeDraftTitle">
+          <section class="compose-resume-draft" id="composeResumeDraft" hidden aria-labelledby="composeResumeDraftTitle" data-draft-legacy>
             <div><strong id="composeResumeDraftTitle">繼續上次草稿？</strong><p id="composeResumeDraftDescription"></p></div>
             <div class="form-actions">
               <button class="primary-button" type="button" id="composeResumeDraftBtn">繼續上次草稿</button>
               <button class="secondary-button" type="button" id="composeStartFreshBtn">先寫新公文</button>
             </div>
           </section>
-          <details class="compose-cloud-drafts">
+          <details class="compose-cloud-drafts" hidden data-draft-legacy>
             <summary>雲端草稿 · 換裝置繼續填寫</summary>
             <div class="form-actions">
               <label>私人草稿<select id="composeCloudDraftSelect"><option value="">選擇私人雲端草稿</option></select></label>
@@ -1173,7 +1204,7 @@
                     <div class="compose-optional-fields-content">
                       <label class="compose-purpose-field">
                         起草方向
-                        <textarea id="documentPurpose" rows="3" placeholder="簡單描述要辦理的事、原因或期限；也可以直接填寫主旨與說明。"></textarea>
+                        <textarea class="resize-none" id="documentPurpose" rows="3" placeholder="簡單描述要辦理的事、原因或期限；也可以直接填寫主旨與說明。"></textarea>
                         <span class="field-hint" id="documentPurposeHint">只用來協助起草，不會直接放入正式公文。</span>
                         <button class="primary-button compose-purpose-generate" id="generateFromPurposeBtn" type="button">AI產生公文主旨與說明</button>
                         <div id="composeAiReview" class="compose-ai-review" hidden role="status" aria-live="polite">
@@ -1198,7 +1229,7 @@
                   </label>
                   <label>
                     說明
-                    <textarea id="bodyText" rows="8" placeholder="可自行輸入，或使用 AI 協助起稿"></textarea>
+                    <textarea class="resize-none" id="bodyText" rows="8" placeholder="可自行輸入，或使用 AI 協助起稿"></textarea>
                     <span class="field-hint" id="bodyTextHint"></span>
                   </label>
                   <details class="compose-optional-fields compose-attachment-disclosure">
@@ -1213,7 +1244,7 @@
                       </label>
                       <label>
                         附件文字內容
-                        <textarea id="attachmentDetails" rows="3" maxlength="5000" placeholder="選擇附件後自動帶入檔名，可改成公文要顯示的附件說明。"></textarea>
+                        <textarea class="resize-none" id="attachmentDetails" rows="3" maxlength="5000" placeholder="選擇附件後自動帶入檔名，可改成公文要顯示的附件說明。"></textarea>
                         <span class="field-hint">公文只顯示此處文字；修改文字不會更改附件檔名或內容。</span>
                         <span class="field-hint" id="attachmentDetailsHint"></span>
                       </label>
@@ -1238,6 +1269,10 @@
                     <select id="smallSealType">
                         <option value="無" selected>無</option>
                     </select>
+                    </label>
+                    <label id="composeContinuousSealField" hidden>
+                      連續章（選填）
+                      <select id="continuousSealType"><option value="無" selected>無</option></select>
                     </label>
                   </div>
                   <div class="compose-seal-availability" id="composeSealAvailabilityNotice" role="status" aria-live="polite" hidden>
@@ -1481,7 +1516,7 @@
                 <h3>權限測試</h3>
                 <span class="status-pill">RBAC</span>
               </div>
-              <form class="compact-form" id="permissionTestForm">
+              <form class="compact-form" id="permissionTestForm" novalidate>
                 <label>測試動作<select id="permissionAction"><option value="pull_inbound">拉取收文</option><option value="register_inbound">收文登錄</option><option value="assign_case">分派案件</option><option value="send_dispatch">送交 jAgent</option><option value="manage_jagent">管理 jAgent</option><option value="view_audit">查看稽核</option></select></label>
                 <button class="primary-button" type="submit">檢查權限</button>
               </form>
@@ -1503,7 +1538,7 @@
                 <h3>流程範本設定</h3>
                 <button class="text-button" id="workflowTemplateApplyBtn" type="button">套用範本</button>
               </div>
-              <form class="compact-form" id="workflowTemplateForm">
+              <form class="compact-form" id="workflowTemplateForm" novalidate>
                 <label>文件/用印類別<select id="workflowDocumentCategorySelect">
                   <optgroup label="1. 合約類（勿選）">
                     <option>商務合約</option><option>合作意向書</option><option>採購合約</option><option selected>服務委託合約</option><option>租賃契約</option>
@@ -1530,7 +1565,7 @@
                 <h3>條件式簽核</h3>
                 <button class="text-button" id="workflowEvaluateBtn" type="button">評估條件</button>
               </div>
-              <form class="compact-form" id="workflowConditionForm">
+              <form class="compact-form" id="workflowConditionForm" novalidate>
                 <label>密等<select id="workflowConditionSecurity"><option>普通</option><option>密</option><option>機密</option><option>極機密</option></select></label>
                 <label>速別<select id="workflowConditionPriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
                 <label>機關別<input id="workflowConditionAgency" value="臺北市政府社會局" /></label>
@@ -1545,7 +1580,7 @@
                 <h3>代理人機制</h3>
                 <button class="text-button" id="workflowProxyAddBtn" type="button">重新整理</button>
               </div>
-              <form class="compact-form" id="workflowProxyForm">
+              <form class="compact-form" id="workflowProxyForm" novalidate>
                 <label>原簽核人<select id="workflowProxyPrincipal" required><option value="">載入正式人員中</option></select></label>
                 <label>代理人<select id="workflowProxyDelegate" required><option value="">請先選擇原簽核人</option></select></label>
                 <label>代理開始<input id="workflowProxyStartsAt" type="datetime-local" required /></label>
@@ -1563,10 +1598,10 @@
                 <h3>進階簽核動作</h3>
                 <span class="status-pill">Action</span>
               </div>
-              <form class="compact-form" id="workflowActionForm">
+              <form class="compact-form" id="workflowActionForm" novalidate>
                 <label>簽核動作<select id="workflowActionSelect"><option value="return">退回</option><option value="withdraw">抽回</option><option value="addSign">加簽</option><option value="countersign">會辦</option><option value="reassign">改派</option></select></label>
                 <label>目標角色<select id="workflowActionTarget"><option>業務助理</option><option>行政部主任</option><option>行政部主任</option><option>主任</option></select></label>
-                <label>簽核意見<textarea id="workflowComment" rows="3">請補充附件清冊與用印理由。</textarea></label>
+                <label>簽核意見<textarea class="resize-none" id="workflowComment" rows="3">請補充附件清冊與用印理由。</textarea></label>
                 <button class="primary-button" type="submit">執行簽核動作</button>
               </form>
             </section>
@@ -1598,7 +1633,7 @@
                 <button class="text-button" id="uploadedSealApplicationToggleBtn" type="button" aria-expanded="true" aria-controls="uploadedSealApplicationFields" hidden>收起資料，專心編輯 PDF</button>
               </div>
               <p class="electronic-seal-application-summary" id="uploadedSealApplicationSummary" hidden></p>
-              <form class="compact-form" id="uploadedSealForm">
+              <form class="compact-form" id="uploadedSealForm" novalidate>
                 <div class="electronic-seal-application-grid" id="uploadedSealApplicationFields">
                   <label>申請人<input id="uploadedSealApplicant" autocomplete="name" placeholder="請輸入姓名" required /></label>
                   <div class="electronic-seal-document-type-field" id="uploadedSealApprovalRouteSection">
@@ -1609,10 +1644,10 @@
                       <span class="field-hint" id="uploadedSealApprovalCategoryHint">選擇後，系統會自動套用 A／B／C／D 簽核層級。</span>
                     </label>
                   </div>
+                  <label>用印公司<select id="uploadedSealCompany" required aria-describedby="uploadedSealCompanyLockHint"></select><span class="field-hint" id="uploadedSealCompanyLockHint" hidden></span></label>
                   <label>部門<select id="uploadedSealDepartment" required></select></label>
-                  <label>用印公司<select id="uploadedSealCompany" required></select></label>
                   <label class="electronic-seal-application-wide">申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
-                  <label class="electronic-seal-application-wide">用印原因<textarea id="uploadedSealReason" rows="3" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
+                  <label class="electronic-seal-application-wide">用印原因<textarea class="resize-none" id="uploadedSealReason" rows="3" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
                 </div>
                 <div class="electronic-seal-route-result approval-route-summary" aria-live="polite">
                   <span>系統自動簽核</span>
@@ -1642,6 +1677,7 @@
                 </div>
                 <div class="pdf-editor-command-status">
                   <span class="pdf-editor-save-status idle" id="uploadedEditorSaveStatus" role="status" aria-live="polite">尚未建立草稿</span>
+                  <button class="secondary-button" id="uploadedEditorSaveDraftBtn" type="button" aria-busy="false" disabled>暫存草稿</button>
                   <button class="primary-button pdf-editor-conflict-action" id="uploadedEditorConflictCopyBtn" type="button" hidden>保留我的內容為新草稿</button>
                   <button class="secondary-button pdf-editor-conflict-action" id="uploadedEditorResolveConflictBtn" type="button" hidden>使用最新版</button>
                   <button class="text-button pdf-editor-conflict-action" id="uploadedEditorConflictBackupBtn" type="button" hidden>下載技術備份</button>
@@ -1682,7 +1718,7 @@
                   <button class="active" type="button" data-editor-tool="select" title="選取與移動">選取</button>
                   <button type="button" data-editor-tool="text" title="新增文字">加文字</button>
                   <button type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
-                  <button type="button" data-editor-tool="seal" title="放置公司印章">印章</button>
+                  <button type="button" data-editor-tool="seal" aria-label="用印：選擇印章並放置章位">用印</button>
                   <button id="uploadedEditorSeamToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorSeamPanel">騎縫章</button>
                   <details class="editor-disclosure" id="uploadedEditorMoreTools">
                     <summary>更多工具</summary>
@@ -1699,6 +1735,17 @@
                   <button id="uploadedEditorUndoBtn" type="button" disabled title="復原（⌘/Ctrl+Z）" aria-label="復原">↶</button>
                   <button id="uploadedEditorRedoBtn" type="button" disabled title="重做（⌘/Ctrl+Shift+Z）" aria-label="重做">↷</button>
                 </div>
+                <div class="pdf-editor-tool-group editor-persistent-actions" role="group" aria-label="儲存與送簽">
+                  <span id="uploadedEditorToolbarSaveStatus" class="editor-toolbar-save-status"></span>
+                  <button id="uploadedEditorSaveDraftToolbarBtn" class="secondary-button" type="button" aria-busy="false" disabled>暫存</button>
+                  <button id="uploadedEditorSubmitToolbarBtn" class="primary-button" type="button" disabled>預覽送簽</button>
+                </div>
+              </div>
+              <div id="uploadedEditorImageSync" class="editor-image-sync" role="status" hidden>
+                <progress max="100" value="0" aria-label="圖片上傳進度"></progress>
+                <span data-image-sync-label>可繼續編輯・圖片上傳 0%</span>
+                <button type="button" class="secondary-button" data-image-sync-retry hidden>重試</button>
+                <button type="button" class="text-button" data-image-sync-remove>移除圖片</button>
               </div>
 
               <p id="uploadedEditorToolNotice" role="status" hidden></p>
@@ -1706,7 +1753,7 @@
                 <div class="uploaded-seal-picker" id="uploadedSealPicker" role="group" aria-label="選擇用印款式與大小章">
                   <div class="uploaded-seal-picker-company"><span>用印公司：<strong id="uploadedSealPickerCompany"></strong></span><button class="text-button" id="uploadedSealCompanyFocusBtn" type="button">變更公司</button></div>
                   <label>用印款式<select id="uploadedSealCategorySelect" aria-describedby="uploadedSealPickerStatus"></select></label>
-                  <label>大小章<select id="uploadedSealSizeSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
+                  <label id="uploadedSealSizeLabel">大小章<select id="uploadedSealSizeSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
                   <label id="uploadedSealRecordLabel" hidden>印章名稱<select id="uploadedSealSealSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
                   <p id="uploadedSealPickerStatus" role="status" aria-live="polite"></p>
                 </div>
@@ -1724,12 +1771,13 @@
               </div>
               <section class="pdf-editor-seam-panel" id="uploadedEditorSeamPanel" hidden aria-label="批次騎縫章">
                 <div class="editor-context-heading"><h4>騎縫章</h4><button id="uploadedEditorSeamCloseBtn" type="button" class="text-button" aria-label="關閉騎縫章設定">×</button></div>
-                <p>相鄰兩頁一組，自動錯開位置；可拖曳調整，尺寸固定。</p>
+                <p>每 5 頁一組，固定右側；拖曳示意框可調整同組高度。</p>
                 <div class="pdf-editor-seam-actions">
+                  <label>騎縫用大章<select id="uploadedEditorSeamSealSelect" aria-describedby="uploadedEditorSeamStatus"></select></label>
                   <label>套用頁面<input id="uploadedEditorSeamPages" inputmode="numeric" placeholder="全部頁（或輸入 1-5）" /></label>
                   <button class="primary-button" id="uploadedEditorSeamAddBtn" type="button">加入騎縫章</button>
                 </div>
-                <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">至少需要兩頁 PDF。</p>
+                <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">請先上傳 PDF。</p>
                 <div id="uploadedEditorSeamGroups"></div>
               </section>
 
@@ -1790,7 +1838,7 @@
                         <svg id="uploadedEditorSvgLayer" role="application" aria-label="PDF 編輯物件層" tabindex="0"></svg>
                       </div>
                       <div id="uploadedEditorTextEdit" class="editor-inline-text" role="group" aria-label="直接編輯文字" hidden>
-                        <textarea id="uploadedEditorInlineText" aria-label="文字內容" rows="2" maxlength="1000" placeholder="輸入文字" autocomplete="off"></textarea>
+                        <textarea class="resize-none" id="uploadedEditorInlineText" aria-label="文字內容" rows="2" maxlength="1000" placeholder="輸入文字" autocomplete="off"></textarea>
                         <div class="editor-inline-actions">
                           <input id="uploadedEditorInlineFontSize" type="number" aria-label="文字字級" min="6" max="144" value="14" />
                           <input id="uploadedEditorInlineColor" type="color" aria-label="文字顏色" value="#111827" />
@@ -1824,8 +1872,8 @@
                     <button class="pdf-editor-pane-close" id="uploadedEditorPropertiesCloseBtn" type="button" aria-label="關閉屬性面板">×</button>
                   </div>
                   <div class="pdf-editor-property-empty" id="uploadedEditorPropertyEmpty">未選取物件</div>
-                  <form class="pdf-editor-property-form" id="uploadedEditorPropertyForm" hidden>
-                    <label class="editor-property-text">內容<textarea id="uploadedEditorPropertyText" rows="3" maxlength="1000"></textarea></label>
+                  <form class="pdf-editor-property-form" id="uploadedEditorPropertyForm" hidden novalidate>
+                    <label class="editor-property-text">內容<textarea class="resize-none" id="uploadedEditorPropertyText" rows="3" maxlength="1000"></textarea></label>
                     <label class="editor-property-shape" hidden>形狀類型<select id="uploadedEditorPropertyShapeType"><option value="rectangle">矩形</option><option value="line">線條</option></select></label>
                     <p class="editor-seal-size-lock" id="uploadedEditorSealSizeLock" hidden></p>
                     <details class="editor-precision-settings">
@@ -1866,7 +1914,9 @@
 
               <div class="uploaded-workspace-actions pdf-editor-footer-actions">
                 <span id="uploadedEditorPreflightStatus" class="pdf-editor-preflight-status">尚未產生送簽確認版</span>
+                <p id="uploadedEditorSubmissionSummary" class="uploaded-editor-submission-summary" hidden></p>
                 <div class="pdf-editor-submit-actions">
+                  <button class="secondary-button" id="uploadedEditorSaveDraftFooterBtn" type="button" aria-busy="false" disabled>暫存草稿</button>
                   <button class="text-button" id="clearUploadedStampsBtn" type="button">清除全部編輯</button>
                   <button class="primary-button" id="submitUploadedSealBtn" type="button">確認編輯並送出簽核</button>
                 </div>
@@ -1937,7 +1987,7 @@
                 <button class="segment" type="button" role="tab" data-seal-vault-tab="usage" aria-selected="false">使用紀錄</button>
               </div>
               <div class="seal-vault-tab-panel" data-seal-vault-panel="upload" role="tabpanel" hidden>
-              <form class="compact-form simple-seal-upload-form" id="simpleSealUploadForm">
+              <form class="compact-form simple-seal-upload-form" id="simpleSealUploadForm" novalidate>
                 <p class="seal-custodian-notice" data-seal-custodian-notice hidden>僅執行長／行政部門主任可變更。</p>
                 <div class="simple-seal-form-grid">
                   <label>公司行號
@@ -1953,12 +2003,16 @@
                   <label>印章類型
                     <select id="simpleSealCategorySelect" required></select>
                   </label>
-                  <label>大小章
+                  <label id="simpleSealSizeLabel">大小章
                     <select id="simpleSealSizeSelect" required></select>
                   </label>
-                  <label>印章實際尺寸（mm）
+                  <label>實際寬度（mm）
                     <input id="simpleSealRenderSizeMmInput" type="number" min="25" max="35" step="0.01" value="30.00" inputmode="decimal" aria-describedby="simpleSealCalibrationHint" required />
                     <small>請直接輸入實際量測邊長；系統會自動套用為相同寬、高。</small>
+                  </label>
+                  <label id="simpleSealRenderHeightLabel" hidden>實際高度（mm）
+                    <input id="simpleSealRenderHeightMmInput" type="number" min="1" max="200" step="0.01" inputmode="decimal" aria-describedby="simpleSealCalibrationHint" />
+                    <small>依實際量測填寫，圖檔必須符合此寬高比例。</small>
                   </label>
                   <label>顯示名稱
                     <input id="simpleSealNameInput" value="公司章" maxlength="100" required />
@@ -1973,8 +2027,8 @@
                   <div class="segmented-control" role="group" aria-label="常用印章類型">
                     <button class="segment active" type="button" data-simple-seal-category="establishment_seal">公司章</button>
                     <button class="segment" type="button" data-simple-seal-category="general_seal">便章</button>
-                    <button class="segment" type="button" data-simple-seal-category="official_seal">關防印</button>
-                    <button class="segment" type="button" data-simple-seal-category="bank_seal">銀行印鑑章</button>
+                    <button class="segment" type="button" data-simple-seal-category="official_seal">圖記章</button>
+                    <button class="segment" type="button" data-simple-seal-category="continuous_seal">連續章</button>
                   </div>
                 </fieldset>
                 <label class="simple-seal-file-field">印章圖檔
@@ -2018,6 +2072,13 @@
                 <button class="secondary-button" id="companySealReloadBtn" type="button">重新整理</button>
               </div>
             </div>
+            <form class="compact-form company-seal-policy" id="companySealPolicyForm" novalidate>
+              <label>印章分類<select id="companySealOwnerKind" required aria-describedby="companySealPolicyStatus">
+                <option value="unclassified">尚未分類</option><option value="company">公司</option><option value="institution">機構</option>
+              </select></label>
+              <button class="secondary-button" id="companySealPolicySaveBtn" type="submit">儲存分類</button>
+              <span class="field-hint" id="companySealPolicyStatus" role="status">只設定印章款式，不變更會計系統資料。</span>
+            </form>
             <section class="company-seal-readiness" id="companySealReadinessPanel">
               <div>
                 <p class="eyebrow">印章檔案完整性</p>
@@ -2068,19 +2129,21 @@
                 <div class="segmented-control" role="group" aria-label="常用印章類型">
                   <button class="segment" type="button" data-company-seal-preset="establishment_seal">公司章</button>
                   <button class="segment" type="button" data-company-seal-preset="general_seal">便章</button>
-                  <button class="segment" type="button" data-company-seal-preset="bank_seal">銀行印鑑章</button>
+                  <button class="segment" type="button" data-company-seal-preset="official_seal">圖記章</button>
+                  <button class="segment" type="button" data-company-seal-preset="continuous_seal">連續章</button>
                 </div>
-                <form class="compact-form" id="companySealCreateForm">
+                <form class="compact-form" id="companySealCreateForm" novalidate>
                   <label>印章名稱<input id="companySealNameInput" value="公司便章－大章" /></label>
                   <label>印章類型<select id="companySealCategorySelect"></select></label>
-                  <label>大章/小章<select id="companySealSizeSelect"></select></label>
+                  <label id="companySealSizeLabel">大章/小章<select id="companySealSizeSelect"></select></label>
                   <label>用途說明<input id="companySealPurposeInput" value="一般公文、合約與行政文件用印" /></label>
                   <button class="secondary-button" id="companySealCreateBtn" type="button">新增印章</button>
                 </form>
-                <form class="compact-form" id="companySealUploadForm">
+                <form class="compact-form" id="companySealUploadForm" novalidate>
                   <label>新版印章檔<input id="companySealFileInput" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" /><span class="field-hint">僅接受 PNG、JPEG、WebP，單檔上限 3 MB。</span></label>
                   <div class="inline-fields seal-calibration-fields">
-                    <label>印章實際尺寸（mm）<input id="companySealRenderSizeMmInput" type="number" min="25" max="35" step="0.01" value="30.00" inputmode="decimal" aria-describedby="companySealCalibrationHint" required /><span class="field-hint">請直接輸入實際量測邊長；寬、高會自動同步。</span></label>
+                    <label>實際寬度（mm）<input id="companySealRenderSizeMmInput" type="number" min="25" max="35" step="0.01" value="30.00" inputmode="decimal" aria-describedby="companySealCalibrationHint" required /><span class="field-hint">依實際量測填寫。</span></label>
+                    <label id="companySealRenderHeightLabel" hidden>實際高度（mm）<input id="companySealRenderHeightMmInput" type="number" min="1" max="200" step="0.01" inputmode="decimal" aria-describedby="companySealCalibrationHint" /><span class="field-hint">圖檔必須符合此寬高比例。</span></label>
                   </div>
                   <p class="field-hint seal-calibration-hint" id="companySealCalibrationHint">大章可直接輸入 25–35 mm；系統會鎖定為正方形，不會讓印章變形。</p>
                   <button class="primary-button" id="companySealUploadBtn" type="button">上傳新版</button>
@@ -2093,12 +2156,12 @@
                   <h3>用印申請</h3>
                   <span class="status-pill" id="sealUsageRequestStatus">待填寫</span>
                 </div>
-                <form class="compact-form" id="sealUsageRequestForm">
+                <form class="compact-form" id="sealUsageRequestForm" novalidate>
                   <label>公司<select id="sealUsageCompanySelect"></select></label>
                   <label>文件<select id="sealUsageDocumentSelect"></select></label>
                   <label>印章<select id="sealUsageSealSelect"></select></label>
                   <label>用印類型<select id="sealUsageTypeSelect"></select></label>
-                  <label>用印原因<textarea id="sealUsageReasonInput" rows="3">公文或合約核准後用印。</textarea></label>
+                  <label>用印原因<textarea class="resize-none" id="sealUsageReasonInput" rows="3">公文或合約核准後用印。</textarea></label>
                   <div class="inline-fields">
                     <label>頁碼<input id="sealUsagePageInput" type="number" min="1" value="1" /></label>
                     <label>X<input id="sealUsageXInput" type="number" value="420" /></label>
@@ -2123,7 +2186,7 @@
                   <h3>用印簽核</h3>
                   <span class="status-pill" id="sealUsageApprovalStatus">0 件</span>
                 </div>
-                <label>簽核意見<textarea id="sealUsageApprovalComment" rows="3">核准用印。</textarea></label>
+                <label>簽核意見<textarea class="resize-none" id="sealUsageApprovalComment" rows="3">核准用印。</textarea></label>
                 <div class="timeline" id="sealUsageApprovalList"></div>
               </section>
 
@@ -2132,7 +2195,7 @@
                   <h3>文件套印</h3>
                   <span class="status-pill" id="sealUsageStampStatus">需先核准</span>
                 </div>
-                <form class="compact-form" id="sealUsageStampForm">
+                <form class="compact-form" id="sealUsageStampForm" novalidate>
                   <label>核准申請<select id="sealStampRequestSelect"></select></label>
                   <button class="primary-button" id="sealUsageStampBtn" type="button">執行用印</button>
                 </form>
@@ -2182,7 +2245,7 @@
                   <h3>印章類別</h3>
                   <button class="text-button" id="addSealTypeBtn" type="button">新增類別</button>
                 </div>
-                <form class="compact-form" id="sealTypeRegistryForm">
+                <form class="compact-form" id="sealTypeRegistryForm" novalidate>
                   <label>類別名稱<select id="sealTypeNameInput"><option>一般章</option><option>公司設立章</option><option>銀行章</option><option>圖記章</option></select></label>
                   <label>使用範圍<input id="sealTypeScopeInput" value="日常公文、一般函稿" /></label>
                 </form>
@@ -2238,7 +2301,7 @@
                 <button class="text-button" id="sealAddBtn" type="button">新增</button>
               </div>
               <p class="seal-custodian-notice" data-seal-custodian-notice hidden>僅執行長／行政部門主任可變更。</p>
-              <form class="compact-form" id="sealForm">
+              <form class="compact-form" id="sealForm" novalidate>
                 <label>印鑑名稱<input id="sealNameInput" value="歲悅長照公司章" /></label>
                 <label>所屬公司<select id="sealCompanyInput"></select></label>
                 <label>所屬部門<select id="sealDepartmentInput"></select></label>
@@ -2272,7 +2335,7 @@
                 <h3>PDF 套版與章戳座標</h3>
                 <button class="text-button" id="sealVerifyHashBtn" type="button">驗證雜湊</button>
               </div>
-              <form class="compact-form" id="sealPdfForm">
+              <form class="compact-form" id="sealPdfForm" novalidate>
                 <label>套版<select id="pdfTemplateSelect"><option>歲悅正式函</option><option>開會通知單</option><option>補正資料函</option></select></label>
                 <div class="inline-fields">
                   <label>公司章 X<input id="companySealX" type="number" value="420" /></label>
@@ -2422,10 +2485,10 @@
                 <h3>提醒設定</h3>
                 <button class="text-button" id="scheduleReminderBtn" type="button">排程提醒</button>
               </div>
-              <form class="compact-form" id="trackingReminderForm">
+              <form class="compact-form" id="trackingReminderForm" novalidate>
                 <label>通知對象<select id="trackingNotifyTarget"><option>業務助理</option><option>行政部主任</option><option>總務</option><option>行政部主任</option></select></label>
                 <label>提醒方式<select id="trackingNotifyMethod"><option>系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
-                <label>提醒內容<textarea id="trackingMessage" rows="3">請於期限前完成交換結果確認與補正處理。</textarea></label>
+                <label>提醒內容<textarea class="resize-none" id="trackingMessage" rows="3">請於期限前完成交換結果確認與補正處理。</textarea></label>
               </form>
             </section>
 
@@ -2434,10 +2497,10 @@
                 <h3>退回補正</h3>
                 <span class="status-pill">Correction</span>
               </div>
-              <form class="compact-form" id="correctionForm">
+              <form class="compact-form" id="correctionForm" novalidate>
                 <label>補正原因<select id="correctionReason"><option>附件缺漏</option><option>文號格式錯誤</option><option>受文者機關代碼錯誤</option><option>主旨或說明需修正</option></select></label>
                 <label>補正期限<input id="correctionDueDate" type="date" value="2026-05-29" /></label>
-                <label>補正說明<textarea id="correctionNote" rows="3">請業務助理修正後重新送行政部主任清稿。</textarea></label>
+                <label>補正說明<textarea class="resize-none" id="correctionNote" rows="3">請業務助理修正後重新送行政部主任清稿。</textarea></label>
                 <button class="primary-button" type="submit">建立退回補正</button>
               </form>
             </section>
@@ -2506,7 +2569,7 @@
                 <h3>交換中心連線</h3>
                 <span class="status-pill">Connection</span>
               </div>
-              <form class="compact-form" id="centerForm">
+              <form class="compact-form" id="centerForm" novalidate>
                 <label>交換中心 URL<input id="exchangeCenterUrl" value="https://jagent.example.gov.tw/api" /></label>
                 <label>所屬交換中心<select id="exchangeCenterName"><option>G2B2C 統合交換中心</option><option>北區交換中心</option><option>測試交換中心</option></select></label>
                 <div class="form-actions">
@@ -2524,7 +2587,7 @@
                 <h3>地址簿查詢</h3>
                 <button class="text-button" id="clearAddressResultsBtn" type="button">清除結果</button>
               </div>
-              <form class="compact-form" id="addressSearchForm">
+              <form class="compact-form" id="addressSearchForm" novalidate>
                 <label>機關名稱或代碼<input id="addressQuery" value="臺北市政府社會局" /></label>
                 <button class="primary-button" type="submit">查詢地址簿</button>
               </form>
@@ -2691,7 +2754,7 @@
                 <h3>憑證卡與 Token</h3>
                 <span class="status-pill" id="securitySessionStatus">Session Ready</span>
               </div>
-              <form class="compact-form" id="securityCertForm">
+              <form class="compact-form" id="securityCertForm" novalidate>
                 <label>憑證卡序號<input id="securityCertSerial" value="SYC-EDOC-2026-0001" /></label>
                 <label>持卡人<select id="securityCertOwner"><option>總務</option><option>行政部主任</option><option>行政部主任</option></select></label>
                 <label>Token 有效時間<select id="securityTokenTtl"><option value="480">8 小時</option><option value="240">4 小時</option><option value="60">1 小時</option></select></label>
@@ -2708,7 +2771,7 @@
                 <h3>RBAC 權限測試</h3>
                 <span class="status-pill">Role Based</span>
               </div>
-              <form class="compact-form" id="securityRbacForm">
+              <form class="compact-form" id="securityRbacForm" novalidate>
                 <label>角色<select id="securityRoleSelect"><option>總務</option><option>業務助理</option><option>行政部主任</option><option>行政部主任</option><option>主任</option></select></label>
                 <label>功能權限<select id="securityActionSelect"><option value="send_dispatch">送交 jAgent</option><option value="manage_token">管理 Token</option><option value="manage_roles">管理角色</option><option value="view_audit">查看稽核</option><option value="verify_hash">驗證雜湊</option></select></label>
                 <button class="primary-button" type="submit">檢查權限</button>
@@ -2723,7 +2786,7 @@
                 <h3>IP / 裝置限制</h3>
                 <button class="text-button" id="securityAddDeviceBtn" type="button">新增裝置</button>
               </div>
-              <form class="compact-form" id="securityDeviceForm">
+              <form class="compact-form" id="securityDeviceForm" novalidate>
                 <label>允許 IP<input id="securityIpInput" value="203.0.113.18" /></label>
                 <label>裝置名稱<input id="securityDeviceName" value="總務辦公室 Mac" /></label>
                 <label>裝置指紋<input id="securityFingerprint" value="FP-SYC-EDOC-A1F9" /></label>
@@ -2850,7 +2913,7 @@
                 <h3>檔案政策</h3>
                 <button class="text-button" id="filePolicySaveBtn" type="button">儲存政策</button>
               </div>
-              <form class="compact-form" id="fileSecurityPolicyForm">
+              <form class="compact-form" id="fileSecurityPolicyForm" novalidate>
                 <label>單檔大小上限 MB<input id="fileMaxSize" type="number" value="50" /></label>
                 <label>允許副檔名<input id="fileAllowedTypes" value="pdf,xml,xlsx,docx,p7m" /></label>
                 <label>敏感資料遮罩<select id="fileMaskPolicy"><option>身分證 / 電話 / Email</option><option>身分證 / 電話 / Email / 地址</option><option>全部個資欄位</option></select></label>
@@ -2998,7 +3061,7 @@
                 <h3>IP 限制</h3>
                 <button class="text-button" id="accountAddIpBtn" type="button">新增限制</button>
               </div>
-              <form class="compact-form" id="accountIpForm">
+              <form class="compact-form" id="accountIpForm" novalidate>
                 <label>允許 IP / CIDR<input id="accountIpInput" value="203.0.113.0/24" /></label>
                 <label>用途<input id="accountIpPurpose" value="歲悅辦公室與 VPN" /></label>
               </form>
@@ -3500,7 +3563,7 @@
                 <h3>新增 / 調整排程</h3>
                 <button class="text-button" id="jobAddBtn" type="button">新增任務</button>
               </div>
-              <form class="compact-form" id="jobForm">
+              <form class="compact-form" id="jobForm" novalidate>
                 <label>任務名稱<input id="jobNameInput" value="自訂交換狀態同步" /></label>
                 <label>任務類型<select id="jobTypeInput"><option value="exchangeSync">交換狀態同步</option><option value="pullInbound">每日收文拉取</option><option value="nextDayCheck">發文翌日查核</option><option value="tokenCheck">Token 到期檢查</option><option value="overdueReminder">逾期稽催</option><option value="contractRenewalCheck">合約到期與續約提醒</option><option value="archiveSeal">歸檔封存</option><option value="reportGenerate">報表產生</option></select></label>
                 <label>排程週期<select id="jobScheduleInput"><option>每 15 分鐘</option><option>每小時</option><option>每日 08:30</option><option>每日 09:00</option><option>每日 18:00</option></select></label>
@@ -3608,7 +3671,7 @@
                 <h3>新增資料</h3>
                 <button class="text-button" id="databaseAddBtn" type="button">新增</button>
               </div>
-              <form class="compact-form" id="databaseForm">
+              <form class="compact-form" id="databaseForm" novalidate>
                 <label>資料表<select id="databaseInsertTable"><option value="documents">公文主檔</option><option value="contracts">合約主檔</option><option value="contractApprovals">合約簽核</option><option value="recipients">受文者</option><option value="attachments">附件</option><option value="exchangeTasks">交換任務</option><option value="exchangeEvents">交換事件</option><option value="auditLogs">audit log</option></select></label>
                 <label>主鍵 / 編號<input id="databaseInsertId" value="DOC-MANUAL-001" /></label>
                 <label>名稱 / 摘要<input id="databaseInsertTitle" value="手動新增資料" /></label>
@@ -3748,7 +3811,7 @@
                 <h3>營運 SOP</h3>
                 <button class="text-button" id="complianceRunSopBtn" type="button">執行選定 SOP</button>
               </div>
-              <form class="compact-form" id="complianceSopForm">
+              <form class="compact-form" id="complianceSopForm" novalidate>
                 <label>SOP 類型<select id="complianceSopSelect"><option>每日收發檢查</option><option>交換失敗處理</option><option>資安事件通報</option><option>備份復原演練</option><option>季檢稽核</option></select></label>
                 <label>執行人<select id="complianceOwnerSelect"><option>總務</option><option>行政部主任</option><option>行政部主任</option><option>主任</option></select></label>
               </form>
@@ -3887,7 +3950,7 @@
                 <h3>錯誤碼查詢</h3>
                 <button class="text-button" id="opsLookupErrorBtn" type="button">查詢</button>
               </div>
-              <form class="compact-form" id="opsErrorForm">
+              <form class="compact-form" id="opsErrorForm" novalidate>
                 <label>錯誤碼<input id="opsErrorCodeInput" value="JAGENT-401" /></label>
               </form>
               <div id="opsErrorDetail"></div>
@@ -3900,7 +3963,7 @@
                 <h3>系統參數版控</h3>
                 <button class="text-button" id="opsCommitConfigBtn" type="button">建立版本</button>
               </div>
-              <form class="compact-form" id="opsConfigForm">
+              <form class="compact-form" id="opsConfigForm" novalidate>
                 <label>版本說明<input id="opsConfigNoteInput" value="調整正式交換 API 與憑證政策" /></label>
                 <label>環境<select id="opsEnvSelect"><option>測試環境</option><option>正式環境</option></select></label>
               </form>
@@ -4004,8 +4067,8 @@
                 </div>
                 <button class="text-button" id="settingsAddDocTypeBtn" type="button">新增 / 更新</button>
               </div>
-              <form class="compact-form" id="settingsDocTypeForm">
-                <label>文件類型<input id="settingsDocTypeName" value="函" /></label>
+              <form class="compact-form" id="settingsDocTypeForm" novalidate>
+                <label>文件類型<input id="settingsDocTypeName" value="函" required /></label>
                 <label>分類<select id="settingsDocTypeCategory"><option>公文</option><option>合約</option><option>用印</option><option>內部文件</option></select></label>
                 <label>預設流程<select id="settingsDocTypeWorkflow"></select></label>
                 <label>預設格式<select id="settingsDocTypeFormat"></select></label>
@@ -4023,11 +4086,11 @@
                 </div>
                 <button class="text-button" id="settingsAddWorkflowTemplateBtn" type="button">新增 / 更新</button>
               </div>
-              <form class="compact-form" id="settingsWorkflowTemplateForm">
+              <form class="compact-form" id="settingsWorkflowTemplateForm" novalidate>
                 <label>模板代碼<input id="settingsWorkflowTemplateKey" value="customA" /></label>
                 <label>模板名稱<input id="settingsWorkflowTemplateName" value="自訂行政用印流程" /></label>
                 <label>路由<select id="settingsWorkflowTemplateRoute"><option>A</option><option>B</option><option>C</option><option>D</option></select></label>
-                <label>節點清單<textarea id="settingsWorkflowTemplateSteps" rows="4">申請人送出
+                <label>節點清單<textarea class="resize-none" id="settingsWorkflowTemplateSteps" rows="4">申請人送出
 申請人主管審核
 行政部門主任核定
 總務用印登錄
@@ -4047,7 +4110,7 @@
                   <button class="text-button" id="settingsRevokePermissionBtn" type="button">移除</button>
                 </div>
               </div>
-              <form class="compact-form" id="settingsPermissionMatrixForm">
+              <form class="compact-form" id="settingsPermissionMatrixForm" novalidate>
                 <label>角色<select id="settingsPermissionRoleSelect"></select></label>
                 <label>權限<select id="settingsPermissionCodeSelect"></select></label>
               </form>
@@ -4065,7 +4128,7 @@
                   <button class="text-button" id="settingsApplyFormatTemplateBtn" type="button">套用</button>
                 </div>
               </div>
-              <form class="compact-form" id="settingsFormatTemplateForm">
+              <form class="compact-form" id="settingsFormatTemplateForm" novalidate>
                 <label>模板名稱<input id="settingsFormatTemplateName" value="政府機關函稿" /></label>
                 <label>適用文別<select id="settingsFormatTemplateDocType"></select></label>
                 <label>速別<select id="settingsFormatTemplatePriority"><option>普通件</option><option>速件</option><option>最速件</option></select></label>
@@ -4094,9 +4157,9 @@
                 </div>
                 <form class="compact-form" id="notificationForm" novalidate>
                   <label>通知類型<select id="notificationType"><option>收文</option><option>待清稿</option><option>交換失敗</option><option>Token 到期</option><option>逾期查核</option></select></label>
-                  <label>收件人 Email<input id="notificationTarget" type="email" autocomplete="off" placeholder="請填寫正式帳號 Email" /></label>
+                  <label>收件人 Email<input id="notificationTarget" type="email" autocomplete="off" placeholder="請填寫正式帳號 Email" required /></label>
                   <label>通知通道<select id="notificationChannel"><option>系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
-                  <label>通知內容<textarea id="notificationBody" rows="3">請確認公文收發電子用印系統待辦事項。</textarea></label>
+                  <label>通知內容<textarea class="resize-none" id="notificationBody" rows="3">請確認公文收發電子用印系統待辦事項。</textarea></label>
                 </form>
               </section>
 
@@ -4105,7 +4168,7 @@
                   <h3>派送通道</h3>
                   <button class="text-button" id="notificationTestChannelsBtn" type="button">測試通道</button>
                 </div>
-                <form class="compact-form" id="notificationGatewayForm">
+                <form class="compact-form" id="notificationGatewayForm" novalidate>
                   <label>Email SMTP / API<input id="notificationEmailApi" value="讀取後端 SMTP 環境設定" /></label>
                   <label>Line Webhook<input id="notificationLineWebhook" value="讀取後端 LINE_WEBHOOK_URL" /></label>
                   <div class="inline-fields">
@@ -4114,7 +4177,7 @@
                   </div>
                   <label>測試通道<select id="notificationTestChannel"><option>Email + Line + 系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option><option>系統通知</option></select></label>
                   <label>測試收件 Email<input id="notificationTestEmail" value="records@suiyuecare.com" /></label>
-                  <label>測試訊息<textarea id="notificationTestBody" rows="2">通知通道實測：請確認 Email、LINE 與站內通知派送紀錄。</textarea></label>
+                  <label>測試訊息<textarea class="resize-none" id="notificationTestBody" rows="2">通知通道實測：請確認 Email、LINE 與站內通知派送紀錄。</textarea></label>
                   <label>站內通知保留<select id="notificationInboxRetention"><option>90 天</option><option>180 天</option><option>永久保存</option></select></label>
                   <div class="form-actions">
                     <button class="primary-button" id="notificationSaveGatewayBtn" type="button">儲存通道</button>
@@ -4131,7 +4194,7 @@
                   <h3>提醒規則</h3>
                   <button class="text-button" id="notificationApplyRulesBtn" type="button">套用規則</button>
                 </div>
-                <form class="compact-form" id="notificationScheduleForm">
+                <form class="compact-form" id="notificationScheduleForm" novalidate>
                   <label>逾期排程<select id="notificationOverdueSchedule"><option>每日 09:00</option><option>每 4 小時</option><option>每小時</option></select></label>
                   <label>Token 到期提醒<select id="notificationTokenSchedule"><option>到期前 30 分鐘</option><option>到期前 60 分鐘</option><option>到期前 2 小時</option></select></label>
                   <label>交換失敗警示<select id="notificationFailureChannel"><option>Email + Line + 系統通知</option><option>Email + 系統通知</option><option>Line 工作群組</option></select></label>
@@ -4147,7 +4210,7 @@
                 <h3>防火牆規則</h3>
                 <button class="text-button" id="settingsAddFirewallBtn" type="button">新增規則</button>
               </div>
-              <form class="compact-form" id="settingsFirewallForm">
+              <form class="compact-form" id="settingsFirewallForm" novalidate>
                 <label>允許 IP / CIDR<input id="settingsFirewallIp" value="203.0.113.0/24" /></label>
                 <label>用途<input id="settingsFirewallPurpose" value="歲悅辦公室固定 IP" /></label>
               </form>
@@ -4159,7 +4222,7 @@
                 <h3>角色設定</h3>
                 <button class="text-button" id="settingsAddRoleBtn" type="button">新增角色</button>
               </div>
-              <form class="compact-form" id="settingsRoleForm">
+              <form class="compact-form" id="settingsRoleForm" novalidate>
                 <label>角色名稱<input id="settingsRoleName" value="稽核助理" /></label>
                 <label>角色說明<input id="settingsRoleNoteInput" value="可查看交換紀錄與報表，不可送交 jAgent" /></label>
                 <label>預設權限<select id="settingsRolePermission"><option value="view_audit">查看稽核</option><option value="export_audit">匯出稽核</option><option value="verify_hash">驗證雜湊</option><option value="query_status">查詢狀態</option></select></label>
@@ -4265,7 +4328,7 @@
           </div>
           <button class="secondary-button" id="officialDecisionModalCloseBtn" type="button">取消</button>
         </div>
-        <form id="officialDecisionForm" class="official-decision-form">
+        <form id="officialDecisionForm" class="official-decision-form" novalidate>
           <section class="official-decision-summary" id="officialDecisionSummary"></section>
           <section class="official-decision-evidence" id="officialDecisionEvidence" aria-labelledby="officialDecisionEvidenceTitle">
             <div>
@@ -4279,12 +4342,12 @@
           </section>
           <section id="officialApprovalReviewFields" class="official-decision-section">
             <h4>送出核准前確認</h4>
-            <label><span id="officialApprovalCommentLabel">核准意見</span><textarea id="officialApprovalComment" rows="3" minlength="2" maxlength="1000" required placeholder="請填寫核准判斷或注意事項（至少 2 個字）"></textarea></label>
+            <label><span id="officialApprovalCommentLabel">核准意見</span><textarea class="resize-none" id="officialApprovalComment" rows="3" minlength="2" maxlength="1000" required placeholder="請填寫核准判斷或注意事項（至少 2 個字）"></textarea></label>
           </section>
           <section id="officialWorkflowActionFields" class="official-decision-section" hidden>
             <p id="officialWorkflowActionExplanation"></p>
             <label id="officialAddSignPersonLabel" hidden>加簽人員<select id="officialAddSignPerson" required></select></label>
-            <label id="officialWithdrawCommentLabel" hidden>抽單原因<textarea id="officialWithdrawComment" rows="3" minlength="6" maxlength="1000" placeholder="請說明抽單原因（至少 6 個字）"></textarea></label>
+            <label id="officialWithdrawCommentLabel" hidden>抽單原因<textarea class="resize-none" id="officialWithdrawComment" rows="3" minlength="6" maxlength="1000" placeholder="請說明抽單原因（至少 6 個字）"></textarea></label>
           </section>
           <section id="officialRejectionFields" class="official-decision-section" hidden>
             <h4>退回補正內容</h4>
@@ -4306,7 +4369,7 @@
               <label><input type="checkbox" name="officialMissingItem" value="applicant_information" />申請資料</label>
             </fieldset>
             <label>補正期限<input id="officialCorrectionDueDate" type="date" /></label>
-            <label>具體補正內容<textarea id="officialRejectComment" rows="4" minlength="6" maxlength="1000" required placeholder="請明確說明需修改的位置與完成條件"></textarea></label>
+            <label>具體補正內容<textarea class="resize-none" id="officialRejectComment" rows="4" minlength="6" maxlength="1000" required placeholder="請明確說明需修改的位置與完成條件"></textarea></label>
           </section>
           <p class="official-decision-error" id="officialDecisionError" role="alert" hidden></p>
           <div class="form-actions">
@@ -4318,9 +4381,24 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div class="modal-backdrop hidden" id="officialHandoverModal" role="dialog" aria-modal="true" aria-labelledby="officialHandoverModalTitle" tabindex="-1">
+      <section class="contract-modal-card official-decision-modal-card">
+        <div class="contract-modal-header"><h3 id="officialHandoverModalTitle">交接確認</h3><button class="secondary-button" id="officialHandoverModalCancel" type="button">取消</button></div>
+        <form id="officialHandoverModalForm" class="official-decision-form" novalidate>
+          <div id="officialHandoverModalSummary" class="official-decision-summary"></div>
+          <label id="officialHandoverRejectLabel" hidden>不採用原因<textarea class="resize-none" id="officialHandoverRejectReason" rows="3" maxlength="2000" aria-describedby="officialHandoverModalError"></textarea></label>
+          <label class="decision-check"><input id="officialHandoverAcknowledgement" type="checkbox" aria-describedby="officialHandoverModalError" /><span id="officialHandoverAcknowledgementText">我確認僅交接待辦責任，不代表文件已簽核通過。</span></label>
+          <p id="officialHandoverModalError" class="official-decision-error" role="alert" hidden></p>
+          <div class="form-actions"><button class="primary-button" id="officialHandoverModalSubmit" type="submit">確認交接</button></div>
+        </form>
+      </section>
+    </div>
     <script type="module" src="pdfjs-bootstrap.mjs?v=20260928-library-recovery-r1"></script>
-    <script src="editor-seam.js?v=20260911-r1"></script>
+    <script src="editor-seam.js?v=20261014-seam-v2"></script>
     <script src="editor-a4.js?v=20260911-r1"></script>
-    <script src="app.js?v=20260928-compose-submit-r1"></script>
+    <script src="official-handover-ui.js?v=20261011-handover-r1"></script>
+    <script src="app.js?v=20261014-editor-workspace-r1"></script>
+    <script src="vendor/tom-select/tom-select.complete.min.js?v=2.6.2"></script>
+    <script src="workspace-select.js?v=20261014-r1"></script>
   </body>
 </html>

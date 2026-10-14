@@ -225,7 +225,7 @@ def main():
             STAGE = f"verify_committed:{label}"
             committed = backend.supabase_get("official_document_editor_assets", asset_id)
             committed_job = backend.supabase_get("official_document_editor_storage_jobs", job["id"])
-            expected_scan_status = "not_scanned" if kind in {"source_pdf", "import_pdf"} else "passed"
+            expected_scan_status = "not_scanned" if kind in {"source_pdf", "import_pdf", "image"} else "passed"
             require(committed["upload_status"] == "finalized" and committed["preflight_status"] == "passed"
                     and committed["scan_status"] == expected_scan_status and committed["sha256"] == digest
                     and committed["storage_path"] == job["final_path"] and committed_job["status"] == "committed"

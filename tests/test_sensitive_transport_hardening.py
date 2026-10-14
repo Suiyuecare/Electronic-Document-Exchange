@@ -47,10 +47,22 @@ class _Response:
 
 class SensitiveTransportHardeningTests(unittest.TestCase):
     POSTGREST_PT409_CONFLICTS = {
+        "handover_operation_conflict",
+        "handover_pending_request_exists",
+        "handover_request_already_resolved",
+        "handover_version_conflict",
+        "handover_assignment_conflict",
+        "handover_workflow_irreversible",
+        "handover_followup_lineage_invalid",
+        "handover_original_not_correctable",
+        "handover_current_step_conflict",
+        "handover_pending_assignment_missing",
+        "handover_corrupt_active_generation",
         "compose_draft_revision_conflict",
         "compose_content_revision_conflict",
         "editor_conflict_copy_request_conflict",
         "editor_locked_after_submit",
+        "editor_preflight_not_completed",
         "finance_member_sync_event_id_conflict",
         "finance_organization_revision_conflict",
         "editor_upload_new_intent_required",
@@ -212,6 +224,11 @@ class SensitiveTransportHardeningTests(unittest.TestCase):
     def test_postgrest_pt409_unknown_or_spoofed_message_stays_opaque(self):
         cases = (
             (409, "PT409", f"unknown_conflict:{SECRET_TEXT}"),
+            (409, "PT409", f"handover_operation_conflict:{SECRET_TEXT}"),
+            (409, "PT409", "handover_unknown_conflict"),
+            (409, "PT409", "handover_operation_conflict "),
+            (400, "PT409", "handover_operation_conflict"),
+            (409, "23505", "handover_operation_conflict"),
             (409, "PGRST116", "editor_revision_conflict"),
             (400, "PT409", "editor_revision_conflict"),
             (409, "23505", f"unknown_constraint:{SECRET_TEXT}"),

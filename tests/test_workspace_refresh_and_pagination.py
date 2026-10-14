@@ -41,14 +41,14 @@ vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 """)
 
     def test_pagination_server_search_dedup_errors_and_stale_response_guard(self):
-        self.run_js(["loadOfficialWorkflow", "officialWorkflowEndpoint", "loadApprovalProgressFromBackend"], r"""
+        self.run_js(["loadOfficialWorkflow", "officialWorkflowEndpoint", "loadApprovalProgressFromBackend", "normalizeApprovalProgressFilter"], r"""
 const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {resolve,reject,promise}};
-const c={console,URLSearchParams,Map,Array,JSON,Promise,scope:'A',officialWorkflowScope:'all',officialWorkflowSearchTerm:'',officialWorkflowStatusFilter:'',approvalLogSearchTerm:'old document',approvalLogFilter:'my_pending',
+const c={console,URLSearchParams,Map,Array,JSON,Promise,scope:'A',officialWorkflowScope:'all',officialWorkflowSearchTerm:'',officialWorkflowStatusFilter:'',approvalLogSearchTerm:'old document',approvalLogFilter:'pending',approvalTaskFilter:'',document:{querySelector:()=>null},
  officialWorkflowItems:[],selectedOfficialDocumentId:'',officialWorkflowPage:{generation:0,scope:'',query:null,cursor:'',hasMore:false,loading:false,error:false},officialDocumentDetailReady:new Set(),officialDocumentDetailRequests:new Map(),calls:[],pending:[],toasts:[],
  frontendSessionScope:()=>c.scope,renderOfficialWorkflowPagination(){},renderOfficialWorkflow(){},renderApprovalLog(){},renderElectronicSealWorkQueue(){},refreshDashboardWorkEntryPoints(){},showToast:s=>c.toasts.push(s),backendRequest:path=>{const d=defer();c.calls.push(path);c.pending.push(d);return d.promise}};
 vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 (async()=>{
- const first=c.loadApprovalProgressFromBackend();assert.match(c.calls[0],/page_size=50/);assert.match(c.calls[0],/search=old\+document/);assert.match(c.calls[0],/view=my_pending/);
+ const first=c.loadApprovalProgressFromBackend();assert.match(c.calls[0],/page_size=50/);assert.match(c.calls[0],/search=old\+document/);assert.match(c.calls[0],/view=pending/);
  c.pending[0].resolve({items:[{id:'older-than-1000'}],has_more:true,next_cursor:'opaque:a+b'});await first;
  assert.equal(c.officialWorkflowItems[0].id,'older-than-1000');assert.equal(c.officialWorkflowPage.hasMore,true);
  const more=c.loadOfficialWorkflow('all',{...c.officialWorkflowPage.query,append:true});assert.match(c.calls[1],/cursor=opaque%3Aa%2Bb/);
@@ -89,10 +89,10 @@ vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 """)
 
     def test_details_cannot_inject_wrong_tab_and_correction_deadline_works(self):
-        self.run_js(["filteredApprovalLogRecords", "approvalRecordDueTimestamp"], r"""
-const own={task:{id:'old',title:'S',role:'R',status:'draft'},doc:{companyName:'SyntheticCo'},officialDocument:{current_status:'draft'},category:'my_pending'};
-const other={task:{id:'detail-injected',title:'S',role:'R',status:'closed'},doc:{companyName:'SyntheticCo'},officialDocument:{current_status:'closed'},category:'processed'};
-const c={console,Date,Number,approvalLogSearchTerm:'SyntheticCo',approvalLogFilter:'my_pending',approvalLogRecords:()=>[own,other],approvalProgressCategory:r=>r.category,approvalRecordIsOverdue:()=>false};
+        self.run_js(["filteredApprovalLogRecords", "approvalRecordDueTimestamp", "approvalRecordMatchesView", "normalizeApprovalProgressFilter"], r"""
+const own={task:{id:'old',title:'S',role:'R',status:'pending'},doc:{companyName:'SyntheticCo'},officialDocument:{current_status:'pending',can_act:true,approval_views:{pending:true}}};
+const other={task:{id:'detail-injected',title:'S',role:'R',status:'closed'},doc:{companyName:'SyntheticCo'},officialDocument:{current_status:'closed',approval_views:{pending:false}}};
+const c={console,Date,Number,approvalLogSearchTerm:'SyntheticCo',approvalLogFilter:'pending',approvalTaskFilter:'',document:{querySelector:()=>null},approvalLogRecords:()=>[own,other],approvalRecordIsOverdue:()=>false};
 vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 assert.deepEqual(c.filteredApprovalLogRecords().map(x=>x.task.id),['old']);
 assert.equal(c.approvalRecordDueTimestamp({officialDocument:{correction_due_at:'2026-09-20 12:00:00',correction_due_date:'2026-09-30'}}),Date.parse('2026-09-20T12:00:00'));
@@ -109,7 +109,7 @@ vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 
     def test_authorized_stamp_retry_remains_actionable_without_pending_approval(self):
         self.run_js(["officialDocumentNeedsUserAttention", "approvalProgressCategory", "approvalRecordIsOverdue", "approvalRecordDueTimestamp"], r"""
-const c={console,Date,authState:{user:{id:'synthetic-reviewer'}},officialDocumentIsApplicant:()=>false,officialDocumentPendingStepMatchesRole:()=>false};
+const c={console,Date,authState:{user:{id:'synthetic-reviewer'}},officialHandoverFeatureEnabled:()=>false,officialDocumentIsApplicant:()=>false,officialDocumentPendingStepMatchesRole:()=>false};
 vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 for(const status of ['stamping_failed','general_affairs_approved']) {
  const item={current_status:status,can_act:false,can_manage_dispatch:false,can_retry_stamp:true,applicant_id:'synthetic-other'};

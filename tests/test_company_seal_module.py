@@ -30,6 +30,7 @@ class CompanySealModuleTestCase(unittest.TestCase):
         backend.seed_auth(self.conn)
         backend.seed_persistent_registries(self.conn)
         backend.seed_company_seal_module(self.conn)
+        self.conn.execute("INSERT OR REPLACE INTO company_seal_policies (id,company_id,owner_kind,updated_by,created_at,updated_at) SELECT id,id,'company','synthetic-fixture',?,? FROM companies", (backend.now(), backend.now()))
         backend.seed_signing_certificates(self.conn)
         backend.seed_certificate_authorities(self.conn)
 

@@ -18,6 +18,7 @@ class EditorUploadPrerequisitesTest(unittest.TestCase):
 const events=[];let selection={documentCategory:'synthetic',approvalRouteCode:'A'},feature=true;
 const uploadedSealEditorRuntime={documentId:'',locked:false,reviewMode:'edited',uploading:false,dirtyGeneration:0,savedGeneration:0};
 const uploadedSealApplicationRuntime={editable:true};
+const uploadedSealApplicationHasUnsavedChanges=()=>false;
 const uploadedSealEditorState={pages:[],elements:[]};
 const nodes={'#uploadedSealPdfInput':{value:'file',files:[new File(['synthetic'],'synthetic.pdf',{type:'application/pdf'})],click(){events.push(['picker'])}},'#uploadedSealCompany':{value:'CO'},'#uploadedSealDepartment':{value:'DEPT'},'#uploadedSealApplicationFields':{hidden:true}};
 const document={querySelector:key=>nodes[key]||null};const window={confirm:()=>true};

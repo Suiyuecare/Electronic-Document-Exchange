@@ -70,6 +70,7 @@ class OverdueReminderTests(unittest.TestCase):
         self.start(mock.patch.object(backend, "supabase_patch", side_effect=patch))
         self.start(mock.patch.object(backend, "supabase_filter_rows", side_effect=rows))
         self.start(mock.patch.object(backend, "supabase_list", side_effect=lambda table, *args: rows(table)))
+        self.start(mock.patch.object(backend, "supabase_scan_rows", side_effect=lambda table: iter(sorted(rows(table), key=lambda row: row['id']))))
 
     def run_job(self, remote=False):
         result = backend.supabase_execute_job_logic({"job_type": "overdueReminder"}) if remote else backend.execute_job_logic(self.conn, {"job_type": "overdueReminder"})
@@ -258,7 +259,7 @@ class OverdueReminderTests(unittest.TestCase):
     def test_truncated_remote_scan_is_explicitly_blocked_not_false_complete(self):
         self.supabase_fixture()
         rows = [{"id": f"CLOSED-{index}", "status": "closed", "due_date": "2026-10-01"} for index in range(500)]
-        with mock.patch.object(backend, "supabase_list", side_effect=lambda table, *args: rows if table == "documents" else []):
+        with mock.patch.object(backend, "supabase_scan_rows", side_effect=RuntimeError("synthetic_scan_failure")):
             result = self.run_job(True)
         self.assertEqual(result["status"], "待處理")
         self.assertEqual(result["payload"]["errors"][0]["code"], "overdue_reminder_scan_incomplete")

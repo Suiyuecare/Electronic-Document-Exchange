@@ -80,9 +80,9 @@ Email／LINE 為選配，未設定或未驗證時保持 disabled/pending；站�
 
 公司與人員皆以 Finance 為唯一主檔。`EDOC_LAUNCH_COMPANY_MODE=finance_active` 會自動開放並同步 Finance 啟用公司；`EDOC_PDF_EDITOR_V2_COMPANY_MODE=finance_active` 讓同一批公司使用 V2，不必在新增公司後重改 Vercel。若發生資安事件或需要分批停用，可暫時切為 `manual_allowlist`，再以對應的 `*_COMPANY_IDS` 限制範圍。
 
-正式環境必須配置明確的 Finance 公司來源模式。圖片仍需可用且已核准的掃描 provider；來源 PDF／匯入 PDF 採下述結構預檢政策，不以病毒特徵掃描作為開啟 PDF 編輯畫布的前提。瀏覽器預檢與直傳完成後可先編輯，後端 finalize 與草稿保存於背景完成；同步完成前仍禁止送簽與切換案件，失敗時保留內容並提供重試。此背景同步不代表正式交換 provider 或一般週期任務已具備 durable queue。
+正式環境必須配置明確的 Finance 公司來源模式。電子用印編輯器的 PNG／JPEG 與來源 PDF／匯入 PDF 採下述結構預檢政策，不執行病毒特徵掃描；一般附件與印章登錄的掃描規則不變。瀏覽器驗證後可先編輯，直傳、後端 finalize 與草稿保存於背景完成；同步完成前仍禁止送簽與切換案件，失敗時保留內容並提供重試。此背景同步不代表正式交換 provider 或一般週期任務已具備 durable queue。
 
-編輯器使用自架、鎖版 PDF.js canvas＋SVG 編輯層。來源 PDF 與匯入 PDF 保留 private Storage 直傳、雜湊及結構預檢（檔案解析、加密、JavaScript、內嵌附件與頁面尺寸），不執行病毒特徵掃描；圖片仍須完成掃描。未掃描 PDF 會明確記錄為 `not_scanned`，不可描述為已掃毒或無病毒。送簽時鎖定 EditorState revision、manifest、prepared PDF 與每一枚印章版本。正式電子公文交換仍維持 Mock／停用，取得機關 jAgent／API／SDK／封包規格並完成測試與人工核准前不得切換正式 provider。
+編輯器使用自架、鎖版 PDF.js canvas＋SVG 編輯層。來源 PDF 與匯入 PDF 保留 private Storage 直傳、雜湊及結構預檢（檔案解析、加密、JavaScript、內嵌附件與頁面尺寸）；編輯器 PNG／JPEG 必須通過 MIME、解碼、大小、像素及雜湊檢查。未掃描檔案明確記錄為 `not_scanned`，不可描述為已掃毒或無病毒。送簽時鎖定 EditorState revision、manifest、prepared PDF 與每一枚印章版本。正式電子公文交換仍維持 Mock／停用，取得機關 jAgent／API／SDK／封包規格並完成測試與人工核准前不得切換正式 provider。
 
 正式部署手冊：[`docs/deployment-production.md`](docs/deployment-production.md)。
 正式環境檢查端點：

@@ -42,6 +42,7 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
     def test_compose_editor_repair_migration_is_required_for_readiness(self):
         self.assertIn("official_document_compose_drafts", backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES)
         self.assertIn("edoc_save_compose_draft", backend.EDOC_READINESS_REQUIRED_RPC_NAMES)
+        self.assertIn("edoc_workspace_drafts", backend.EDOC_READINESS_REQUIRED_RPC_NAMES)
         self.assertIn("edoc_copy_editor_conflict", backend.EDOC_READINESS_REQUIRED_RPC_NAMES)
         with self.production_runtime_config(), mock.patch.object(
             backend, "_readiness_http_json", return_value=[],

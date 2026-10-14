@@ -17,17 +17,18 @@ class ComposeMultiSealFrontendTest(unittest.TestCase):
 
     EXISTING_SETUP = '''
       const calls=[],composeRequestScope=()=>"A";let composeOfficialContentRevision=3;
-      const composeCompanyForOfficialApplication=()=>({id:"CO"}),activeUnit=()=>"fixture",officialComposeMetadata=()=>({}),officialSealHasCurrentFile=()=>true;
+      const composeCompanyForOfficialApplication=()=>({id:"CO"}),activeUnit=()=>"fixture",officialComposeMetadata=()=>({});
       const companySealFixedGeometry=seal=>({widthPt:seal.width,heightPt:seal.height,sealSizeType:seal.seal_size_type});
-      const seals=[{id:"L",seal_category:"general_seal",seal_size_type:"large_seal",width:99.21,height:99.21},{id:"S",seal_category:"establishment_seal",seal_size_type:"small_seal",width:56.69,height:56.69},{id:"N",seal_category:"bank_seal",seal_size_type:"large_seal",width:90,height:90}];
+      const seals=[{id:"L",seal_category:"general_seal",seal_size_type:"large_seal",width:99.21,height:99.21},{id:"S",seal_category:"establishment_seal",seal_size_type:"small_seal",width:56.69,height:56.69},{id:"N",seal_category:"establishment_seal",seal_size_type:"large_seal",width:90,height:90}];seals.forEach(seal=>Object.assign(seal,{company_id:'CO',owner_kind:'company',is_active:true,selectable:true,current_file:{id:'FILE-'+seal.id,usable:true,is_current:true}}));
       const existing=[{id:"POS-L",seal_id:"L",width:85.04,height:85.04,locked_seal_file_id:"FILE-L-OLD",locked_seal_sha256:"old-large-hash",locked_render_width_pt:85.04,locked_render_height_pt:85.04,locked_dimension_policy_version:"fixed-v1"}];
       const backendRequest=async(path,options)=>{calls.push({path,payload:options?JSON.parse(options.body):null});if(!options)return path.includes("/companies/")?seals:{stamp_request:{stamp_positions:existing}};return{id:"OD-SAVED",dispatch_no:"TEST",content_revision:4,stamp_request:{stamp_positions:JSON.parse(options.body).stamp_positions}}};
-      global.document={querySelector:()=>({files:[]})};global.window={confirm:()=>true};
+      global.document={querySelector:()=>({files:[]})};global.window={};
+      let confirmation=true;const requestWorkspaceConfirmation=async()=>confirmation;
       const data={outputMode:"physical",largeSealType:"一般章",smallSealType:"公司設立章",approvalFlowNodes:[],sealPlacements:{large:{page:1,x:60,y:70},small:{page:1,x:80,y:85}}};
     '''
 
     def test_existing_single_seal_addition_fetches_identity_and_preserves_old_calibrated_version(self):
-        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory"], self.EXISTING_SETUP, '''await createOfficialApplicationFromCompose({officialDocumentId:"OD-SAVED"},data,{submit:false});console.log(JSON.stringify(calls[calls.length-1].payload));''')
+        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory", "companySealSelectable", "companySealCategoryLabel", "officialSealHasCurrentFile"], self.EXISTING_SETUP, '''await createOfficialApplicationFromCompose({officialDocumentId:"OD-SAVED"},data,{submit:false});console.log(JSON.stringify(calls[calls.length-1].payload));''')
         positions = result["stamp_positions"]
         self.assertEqual(positions[0]["id"], "POS-L")
         self.assertEqual(positions[0]["locked_seal_file_id"], "FILE-L-OLD")
@@ -38,21 +39,21 @@ class ComposeMultiSealFrontendTest(unittest.TestCase):
 
     def test_removing_large_keeps_small_identity_even_when_order_changes(self):
         body = '''existing.push({id:"POS-S",seal_id:"S",width:56.69,height:56.69,locked_seal_file_id:"FILE-S",locked_seal_sha256:"small-hash",locked_render_width_pt:56.69,locked_render_height_pt:56.69,locked_dimension_policy_version:"fixed-v1"});data.largeSealType="無";await createOfficialApplicationFromCompose({officialDocumentId:"OD-SAVED",officialStampPositions:existing},data,{submit:false});console.log(JSON.stringify(calls[calls.length-1].payload));'''
-        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory"], self.EXISTING_SETUP, body)
+        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory", "companySealSelectable", "companySealCategoryLabel", "officialSealHasCurrentFile"], self.EXISTING_SETUP, body)
         self.assertEqual(result["seal_id"], "S")
         self.assertEqual(len(result["stamp_positions"]), 1)
         self.assertEqual(result["stamp_positions"][0]["id"], "POS-S")
         self.assertEqual(result["stamp_positions"][0]["order_index"], 1)
 
     def test_replacement_requires_explicit_confirmation_before_any_patch(self):
-        body = '''data.largeSealType="銀行印鑑章";data.smallSealType="無";window.confirm=()=>false;let error="";try{await createOfficialApplicationFromCompose({officialDocumentId:"OD-SAVED",officialStampPositions:existing},data,{submit:false})}catch(e){error=e.message}console.log(JSON.stringify({mutations:calls.filter(c=>c.payload).length,error}));'''
-        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory"], self.EXISTING_SETUP, body)
+        body = '''data.largeSealType="公司設立章";data.smallSealType="無";confirmation=false;let error="";try{await createOfficialApplicationFromCompose({officialDocumentId:"OD-SAVED",officialStampPositions:existing},data,{submit:false})}catch(e){error=e.message}console.log(JSON.stringify({mutations:calls.filter(c=>c.payload).length,error}));'''
+        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory", "companySealSelectable", "companySealCategoryLabel", "officialSealHasCurrentFile"], self.EXISTING_SETUP, body)
         self.assertEqual(result["mutations"], 0)
         self.assertIn("已取消印章變更", result["error"])
 
     def test_confirmed_replacement_carries_rebind_intent_without_old_identity(self):
-        body = '''data.largeSealType="銀行印鑑章";data.smallSealType="無";await createOfficialApplicationFromCompose({officialDocumentId:"OD-SAVED",officialStampPositions:existing},data,{submit:false});console.log(JSON.stringify(calls[calls.length-1].payload.stamp_positions));'''
-        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory"], self.EXISTING_SETUP, body)
+        body = '''data.largeSealType="公司設立章";data.smallSealType="無";await createOfficialApplicationFromCompose({officialDocumentId:"OD-SAVED",officialStampPositions:existing},data,{submit:false});console.log(JSON.stringify(calls[calls.length-1].payload.stamp_positions));'''
+        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory", "companySealSelectable", "companySealCategoryLabel", "officialSealHasCurrentFile"], self.EXISTING_SETUP, body)
         self.assertEqual(result[0]["seal_id"], "N")
         self.assertTrue(result[0]["rebind_current"])
         self.assertNotIn("id", result[0])
@@ -60,14 +61,14 @@ class ComposeMultiSealFrontendTest(unittest.TestCase):
         setup = '''
           const calls=[],composeRequestScope=()=>"A";let composeOfficialContentRevision=null;
           const composeCompanyForOfficialApplication=()=>({id:"CO"}),activeUnit=()=>"fixture",
-            ensureComposeDraftRequestId=()=>"OD-TEST",officialComposeMetadata=()=>({}),officialSealHasCurrentFile=()=>true;
+            ensureComposeDraftRequestId=()=>"OD-TEST",officialComposeMetadata=()=>({});
           const companySealFixedGeometry=seal=>({widthPt:seal.width,heightPt:seal.height,sealSizeType:seal.seal_size_type});
-          const seals=[{id:"L",seal_category:"general_seal",seal_size_type:"large_seal",width:85.04,height:85.04},{id:"S",seal_category:"establishment_seal",seal_size_type:"small_seal",width:56.69,height:56.69}];
+          const seals=[{id:"L",seal_category:"general_seal",seal_size_type:"large_seal",width:85.04,height:85.04},{id:"S",seal_category:"establishment_seal",seal_size_type:"small_seal",width:56.69,height:56.69}];seals.forEach(seal=>Object.assign(seal,{company_id:'CO',owner_kind:'company',is_active:true,selectable:true,current_file:{id:'FILE-'+seal.id,usable:true,is_current:true}}));
           const backendRequest=async(path,options)=>{calls.push({path,payload:options?JSON.parse(options.body):null});return options?{id:"OD-TEST",dispatch_no:"TEST",content_revision:1}:seals};
           global.document={querySelector:()=>({files:[]})};
           const data={outputMode:"physical",largeSealType:"一般章",smallSealType:"公司設立章",approvalFlowNodes:[],sealPlacements:{large:{page:1,x:60,y:70},small:{page:2,x:80,y:85}}};
         '''
-        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory"], setup, '''await createOfficialApplicationFromCompose({},data,{submit:false});console.log(JSON.stringify({calls}));''')
+        result = self.run_js(["createOfficialApplicationFromCompose", "composeSealCategory", "companySealSelectable", "companySealCategoryLabel", "officialSealHasCurrentFile"], setup, '''await createOfficialApplicationFromCompose({},data,{submit:false});console.log(JSON.stringify({calls}));''')
         self.assertEqual(len(result["calls"]), 2)
         payload = result["calls"][1]["payload"]
         self.assertEqual(payload["seal_id"], "L")

@@ -166,6 +166,41 @@ class OfficialListPaginationTest(unittest.TestCase):
 
 
 class SQLiteOfficialListPaginationTest(unittest.TestCase):
+    def test_approval_tabs_filter_1000_irrelevant_rows_before_bundle_hydration(self):
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        backend.register_sqlite_functions(conn)
+        conn.executescript(backend.SCHEMA)
+        conn.execute("INSERT INTO companies(id,name,created_at,updated_at) VALUES ('CO','Synthetic','x','x')")
+        docs = [(f"HISTORY-{n:04d}", "OTHER", "closed", "", "2026-10-14 12:00:00") for n in range(1000)]
+        docs += [
+            ("MINE", "ACTOR", "closed", "", "2026-01-01 12:00:00"),
+            ("REJECTED", "OTHER", "rejected", "", "2026-01-01 12:00:00"),
+            ("ACTED-LOG", "OTHER", "closed", "", "2026-01-01 12:00:00"),
+            ("ACTED-STEP", "OTHER", "closed", "", "2026-01-01 12:00:00"),
+            ("PENDING", "OTHER", "pending_applicant_manager", "applicant_manager", "2026-01-01 12:00:00"),
+        ]
+        conn.executemany("""INSERT INTO official_documents(id,company_id,source_type,title,applicant_id,current_status,current_step,created_at,updated_at)
+          VALUES (?,'CO','uploaded_pdf','Synthetic',?,?,?,?,'x')""", docs)
+        conn.execute("""INSERT INTO official_document_approval_logs(id,document_id,actor_id,action,created_at)
+          VALUES ('LOG','ACTED-LOG','ACTOR','return_previous','x')""")
+        conn.execute("""INSERT INTO official_document_approval_steps(id,document_id,step_order,step_key,step_name,approver_user_id,decision_actor_user_id,status,created_at,updated_at)
+          VALUES ('DECIDED','ACTED-STEP',1,'applicant_manager','Synthetic','OTHER','ACTOR','approved','x','x'),
+          ('PENDING-STEP','PENDING',1,'applicant_manager','Synthetic','ACTOR',NULL,'pending','x','x'),
+          ('ASSIGNED-ONLY','HISTORY-0999',1,'applicant_manager','Synthetic','ACTOR',NULL,'approved','x','x')""")
+        session = {"user": {"id": "ACTOR", "company_id": "CO"}, "permissions": ["official_documents.all_records"]}
+        for view, expected in (("mine", ["MINE"]), ("rejected", ["REJECTED"]),
+                               ("acted", ["ACTED-STEP", "ACTED-LOG"]), ("pending", ["PENDING"])):
+            with self.subTest(view=view):
+                statements = []
+                conn.set_trace_callback(statements.append)
+                page = backend.list_official_documents(conn, {"scope": ["all"], "view": [view], "page_size": ["25"]}, session)
+                conn.set_trace_callback(None)
+                self.assertEqual(expected, [row["id"] for row in page["items"]])
+                self.assertFalse(page["has_more"])
+                self.assertEqual(1, sum("SELECT d.* FROM official_documents" in sql for sql in statements))
+
     def test_real_sqlite_scope_and_old_case_pagination(self):
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)

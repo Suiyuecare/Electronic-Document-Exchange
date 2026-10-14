@@ -21,11 +21,11 @@ class EditorSaveScopeTest(unittest.TestCase):
         ))
         harness = r'''
 const assert=require('node:assert/strict');
-let session='user-a:company-a',calls=[],statuses=[],conflicts=0,timers=new Map(),timerNo=0;
+let session='user-a:company-a',calls=[],statuses=[],submissionRenders=[],conflicts=0,timers=new Map(),timerNo=0;
 const frontendSessionScope=()=>session;
 const uploadedSealApplicationRuntime={epoch:0};
-const uploadedSealEditorRuntime={documentId:'DOC-A',locked:false,conflict:null,saving:false,savePromise:null,saveQueued:false,saveTimer:0,dirtyGeneration:1,savedGeneration:0,baseManifestSha256:'base-a'};
-let uploadedSealEditorState={schemaVersion:2,revisionNo:1,manifestSha256:'base-a',elements:[{id:'text-a',kind:'text',properties:{text:'SYNTHETIC A'}}]};
+const uploadedSealEditorRuntime={documentId:'DOC-A',locked:false,conflict:null,saving:false,savePromise:null,saveQueued:false,saveTimer:0,dirtyGeneration:1,savedGeneration:0,baseManifestSha256:'base-a',pendingImage:null};
+let uploadedSealEditorState={schemaVersion:2,revisionNo:1,manifestSha256:'base-a',sourceFiles:[],elements:[{id:'text-a',kind:'text',properties:{text:'SYNTHETIC A'}}]};
 const cloneUploadedEditorValue=value=>JSON.parse(JSON.stringify(value));
 const window={clearTimeout:id=>timers.delete(id),setTimeout(fn){timers.set(++timerNo,fn);return timerNo;}};
 const navigator={onLine:true};
@@ -35,6 +35,7 @@ const syncLegacyUploadedEditorCollections=()=>{};
 const renderUploadedEditorSvgLayer=()=>{};
 const renderUploadedEditorProperties=()=>{};
 const renderUploadedSealWorkbench=()=>{};
+const renderUploadedEditorSubmissionActions=()=>submissionRenders.push({saving:uploadedSealEditorRuntime.saving,documentId:uploadedSealEditorRuntime.documentId});
 const setUploadedEditorSaveStatus=(...value)=>statuses.push(value);
 let calculateUploadedEditorManifest=async()=> 'hash-a';
 let backendRequest=async(path,options)=>{calls.push({path,body:JSON.parse(options.body)});return {revisionNo:2,manifestSha256:'saved-a',state:{...uploadedSealEditorState,revisionNo:2}}};
@@ -47,7 +48,7 @@ function replaceScope({sameDocument=false,newUser=false}={}){
  uploadedSealApplicationRuntime.epoch++;
  if(newUser)session='user-b:company-b';
  Object.assign(uploadedSealEditorRuntime,{documentId:sameDocument?'DOC-A':'DOC-B',saving:true,savePromise:Promise.resolve('new-operation'),saveQueued:false,dirtyGeneration:3,savedGeneration:2,baseManifestSha256:'base-b',saveTimer:900,conflict:null});
- uploadedSealEditorState={schemaVersion:2,revisionNo:8,manifestSha256:'base-b',elements:[{id:'text-b',properties:{text:'SYNTHETIC B'}}]};
+ uploadedSealEditorState={schemaVersion:2,revisionNo:8,manifestSha256:'base-b',sourceFiles:[],elements:[{id:'text-b',properties:{text:'SYNTHETIC B'}}]};
 }
 '''
         result = subprocess.run([node, '-e', harness + functions + '\n(async()=>{\n' + case + '\n})().catch(error=>{console.error(error);process.exitCode=1;});'], capture_output=True, text=True, timeout=20)
@@ -59,6 +60,7 @@ await saveUploadedEditorState();
 assert.equal(calls.length,1);assert.equal(calls[0].path,'/official-documents/DOC-A/editor-state');
 assert.equal(uploadedSealEditorState.revisionNo,2);assert.equal(uploadedSealEditorRuntime.savedGeneration,1);
 assert.equal(uploadedSealEditorRuntime.saving,false);assert.equal(uploadedSealEditorRuntime.savePromise,null);
+assert.equal(submissionRenders.at(-1).saving,false,'submit controls must refresh after the save releases busy');
 ''')
 
     def test_late_success_cannot_replace_new_or_reopened_draft(self):

@@ -13,7 +13,7 @@ class ComposeRecoveryTokenTest(unittest.TestCase):
     SETUP = '''
       const composeAutosaveIdentity=()=>"U:CO",refreshComposeCloudDrafts=()=>Promise.resolve(),renderApprovalCategorySelect=()=>{},syncComposeCopyRecipientsDefault=()=>{},syncComposeElectronicExchangeMode=()=>{},renderComposeApprovalRoute=()=>{},renderDraftPreview=()=>{},renderComposeSaveStatus=()=>{},formatComposeSaveTime=()=>"12:00";
       let composeAutosaveRestoredForIdentity="",currentComposeDraftId="",composeDraftRequestId="",composeCloudDraftId="",composeOfficialContentRevision=null,draftConfirmed=false,draftSigned=false,activeComposeStep="fill",composeSaveState={};
-      const composeAutosaveSelectors=["#subject"],node={value:"",tagName:"TEXTAREA",dataset:{}},dispatchDocs=[],composeSealPlacements={large:{x:70,y:80},small:{x:80,y:80}},clampComposePlacement=(value,fallback)=>fallback;
+      const composeAutosaveSelectors=["#subject"],node={value:"",tagName:"TEXTAREA",dataset:{}},dispatchDocs=[],composeSealPlacements={large:{x:70,y:80},small:{x:80,y:80},single:{x:58,y:80}},clampComposePlacement=(value,fallback)=>fallback;
       global.document={querySelector:key=>key==="#subject"?node:null};
       const id="OD-00000000-0000-4000-8000-000000000001";
       const saved={snapshot:{schemaVersion:2,userId:"U",companyId:"CO",cloudDraftId:id,values:{"#subject":"上次草稿"}},updatedAt:"2026-09-12"};

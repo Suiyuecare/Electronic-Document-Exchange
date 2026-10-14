@@ -151,8 +151,8 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         expected = [
             "uploadedSealApplicant",
             "uploadedSealApprovalCategorySelect",
-            "uploadedSealDepartment",
             "uploadedSealCompany",
+            "uploadedSealDepartment",
             "uploadedSealTitle",
             "uploadedSealReason",
         ]
@@ -277,7 +277,6 @@ class ElectronicSealPageContractTest(unittest.TestCase):
             "requestEditorUpload(file, \"source_pdf\", preparation.sha256)",
             "performTusUpload(file, intent",
             "confirmUploadedPdfConversion(file)",
-            "pending.finalizePromise = transferPendingEditorPdf(pending)",
             "loadUploadedPdfIntoEditor(file, intent, null, { append: false, preparation })",
             "finishPendingEditorPdfFinalization(pending)",
             "ensureUploadedEditorPagesA4(uploadedSealEditorState.pages)",
@@ -285,12 +284,17 @@ class ElectronicSealPageContractTest(unittest.TestCase):
             self.assertIn(operation, handler)
         self.assertNotIn("掃毒與 PDF 預檢中", handler)
         self.assertLess(handler.index("await loadUploadedPdfIntoEditor(file, intent, null"), handler.index("finishPendingEditorPdfFinalization("))
-        self.assertLess(handler.index("await loadUploadedPdfIntoEditor(file, intent, null"), handler.index("transferPendingEditorPdf(pending)"))
+        a4 = handler[handler.index("if (preparation.report.valid)"):handler.index("// Non-A4 documents")]
+        self.assertLess(a4.index("pending.intentPromise = requestEditorUpload"), a4.index("await loadUploadedPdfIntoEditor"))
+        self.assertNotIn("await requestEditorUpload", a4)
         transfer = javascript_function(self.js, "transferPendingEditorPdf")
         self.assertIn("await performTusUpload(file, intent", transfer)
         self.assertIn("await finalizeEditorUpload(intent, file, { allowA4Conversion: true })", transfer)
 
         finish = javascript_function(self.js, "finishPendingEditorPdfFinalization")
+        self.assertIn("await preparePendingEditorPdfIntent(pending)", finish)
+        self.assertIn("await transferPendingEditorPdf(pending)", finish)
+        self.assertLess(finish.index("await preparePendingEditorPdfIntent(pending)"), finish.index("await transferPendingEditorPdf(pending)"))
         self.assertIn("applyEditorRevisionFromResponse(finalized)", finish)
         self.assertIn("await saveUploadedEditorState({ immediate: true })", finish)
 

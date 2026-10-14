@@ -24,7 +24,7 @@ class BackupHostTests(unittest.TestCase):
         self.output.mkdir(mode=0o700)
         self.state = self.root / "state"
         self.now = datetime.now(timezone.utc)
-        self.config = {"schemaVersion": 1, "sourceProjectRef": "a" * 20, "storageProjectRef": "a" * 20, "supabaseWorkdir": str(self.root / "work"), "supabaseExecutable": "/opt/operator/bin/supabase", "pythonExecutable": "/opt/operator/venv/bin/python", "pgBinDir": "/opt/operator/pg/bin", "outputDir": str(self.output), "stateDir": str(self.state), "encryptionKeyFile": str(self.root / "keys/key"), "intervalSeconds": 3600, "timeoutSeconds": 600, "maximumSnapshotAgeMinutes": 90, "rtoTargetMinutes": 30, "rpoTargetMinutes": 15, "_path": str(self.root / "operator.json")}
+        self.config = {"schemaVersion": 1, "sourceProjectRef": "a" * 20, "storageProjectRef": "a" * 20, "supabaseWorkdir": str(self.root / "work"), "supabaseExecutable": "/opt/operator/bin/supabase", "pythonExecutable": "/opt/operator/venv/bin/python", "pgBinDir": "/opt/operator/pg/bin", "outputDir": str(self.output), "stateDir": str(self.state), "encryptionKeyFile": str(self.root / "keys/key"), "intervalSeconds": 600, "timeoutSeconds": 120, "maximumSnapshotAgeMinutes": 90, "rtoTargetMinutes": 30, "rpoTargetMinutes": 15, "_path": str(self.root / "operator.json")}
         self.report = self.fixture_report()
 
     def fixture_report(self, *, snapshot=None):
@@ -224,6 +224,24 @@ class BackupHostTests(unittest.TestCase):
         self.assertEqual(plist["ProgramArguments"][-1], "run")
         self.assertNotIn("SUPABASE_ACCESS_TOKEN", json.dumps(plist))
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_hourly_schedule_cannot_pass_a_fifteen_minute_rpo_even_with_fresh_backup(self):
+        hourly = dict(self.config, intervalSeconds=3600, timeoutSeconds=600)
+        self.run_mock(self.report)
+        result = host.health(hourly, now=self.now + timedelta(seconds=3))
+        self.assertEqual(result["status"], "degraded")
+        self.assertTrue(result["snapshotWithinRpoTarget"])
+        self.assertFalse(result["scheduleCanMeetRpoTarget"])
+        self.assertIn("host_backup_schedule_cannot_meet_rpo_target", result["errorCodes"])
+        with mock.patch.object(host, "runtime_check", return_value=[]):
+            with self.assertRaisesRegex(host.runner.DrillError, "schedule_cannot_meet_rpo_target"):
+                host.prepare_launch_agent(hourly)
+        self.assertFalse((self.state / "pending").exists())
+
+    def test_schedule_uses_completion_bound_and_shutdown_margin(self):
+        boundary = dict(self.config, intervalSeconds=750, timeoutSeconds=120)
+        self.assertTrue(host.schedule_check(boundary)["scheduleCanMeetRpoTarget"])
+        self.assertFalse(host.schedule_check(dict(boundary, intervalSeconds=751))["scheduleCanMeetRpoTarget"])
 
     def test_temporary_or_cache_runtime_paths_are_rejected(self):
         for path in ("/tmp/python", "/private/tmp/pg", "/Users/operator/.cache/python", "/Volumes/Postgres/bin/pg_dump", "relative/python"):

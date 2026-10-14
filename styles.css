@@ -18,6 +18,26 @@
   font-family: "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
 }
 
+.workspace-field-error {
+  display: block;
+  color: var(--rose);
+  font-size: 13px;
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
+.workspace-form-errors {
+  grid-column: 1 / -1;
+  border-left: 3px solid var(--rose);
+  padding: 10px 12px;
+  color: var(--rose);
+  background: var(--cream);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.workspace-form-errors[hidden] { display: none; }
+
 /* Electronic-seal PDF Editor V2 ------------------------------------------ */
 
 #uploadedEditorOpeningPreview .editor-opening-preview-actions {
@@ -833,6 +853,26 @@ input[readonly].seal-dimension-locked {
   color: #64748b;
   font-size: 11px;
   font-weight: 800;
+}
+
+.uploaded-editor-submission-summary {
+  width: 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+#workspaceTypedConfirmDescription {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.company-seal-policy {
+  align-items: end;
+  margin-bottom: 16px;
 }
 
 .pdf-editor-v2[data-editor-mode="general"] .advanced-only {
@@ -9179,7 +9219,7 @@ label {
 }
 
 textarea {
-  resize: vertical;
+  resize: none;
 }
 
 .flow-panel {
@@ -11303,6 +11343,25 @@ textarea {
   font-size: 1.38cqw;
 }
 
+/* The calibrated visual follows immutable physical dimensions. The owning
+   button keeps the shared 44px minimum hit target without stretching ink. */
+.official-draft-preview .draft-seal-placeholder.calibrated,
+.official-draft-preview .draft-seal-placeholder.calibrated:hover {
+  border: 0;
+  background: transparent;
+}
+
+.official-draft-preview .draft-seal-calibrated-mark {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-content: center;
+  border: 2px dashed rgba(185, 28, 28, 0.55);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
+}
+
 .official-draft-print-host {
   display: none;
 }
@@ -12584,6 +12643,7 @@ body[data-session-state="revalidating"] .workspace::after {
 .pdf-editor-seam-actions, .pdf-editor-seam-group { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
 .pdf-editor-seam-panel label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .pdf-editor-seam-panel input { min-height: 44px; font-size: 16px; width: 220px; max-width: 100%; }
+.pdf-editor-seam-panel select { min-height: var(--action-hit-size); font-size: 16px; max-width: 100%; }
 .pdf-editor-seam-panel button { min-height: 44px; }
 .pdf-editor-seam-group { border-top: 1px solid #ead8c5; padding: 12px 0; }
 .pdf-editor-seam-group strong { flex: 1 1 180px; align-self: center; }
@@ -13272,3 +13332,43 @@ body[data-session-state="revalidating"] .workspace::after {
   align-items: center;
   justify-content: center;
 }
+/* Shared, task-scoped assistance and honest server-side list/report scope. */
+.workspace-quick-guide {
+  margin: 0 0 16px;
+  border: 1px solid var(--line, #f6c99f);
+  border-radius: 14px;
+  background: var(--surface-soft, #fff9f1);
+}
+.workspace-quick-guide summary {
+  min-height: 44px;
+  padding: 12px 16px;
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--muted, #73685e);
+}
+.workspace-quick-guide-content { padding: 0 16px 16px; line-height: 1.65; }
+.workspace-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; }
+.workspace-search-field { position: relative; }
+.workspace-search-field input { padding-inline-end: 54px; }
+.workspace-search-clear { position: absolute; inset-inline-end: 4px; inset-block-end: 2px; width: 44px; min-height: 44px; padding: 0; border: 0; background: transparent; color: var(--finance-orange, #ef8900); font-size: 24px; cursor: pointer; }
+.workspace-search-clear:hover { background: var(--finance-sidebar-bg, #fff9ef); }
+.workspace-search-clear:focus-visible { outline: 2px solid var(--finance-orange, #ef8900); outline-offset: 1px; }
+.workspace-pagination > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.workspace-pagination > span { color: var(--muted, #73685e); font-size: 14px; }
+.timeliness-buckets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.timeliness-buckets h4 { margin: 8px 0 12px; }
+.timeliness-buckets ul { list-style: none; padding: 0; margin: 0; }
+.timeliness-buckets li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line, #f6c99f); }
+@media (max-width: 760px) {
+  .timeliness-buckets { grid-template-columns: minmax(0, 1fr); }
+  .workspace-pagination > div { width: 100%; }
+  .workspace-pagination button { flex: 1; }
+}
+/* Offboarding keeps the existing Finance tokens and dialog layer. */
+#officialHandoverPanel .form-actions { flex-wrap: wrap; }
+#officialHandoverPanel button, #officialHandoverModal button { min-height: 44px; }
+.official-handover-detail { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 1rem; min-width: 0; }
+.official-handover-detail .address-card { margin-top: 1rem; }
+#officialHandoverPanel textarea, #officialHandoverModal textarea { resize: none; width: 100%; }
+#officialHandoverPanel input, #officialHandoverPanel select, #officialHandoverPanel textarea, #officialHandoverModal textarea { font-size: 16px; min-width: 0; }
+#officialHandoverPanel p, #officialHandoverModalSummary p { overflow-wrap: anywhere; }
