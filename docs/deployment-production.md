@@ -230,6 +230,30 @@ vercel env add APP_SECRET production --sensitive --scope "$VERCEL_SCOPE"
 
 ## 5. 部署與上線後檢查
 
+### 單人 owner 核准流程（2026-10-14 核准調整）
+
+經系統 owner 明確同意，GitHub `main` 的
+`required_approving_review_count` 改為 `0`，不再要求第二人的 GitHub
+approval。這只移除第二人 review 門檻，不取消 PR、owner 發布核准、CI
+或其餘分支保護；不得冒用他人身分建立 review。
+
+1. 每次變更仍以 PR 留下範圍、驗收與回復方式，由 owner 核准發布範圍，
+   並在發布紀錄綁定該次 PR 與精確 commit。owner 可以是提交者；代理
+   執行者只能依 owner 已核准的範圍操作，不得自行宣稱取得核准。
+2. `Validate backend and frontend` 與 `Rebuild Supabase from migrations`
+   兩項 GitHub Actions checks 都必須在待合併版本成功。正式發布仍只採
+   已通過這兩項 CI 的核准 `main` commit；合併產生新 SHA 時，要確認
+   該精確 `main` SHA 的 CI，不沿用其他版本結果。
+3. `docs/release-protection-policy.json` 是本機政策，不是遠端已套用的
+   證據。發布前須讀回 GitHub 分支保護，確認 `strict=true`、
+   `enforce_admins=true`、兩項 checks 的來源 app 固定為 `15368`、
+   `allow_force_pushes=false`、`allow_deletions=false`、
+   `required_conversation_resolution=true`，其餘保護維持不變。
+   政策或 checks 不符時停止，不直接推送 `main`、不使用管理者 bypass。
+4. owner 核准及 CI 通過後，仍須完成本手冊的備份、資料庫 cutover 與
+   部署驗證。需要 staged build 的變更只 promotion 已驗證的精確 build；
+   測試通過或修改本機政策檔本身都不代表已正式上線。
+
 ```bash
 python3 -m py_compile backend.py api/index.py
 node --check app.js

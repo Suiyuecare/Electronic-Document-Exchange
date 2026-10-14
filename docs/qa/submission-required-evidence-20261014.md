@@ -52,12 +52,19 @@ PostgreSQL 首次跨套件執行有 6 個連線錯誤：既有並行測試固定
 
 ## 發布閘門
 
-正式 main 分支即時確認：enforce_admins=true，要求兩個 CI checks 與一位
-非提交者 review。依 `docs/deployment-production.md`，只從核准 main 發布。
-本次不能因使用者要求直接上線而取消審查、冒用審查身分或改由 CLI 繞過。
+歷史狀態：本次修補最初讀回的 main 保護要求兩個 CI checks 與一位
+非提交者 review，因此當時未套正式 shared forward，也未 promotion。
 
-修補送至既有 PR #40；仍須等待該精確 commit 的 CI 與獨立 GitHub 核准。
-核准前不套正式 shared forward、不 promotion，因此不宣稱已上線。
+2026-10-14，owner 明確同意取消 GitHub 第二人 review，改採單人 owner
+核准發布。`docs/release-protection-policy.json` 的
+`required_approving_review_count` 因而由 `1` 改為 `0`；仍保留兩項 CI、
+`strict=true`、`enforce_admins=true`、禁止 force push／刪除及對話必須解決
+等既有保護。這是已核准的政策變更，不是冒用 review 或管理者 bypass。
+
+修補與政策更新仍透過既有 PR #40；依 `docs/deployment-production.md`
+核對 owner 核准範圍、遠端保護讀回值與精確 commit 的兩項 CI，只從核准
+main 發布。本機政策與本段紀錄不代表遠端設定、正式 migration 或部署
+已完成；發布完成須另留下正式驗證證據。
 
 核准後順序：核對備份與回復點 → 只套用 hash-bound shared forward
 `20261014031923_shared_atomic_submission_step_evidence_defaults.sql` →
