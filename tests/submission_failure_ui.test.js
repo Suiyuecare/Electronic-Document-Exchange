@@ -100,6 +100,8 @@ function harness(code = 'official_submission_validation_failed', status = 500) {
   vm.createContext(c);
   vm.runInContext(['fetchWithDeadline', 'backendRequest', 'friendlyBackendErrorMessage',
     'uploadedSealApplicationScopeSnapshot', 'uploadedSealApplicationScopeIsCurrent',
+    'uploadedEditorStatusScope', 'uploadedEditorBusinessStatus',
+    'setUploadedEditorPreflightStatus', 'renderUploadedEditorPreflightStatusPresentation',
     'uploadedEditorSubmissionFingerprint', 'uploadedEditorSubmissionPreviewIsCurrent',
     'invalidateUploadedEditorSubmissionPreview', 'uploadedEditorReadOnlyPresentation', 'renderUploadedEditorSubmissionActions',
     'submitUploadedSealApplication'].map(implementation).join('\n'), c);
