@@ -16565,6 +16565,86 @@ def official_document_file_reference(conn: sqlite3.Connection, file_object_id: s
     return row_to_dict(row) if row else None
 
 
+def case_scoped_file_reference(conn: sqlite3.Connection, file_object_id: str) -> Dict[str, Any] | None:
+    """Never let the legacy file API bypass a case-specific download guard.
+
+    Editor images are not necessarily official_document_files. Incoming files
+    and reply attachments likewise have their own permission-checked routes.
+    Check persisted references, not a filename or a caller-supplied purpose.
+    """
+    reference = official_document_file_reference(conn, file_object_id)
+    if reference:
+        return reference
+    for table, file_column, parent_column, kind in (
+        ("official_document_editor_assets", "file_object_id", "document_id", "editor_asset"),
+        ("official_document_editor_storage_jobs", "final_file_object_id", "document_id", "editor_storage_job"),
+        ("inbound_document_attachments", "file_object_id", "inbound_document_id", "inbound_attachment"),
+        ("internal_dispatch_replies", "attachment_file_id", "dispatch_id", "dispatch_reply_attachment"),
+    ):
+        row = conn.execute(
+            f'SELECT id, "{parent_column}" AS document_id FROM "{table}" WHERE "{file_column}" = ? LIMIT 1',
+            (file_object_id,),
+        ).fetchone()
+        if row:
+            return {**row_to_dict(row), "file_type": kind}
+    # Fail closed during registration/finalization and for incomplete legacy
+    # references: a persisted case parent still requires its dedicated route.
+    file_row = conn.execute("SELECT document_id FROM file_objects WHERE id = ?", (file_object_id,)).fetchone()
+    if file_row and file_row["document_id"]:
+        for table in ("official_documents", "inbound_documents", "internal_dispatches"):
+            row = conn.execute(f'SELECT id FROM "{table}" WHERE id = ?', (file_row["document_id"],)).fetchone()
+            if row:
+                return {"id": file_object_id, "document_id": row["id"], "file_type": table}
+    return None
+
+
+def require_generic_file_document_access(conn: sqlite3.Connection, file_id: str, session: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Recheck legacy document ACL and company scope on signing AND use."""
+    user = official_session_user(session)
+    if not session_has_any_permission(session, ["files.manage", "official_documents.records", "official_documents.all_records"]):
+        raise PermissionError("generic_file_download_forbidden")
+    row = conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_id,)).fetchone()
+    if not row:
+        raise ValueError("file_not_found")
+    item = row_to_dict(row)
+    document = conn.execute("SELECT * FROM documents WHERE id = ?", (item.get("document_id") or "",)).fetchone()
+    if not document or not can_read_document(conn, document["id"], session):
+        raise PermissionError("generic_file_document_forbidden")
+    metadata = parse_json_any(document["metadata_json"], None)
+    if not isinstance(metadata, dict):
+        raise PermissionError("generic_file_company_forbidden")
+    company_ids = {str(metadata[key]).strip() for key in ("company_id", "companyId") if metadata.get(key)}
+    company = conn.execute(
+        "SELECT id, finance_tenant_id, status FROM companies WHERE name = ?",
+        (document["company_name"],),
+    ).fetchone()
+    if not company or str(user.get("company_id") or "") != company["id"]:
+        raise PermissionError("generic_file_company_forbidden")
+    if any(company_id != company["id"] for company_id in company_ids):
+        raise PermissionError("generic_file_company_forbidden")
+    if roster_text(company["status"]).lower() not in {"active", "啟用"}:
+        raise PermissionError("generic_file_company_forbidden")
+    if company["finance_tenant_id"] and str(user.get("finance_tenant_id") or "") != company["finance_tenant_id"]:
+        raise PermissionError("generic_file_company_forbidden")
+    return item
+
+
+def authorize_generic_file_request(conn: sqlite3.Connection, file_id: str, session: Dict[str, Any] | None, *, action: str) -> Dict[str, Any]:
+    """Persist denied HTTP file access before the request unwinds its DB context."""
+    try:
+        return require_generic_file_document_access(conn, file_id, session)
+    except PermissionError as exc:
+        row = conn.execute("SELECT document_id FROM file_objects WHERE id = ?", (file_id,)).fetchone()
+        if row:
+            record_file_access(
+                conn, file_object_id=file_id, document_id=row["document_id"] or "",
+                actor=official_actor_name((session or {}).get("user") or {}),
+                action=action, result="失敗", detail=str(exc),
+            )
+            conn.commit()
+        raise
+
+
 def create_file_signed_url(conn: sqlite3.Connection, file_id: str, actor: str = "API", ttl_seconds: int | None = None, purpose: str = "download") -> Dict[str, Any]:
     row = conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_id,)).fetchone()
     if not row:
@@ -16573,7 +16653,7 @@ def create_file_signed_url(conn: sqlite3.Connection, file_id: str, actor: str = 
     if is_seal_vault_file(item):
         audit_seal_vault_access(conn, file_id=file_id, actor=actor, action="block_seal_vault_signed_url", result="denied", detail="seal_original_never_gets_download_url")
         return {"error": "seal_vault_download_forbidden", "detail": "seal_original_files_must_be_accessed_only_by_authorized_backend_seal_workflows"}
-    official_reference = official_document_file_reference(conn, file_id)
+    official_reference = case_scoped_file_reference(conn, file_id)
     if official_reference:
         log_audit(
             conn,
@@ -47734,13 +47814,66 @@ def supabase_verify_official_document_archive_sources(
     }
 
 
+# Keep the direct Python server's public surface identical to the deployment's
+# explicit @vercel/static builds. Never serve arbitrary repository files: the
+# same tree can also contain SQLite databases, uploads and local credentials.
+PUBLIC_STATIC_FILES = frozenset({
+    "index.html", "entry-bootstrap.js", "pdfjs-bootstrap.mjs", "app.js",
+    "official-handover-ui.js", "editor-seam.js", "editor-a4.js", "styles.css",
+    "editor-fluid.css", "workspace-select.js", "workspace-select.css",
+    "workspace-navigation.css",
+    "vendor/tom-select/tom-select.complete.min.js",
+    "vendor/tom-select/tom-select.default.min.css", "vendor/tom-select/LICENSE",
+    "vendor/pdfjs/pdf.min.mjs", "vendor/pdfjs/pdf.worker.min.mjs", "vendor/pdfjs/LICENSE",
+    "assets/favicon-32.png", "assets/favicon-48.png", "assets/favicon-192.png",
+    "assets/apple-touch-icon.png", "assets/suiyue-milk-favicon.png",
+    "assets/suiyue-logo-transparent.png", "assets/fonts/edukai-5.1_20251208.ttf",
+    "assets/fonts/EDUKAI-NOTICE.txt", "assets/fonts/LXGWWenKaiTC-Regular.woff2",
+    "assets/fonts/LXGWWenKaiTC-OFL.txt",
+})
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "SuiyueEdocBackend/1.0"
 
     def translate_path(self, path: str) -> str:
         parsed = urlparse(path)
-        rel = unquote(parsed.path).lstrip("/") or "index.html"
-        return str((ROOT / rel).resolve())
+        decoded = unquote(parsed.path)
+        rel = "index.html" if decoded == "/" else decoded.removeprefix("/")
+        if not decoded.startswith("/") or rel not in PUBLIC_STATIC_FILES:
+            raise FileNotFoundError("not_a_public_asset")
+        root = ROOT.resolve()
+        target = root / rel
+        # Do not let an allowlisted filename become a link to private data,
+        # whether the link points inside or outside the public root.
+        current = root
+        for part in Path(rel).parts:
+            current /= part
+            if current.is_symlink():
+                raise FileNotFoundError("not_a_public_asset")
+        if not target.is_file() or not target.resolve().is_relative_to(root):
+            raise FileNotFoundError("not_a_public_asset")
+        return str(target)
+
+    def send_head(self):
+        try:
+            self.translate_path(self.path)
+            return super().send_head()
+        except (OSError, ValueError):
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return None
+
+    def list_directory(self, path):
+        self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+        return None
+
+    def do_HEAD(self) -> None:
+        # API HEAD is not implemented. The inherited implementation would
+        # bypass API authorization and interpret its URL as a filesystem path.
+        if urlparse(self.path).path.startswith("/api/"):
+            self.send_error(HTTPStatus.METHOD_NOT_ALLOWED, "Method not allowed")
+            return
+        super().do_HEAD()
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
@@ -48102,21 +48235,23 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_file_object(self, conn: sqlite3.Connection, file_id: str) -> None:
+        session = current_session(conn, self.bearer_token())
+        actor = official_actor_name(official_session_user(session))
         row = conn.execute("SELECT * FROM file_objects WHERE id = ?", (file_id,)).fetchone()
         if not row:
             self.send_json({"error": "not_found"}, 404)
             return
         item = row_to_dict(row)
         if is_seal_vault_file(item):
-            audit_seal_vault_access(conn, file_id=file_id, actor="Download", action="block_seal_vault_download", result="denied", detail="generic_file_download_forbidden", document_id=item.get("document_id") or "")
+            audit_seal_vault_access(conn, file_id=file_id, actor=actor, action="block_seal_vault_download", result="denied", detail="generic_file_download_forbidden")
             conn.commit()
             self.send_json({"error": "seal_vault_download_forbidden", "detail": "seal_original_files_are_never_downloaded_through_generic_file_api"}, 403)
             return
-        official_reference = official_document_file_reference(conn, file_id)
+        official_reference = case_scoped_file_reference(conn, file_id)
         if official_reference:
             log_audit(
                 conn,
-                "Download",
+                actor,
                 "阻擋發文檔案通用下載",
                 "official_document_files",
                 official_reference["id"],
@@ -48128,15 +48263,16 @@ class Handler(SimpleHTTPRequestHandler):
                 "detail": "use_/api/official-documents/:documentId/files/:fileId/download",
             }, 403)
             return
+        authorize_generic_file_request(conn, file_id, session, action="通用檔案下載阻擋")
         token = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
         valid, reason, token_row = validate_file_download_token(conn, file_id, token)
         if not valid:
-            record_file_access(conn, file_object_id=file_id, document_id=item.get("document_id") or "", actor="Download", action="短效下載阻擋", result="失敗", detail=reason)
+            record_file_access(conn, file_object_id=file_id, document_id=item.get("document_id") or "", actor=actor, action="短效下載阻擋", result="失敗", detail=reason)
             conn.commit()
             self.send_json({"error": reason, "detail": "download_url_expired_or_invalid"}, 403)
             return
         if item.get("scan_status") == "已隔離":
-            record_file_access(conn, file_object_id=file_id, document_id=item.get("document_id") or "", actor=token_row.get("actor", "Download") if token_row else "Download", action="隔離檔案下載阻擋", result="失敗", detail=item.get("quarantine_reason") or "quarantined")
+            record_file_access(conn, file_object_id=file_id, document_id=item.get("document_id") or "", actor=actor, action="隔離檔案下載阻擋", result="失敗", detail=item.get("quarantine_reason") or "quarantined")
             conn.commit()
             self.send_json({"error": "file_quarantined", "detail": item.get("quarantine_reason")}, 423)
             return
@@ -48148,12 +48284,15 @@ class Handler(SimpleHTTPRequestHandler):
         conn.execute("UPDATE file_objects SET last_download_at = ? WHERE id = ?", (now(), file_id))
         if token_row:
             conn.execute("UPDATE file_download_tokens SET used_at = ? WHERE id = ?", (now(), token_row["id"]))
-        record_file_access(conn, file_object_id=file_id, document_id=item.get("document_id") or "", actor=token_row.get("actor", "Download") if token_row else "Download", action="短效 URL 下載", result="成功", detail=f"expires_at={token_row.get('expires_at') if token_row else ''}")
+        record_file_access(conn, file_object_id=file_id, document_id=item.get("document_id") or "", actor=actor, action="短效 URL 下載", result="成功", detail=f"expires_at={token_row.get('expires_at') if token_row else ''};issued_by={token_row.get('actor') if token_row else ''}")
         conn.commit()
         self.send_response(200)
         self.send_header("Content-Type", item["mime_type"])
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Content-Disposition", f"attachment; filename=\"{urllib.parse.quote(item['file_name'])}\"")
+        self.send_header("Cache-Control", "private, no-store, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
 
@@ -50986,8 +51125,9 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(result, 201 if not result.get("error") else 422)
                     return
                 if method == "POST" and len(parts) == 3 and parts[0] == "files" and parts[2] == "signed-url":
+                    authorize_generic_file_request(conn, parts[1], session, action="通用下載連結簽發阻擋")
                     payload = self.read_json()
-                    result = create_file_signed_url(conn, parts[1], payload.get("actor") or "API", int(payload.get("ttl_seconds") or EDOC_SIGNED_URL_TTL_SECONDS), payload.get("purpose") or "download")
+                    result = create_file_signed_url(conn, parts[1], official_actor_name(session["user"]), int(payload.get("ttl_seconds") or EDOC_SIGNED_URL_TTL_SECONDS), payload.get("purpose") or "download")
                     conn.commit()
                     status = 403 if result.get("error") in {
                         "seal_vault_download_forbidden",

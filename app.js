@@ -34751,15 +34751,40 @@ function renderPdfVersionGrid() {
   ].map(([label, value]) => `<article class="archive-card"><span>${label}</span><strong>${value}</strong></article>`).join("");
 }
 
-function downloadPdfVersion(kind) {
+async function downloadPdfVersion(kind) {
+  if (!["before", "after"].includes(kind)) return;
   const doc = currentDispatchDoc();
   const version = doc ? pdfVersionStore[doc.id]?.[kind] : null;
   if (!version) return showToast(kind === "before" ? "尚未產生押章前 PDF。" : "尚未產生押章後 PDF。");
-  const link = document.createElement("a");
-  link.href = version.url?.startsWith("/api/") ? `${window.location.origin}${version.url}` : version.url;
-  link.download = `${doc.no}-${kind === "before" ? "before-seal" : "after-seal"}.pdf`;
-  link.click();
-  addSealAudit("下載 PDF 版本", `${doc.no} 已下載${kind === "before" ? "押章前" : "押章後"}版本。`);
+  const button = document.querySelector(kind === "before" ? "#downloadBeforePdfBtn" : "#downloadAfterPdfBtn");
+  if (button?.disabled) return;
+  const fileName = `${doc.no}-${kind === "before" ? "before-seal" : "after-seal"}.pdf`;
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+  }
+  try {
+    if (version.url?.startsWith("/api/")) {
+      // Generic file URLs now recheck the current user's document access.
+      // Reuse the authenticated transport instead of a bearer-less anchor.
+      await downloadBinaryFile(version.url.slice(4), fileName, { redirect: "error" });
+    } else if (version.url?.startsWith(`blob:${window.location.origin}/`)) {
+      const link = document.createElement("a");
+      link.href = version.url;
+      link.download = fileName;
+      link.click();
+    } else {
+      throw new Error("invalid_pdf_download_url");
+    }
+    addSealAudit("下載 PDF 版本", `${doc.no} 已下載${kind === "before" ? "押章前" : "押章後"}版本。`);
+  } catch (_error) {
+    showToast("PDF 下載失敗；請確認登入與文件權限，或重新產生下載連結後再試。");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
 }
 
 function generateSealApplication() {
