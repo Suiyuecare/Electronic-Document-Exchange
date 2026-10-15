@@ -1,6 +1,7 @@
 """Actual local PostgreSQL dispatch transactions; no hosted credentials/network."""
 import concurrent.futures
 import copy
+import hashlib
 import json
 import os
 import re
@@ -11,10 +12,54 @@ from pathlib import Path
 import backend
 import internal_dispatch_workflow
 from tests import test_compose_output_postgres as fixture
-from tools.shared_supabase_bootstrap import transform_sql
-from tools.internal_dispatch_shared_forward import render_shared_forward
+from tools.shared_supabase_bootstrap import transform_sql, sha256_text
+from tools.internal_dispatch_shared_forward import FORWARD_NAME, render_shared_forward
 
 MIGRATION = "20261015144049_internal_dispatch_workflow_integrity.sql"
+
+
+class InternalDispatchMigrationContractTest(unittest.TestCase):
+    def test_shared_forward_and_cutover_bind_exact_migration_inventory(self):
+        source = (fixture.ROOT / "supabase/migrations" / MIGRATION).read_text()
+        source_hash = sha256_text(source)
+        transformed_hash = sha256_text(transform_sql(source))
+        forward = (fixture.ROOT / "supabase/shared-project-migrations" / FORWARD_NAME).read_text()
+        self.assertEqual(render_shared_forward(), forward)
+
+        manifest = json.loads((fixture.ROOT / "supabase/verification/migration_manifest.json").read_text())
+        names = manifest["migrations"] + ["roles.sql"]
+        self.assertIn(MIGRATION, names)
+        inventory_hash = hashlib.sha256("\n".join(sorted(names)).encode()).hexdigest()
+        checks = (fixture.ROOT / "supabase/verification/shared_project_cutover_checks.sql").read_text()
+        ledger_check = checks.split("'migration_ledger_complete',", 1)[1].split(
+            "'atomic_submission_step_evidence_contract',", 1
+        )[0]
+        self.assertIn(f"shared_project_migration_ledger) = {len(names)}", ledger_check)
+        self.assertIn("string_agg(file_name, E'\\n' order by file_name)", ledger_check)
+        self.assertIn(f"= '{inventory_hash}'", ledger_check)
+        self.assertRegex(
+            ledger_check,
+            rf"file_name='{re.escape(MIGRATION)}'\s+and source_sha256='{source_hash}'"
+            rf"\s+and transformed_sha256='{transformed_hash}'",
+        )
+        self.assertIn("('r','p','v','m')) = 100", checks)
+        dispatch_gate = checks.split("do $internal_dispatch_integrity_gate$", 1)[1].split(
+            "$internal_dispatch_integrity_gate$;", 1
+        )[0]
+        self.assertIn("edoc.internal_dispatch_mutations", dispatch_gate)
+        self.assertIn("relrowsecurity", dispatch_gate)
+        self.assertIn("edoc_backend", dispatch_gate)
+        self.assertIn("internal_dispatch_rpc_browser_grant", dispatch_gate)
+        for rpc in (
+            "edoc_internal_dispatch_scope_v1",
+            "edoc_dispatch_log_v1",
+            "edoc_list_internal_dispatches_v1",
+            "edoc_create_internal_dispatch_v1",
+            "edoc_close_internal_dispatch_v1",
+            "edoc_reply_internal_dispatch_v1",
+            "edoc_assign_inbound_with_dispatch_v1",
+        ):
+            self.assertIn(rpc, dispatch_gate)
 
 
 @unittest.skipUnless(fixture.PORT, "isolated PostgreSQL gate not enabled")
