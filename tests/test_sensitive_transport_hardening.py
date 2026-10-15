@@ -96,6 +96,9 @@ class SensitiveTransportHardeningTests(unittest.TestCase):
         "inbound_version_conflict",
         "inbound_registration_state_conflict",
         "inbound_mutation_state_conflict",
+        "internal_dispatch_closed",
+        "internal_dispatch_pending_replies",
+        "internal_dispatch_idempotency_conflict",
     }
     POSTGREST_23505_CONFLICTS = {
         "finance_member_sync_event_id_conflict",
