@@ -142,14 +142,13 @@ class DispatchTerminalApiGuardsTest(unittest.TestCase):
         user = {"id": "TEST-RECIPIENT"}
         recipient = {"id": "TEST-R", "recipient_user_id": user["id"], "action_required": True, "status": "pending"}
         initial = {"status": "sent", "closed_at": "", "reply_required": True, "recipients": [recipient]}
-        closed = {**initial, "status": "closed", "closed_at": "2026-09-09 00:00:00", "recipients": [{**recipient, "status": "replied"}]}
-        with mock.patch.object(backend, "supabase_official_session_user", return_value=user), mock.patch.object(backend, "supabase_internal_dispatch_detail", side_effect=[initial, closed, closed]), mock.patch.object(backend, "supabase_insert", side_effect=lambda _table, row: row), mock.patch.object(backend, "supabase_patch") as patch, mock.patch.object(backend, "supabase_request", return_value=[]) as request, mock.patch.object(backend, "supabase_internal_dispatch_log"):
-            result = backend.supabase_reply_internal_dispatch("TEST-IDISP", {"reply_text": "隔離回覆"}, {"user": user})
-            self.assertEqual(result["status"], "closed")
-            self.assertTrue(all(call.args[0] != "internal_dispatches" for call in patch.call_args_list))
-            query = parse_qs(request.call_args.args[1].split("?", 1)[1])
-            self.assertEqual(query, {"id": ["eq.TEST-IDISP"], "status": ["not.in.(closed,cancelled)"], "or": ["(closed_at.is.null,closed_at.eq.)"]})
+        with mock.patch.object(backend, "supabase_official_session_user", return_value=user), mock.patch.object(backend, "supabase_internal_dispatch_detail", return_value=initial), mock.patch.object(backend, "supabase_insert") as insert, mock.patch.object(backend, "supabase_patch") as patch, mock.patch.object(backend, "supabase_request", side_effect=RuntimeError("PT409 internal_dispatch_closed")) as request, mock.patch.object(backend, "supabase_internal_dispatch_log") as log:
+            with self.assertRaisesRegex(ValueError, "^internal_dispatch_closed$"):
+                backend.supabase_reply_internal_dispatch("TEST-IDISP", {"reply_text": "隔離回覆"}, {"user": user})
+            insert.assert_not_called(); patch.assert_not_called(); log.assert_not_called()
+            self.assertEqual(request.call_args.args[:2], ("POST", "rpc/edoc_reply_internal_dispatch_v1"))
+            self.assertEqual(request.call_args.args[2]["p_actor_user_id"], user["id"])
 
     def test_terminal_errors_are_conflicts_not_500(self):
-        for code in ("official_dispatch_record_locked", "internal_dispatch_closed"):
+        for code in ("official_dispatch_record_locked", "internal_dispatch_closed", "internal_dispatch_pending_replies", "internal_dispatch_idempotency_conflict"):
             self.assertEqual(backend.api_value_error_status(code), 409)

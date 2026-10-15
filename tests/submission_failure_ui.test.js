@@ -75,6 +75,7 @@ function harness(code = 'official_submission_validation_failed', status = 500) {
     fetch: async (url, options) => { calls.push({ url, options }); return h.respond(); },
     uploadedSealEditorRuntime: runtime, uploadedSealApplicationRuntime: application,
     uploadedSealEditorState: state, uploadedSealMode: 'seal',
+    officialStatusLabels: {},
     frontendSessionScope: () => session,
     uploadedSealCatalogReady: () => true, uploadedSealCatalogMessage: () => '',
     approvalSelectionForSelect: () => ({ documentCategory: 'synthetic-category', approvalRouteCode: 'A' }),
@@ -100,7 +101,7 @@ function harness(code = 'official_submission_validation_failed', status = 500) {
   vm.runInContext(['fetchWithDeadline', 'backendRequest', 'friendlyBackendErrorMessage',
     'uploadedSealApplicationScopeSnapshot', 'uploadedSealApplicationScopeIsCurrent',
     'uploadedEditorSubmissionFingerprint', 'uploadedEditorSubmissionPreviewIsCurrent',
-    'invalidateUploadedEditorSubmissionPreview', 'renderUploadedEditorSubmissionActions',
+    'invalidateUploadedEditorSubmissionPreview', 'uploadedEditorReadOnlyPresentation', 'renderUploadedEditorSubmissionActions',
     'submitUploadedSealApplication'].map(implementation).join('\n'), c);
   application.submissionPreview = c.uploadedEditorSubmissionFingerprint();
   h.c = c;

@@ -18,7 +18,7 @@ with required_tables(table_name) as (
     ('company_seals'), ('company_seal_policies'), ('approved_original_scan_import_batches'), ('approved_native120_scan_import_batches'), ('file_download_tokens'), ('file_objects'),
     ('finance_member_sync_nonces'), ('finance_member_sync_receipts'),
     ('inbound_document_attachments'), ('inbound_documents'),
-    ('internal_dispatch_logs'), ('internal_dispatch_recipients'),
+    ('internal_dispatch_logs'), ('internal_dispatch_mutations'), ('internal_dispatch_recipients'),
     ('internal_dispatch_replies'), ('internal_dispatches'), ('login_events'),
     ('official_document_approval_logs'), ('official_document_approval_steps'),
     ('official_document_archive_exports'), ('official_document_dispatch_events'),
@@ -122,8 +122,8 @@ where schemaname = 'public'
   and roles && array['public', 'anon', 'authenticated']::name[]
 order by tablename, policyname;
 
--- 2b. Exact backend grant parity for 88 direct PostgREST tables and the two
--- trigger-managed numbering tables.
+-- 2b. Exact backend grant parity for direct PostgREST tables, trigger-managed
+-- numbering tables and the SELECT/INSERT-only dispatch idempotency ledger.
 -- Pass condition: table_exists, owner_matches, no_unexpected_table_grants and
 -- grant_matches must all be true for every row, in addition to the zero-row
 -- browser-grant checks in section 2. The first 82 are backend.TABLES and the
@@ -142,7 +142,7 @@ with backend_tables(table_name) as (
     'exchange_events', 'exchange_inbox', 'exchange_log', 'exchange_outbox',
     'exchange_status_history', 'exchange_tasks', 'file_access_logs',
     'file_download_tokens', 'file_objects', 'inbound_document_attachments',
-    'inbound_documents', 'internal_dispatch_logs',
+    'inbound_documents', 'internal_dispatch_logs', 'internal_dispatch_mutations',
     'internal_dispatch_recipients', 'internal_dispatch_replies',
     'internal_dispatches', 'ip_allowlist', 'job_runs', 'login_events',
     'module_account_links', 'notification_channel_credentials',
@@ -175,7 +175,7 @@ with backend_tables(table_name) as (
     'exchange_inbox', 'exchange_log', 'exchange_outbox',
     'exchange_status_history', 'file_access_logs', 'file_objects',
     'inbound_document_attachments', 'inbound_documents',
-    'internal_dispatch_logs', 'internal_dispatch_recipients',
+    'internal_dispatch_logs', 'internal_dispatch_mutations', 'internal_dispatch_recipients',
     'internal_dispatch_replies', 'internal_dispatches', 'job_runs',
     'login_events', 'module_account_links', 'notification_deliveries',
     'notifications', 'official_document_approval_logs',
@@ -270,6 +270,13 @@ with required_rpcs(signature) as (
     ('public.edoc_claim_official_document_stamp(text,text,text,text,integer)'),
     ('public.edoc_create_finance_login_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_mutate_inbound_document_v1(text,text,text,text,text,bigint,jsonb)'),
+    ('public.edoc_internal_dispatch_scope_v1(text,text)'),
+    ('public.edoc_dispatch_log_v1(text,text,text,text)'),
+    ('public.edoc_list_internal_dispatches_v1(text,boolean,boolean,text,integer,text,text)'),
+    ('public.edoc_create_internal_dispatch_v1(text,jsonb)'),
+    ('public.edoc_close_internal_dispatch_v1(text,text,boolean,text)'),
+    ('public.edoc_reply_internal_dispatch_v1(text,text,jsonb)'),
+    ('public.edoc_assign_inbound_with_dispatch_v1(text,text,text,text,text,bigint,jsonb)'),
     ('public.edoc_resolve_finance_session_v1(text)'),
     ('public.edoc_revalidate_finance_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_create_official_workflow_delegation(text,text,text,text,timestamp with time zone,timestamp with time zone,text,text)'),
@@ -329,6 +336,13 @@ with required_rpcs(signature) as (
     ('public.edoc_claim_official_document_stamp(text,text,text,text,integer)'),
     ('public.edoc_create_finance_login_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_mutate_inbound_document_v1(text,text,text,text,text,bigint,jsonb)'),
+    ('public.edoc_internal_dispatch_scope_v1(text,text)'),
+    ('public.edoc_dispatch_log_v1(text,text,text,text)'),
+    ('public.edoc_list_internal_dispatches_v1(text,boolean,boolean,text,integer,text,text)'),
+    ('public.edoc_create_internal_dispatch_v1(text,jsonb)'),
+    ('public.edoc_close_internal_dispatch_v1(text,text,boolean,text)'),
+    ('public.edoc_reply_internal_dispatch_v1(text,text,jsonb)'),
+    ('public.edoc_assign_inbound_with_dispatch_v1(text,text,text,text,text,bigint,jsonb)'),
     ('public.edoc_resolve_finance_session_v1(text)'),
     ('public.edoc_revalidate_finance_session_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text)'),
     ('public.edoc_create_official_workflow_delegation(text,text,text,text,timestamp with time zone,timestamp with time zone,text,text)'),
@@ -420,6 +434,13 @@ with allowed(signature) as (
     ('public.edoc_finalize_editor_asset_v2(jsonb)'),
     ('public.edoc_finalize_official_document_resubmit(text,text,text,timestamp with time zone,text,text,text,text,text)'),
     ('public.edoc_mutate_inbound_document_v1(text,text,text,text,text,bigint,jsonb)'),
+    ('public.edoc_internal_dispatch_scope_v1(text,text)'),
+    ('public.edoc_dispatch_log_v1(text,text,text,text)'),
+    ('public.edoc_list_internal_dispatches_v1(text,boolean,boolean,text,integer,text,text)'),
+    ('public.edoc_create_internal_dispatch_v1(text,jsonb)'),
+    ('public.edoc_close_internal_dispatch_v1(text,text,boolean,text)'),
+    ('public.edoc_reply_internal_dispatch_v1(text,text,jsonb)'),
+    ('public.edoc_assign_inbound_with_dispatch_v1(text,text,text,text,text,bigint,jsonb)'),
     ('public.edoc_register_official_archive_export(text,text,text,text,text,integer,bigint,text,text,text)'),
     ('public.edoc_resolve_finance_session_v1(text)'),
     ('public.edoc_resolve_portal_finance_user(uuid,text)'),

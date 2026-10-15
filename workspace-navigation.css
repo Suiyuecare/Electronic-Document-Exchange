@@ -13,6 +13,16 @@
 .draft-local-recovery { margin-bottom:1rem; border-style:dashed; }
 [data-draft-legacy] { display:none!important; }
 .approval-task-filter { min-width:12rem; }
+.electronic-seal-navigation { flex-wrap:wrap; justify-content:flex-end; }
+.electronic-seal-navigation button { min-height:44px; scroll-margin-block:120px 24px; }
+/* Detail navigation follows the existing one-column layout breakpoint. */
+@media(max-width:1120px) {
+ #approvalLog:not([data-mobile-detail=true]) .approval-log-detail-panel,
+ #approvalLog[data-mobile-detail=true] .approval-log-list-panel { display:none; }
+ #approvalLog .approval-log-layout { grid-template-columns:minmax(0,1fr); }
+ #approvalLog .approval-list-return { display:inline-flex; }
+ #approvalLog .approval-log-detail-panel { position:static; }
+}
 #approvalLog .inbound-simple-flow { display:flex; gap:.5rem; flex-wrap:wrap; }
 #approvalLog [role=tab] { min-height:44px; }
 #approvalLog [role=tab][aria-selected=true] { background:#ed8500; color:#fff; border-color:#ed8500; }

@@ -80,7 +80,9 @@ class Native120ForwardTest(unittest.TestCase):
             if schema == "edoc":
                 manifest = json.loads((forward.ROOT / "supabase/verification/migration_manifest.json").read_text())
                 self.assertIn(f"migration_ledger) = {len(manifest['migrations']) + 1}", text)
-                self.assertIn("('r','p','v','m')) = 99", text)
+                # The dispatch integrity forward adds internal_dispatch_mutations
+                # to the previously verified 99-relation shared schema.
+                self.assertIn("('r','p','v','m')) = 100", text)
                 self.assertIn(sha256_text(forward.source_sql()), text)
                 self.assertIn(sha256_text(forward.transformed_sql(forward.source_sql())), text)
 

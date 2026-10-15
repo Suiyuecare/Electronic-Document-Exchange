@@ -330,6 +330,63 @@ begin
 end;
 $configurable_workflow_gate$;
 
+do $internal_dispatch_integrity_gate$
+declare
+  v_table regclass := pg_catalog.to_regclass('edoc.internal_dispatch_mutations');
+  v_rpc text;
+  v_role text;
+  v_proc record;
+begin
+  if v_table is null or not exists (
+    select 1 from pg_catalog.pg_class
+    where oid = v_table and relrowsecurity and pg_catalog.pg_get_userbyid(relowner) = 'postgres'
+  ) or not pg_catalog.has_table_privilege('edoc_backend', v_table, 'SELECT')
+    or not pg_catalog.has_table_privilege('edoc_backend', v_table, 'INSERT')
+    or pg_catalog.has_table_privilege('edoc_backend', v_table, 'UPDATE,DELETE,TRUNCATE')
+    or not exists (
+      select 1 from pg_catalog.pg_policy
+      where polrelid = v_table and polname = 'dispatch_mutations_backend'
+        and polroles = array[pg_catalog.to_regrole('edoc_backend')::oid]
+        and polcmd = '*'
+    ) then
+    raise exception 'internal_dispatch_mutations_security_mismatch';
+  end if;
+  foreach v_role in array array['anon','authenticated','service_role','authenticator'] loop
+    if pg_catalog.has_table_privilege(v_role, v_table, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE') then
+      raise exception 'internal_dispatch_mutations_browser_grant';
+    end if;
+  end loop;
+  foreach v_rpc in array array[
+    'edoc_internal_dispatch_scope_v1(text,text)',
+    'edoc_dispatch_log_v1(text,text,text,text)',
+    'edoc_list_internal_dispatches_v1(text,boolean,boolean,text,integer,text,text)',
+    'edoc_create_internal_dispatch_v1(text,jsonb)',
+    'edoc_close_internal_dispatch_v1(text,text,boolean,text)',
+    'edoc_reply_internal_dispatch_v1(text,text,jsonb)',
+    'edoc_assign_inbound_with_dispatch_v1(text,text,text,text,text,bigint,jsonb)'
+  ] loop
+    select * into v_proc from pg_catalog.pg_proc
+      where oid = pg_catalog.to_regprocedure('edoc.' || v_rpc);
+    if not found or v_proc.prosecdef
+      or pg_catalog.pg_get_userbyid(v_proc.proowner) <> 'postgres'
+      or not coalesce(v_proc.proconfig @> array['search_path=""'], false)
+      or not pg_catalog.has_function_privilege('edoc_backend', v_proc.oid, 'EXECUTE') then
+      raise exception 'internal_dispatch_rpc_security_mismatch';
+    end if;
+    foreach v_role in array array['anon','authenticated','service_role','authenticator'] loop
+      if pg_catalog.has_function_privilege(v_role, v_proc.oid, 'EXECUTE') then
+        raise exception 'internal_dispatch_rpc_browser_grant';
+      end if;
+    end loop;
+    if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,
+        pg_catalog.acldefault('f',v_proc.proowner))) a
+        where a.grantee = 0 and a.privilege_type = 'EXECUTE') then
+      raise exception 'internal_dispatch_rpc_public_grant';
+    end if;
+  end loop;
+end;
+$internal_dispatch_integrity_gate$;
+
 
 with expected_storage_policies(policy_name, table_name) as (
   values
@@ -412,7 +469,7 @@ checks(check_name, passed, observed) as (
       (select count(*) from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
-         and class_row.relkind in ('r','p','v','m')) = 99,
+         and class_row.relkind in ('r','p','v','m')) = 100,
       (select count(*)::text from pg_catalog.pg_class class_row
        join pg_catalog.pg_namespace namespace_row on namespace_row.oid = class_row.relnamespace
        where namespace_row.nspname = 'edoc'
@@ -420,7 +477,17 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 77
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 78
+      -- The sorted digest binds the complete ledger name set to migration_manifest.json
+      -- plus the bootstrap's roles.sql row; count and primary key prevent duplicates.
+      and (select pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+             pg_catalog.string_agg(file_name, E'\n' order by file_name), 'UTF8')), 'hex')
+           from edoc_private.shared_project_migration_ledger)
+          = '9d64dc386f15eb779fa3e1bc328fe2ed9bf525bb09f88b1e8a8d5a7b3688bd71'
+      and exists(select 1 from edoc_private.shared_project_migration_ledger
+        where file_name='20261015144049_internal_dispatch_workflow_integrity.sql'
+          and source_sha256='2cf453637d1ca11814671593073b5120b885b89b1681d2a75ef3aea7f44cb907'
+          and transformed_sha256='423f9fb1aeb595eea1865f2e5f1301b0f6db00d31f30c4e1bfb2a99136c7e25e')
       and exists(select 1 from edoc_private.shared_project_migration_ledger
         where file_name='20261014031923_atomic_submission_step_evidence_defaults.sql'
           and source_sha256='56d6f33e1ddfa2ef6107e6e15e97a93953fd234ea0d1961ac0d42aa404d57450'

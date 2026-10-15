@@ -385,7 +385,7 @@ class UiUxSimplificationContractTest(unittest.TestCase):
         )
         self.assertIn(".append(", initialize_body)
 
-        view_start = self.js.index("function setView(target)")
+        view_start = self.js.index("function setView(")
         view_end = self.js.index("\nwindow.addEventListener(\"hashchange\"", view_start)
         set_view = self.js[view_start:view_end]
         self.assertIn("const activeMajorRoute = majorRouteForRoute(target);", set_view)

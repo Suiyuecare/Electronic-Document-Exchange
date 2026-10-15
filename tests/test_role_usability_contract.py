@@ -59,11 +59,12 @@ key(0,'ArrowRight');assert.equal(active,2);key(0,'ArrowLeft');assert.equal(activ
     def test_internal_dispatch_background_scope_and_failure_preservation(self):
         self.run_js(["loadInternalDispatches"], r'''
 let authenticated=true,scope='A',internalDispatchLoadGeneration=0,internalDispatchLoadStatus='idle',internalDispatchItems=[],internalDispatchRecipientDirectory=[],selectedInternalDispatchId='',calls=[];
+let internalDispatchPageState={scope:'A',cursor:'',history:[]};const authState={token:'synthetic'};
 const hasAuthenticatedBackendSession=()=>authenticated,frontendSessionScope=()=>scope,canCreateInternalDispatch=()=>true;
 const renderInternalDispatchModule=()=>{},refreshDashboardWorkEntryPoints=()=>{},showToast=()=>{};
-let backendRequest=p=>{calls.push(p);return Promise.resolve([{id:'A-1'}])};
+let backendRequest=p=>{calls.push(p);return Promise.resolve({items:[{id:'A-1'}],scopeComplete:true,hasMore:false,nextCursor:null})};
 (async()=>{
- await loadInternalDispatches(true,{includeDirectory:false});assert.deepEqual(calls,['/internal-dispatches']);assert.equal(internalDispatchItems[0].id,'A-1');
+ await loadInternalDispatches(true,{includeDirectory:false});assert.deepEqual(calls,['/internal-dispatches?paginated=1&page_size=50']);assert.equal(internalDispatchItems[0].id,'A-1');
  backendRequest=()=>Promise.reject(new Error('offline'));await loadInternalDispatches();assert.equal(internalDispatchItems[0].id,'A-1');assert.equal(internalDispatchLoadStatus,'error');
  let resolve;backendRequest=()=>new Promise(r=>resolve=r);const old=loadInternalDispatches(true,{includeDirectory:false});scope='B';resolve([{id:'A-OLD'}]);await old;assert.equal(internalDispatchItems[0].id,'A-1');
  authenticated=false;calls=[];backendRequest=p=>{calls.push(p)};await loadInternalDispatches();assert.equal(calls.length,0);

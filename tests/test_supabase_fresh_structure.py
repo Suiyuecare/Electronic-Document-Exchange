@@ -634,7 +634,10 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                     if table == "official_document_compose_drafts" else numbering_sql
                 )
                 self.assertIn(f"grant {privileges} on public.{table} to service_role;", forward_sql)
-        self.assertEqual(set(expected_matrix), granted_select | later_select | approved_scan_select | set(numbering_matrix))
+        dispatch_matrix = {"internal_dispatch_mutations": "si"}
+        dispatch_sql = (MIGRATIONS / "20261015144049_internal_dispatch_workflow_integrity.sql").read_text(encoding="utf-8").lower()
+        self.assertIn("grant select,insert on public.internal_dispatch_mutations to service_role;", dispatch_sql)
+        self.assertEqual(set(expected_matrix), granted_select | later_select | approved_scan_select | set(numbering_matrix) | set(dispatch_matrix))
         self.assertEqual(expected_matrix["approved_original_scan_import_batches"], "s")
         self.assertEqual(expected_matrix["approved_native120_scan_import_batches"], "s")
         for privilege, marker in (("insert", "i"), ("update", "u"), ("delete", "d")):
@@ -648,6 +651,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             if privilege in {"insert", "update"}:
                 granted |= later_select
             granted |= {table for table, operations in numbering_matrix.items() if marker in operations}
+            granted |= {table for table, operations in dispatch_matrix.items() if marker in operations}
             self.assertEqual(
                 granted,
                 {table for table, operations in expected_matrix.items() if marker in operations},
@@ -767,6 +771,37 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
                 self.assertIn(f"public.{rpc_name}(", matrix_smoke)
         self.assertIn("notify pgrst, 'reload schema'", sql)
 
+    def test_dispatch_grant_inventory_tracks_only_exact_forward_objects(self) -> None:
+        migration = (MIGRATIONS / "20261015144049_internal_dispatch_workflow_integrity.sql").read_text(encoding="utf-8").lower()
+        smoke = SERVICE_ROLE_GRANT_SMOKE.read_text(encoding="utf-8").lower()
+        cutover = CUTOVER.read_text(encoding="utf-8").lower()
+        signatures = {
+            "public.edoc_internal_dispatch_scope_v1(text,text)",
+            "public.edoc_dispatch_log_v1(text,text,text,text)",
+            "public.edoc_list_internal_dispatches_v1(text,boolean,boolean,text,integer,text,text)",
+            "public.edoc_create_internal_dispatch_v1(text,jsonb)",
+            "public.edoc_close_internal_dispatch_v1(text,text,boolean,text)",
+            "public.edoc_reply_internal_dispatch_v1(text,text,jsonb)",
+            "public.edoc_assign_inbound_with_dispatch_v1(text,text,text,text,text,bigint,jsonb)",
+        }
+        grants = re.search(r"grant execute on function (.*?) to service_role;", migration, re.DOTALL)
+        self.assertIsNotNone(grants)
+        self.assertEqual(set(re.findall(r"public\.edoc_\w+\([^)]*\)", grants.group(1))), signatures)
+        for signature in signatures:
+            with self.subTest(signature=signature):
+                # Both the required-grant and no-unexpected-grant branches are
+                # closed inventories; never exempt a whole namespace/prefix.
+                self.assertEqual(smoke.count(f"('{signature}')"), 2)
+                self.assertEqual(cutover.count(f"('{signature}')"), 3)
+        self.assertIn("service_role_unexpected_public_function_grant", smoke)
+        self.assertIn("unexpected_service_role_function", cutover)
+        for role in ("anon", "authenticated"):
+            self.assertIn(f"has_function_privilege('{role}', v_oid, 'execute')", smoke)
+        required_tables = cutover.split("with required_tables(table_name) as (", 1)[1].split(
+            ")\nselect", 1
+        )[0]
+        self.assertIn("('internal_dispatch_mutations')", required_tables)
+
     def test_compose_grant_smoke_keeps_closed_table_and_invoker_helper_allowlists(self) -> None:
         smoke = SERVICE_ROLE_GRANT_SMOKE.read_text(encoding="utf-8").lower()
         table_block = smoke.split("do $service_role_table_matrix$", 1)[1].split("$service_role_table_matrix$;", 1)[0]
@@ -776,6 +811,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
         self.assertEqual(set(expected), allowed)
         self.assertEqual(expected["official_document_number_counters"], "siu")
         self.assertEqual(expected["official_document_number_allocations"], "si")
+        self.assertEqual(expected["internal_dispatch_mutations"], "si")
         # Extra DELETE/UPDATE must fail exactly like missing required grants;
         # unrelated-table denial and special-privilege denial remain in force.
         for operation, marker in (("select", "s"), ("insert", "i"), ("update", "u"), ("delete", "d")):

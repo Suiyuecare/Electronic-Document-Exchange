@@ -888,6 +888,39 @@ input[readonly].seal-dimension-locked {
   opacity: 0.5;
 }
 
+/* A locked case is a document viewer, not an editor with dead controls. */
+#uploadedPdfEditor[data-read-only-presentation="true"] :is(
+  #uploadedEditorToolTray, #uploadedEditorSaveDraftBtn, #uploadedPdfReplaceBtn,
+  #uploadedPdfA4Rule, #uploadedEditorGeneralOptions, #uploadedEditorSeamPanel,
+  #uploadedEditorPageActions, .pdf-editor-page-import, #uploadedEditorProperties,
+  #uploadedEditorSelectionActions, .editor-object-disclosure,
+  #uploadedEditorSaveDraftFooterBtn, #clearUploadedStampsBtn,
+  #uploadedEditorToolNotice, #uploadedSealAvailabilityNotice
+) {
+  display: none;
+}
+
+#uploadedPdfEditor[data-case-read-only="true"] .pdf-editor-footer-actions { display: none; }
+#uploadedSealApplicationPanel[data-case-read-only="true"] .electronic-seal-route-result { display: none; }
+
+#uploadedPdfEditor .uploaded-editor-readonly-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--cream);
+  overflow-wrap: anywhere;
+}
+
+#uploadedPdfEditor .uploaded-editor-readonly-notice[hidden] { display: none; }
+#uploadedPdfEditor .uploaded-editor-readonly-notice strong { flex-basis: 100%; }
+#uploadedPdfEditor .uploaded-editor-readonly-notice p { flex: 1 1 280px; margin: 0; color: var(--muted); }
+#uploadedPdfEditor[data-read-only-presentation="true"] .editor-svg-element { cursor: default; }
+
 .pdf-editor-v2[data-uploading="true"] .pdf-editor-toolbar,
 .pdf-editor-v2[data-uploading="true"] .pdf-editor-general-options,
 .pdf-editor-v2[data-uploading="true"] .pdf-editor-shell,
@@ -12459,7 +12492,7 @@ body[data-session-state="revalidating"] .workspace::after {
 
 .official-decision-evidence {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   align-items: center;
   margin-top: 14px;
@@ -12483,8 +12516,38 @@ body[data-session-state="revalidating"] .workspace::after {
 .official-decision-evidence-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
+}
+
+#officialDecisionModal :is(.official-decision-evidence > *, .decision-check > span, .approval-log-meta > div) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+#officialDecisionModal .decision-check {
+  grid-template-columns: 20px minmax(0, 1fr);
+  min-height: 44px;
+  align-items: start;
+}
+
+#officialDecisionModal .official-decision-evidence-actions button {
+  min-height: 44px;
+  max-width: 100%;
+  white-space: normal;
+}
+
+#officialDecisionModal .official-decision-form {
+  scroll-padding-block: 16px 160px;
+}
+
+.official-decision-requirements {
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .modal-backdrop {

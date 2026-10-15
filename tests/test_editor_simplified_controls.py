@@ -278,13 +278,15 @@ assert.equal(counts.commits,1);assert.equal(counts.confirms,2);
         if not node:
             self.skipTest("Node.js is required for shipping thumbnail function tests")
         functions = "\n".join(javascript_function(self.js, name) for name in (
-            "renderUploadedEditorThumbnail", "renderUploadedEditorThumbnails",
+            "uploadedEditorReadOnlyPresentation", "renderUploadedEditorThumbnail", "renderUploadedEditorThumbnails",
         ))
         harness = r'''
 const assert=require('node:assert/strict');
 const counters={domWrites:0,renders:0,observes:0,unobserves:0};
 const uploadedSealEditorState={pages:[{pageId:'p1',rotation:0,sourceAssetId:'asset',widthPt:842,heightPt:595}],elements:[]};
-const uploadedSealEditorRuntime={currentPageId:'p1',thumbnailObserver:null};
+const uploadedSealEditorRuntime={currentPageId:'p1',thumbnailObserver:null,reviewMode:'edited'};
+const uploadedSealApplicationRuntime={editable:true};
+const officialStatusLabels={};
 const runtimes=new Map();
 const uploadedEditorPageRuntime=id=>runtimes.get(id);
 const thumbnail={dataset:{},style:{},getContext:()=>({}),closest:()=>button};

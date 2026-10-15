@@ -46,6 +46,12 @@ class VercelPackagingTestCase(unittest.TestCase):
         self.assertIn("official_listing.py", python_build["config"]["includeFiles"])
         self.assertTrue((ROOT / "official_listing.py").is_file())
 
+    def test_internal_dispatch_workflow_is_included_in_runtime_bundle(self) -> None:
+        config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
+        python_build = next(item for item in config["builds"] if item.get("src") == "api/index.py")
+        self.assertIn("internal_dispatch_workflow.py", python_build["config"]["includeFiles"])
+        self.assertTrue((ROOT / "internal_dispatch_workflow.py").is_file())
+
     def test_production_env_template_includes_dedicated_app_secret(self) -> None:
         values = {}
         template = (ROOT / ".env.production.example").read_text(encoding="utf-8")
