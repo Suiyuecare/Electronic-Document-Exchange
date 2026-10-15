@@ -802,6 +802,7 @@
                   </fieldset>
                   <label>處理期限天數<input id="internalDispatchDueDaysInput" type="number" min="1" max="365" step="1" value="3" /></label>
                   <button class="primary-button" id="internalDispatchSubmitBtn" type="submit">送出內部派發</button>
+                  <p class="empty-text" id="internalDispatchCreateNotice" role="status" aria-live="polite" hidden></p>
                 </form>
               </div>
               <section class="internal-dispatch-board">
@@ -809,7 +810,10 @@
                   <h3>派發與處理紀錄</h3>
                   <span class="status-pill" id="internalDispatchCount">0 件</span>
                 </div>
+                <p class="empty-text" id="internalDispatchLoadNotice" role="status" aria-live="polite" hidden></p>
+                <label>派發範圍<select id="internalDispatchScopeFilter"><option value="all">全部派發</option><option value="needs_reply">待我回覆</option></select></label>
                 <div class="internal-dispatch-list" id="internalDispatchList"></div>
+                <nav class="workspace-pagination" id="internalDispatchPagination" aria-label="派發紀錄分頁"></nav>
                 <div class="internal-dispatch-detail" id="internalDispatchDetail"></div>
               </section>
             </div>
@@ -1621,7 +1625,11 @@
             <div>
               <h3 id="uploadedSealHeaderTitle">電子用印</h3>
             </div>
-            <span class="status-pill" id="uploadedSealPdfStatus">尚未上傳 PDF</span>
+            <div class="row-actions electronic-seal-navigation">
+              <button class="secondary-button" id="uploadedSealReturnBtn" type="button" hidden>返回案件</button>
+              <button class="secondary-button" id="uploadedSealNewBtn" type="button" hidden>新增用印申請</button>
+              <span class="status-pill" id="uploadedSealPdfStatus">尚未上傳 PDF</span>
+            </div>
           </div>
 
           <div class="electronic-seal-layout electronic-seal-layout-split">
@@ -4336,9 +4344,9 @@
               <p>請依序確認申請資訊、原稿或送簽版、全部附件，以及 PDF 編輯內容；完成檢視後才能作成決定。</p>
             </div>
             <div class="official-decision-evidence-actions" id="officialDecisionEvidenceActions"></div>
-            <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required />我已查看原稿／送簽 PDF，並核對申請目的。</label>
-            <label class="decision-check"><input id="officialReviewAttachments" type="checkbox" required />我已查看全部附件，或確認本案沒有附件。</label>
-            <label class="decision-check"><input id="officialReviewEdited" type="checkbox" required />我已查看 PDF 編輯版與用印位置，或確認本案沒有編輯內容。</label>
+            <label class="decision-check"><input id="officialReviewOriginal" type="checkbox" required /><span>我已查看原稿／送簽 PDF，並核對申請目的。</span></label>
+            <label class="decision-check"><input id="officialReviewAttachments" type="checkbox" required /><span>我已查看全部附件，或確認本案沒有附件。</span></label>
+            <label class="decision-check"><input id="officialReviewEdited" type="checkbox" required /><span>我已查看 PDF 編輯版與用印位置，或確認本案沒有編輯內容。</span></label>
           </section>
           <section id="officialApprovalReviewFields" class="official-decision-section">
             <h4>送出核准前確認</h4>
@@ -4373,7 +4381,8 @@
           </section>
           <p class="official-decision-error" id="officialDecisionError" role="alert" hidden></p>
           <div class="form-actions">
-            <button class="primary-button" id="officialDecisionSubmitBtn" type="submit">確認核准</button>
+            <p class="official-decision-requirements" id="officialDecisionRequirements" role="status" aria-live="polite"></p>
+            <button class="primary-button" id="officialDecisionSubmitBtn" type="submit" aria-describedby="officialDecisionRequirements officialDecisionError">確認核准</button>
             <button class="secondary-button" id="officialDecisionCancelBtn" type="button">取消</button>
           </div>
         </form>

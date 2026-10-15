@@ -12459,7 +12459,7 @@ body[data-session-state="revalidating"] .workspace::after {
 
 .official-decision-evidence {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   align-items: center;
   margin-top: 14px;
@@ -12483,8 +12483,38 @@ body[data-session-state="revalidating"] .workspace::after {
 .official-decision-evidence-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
+}
+
+#officialDecisionModal :is(.official-decision-evidence > *, .decision-check > span, .approval-log-meta > div) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+#officialDecisionModal .decision-check {
+  grid-template-columns: 20px minmax(0, 1fr);
+  min-height: 44px;
+  align-items: start;
+}
+
+#officialDecisionModal .official-decision-evidence-actions button {
+  min-height: 44px;
+  max-width: 100%;
+  white-space: normal;
+}
+
+#officialDecisionModal .official-decision-form {
+  scroll-padding-block: 16px 160px;
+}
+
+.official-decision-requirements {
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .modal-backdrop {

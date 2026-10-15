@@ -44,7 +44,7 @@ function harness() {
   for (const n of [...Object.values(nodes), ...routes, ...nav, document.body]) n.document = document;
   nodes.appShell.children = [nodes.primarySidebar, routes[0], nodes.mobileDrawerBackdrop];
   const timers = new Map(); let now = 0, timerId = 0;
-  const c = { document, Date: { now: () => now }, performance: { now: () => now }, requestAnimationFrame: fn => fn(), recordUiPerformance() {}, renderWorkspaceQuickGuide() {}, Map, Set, String, Boolean, HTMLElement: Node,
+  const c = { document, Date: { now: () => now }, performance: { now: () => now }, requestAnimationFrame: fn => fn(), recordUiPerformance() {}, renderWorkspaceQuickGuide() {}, Map, Set, String, Boolean, URLSearchParams, HTMLElement: Node,
     getComputedStyle: () => ({ visibility: 'visible' }),
     window: { setTimeout(fn, ms) { const id = ++timerId; timers.set(id, { fn, at: now + ms }); return id; }, clearTimeout: id => timers.delete(id), matchMedia: () => ({ matches: false }), requestAnimationFrame: fn => fn() },
     toastDismissTimer: null, toastDismissAt: 0, toastRemainingMs: 0,
@@ -56,11 +56,16 @@ function harness() {
     bindWorkspaceDraftControls() {}, refreshWorkspaceDraftCount() {}, loadWorkspaceDrafts() {},
     configureUploadedSealMode() {}, uploadedSealEditorRuntime: {}, companySealCompanies: [],
     openIntegratedPageSection() {}, loadRouteBackendData() {}, trackUiUsage() {},
-    location: { hash: '#dashboard' }, history: { replaceState() {} }, activeRole: () => 'synthetic-role',
+    titles: Object.fromEntries(routes.map(route => [route.id, route.id])), approvalLogFilter: 'pending',
+    hasBackendPermission: () => false,
+    location: { hash: '#dashboard' }, history: {
+      pushState: (_state, _title, hash) => { c.location.hash = hash; },
+      replaceState: (_state, _title, hash) => { c.location.hash = hash; },
+    }, activeRole: () => 'synthetic-role',
     authState: { user: { name: 'synthetic-user' } }, headerBackendSyncState: { status: 'idle' }, headerTodoCount: () => 2,
   };
   vm.createContext(c);
-  vm.runInContext(['dismissToast', 'resumeToastDismissal', 'pauseToastDismissal', 'showToast', 'visibleWorkspaceModals', 'syncWorkspaceOverlayIsolation', 'workspaceModalFocusableItems', 'trapWorkspaceModalFocus', 'showWorkspaceModal', 'hideWorkspaceModal', 'mobileNavigationIsCompact', 'setView', 'updateHeaderStatus'].map(implementation).join('\n'), c);
+  vm.runInContext(['dismissToast', 'resumeToastDismissal', 'pauseToastDismissal', 'showToast', 'visibleWorkspaceModals', 'syncWorkspaceOverlayIsolation', 'workspaceModalFocusableItems', 'trapWorkspaceModalFocus', 'showWorkspaceModal', 'hideWorkspaceModal', 'mobileNavigationIsCompact', 'parseWorkspaceCaseRoute', 'writeWorkspaceCaseRoute', 'renderUploadedSealNavigation', 'setView', 'updateHeaderStatus'].map(implementation).join('\n'), c);
   function advance(ms) { now += ms; for (const [id, timer] of timers) if (timer.at <= now) { timers.delete(id); timer.fn(); } }
   return { c, nodes, routes, nav, document, timers, advance };
 }

@@ -110,6 +110,27 @@ def category(api, item, user):
     return "processed"
 
 
+def approval_membership(api, item, all_steps, decision_logs, user, delegation=None):
+    """List, detail and mutation responses share actual-decision membership."""
+    user_id = user.get("id")
+    result = {}
+    decision_actions = {"approve", "reject", "add_sign", "return_previous", "decline"}
+    acted = bool(user_id) and any(log.get("actor_id") == user_id and log.get("action") in decision_actions
+                for log in decision_logs)
+    # Actor columns are write-on-decision evidence, not assigned approvers.
+    acted = acted or (bool(user_id) and any(s.get("decision_actor_user_id") == user_id and s.get("status") in {"approved", "rejected"}
+                         and s.get("step_key") != "applicant_confirm" for s in all_steps))
+    operations = bool(item["can_manage_dispatch"] or item["can_retry_stamp"] or item["can_confirm"] or item["can_create_linked_application"])
+    result["approval_views"] = {
+        "pending": bool((item["can_act"] and item.get("current_step") != "applicant_confirm") or operations),
+        "mine": bool(user_id) and item.get("applicant_id") == user_id,
+        "acted": bool(acted),
+        "rejected": item.get("current_status") in {"rejected", "declined"},
+    }
+    result["approval_task_filters"] = {"delegated": bool(delegation), "overdue": category(api, item, user) == "overdue", "operations": operations}
+    return result
+
+
 def project(api, bundle, config, user, session):
     item = dict(bundle["document"])
     all_steps = bundle.get("steps") or []
@@ -166,20 +187,7 @@ def project(api, bundle, config, user, session):
                 delegation_id=delegation.get("id") if delegation else "")
     if scope == "todo" and not (item["can_act"] or item["can_retry_stamp"] or item["can_confirm"] or item["can_create_linked_application"] or item["can_manage_dispatch"]):
         return None
-    decision_actions = {"approve", "reject", "add_sign", "return_previous", "decline"}
-    acted = any(log.get("actor_id") == user["id"] and log.get("action") in decision_actions
-                for log in bundle.get("decision_logs", []))
-    # Actor columns are write-on-decision evidence, not assigned approvers.
-    acted = acted or any(s.get("decision_actor_user_id") == user["id"] and s.get("status") in {"approved", "rejected"}
-                         and s.get("step_key") != "applicant_confirm" for s in all_steps)
-    operations = bool(item["can_manage_dispatch"] or item["can_retry_stamp"] or item["can_confirm"] or item["can_create_linked_application"])
-    item["approval_views"] = {
-        "pending": bool((item["can_act"] and item.get("current_step") != "applicant_confirm") or operations),
-        "mine": item.get("applicant_id") == user["id"],
-        "acted": bool(acted),
-        "rejected": item.get("current_status") in {"rejected", "declined"},
-    }
-    item["approval_task_filters"] = {"delegated": bool(delegation), "overdue": category(api, item, user) == "overdue", "operations": operations}
+    item.update(approval_membership(api, item, all_steps, bundle.get("decision_logs", []), user, delegation))
     if config["view"] in item["approval_views"]:
         if not item["approval_views"][config["view"]]:
             return None

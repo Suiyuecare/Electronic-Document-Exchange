@@ -214,6 +214,8 @@ let inboundAssignmentInFlight = false;
 let internalDispatchRecipientDirectory = [];
 let internalDispatchLoadGeneration = 0;
 let internalDispatchLoadStatus = "idle";
+let internalDispatchPageState = { scope: "", cursor: "", nextCursor: null, hasMore: false, count: null, history: [], needsReply: false };
+const internalDispatchCreateIntents = new Map();
 let selectedInternalDispatchId = "";
 const dispatchAuditLog = [
   ["10:12", "系統初始化", "載入既有發文與交換紀錄。"]
@@ -3122,8 +3124,122 @@ async function loadUiUsageSummary(silent = true) {
 
 const routeScrollPositions = new Map();
 let routeScrollScope = "";
+const officialCaseNavigation = { generation: 0, controller: null, scope: "", token: "", id: "", detail: null, loading: false, error: "" };
+let uploadedSealBlankInputScope = "";
 
-function setView(target) {
+function parseWorkspaceCaseRoute(hash = location.hash) {
+  const [path, query = ""] = String(hash).replace(/^#/, "").split("?");
+  const params = new URLSearchParams(query);
+  const route = titles[path] ? path : "dashboard";
+  const caseId = /^(?:OD-)[A-Za-z0-9_-]{1,120}$/.test(params.get("case") || "") ? params.get("case") : "";
+  const tab = ["pending", "mine", "acted", "rejected"].includes(params.get("tab")) ? params.get("tab") : "pending";
+  const mode = ["edited", "original", "prepared", "changes"].includes(params.get("mode")) ? params.get("mode") : "edited";
+  return { route, caseId: ["approvalLog", "electronicSeal"].includes(route) ? caseId : "", tab, mode };
+}
+
+function writeWorkspaceCaseRoute(route, { caseId = "", tab = approvalLogFilter, mode = "edited", replace = false } = {}) {
+  const params = new URLSearchParams();
+  if (["approvalLog", "electronicSeal"].includes(route) && /^OD-[A-Za-z0-9_-]{1,120}$/.test(caseId)) params.set("case", caseId);
+  if (route === "approvalLog" || params.has("case")) params.set("tab", ["pending", "mine", "acted", "rejected"].includes(tab) ? tab : "pending");
+  if (route === "electronicSeal" && params.has("case")) params.set("mode", ["edited", "original", "prepared", "changes"].includes(mode) ? mode : "edited");
+  const hash = `#${route}${params.size ? `?${params}` : ""}`;
+  if (location.hash !== hash) history[replace ? "replaceState" : "pushState"](null, "", hash);
+}
+
+function clearOfficialCaseNavigation() {
+  officialCaseNavigation.controller?.abort();
+  Object.assign(officialCaseNavigation, { generation: officialCaseNavigation.generation + 1, controller: null, id: "", detail: null, loading: false, error: "" });
+}
+
+function currentOfficialCaseNavigation() {
+  return officialCaseNavigation.scope === frontendSessionScope() && officialCaseNavigation.token === (authState?.token || "") ? officialCaseNavigation : null;
+}
+
+function officialCasePreferredTab(item, preferred = "") {
+  const record = { officialDocument: item };
+  if (["pending", "mine", "acted", "rejected"].includes(preferred) && approvalRecordMatchesView(record, preferred)) return preferred;
+  return ["pending", "mine", "acted", "rejected"].find((tab) => approvalRecordMatchesView(record, tab)) || "pending";
+}
+
+function officialCaseNavigationRecord(records, navigation) {
+  if (!navigation?.detail) return null;
+  const latest = officialWorkflowItems.find((item) => item.id === navigation.id) || navigation.detail;
+  navigation.detail = latest;
+  return records.find(({ task }) => task.id === navigation.id) || approvalLogRecords([latest])[0];
+}
+
+function rememberApprovalReturnContext() {
+  writeScopedSessionJson("approval-return-context", {
+    caseId: selectedWorkflowTaskId, tab: approvalLogFilter, taskFilter: approvalTaskFilter,
+    search: approvalLogSearchTerm, scrollTop: document.querySelector("#approvalLog")?.scrollTop || 0,
+    detail: document.querySelector("#approvalLog")?.dataset.mobileDetail === "true"
+  });
+}
+
+async function openOfficialCaseFromNavigation(documentId, { tab = "", preserveFilters = false, replace = false } = {}) {
+  if (!isRouteAllowed("approvalLog") || !/^OD-[A-Za-z0-9_-]{1,120}$/.test(documentId || "")) return false;
+  const previousTab = approvalLogFilter;
+  clearOfficialCaseNavigation();
+  const controller = new AbortController();
+  const scope = frontendSessionScope(), token = authState?.token || "";
+  const generation = officialCaseNavigation.generation;
+  Object.assign(officialCaseNavigation, { controller, scope, token, id: documentId, loading: true });
+  if (!preserveFilters) {
+    approvalLogSearchTerm = ""; approvalTaskFilter = "";
+    const search = document.querySelector("#approvalLogSearch"); if (search) search.value = "";
+  }
+  if (tab) approvalLogFilter = tab;
+  selectedWorkflowTaskId = documentId;
+  if (activeRouteTarget !== "approvalLog") setView("approvalLog", { preserveCaseRoute: true });
+  writeWorkspaceCaseRoute("approvalLog", { caseId: documentId, replace });
+  renderApprovalLog(); openApprovalLogMobileDetail();
+  const current = () => !controller.signal.aborted && generation === officialCaseNavigation.generation
+    && frontendSessionScope() === scope && (authState?.token || "") === token && activeRouteTarget === "approvalLog";
+  try {
+    const item = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`, { signal: controller.signal });
+    if (!current()) return false;
+    if (item?.id !== documentId) throw new Error("案件回應不一致，請重新開啟。");
+    officialCaseNavigation.detail = item;
+    approvalLogFilter = officialCasePreferredTab(item, tab);
+    selectedOfficialDocumentId = documentId;
+    selectedWorkflowTaskId = documentId;
+    officialWorkflowItems = [item, ...officialWorkflowItems.filter((entry) => entry.id !== documentId)];
+    officialDocumentDetailReady.add(documentId);
+    writeWorkspaceCaseRoute("approvalLog", { caseId: documentId, replace: true });
+    if (!preserveFilters || previousTab !== approvalLogFilter) void loadApprovalProgressFromBackend();
+    return true;
+  } catch (error) {
+    if (!current()) return false;
+    officialCaseNavigation.detail = null;
+    officialCaseNavigation.error = error?.status === 403 ? "目前沒有查看這筆案件的權限。請返回清單，或聯絡管理者確認派發。" : "案件目前無法載入，請重試或返回清單。";
+    return false;
+  } finally {
+    if (current()) { officialCaseNavigation.loading = false; renderApprovalLog(); openApprovalLogMobileDetail(); }
+  }
+}
+
+async function restoreWorkspaceCaseRoute() {
+  const route = parseWorkspaceCaseRoute();
+  if (!isRouteAllowed(route.route)) return setView("dashboard");
+  if (route.route === "approvalLog") {
+    approvalLogFilter = route.tab;
+    const saved = readScopedSessionJson("approval-return-context", {});
+    if (saved.caseId === route.caseId && saved.tab === route.tab) {
+      approvalLogSearchTerm = String(saved.search || ""); approvalTaskFilter = String(saved.taskFilter || "");
+      const search = document.querySelector("#approvalLogSearch"); if (search) search.value = approvalLogSearchTerm;
+    }
+    if (route.caseId) return openOfficialCaseFromNavigation(route.caseId, { tab: route.tab, preserveFilters: true, replace: true });
+    clearOfficialCaseNavigation();
+    setView(route.route, { preserveCaseRoute: true }); renderApprovalLog(); closeApprovalLogMobileDetail({ writeRoute: false });
+    return;
+  }
+  if (route.route === "electronicSeal" && route.caseId) {
+    return openOfficialDocumentEditorReview(route.caseId, route.mode, { restore: true, tab: route.tab });
+  }
+  setView(route.route);
+}
+
+function setView(target, { preserveCaseRoute = false } = {}) {
   bindWorkspaceDraftControls();
   const routeStartedAt = performance.now();
   if (!isRouteAllowed(target)) target = "dashboard";
@@ -3138,6 +3254,11 @@ function setView(target) {
   const previousView = document.getElementById(previousMajorRoute);
   const activeMajorRoute = majorRouteForRoute(target);
   const routeChanged = previousMajorRoute !== activeMajorRoute;
+  if (routeChanged) {
+    if (previousMajorRoute === "approvalLog") rememberApprovalReturnContext();
+    if (previousMajorRoute === "electronicSeal") uploadedSealApplicationRuntime.openAbortController?.abort();
+    if (previousMajorRoute === "approvalLog") clearOfficialCaseNavigation();
+  }
   if (sameScope && routeChanged && previousView?.classList.contains("active")) {
     routeScrollPositions.set(previousMajorRoute, { top: previousView.scrollTop, left: previousView.scrollLeft });
   }
@@ -3202,7 +3323,8 @@ function setView(target) {
       recordUiPerformance("workspace_visible", routeStartedAt, "success", { cacheState: sameScope ? "warm" : "cold" });
     }
   });
-  if (location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
+  if (!preserveCaseRoute && (routeChanged || parseWorkspaceCaseRoute().route !== target)) writeWorkspaceCaseRoute(target);
+  renderUploadedSealNavigation();
 }
 
 function renderWorkspaceQuickGuide(route) {
@@ -3231,8 +3353,7 @@ function renderWorkspaceQuickGuide(route) {
 }
 
 window.addEventListener("hashchange", () => {
-  const target = location.hash.slice(1);
-  if (target && titles[target]) setView(target);
+  if (hasAuthenticatedBackendSession()) void restoreWorkspaceCaseRoute();
 });
 
 function activeRole() {
@@ -4069,7 +4190,10 @@ function applyWorkflowDelegationOnlyView() {
 
 function internalDispatchRecipientForCurrentUser(item = {}) {
   const userId = authState?.user?.id || "";
-  return (item.recipients || []).find((recipient) => recipient.recipient_user_id === userId) || null;
+  const active = (item.recipients || []).filter((recipient) => recipient.recipient_user_id === userId && recipient.status !== "reassigned");
+  // A successor may already have a historical reply. New responsibility must
+  // not be hidden behind that older recipient row or rewrite its history.
+  return active.find((recipient) => recipient.action_required && recipient.status !== "replied") || active[0] || null;
 }
 
 function internalDispatchDueTime(item = {}) {
@@ -4537,26 +4661,7 @@ function openDailyAction(index) {
     return;
   }
   if (item.selectOfficialDocumentId) {
-    selectedOfficialDocumentId = item.selectOfficialDocumentId;
-    const official = officialWorkflowItems.find((entry) => entry.id === selectedOfficialDocumentId);
-    if (official?.can_act === true) {
-      selectedWorkflowTaskId = official.id;
-      approvalLogFilter = official.delegation_id ? "delegated" : approvalRecordIsOverdue({ officialDocument: official }) ? "overdue" : "my_pending";
-      approvalLogSearchTerm = official.id;
-      const search = document.querySelector("#approvalLogSearch");
-      if (search) search.value = approvalLogSearchTerm;
-      setView("approvalLog");
-      renderApprovalLog();
-      openApprovalLogMobileDetail();
-      void ensureOfficialDocumentDetail(official.id).then(renderApprovalLog);
-    } else if (official && officialDocumentHasEditorV2(official)) {
-      void openOfficialDocumentEditorReview(official.id, "edited");
-    } else {
-      officialWorkflowScope = "all";
-      setView(isRouteAllowed("inbound") ? "inbound" : "approvalLog");
-      renderOfficialWorkflow();
-      void loadOfficialDocumentDetail(selectedOfficialDocumentId);
-    }
+    void openOfficialCaseFromNavigation(item.selectOfficialDocumentId);
     return;
   }
   if (item.flowId && isRouteAllowed(item.target)) {
@@ -4581,14 +4686,7 @@ function renderHomeMyCases() {
   list.querySelectorAll("[data-home-case]").forEach((button) => button.addEventListener("click", () => {
     const record = records.find((entry) => entry.task.id === button.dataset.homeCase);
     if (!record) return;
-    selectedWorkflowTaskId = record.task.id;
-    approvalLogFilter = approvalProgressCategory(record);
-    approvalLogSearchTerm = record.task.id;
-    const search = document.querySelector("#approvalLogSearch");
-    if (search) search.value = approvalLogSearchTerm;
-    setView("approvalLog");
-    renderApprovalLog();
-    openApprovalLogMobileDetail();
+    void openOfficialCaseFromNavigation(record.task.id, { tab: "mine" });
   }));
 }
 
@@ -4972,7 +5070,7 @@ function renderDashboardApprovalProgress() {
   const status = document.querySelector("#dashboardApprovalStatus");
   if (!panel || !list || !summary || !steps || !status) return;
   const records = dashboardApprovalTasks();
-  if (!records.some(({ task }) => task.id === selectedWorkflowTaskId)) selectedWorkflowTaskId = records[0]?.task?.id || "";
+  if (activeRouteTarget === "dashboard" && !records.some(({ task }) => task.id === selectedWorkflowTaskId)) selectedWorkflowTaskId = records[0]?.task?.id || "";
   const selected = records.find(({ task }) => task.id === selectedWorkflowTaskId) || records[0] || null;
   const task = selected?.task || null;
   const snapshotSteps = selected?.steps || [];
@@ -6559,8 +6657,7 @@ function enterApp(message = "登入成功，已進入公文收發電子用印系
   document.querySelector("#appShell").classList.remove("hidden");
   applyAuthUser();
   startFinanceDirectoryRefresh();
-  const requestedRoute = location.hash?.slice(1);
-  setView(requestedRoute && titles[requestedRoute] && isRouteAllowed(requestedRoute) ? requestedRoute : "dashboard");
+  void restoreWorkspaceCaseRoute();
   runAuthenticatedStartupSyncs(true);
   completeCachedSessionShellReveal();
   window.requestAnimationFrame(() => {
@@ -6774,6 +6871,7 @@ function clearFrontendSeedRecordsForAuthenticatedSession() {
   internalDispatchRecipientDirectory = [];
   internalDispatchLoadGeneration += 1;
   internalDispatchLoadStatus = "idle";
+  internalDispatchPageState = { scope: "", cursor: "", nextCursor: null, hasMore: false, count: null, history: [], needsReply: false };
   searchResults = [];
   dailyActionCache = [];
   selectedInboundId = "";
@@ -7669,7 +7767,10 @@ function restoreRememberedInboundArchiveDraft() {
 }
 
 function clearCurrentFrontendSessionState(session = authState) {
-  ["inbound-mutation-keys", "inbound-archive-draft", "list-preferences"].forEach((name) => {
+  clearOfficialCaseNavigation();
+  uploadedSealBlankInputScope = "";
+  try { sessionStorage.removeItem(frontendScopedSessionKey("approval-return-context", session)); } catch (_error) { /* Storage may be unavailable. */ }
+  ["inbound-mutation-keys", "inbound-archive-draft", "list-preferences", "internal-dispatch-create-intents"].forEach((name) => {
     try {
       sessionStorage.removeItem(frontendScopedSessionKey(name, session));
     } catch (_error) {
@@ -7677,6 +7778,7 @@ function clearCurrentFrontendSessionState(session = authState) {
     }
   });
   inboundMutationIdempotencyKeys.clear();
+  internalDispatchCreateIntents.clear();
 }
 
 function persistSessionScopedListPreferences() {
@@ -12959,15 +13061,53 @@ function markOfficialDecisionEvidenceReviewed(kind) {
   if (button) {
     button.classList.add("complete");
     const prefix = kind === "application" ? "已展開｜" : "已下載｜";
-    button.textContent = `${prefix}${button.dataset.defaultLabel || button.textContent.replace(/^(已展開|已下載)｜/, "")}`;
+    button.textContent = button.dataset.completionLabel || `${prefix}${button.dataset.defaultLabel || button.textContent.replace(/^(已展開|已下載)｜/, "")}`;
   }
   updateOfficialDecisionSubmitAvailability();
+}
+
+function officialDecisionPendingRequirements() {
+  const { documentId, action } = officialDecisionState;
+  const pending = [];
+  if (!documentId || !officialDocumentDetailReady.has(documentId)) pending.push("等待完整案件資料載入");
+  if (action === "withdraw") {
+    if ((document.querySelector("#officialWithdrawComment")?.value.trim().length || 0) < 6) pending.push("填寫抽單原因（至少 6 個字）");
+    return pending;
+  }
+  if (!officialDecisionEvidenceReady("application")) pending.push("展開申請資料");
+  [
+    ["source", "#officialReviewOriginal", "下載原稿／送簽版", "勾選原稿檢閱確認"],
+    ["attachments", "#officialReviewAttachments", "下載附件或確認沒有附件", "勾選附件檢閱確認"],
+    ["editor", "#officialReviewEdited", "下載編輯 PDF 或確認沒有編輯內容", "勾選編輯版檢閱確認"]
+  ].forEach(([kind, selector, inspect, acknowledge]) => {
+    if (!officialDecisionEvidenceReady(kind)) pending.push(document.querySelector(selector)?.disabled ? inspect : acknowledge);
+  });
+  if (action === "reject") {
+    if (!document.querySelector("#officialRejectCategory")?.value) pending.push("選擇補正原因分類");
+    if ((document.querySelector("#officialRejectComment")?.value.trim().length || 0) < 6) pending.push("填寫具體補正內容（至少 6 個字）");
+    const dueDate = document.querySelector("#officialCorrectionDueDate")?.value || "";
+    if (dueDate && !isValidFutureOrToday(dueDate)) pending.push("將補正期限設為今天或之後");
+  } else {
+    const minimum = action === "decline" ? 6 : 2;
+    if ((document.querySelector("#officialApprovalComment")?.value.trim().length || 0) < minimum) {
+      pending.push(`填寫${action === "decline" ? "不通過原因" : action === "return-previous" ? "退回上一關原因" : "核准意見"}（至少 ${minimum} 個字）`);
+    }
+    if (action === "add-sign" && !(officialDecisionState.candidates || []).some((person) => person.id === document.querySelector("#officialAddSignPerson")?.value)) pending.push("選擇可加簽人員");
+  }
+  return pending;
 }
 
 function updateOfficialDecisionSubmitAvailability() {
   const submit = document.querySelector("#officialDecisionSubmitBtn");
   if (!submit) return;
   const { documentId, action } = officialDecisionState;
+  const requirements = document.querySelector("#officialDecisionRequirements");
+  if (requirements) {
+    const pending = officialDecisionPendingRequirements();
+    requirements.textContent = officialDecisionState.busy ? "送出中，請勿重複操作。"
+      : officialDecisionState.candidateLoading ? "正在確認可加簽人員，請稍候。"
+        : pending.length ? `尚待完成 ${pending.length} 項｜下一步：${pending[0]}。` : "檢閱確認已完成，可以送出。";
+  }
   if (officialDecisionState.busy || officialDecisionState.candidateLoading) { submit.disabled = true; return; }
   const fullDetailReady = Boolean(documentId && officialDocumentDetailReady.has(documentId));
   if (action === "withdraw") {
@@ -12999,11 +13139,11 @@ function renderOfficialDecisionEvidence(item) {
   const actionDefinitions = [
     ["application", "展開申請資料", false],
     ["source", source ? "下載原稿／送簽版" : "找不到原稿或送簽版", !source],
-    ["attachments", attachments.length ? `下載全部附件（${attachments.length}）` : "本案沒有附件", false],
-    ["editor", edited ? "下載編輯 PDF" : requiresLockedPrepared ? "鎖定確認版無法讀取，請重新開啟案件" : "本案沒有編輯 PDF", requiresLockedPrepared && !edited]
+    ["attachments", attachments.length ? `下載全部附件（${attachments.length}）` : "本案沒有附件", false, attachments.length ? "" : "已確認無附件"],
+    ["editor", edited ? "下載編輯 PDF" : requiresLockedPrepared ? "鎖定確認版無法讀取，請重新開啟案件" : "本案沒有編輯 PDF", requiresLockedPrepared && !edited, !edited && !requiresLockedPrepared ? "已確認無編輯內容" : ""]
   ];
-  actions.innerHTML = actionDefinitions.map(([kind, label, disabled]) => `
-    <button class="secondary-button" type="button" data-decision-evidence="${kind}" data-default-label="${escapeHtml(label)}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>
+  actions.innerHTML = actionDefinitions.map(([kind, label, disabled, completionLabel = ""]) => `
+    <button class="secondary-button" type="button" data-decision-evidence="${kind}" data-default-label="${escapeHtml(label)}" data-completion-label="${escapeHtml(completionLabel)}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>
   `).join("");
   const details = document.createElement("dl");
   details.className = "approval-log-meta";
@@ -13041,10 +13181,22 @@ function renderOfficialDecisionEvidence(item) {
       if (reviewed) {
         markOfficialDecisionEvidenceReviewed(kind);
         if (kind !== "application" && button.isConnected) {
-          button.title = "已下載；請另行勾選下方檢閱確認。";
+          button.title = `${button.dataset.completionLabel || "已下載"}；請另行勾選下方檢閱確認。`;
         }
       }
-      if (!reviewed && button.isConnected) button.disabled = false;
+      const notice = document.querySelector("#officialDecisionError");
+      if (!reviewed && button.isConnected) {
+        button.disabled = false;
+        if (notice) {
+          notice.hidden = false;
+          notice.dataset.evidenceFailure = kind;
+          notice.textContent = "檔案未完整下載，尚未解鎖檢閱確認。請重新下載；已填寫的內容會保留。";
+        }
+      } else if (notice?.dataset.evidenceFailure === kind) {
+        notice.hidden = true;
+        notice.textContent = "";
+        delete notice.dataset.evidenceFailure;
+      }
     });
   });
 }
@@ -13095,6 +13247,7 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   if (error) {
     error.hidden = true;
     error.textContent = "";
+    delete error.dataset.evidenceFailure;
   }
   const isApprove = ["approve", "return-previous", "add-sign", "decline"].includes(action);
   approval.querySelector("h4").textContent = action === "decline" ? "確認不通過" : "簽核前確認";
@@ -13326,7 +13479,7 @@ async function submitOfficialDecision(event) {
   }
   if (["return-previous", "add-sign", "withdraw", "decline"].includes(action)) Object.assign(payload, { operation_id: operationId, expected_step_id: expectedStepId });
   officialDecisionState.busy = true;
-  if (submit) submit.disabled = true;
+  if (submit) updateOfficialDecisionSubmitAvailability();
   const ok = await mutateOfficialDocument(action, payload, item, source);
   if (officialDecisionState.operationId !== operationId) return;
   officialDecisionState.busy = false;
@@ -13508,8 +13661,7 @@ function internalDispatchCurrentItem() {
 }
 
 function internalDispatchCurrentRecipient(item = {}) {
-  const userId = authState?.user?.id || "";
-  return (item.recipients || []).find((entry) => entry.recipient_user_id === userId) || null;
+  return internalDispatchRecipientForCurrentUser(item);
 }
 
 function internalDispatchReplyAttachment(reply = {}) {
@@ -13534,6 +13686,9 @@ function internalDispatchFileSizeLabel(size = 0) {
 
 async function markInternalDispatchRead(dispatchId, options) {
   const settings = options || {};
+  const scope = frontendSessionScope();
+  const token = authState?.token;
+  const isCurrent = () => frontendSessionScope() === scope && authState?.token === token;
   const item = internalDispatchItems.find((entry) => entry.id === dispatchId);
   const recipient = internalDispatchCurrentRecipient(item || {});
   if (!dispatchId || !recipient || recipient.read_at) return item || null;
@@ -13542,6 +13697,7 @@ async function markInternalDispatchRead(dispatchId, options) {
       method: "PATCH",
       body: "{}"
     });
+    if (!isCurrent()) return null;
     const index = internalDispatchItems.findIndex((entry) => entry.id === result.id);
     if (index >= 0) internalDispatchItems[index] = result;
     else internalDispatchItems.unshift(result);
@@ -13550,6 +13706,7 @@ async function markInternalDispatchRead(dispatchId, options) {
     refreshDashboardWorkEntryPoints();
     return result;
   } catch (error) {
+    if (!isCurrent()) return null;
     if (!settings.silent) showToast(`已讀狀態同步失敗：${error.message}`);
     return null;
   }
@@ -13616,19 +13773,37 @@ function renderInternalDispatchRecipientOptions() {
   });
 }
 
-async function loadInternalDispatches(silent = false, { includeDirectory = true, throwOnError = false } = {}) {
+async function loadInternalDispatches(silent = false, { includeDirectory = true, throwOnError = false, cursor, direction = "refresh", reset = false, needsReply: onlyNeedsReply } = {}) {
   if (!hasAuthenticatedBackendSession()) return null;
   const scope = frontendSessionScope();
+  const token = authState?.token;
+  if (internalDispatchPageState.scope !== scope) {
+    internalDispatchPageState = { scope, cursor: "", nextCursor: null, hasMore: false, count: null, history: [], needsReply: false };
+    internalDispatchItems = [];
+    internalDispatchRecipientDirectory = [];
+    selectedInternalDispatchId = "";
+  }
+  const requestedCursor = reset ? "" : cursor === undefined ? internalDispatchPageState.cursor : cursor;
+  const params = new URLSearchParams({ paginated: "1", page_size: "50" });
+  if (requestedCursor) params.set("cursor", requestedCursor);
+  const needsReply = onlyNeedsReply === undefined ? Boolean(internalDispatchPageState.needsReply) : Boolean(onlyNeedsReply);
+  if (needsReply) params.set("needs_reply", "1");
   const generation = ++internalDispatchLoadGeneration;
+  const isCurrent = () => hasAuthenticatedBackendSession() && frontendSessionScope() === scope && authState?.token === token && generation === internalDispatchLoadGeneration;
   internalDispatchLoadStatus = "loading";
+  renderInternalDispatchModule();
   try {
-    const [items, directory] = await Promise.all([
-      backendRequest("/internal-dispatches"),
+    const [page, directory] = await Promise.all([
+      backendRequest(`/internal-dispatches?${params}`),
       includeDirectory && canCreateInternalDispatch() ? backendRequest("/internal-dispatches/recipients") : Promise.resolve(null)
     ]);
-    if (!hasAuthenticatedBackendSession() || frontendSessionScope() !== scope || generation !== internalDispatchLoadGeneration) return null;
-    if (!Array.isArray(items) || (directory !== null && !Array.isArray(directory))) throw new Error("internal_dispatch_list_invalid");
-    internalDispatchItems = items;
+    if (!isCurrent()) return null;
+    if (!Array.isArray(page?.items) || page.items.length > 50 || typeof page.hasMore !== "boolean" || page.scopeComplete !== true || (page.hasMore && !page.nextCursor) || (directory !== null && !Array.isArray(directory))) throw new Error("internal_dispatch_list_invalid");
+    const history = reset ? [] : [...internalDispatchPageState.history];
+    if (!reset && direction === "next") history.push(internalDispatchPageState.cursor);
+    if (!reset && direction === "previous") history.pop();
+    internalDispatchPageState = { scope, cursor: requestedCursor, nextCursor: page.nextCursor || null, hasMore: page.hasMore, count: Number.isInteger(page.count) ? page.count : null, history, needsReply };
+    internalDispatchItems = page.items;
     if (directory !== null) internalDispatchRecipientDirectory = directory;
     internalDispatchLoadStatus = "loaded";
     if (!internalDispatchItems.some((item) => item.id === selectedInternalDispatchId)) {
@@ -13636,8 +13811,9 @@ async function loadInternalDispatches(silent = false, { includeDirectory = true,
     }
     renderInternalDispatchModule();
     refreshDashboardWorkEntryPoints();
+    return page;
   } catch (error) {
-    if (!hasAuthenticatedBackendSession() || frontendSessionScope() !== scope || generation !== internalDispatchLoadGeneration) return null;
+    if (!isCurrent()) return null;
     internalDispatchLoadStatus = "error";
     renderInternalDispatchModule();
     refreshDashboardWorkEntryPoints();
@@ -13646,19 +13822,47 @@ async function loadInternalDispatches(silent = false, { includeDirectory = true,
   }
 }
 
+function renderInternalDispatchPagination() {
+  const target = document.querySelector("#internalDispatchPagination");
+  const notice = document.querySelector("#internalDispatchLoadNotice");
+  const loading = internalDispatchLoadStatus === "loading";
+  const filter = document.querySelector("#internalDispatchScopeFilter");
+  if (filter) {
+    filter.value = internalDispatchPageState.needsReply ? "needs_reply" : "all";
+    filter.disabled = loading;
+    filter.onchange = () => {
+      void loadInternalDispatches(false, { includeDirectory: false, reset: true, needsReply: filter.value === "needs_reply" });
+    };
+  }
+  if (notice) {
+    notice.hidden = !["loading", "error"].includes(internalDispatchLoadStatus);
+    notice.textContent = loading ? "正在更新派發紀錄，仍可查看目前內容。" : "派發紀錄更新失敗；目前頁面已保留，請按重新整理重試。";
+  }
+  if (!target) return;
+  const state = internalDispatchPageState;
+  target.innerHTML = `<button class="secondary-button" type="button" data-dispatch-page="previous" ${loading || !state.history.length ? "disabled" : ""}>上一頁</button><span>第 ${state.history.length + 1} 頁 · 本頁 ${internalDispatchItems.length} 件${state.hasMore ? " · 還有更多紀錄" : ""}</span><button class="secondary-button" type="button" data-dispatch-page="next" ${loading || !state.hasMore ? "disabled" : ""}>下一頁</button>`;
+  target.querySelectorAll("[data-dispatch-page]").forEach((button) => button.addEventListener("click", () => {
+    const direction = button.dataset.dispatchPage;
+    const cursor = direction === "next" ? state.nextCursor : state.history[state.history.length - 1];
+    void loadInternalDispatches(false, { includeDirectory: false, cursor, direction });
+  }));
+}
+
 function renderInternalDispatchList() {
   const list = document.querySelector("#internalDispatchList");
   const count = document.querySelector("#internalDispatchCount");
   if (!list || !count) return;
-  count.textContent = internalDispatchLoadStatus === "error" ? internalDispatchItems.length ? `${internalDispatchItems.length} 件（上次資料）` : "尚未載入" : `${internalDispatchItems.length} 件`;
+  renderInternalDispatchPagination();
+  count.textContent = internalDispatchLoadStatus === "error" ? internalDispatchItems.length ? `本頁 ${internalDispatchItems.length} 件（上次資料）` : "尚未載入" : `本頁 ${internalDispatchItems.length} 件`;
   if (!internalDispatchItems.length) {
-    list.innerHTML = `<p class="empty-text">${internalDispatchLoadStatus === "error" ? "內部派發清單載入失敗，請按重新整理。" : internalDispatchLoadStatus === "loading" ? "正在讀取派發紀錄…" : "尚無內部派發紀錄。"}</p>`;
+    list.innerHTML = `<p class="empty-text">${internalDispatchLoadStatus === "error" ? "內部派發清單載入失敗，請按重新整理。" : internalDispatchLoadStatus === "loading" ? "正在讀取派發紀錄…" : internalDispatchPageState.needsReply ? "目前沒有待我回覆的派發，可切換全部派發查看歷史。" : "尚無內部派發紀錄。"}</p>`;
     return;
   }
   list.innerHTML = internalDispatchItems.map((item) => {
     const recipients = item.recipients || [];
-    const required = recipients.filter((recipient) => Boolean(recipient.action_required));
-    const informed = recipients.length - required.length;
+    const activeRecipients = recipients.filter((recipient) => recipient.status !== "reassigned");
+    const required = activeRecipients.filter((recipient) => Boolean(recipient.action_required));
+    const informed = activeRecipients.length - required.length;
     const replied = required.filter((recipient) => recipient.status === "replied").length;
     return `
       <button class="internal-dispatch-item ${item.id === selectedInternalDispatchId ? "active" : ""}" type="button" data-internal-dispatch-id="${escapeHtml(item.id)}">
@@ -13678,21 +13882,25 @@ function renderInternalDispatchList() {
 }
 
 function canReplyInternalDispatch(item) {
-  const userId = authState?.user?.id || "";
-  const recipient = (item?.recipients || []).find((entry) => entry.recipient_user_id === userId);
+  const recipient = internalDispatchRecipientForCurrentUser(item || {});
   return Boolean(
     item?.reply_required
     && !["closed", "cancelled"].includes(item.status)
     && !item.closed_at
     && recipient
     && Boolean(recipient.action_required)
-    && recipient.status !== "replied"
+    && !["replied", "reassigned"].includes(recipient.status)
   );
 }
 
 function canCloseInternalDispatch(item) {
   const userId = authState?.user?.id || "";
   return Boolean(item && !["closed", "cancelled"].includes(item.status) && !item.closed_at && (item.sender_user_id === userId || (authState?.permissions || []).includes("official_documents.all_todo")));
+}
+
+function internalDispatchPendingReplies(item = {}) {
+  if (!item.reply_required) return [];
+  return (item.recipients || []).filter((entry) => Boolean(entry.action_required) && !["replied", "reassigned"].includes(entry.status));
 }
 
 function formatInternalDispatchReplyTime(value) {
@@ -13716,6 +13924,7 @@ function renderInternalDispatchDetail() {
   const linkedInbound = item.inbound_document || null;
   const linkedAttachments = linkedInbound?.attachments || [];
   const requiredRecipients = recipients.filter((recipient) => Boolean(recipient.action_required));
+  const pendingReplies = internalDispatchPendingReplies(item).length;
   const replyForm = target.querySelector("#internalDispatchReplyForm");
   const replyDraft = replyForm ? {
     dispatchId: replyForm.dataset.dispatchId || selectedInternalDispatchId,
@@ -13752,7 +13961,7 @@ function renderInternalDispatchDetail() {
         ${recipients.length ? recipients.map((recipient) => `
           <span class="internal-dispatch-chip ${recipient.status === "replied" ? "replied" : ""}">
             ${escapeDraftHtml(recipient.recipient_name || recipient.recipient_user_id || "未命名")}
-            <small>${recipient.action_required ? (recipient.status === "replied" ? "已處理回覆" : "需要處理") : "僅供知悉"} · ${recipient.read_at ? `已讀 ${escapeHtml(recipient.read_at)}` : "尚未讀取"}</small>
+            <small>${recipient.status === "reassigned" ? "已移交" : recipient.action_required ? (recipient.status === "replied" ? "已處理回覆" : "需要處理") : "僅供知悉"} · ${recipient.read_at ? `已讀 ${escapeHtml(recipient.read_at)}` : "尚未讀取"}</small>
           </span>
         `).join("") : `<p class="empty-text">尚無收件人。</p>`}
       </div>
@@ -13786,7 +13995,7 @@ function renderInternalDispatchDetail() {
           <button class="primary-button" type="submit">送出回文</button>
         </form>
       ` : ""}
-      ${canCloseInternalDispatch(item) ? `<button class="secondary-button" id="internalDispatchCloseBtn" type="button">結案</button>` : ""}
+      ${canCloseInternalDispatch(item) ? `<p id="internalDispatchCloseHint" class="empty-text">${pendingReplies ? `尚有 ${pendingReplies} 位同仁待回覆，完成後才可結案。` : "全部處理要求已完成，可結案保存紀錄。"}</p><button class="secondary-button" id="internalDispatchCloseBtn" type="button" aria-describedby="internalDispatchCloseHint" ${pendingReplies ? "disabled" : ""}>結案</button>` : ""}
     </article>
   `;
   const nextReplyForm = target.querySelector("#internalDispatchReplyForm");
@@ -13843,20 +14052,18 @@ async function runInternalDispatchOnce(key, selector, operation) {
   if (internalDispatchMutationsInFlight.has(key)) return null;
   internalDispatchMutationsInFlight.add(key);
   const button = document.querySelector(selector);
-  const label = button?.textContent;
+  const wasDisabled = button?.disabled;
   if (button) {
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
-    button.textContent = "處理中…";
   }
   try {
     return await operation();
   } finally {
     internalDispatchMutationsInFlight.delete(key);
     if (button?.isConnected) {
-      button.disabled = false;
+      button.disabled = wasDisabled;
       button.removeAttribute("aria-busy");
-      button.textContent = label;
     }
   }
 }
@@ -13865,50 +14072,96 @@ async function createInternalDispatchFromForm() {
   return runInternalDispatchOnce("create", "#internalDispatchSubmitBtn", performCreateInternalDispatchFromForm);
 }
 
+async function internalDispatchCreateIntent(payload) {
+  const scope = frontendSessionScope();
+  const token = authState?.token;
+  const bytes = new TextEncoder().encode(JSON.stringify(canonicalizeInboundMutationValue(payload)));
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  if (frontendSessionScope() !== scope || authState?.token !== token) throw new Error("登入狀態已變更，請重新確認派發內容。");
+  const digest = Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const stored = internalDispatchCreateIntents.get(scope) || readScopedSessionJson("internal-dispatch-create-intents", {});
+  const intents = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  const key = typeof intents[digest] === "string" ? intents[digest] : newInboundIdempotencyKey("dispatch");
+  // Store only an irreversible content digest and a random retry token, never document content.
+  delete intents[digest];
+  intents[digest] = key;
+  const retained = Object.fromEntries(Object.entries(intents).slice(-64));
+  internalDispatchCreateIntents.set(scope, retained);
+  writeScopedSessionJson("internal-dispatch-create-intents", retained);
+  return { digest, key };
+}
+
+function clearInternalDispatchCreateIntent(digest, key) {
+  const scope = frontendSessionScope();
+  const intents = internalDispatchCreateIntents.get(scope) || readScopedSessionJson("internal-dispatch-create-intents", {});
+  if (intents?.[digest] !== key) return;
+  delete intents[digest];
+  internalDispatchCreateIntents.set(scope, intents);
+  writeScopedSessionJson("internal-dispatch-create-intents", intents);
+}
+
+function internalDispatchFormPayload() {
+  const recipients = [...document.querySelectorAll(".internal-dispatch-recipient-check:checked")].map((checkbox) => ({
+    user_id: checkbox.value,
+    recipient_name: checkbox.dataset.recipientName || "",
+    action_required: (document.querySelector(`[data-recipient-action-for="${CSS.escape(checkbox.value)}"]`)?.value || "required") === "required"
+  })).sort((left, right) => left.user_id.localeCompare(right.user_id));
+  const title = document.querySelector("#internalDispatchTitleInput")?.value.trim() || "";
+  const replyRequired = recipients.some((recipient) => recipient.action_required);
+  return {
+    inbound_document_id: document.querySelector("#internalDispatchDocumentSelect")?.value || "",
+    title, subject: title,
+    body: document.querySelector("#internalDispatchBodyInput")?.value.trim() || "",
+    reply_required: replyRequired,
+    reply_due_days: replyRequired ? Number(document.querySelector("#internalDispatchDueDaysInput")?.value || 0) : 0,
+    recipients
+  };
+}
+
 async function performCreateInternalDispatchFromForm() {
   if (!canCreateInternalDispatch()) return showToast("只有總務、行政部門主任或執行長可以建立內部派發。");
-  const selectedRecipients = [...document.querySelectorAll(".internal-dispatch-recipient-check:checked")];
-  const inboundDocumentId = document.querySelector("#internalDispatchDocumentSelect")?.value || "";
-  const title = document.querySelector("#internalDispatchTitleInput")?.value.trim() || "";
-  const body = document.querySelector("#internalDispatchBodyInput")?.value.trim() || "";
-  if (!inboundDocumentId) return showToast("請先選擇要派發的已收錄公文。");
-  if (!title) return showToast("請填寫內部派文主旨。");
-  if (!body) return showToast("請填寫內部派文內容。");
-  if (!selectedRecipients.length) return showToast("請至少選擇一位收件同仁。");
-  const recipients = selectedRecipients.map((checkbox) => {
-    const action = document.querySelector(`[data-recipient-action-for="${CSS.escape(checkbox.value)}"]`)?.value || "required";
-    return {
-      user_id: checkbox.value,
-      recipient_name: checkbox.dataset.recipientName || "",
-      action_required: action === "required"
-    };
-  });
-  const replyRequired = recipients.some((recipient) => recipient.action_required);
-  const dueDays = Number(document.querySelector("#internalDispatchDueDaysInput")?.value || 0);
-  if (replyRequired && (!Number.isInteger(dueDays) || dueDays < 1 || dueDays > 365)) return showToast("回覆期限請填 1–365 天的整數。");
+  const payload = internalDispatchFormPayload();
+  if (!payload.inbound_document_id) return showToast("請先選擇要派發的已收錄公文。");
+  if (!payload.title) return showToast("請填寫內部派文主旨。");
+  if (!payload.body) return showToast("請填寫內部派文內容。");
+  if (!payload.recipients.length) return showToast("請至少選擇一位收件同仁。");
+  if (payload.reply_required && (!Number.isInteger(payload.reply_due_days) || payload.reply_due_days < 1 || payload.reply_due_days > 365)) return showToast("回覆期限請填 1–365 天的整數。");
+  const scope = frontendSessionScope();
+  const token = authState?.token;
+  const isCurrent = () => frontendSessionScope() === scope && authState?.token === token;
+  const notice = document.querySelector("#internalDispatchCreateNotice");
+  if (notice) { notice.hidden = false; notice.textContent = "正在送出派發，請勿關閉頁面。"; }
   try {
+    const intent = await internalDispatchCreateIntent(payload);
+    if (!isCurrent()) return null;
     const result = await backendRequest("/internal-dispatches", {
       method: "POST",
-      body: JSON.stringify({
-        inbound_document_id: inboundDocumentId,
-        title,
-        subject: title,
-        body,
-        reply_required: replyRequired,
-        reply_due_days: replyRequired ? dueDays : 0,
-        recipients
-      })
+      body: JSON.stringify({ ...payload, idempotency_key: intent.key })
     });
+    if (!isCurrent()) return null;
+    if (!result?.id) throw new Error("尚未取得派發結果");
+    clearInternalDispatchCreateIntent(intent.digest, intent.key);
     selectedInternalDispatchId = result.id;
-    document.querySelector("#internalDispatchTitleInput").value = "";
-    document.querySelector("#internalDispatchBodyInput").value = "";
-    document.querySelectorAll(".internal-dispatch-recipient-check").forEach((checkbox) => { checkbox.checked = false; });
-    document.querySelectorAll(".internal-dispatch-recipient-action").forEach((select) => { select.disabled = true; select.value = "required"; });
-    await loadInternalDispatches(true);
+    internalDispatchItems = [result, ...internalDispatchItems.filter((item) => item.id !== result.id)].slice(0, 50);
+    if (JSON.stringify(payload) === JSON.stringify(internalDispatchFormPayload())) {
+      document.querySelector("#internalDispatchTitleInput").value = "";
+      document.querySelector("#internalDispatchBodyInput").value = "";
+      document.querySelectorAll(".internal-dispatch-recipient-check").forEach((checkbox) => { checkbox.checked = false; });
+      document.querySelectorAll(".internal-dispatch-recipient-action").forEach((select) => { select.disabled = true; select.value = "required"; });
+    }
+    if (notice) notice.textContent = "內部派發已送出，可在派發紀錄查看進度。";
+    internalDispatchPageState.needsReply = false;
+    await loadInternalDispatches(true, { reset: true, includeDirectory: false });
+    if (!isCurrent()) return null;
     showToast("內部派發已送出。");
     return result;
   } catch (error) {
-    showToast(`內部派發失敗：${error.message}`);
+    if (!isCurrent()) return null;
+    const message = Number(error?.status) >= 400 && Number(error?.status) < 500
+      ? `派發未送出：${error.message}。內容已保留，請修正後重試。`
+      : `尚未確認派發結果：${error.message}。內容已保留；以相同內容重試不會重複建立。`;
+    if (notice) notice.textContent = message;
+    showToast(message);
   }
 }
 
@@ -13950,17 +14203,32 @@ async function closeInternalDispatch(dispatchId) {
 }
 
 async function performCloseInternalDispatch(dispatchId) {
+  const item = internalDispatchItems.find((entry) => entry.id === dispatchId);
+  if (!canCloseInternalDispatch(item)) return showToast("目前無法結案，請重新整理確認案件與權限。");
+  if (internalDispatchPendingReplies(item).length) return showToast("尚有同仁待回覆，完成後才可結案。");
+  const scope = frontendSessionScope();
+  const token = authState?.token;
+  const isCurrent = () => frontendSessionScope() === scope && authState?.token === token;
+  if (!await requestWorkspaceConfirmation("確認結案", `「${item.subject || item.title || "這筆內部派發"}」結案後將停止接受回覆，並保留處理紀錄。`, "結案") || !isCurrent()) return null;
   try {
     const result = await backendRequest(`/internal-dispatches/${encodeURIComponent(dispatchId)}/close`, {
       method: "POST",
       body: JSON.stringify({ comment: "內部派文結案。" })
     });
+    if (!isCurrent()) return null;
     selectedInternalDispatchId = result.id;
-    await loadInternalDispatches(true);
+    const index = internalDispatchItems.findIndex((entry) => entry.id === result.id);
+    if (index >= 0) internalDispatchItems[index] = result;
+    await loadInternalDispatches(true, { includeDirectory: false });
+    if (!isCurrent()) return null;
     showToast("內部派文已結案。");
     return result;
   } catch (error) {
-    showToast(`結案失敗：${error.message}`);
+    if (!isCurrent()) return null;
+    if (error?.status === 409 || error?.rawMessage === "internal_dispatch_pending_replies") {
+      showToast("案件仍有待回覆事項，尚未結案；已重新讀取處理進度。");
+      await loadInternalDispatches(true, { includeDirectory: false });
+    } else showToast(`結案失敗：${error.message}`);
   }
 }
 
@@ -21946,20 +22214,7 @@ async function openNotificationSource(item = currentNotification()) {
     await runNotificationAction("read", [item.id]);
   }
   if (sourceType === "official_document" || sourceId.startsWith("OD-")) {
-    try {
-      const detail = await backendRequest(`/official-documents/${encodeURIComponent(sourceId)}`);
-      const index = officialWorkflowItems.findIndex((entry) => entry.id === detail.id);
-      if (index >= 0) officialWorkflowItems[index] = detail;
-      else officialWorkflowItems.unshift(detail);
-      selectedOfficialDocumentId = detail.id;
-      selectedWorkflowTaskId = detail.id;
-      approvalLogFilter = approvalProgressCategory({ officialDocument: detail, task: { status: detail.current_status } });
-      setView(isRouteAllowed("approvalLog") ? "approvalLog" : "notifications");
-      renderApprovalLog();
-      return;
-    } catch (error) {
-      return showToast(`案件載入失敗：${error.message}`);
-    }
+    return openOfficialCaseFromNavigation(sourceId);
   }
   if (sourceType === "inbound_documents") {
     if (!isRouteAllowed("inbound")) return showToast("目前沒有檢視這筆收文的權限。");
@@ -23304,9 +23559,11 @@ function applyPersistentWorkflowTasks(rows = []) {
       .map((task) => ({ ...task, fixtureOnly: true }))
     : [];
   workflowTasks.splice(0, workflowTasks.length, ...mapped, ...explicitFixtures);
-  selectedWorkflowTaskId = workflowTasks.some((task) => task.id === selectedWorkflowTaskId)
-    ? selectedWorkflowTaskId
-    : workflowTasks[0]?.id || "";
+  if (!currentOfficialCaseNavigation()?.id) {
+    selectedWorkflowTaskId = workflowTasks.some((task) => task.id === selectedWorkflowTaskId)
+      ? selectedWorkflowTaskId
+      : workflowTasks[0]?.id || "";
+  }
   renderWorkflowTasks();
   renderApprovalLog();
   renderDashboardApprovalProgress();
@@ -25055,7 +25312,7 @@ function openApprovalLogMobileDetail() {
   const page = document.querySelector("#approvalLog");
   if (!page) return;
   page.dataset.mobileDetail = "true";
-  if (window.matchMedia("(max-width: 760px)").matches) {
+  if (window.matchMedia("(max-width: 1120px)").matches) {
     const panel = document.querySelector("#approvalLogDetailPanel");
     panel?.setAttribute("tabindex", "-1");
     panel?.focus({ preventScroll: true });
@@ -25063,14 +25320,16 @@ function openApprovalLogMobileDetail() {
   }
 }
 
-function closeApprovalLogMobileDetail() {
+function closeApprovalLogMobileDetail({ writeRoute = true } = {}) {
   document.querySelector("#approvalLog")?.removeAttribute("data-mobile-detail");
+  clearOfficialCaseNavigation();
+  if (writeRoute) writeWorkspaceCaseRoute("approvalLog");
   const selectedButton = document.querySelector("#approvalLogList")
     ?.querySelector(`[data-approval-log-select="${CSS.escape(selectedWorkflowTaskId || "")}"]`);
   selectedButton?.focus({ preventScroll: true });
   // Revealing the long list does not restore the scroll position lost when it
   // was hidden. Keep the original mobile case visible, not just focused offscreen.
-  if (window.matchMedia("(max-width: 760px)").matches) {
+  if (window.matchMedia("(max-width: 1120px)").matches) {
     selectedButton?.scrollIntoView({ block: "center", behavior: "instant" });
   }
 }
@@ -25081,6 +25340,11 @@ function renderApprovalLog() {
   const list = document.querySelector("#approvalLogList");
   const detail = document.querySelector("#approvalLogDetail");
   if (!list || !detail) return;
+  const navigation = currentOfficialCaseNavigation();
+  if (navigation?.id) selectedWorkflowTaskId = navigation.id;
+  if (navigation?.detail && !officialWorkflowItems.some((entry) => entry.id === navigation.id)) {
+    officialWorkflowItems.unshift(navigation.detail);
+  }
   const fullCaseButton = document.querySelector("#approvalLogOpenWorkflowBtn");
   const heading = fullCaseButton?.parentElement;
   const existingProxyButton = document.querySelector("#approvalProxySettingsBtn");
@@ -25111,7 +25375,7 @@ function renderApprovalLog() {
   const records = filteredApprovalLogRecords();
   document.querySelector("#approvalLogCount").textContent = `${officialWorkflowPage.loading ? "載入中 · " : "已載入 "}${records.length} 件${officialWorkflowPage.hasMore ? "+" : ""}`;
   document.querySelector("#approvalLogScope").textContent = canSeeCompanyWideDocs() ? "全公司" : "依部門/角色";
-  if (records.length && !records.some(({ task }) => task.id === selectedWorkflowTaskId)) selectedWorkflowTaskId = records[0].task.id;
+  if (!navigation?.id && records.length && !records.some(({ task }) => task.id === selectedWorkflowTaskId)) selectedWorkflowTaskId = records[0].task.id;
   renderStableWorkflowMarkup(list, records.length ? records.map(({ task, doc, currentStep, doneCount, totalSteps, submittedAt, officialDocument }) => `
     <article class="address-card approval-case-card ${task.id === selectedWorkflowTaskId ? "selected-card" : ""}" data-workflow-row="${escapeHtml(task.id)}">
       <strong>${escapeHtml(doc?.no || task.id)}</strong>
@@ -25124,14 +25388,19 @@ function renderApprovalLog() {
     </article>
   `).join("") : `<div class="ux-empty-state"><strong>${officialWorkflowPage.loading ? "正在載入案件…" : officialWorkflowPage.error ? "案件尚未更新，請重試" : officialWorkflowPage.hasMore ? "這一頁沒有符合案件，請載入更多" : "目前沒有這一類簽核紀錄"}</strong><p>可調整搜尋條件，或重新整理查看最新案件。</p></div>`);
 
-  const selected = records.find(({ task }) => task.id === selectedWorkflowTaskId) || records[0];
+  const selected = navigation?.id
+    ? officialCaseNavigationRecord(records, navigation)
+    : records.find(({ task }) => task.id === selectedWorkflowTaskId) || records[0];
   if (fullCaseButton) fullCaseButton.disabled = !selected;
   const detailPanel = document.querySelector("#approvalLogDetailPanel");
-  if (detailPanel) detailPanel.hidden = !selected;
+  if (detailPanel) detailPanel.hidden = !selected && !navigation?.id;
   document.querySelector(".approval-log-layout")?.classList.toggle("is-empty", !selected);
   const backButton = document.querySelector("#approvalLogBackBtn");
   if (backButton) backButton.onclick = closeApprovalLogMobileDetail;
-  if (!selected) {
+  if (navigation?.id && !selected) {
+    renderStableWorkflowMarkup(detail, `<div class="ux-empty-state" role="${navigation.error ? "alert" : "status"}"><strong>${escapeHtml(navigation.error || "正在載入案件…")}</strong>${navigation.error ? '<button type="button" class="secondary" data-retry-case-navigation>重試</button>' : ""}</div>`);
+    detail.querySelector("[data-retry-case-navigation]")?.addEventListener("click", () => void openOfficialCaseFromNavigation(navigation.id, { tab: approvalLogFilter, preserveFilters: true, replace: true }));
+  } else if (!selected) {
     renderStableWorkflowMarkup(detail, "");
     document.querySelector("#approvalLog")?.removeAttribute("data-mobile-detail");
   } else {
@@ -25201,6 +25470,11 @@ function renderApprovalLog() {
   }
   document.querySelectorAll("[data-approval-log-select]").forEach((button) => {
     bindWorkflowActionOnce(button, async () => {
+      if (String(button.dataset.approvalLogSelect || "").startsWith("OD-")) {
+        rememberApprovalReturnContext();
+        await openOfficialCaseFromNavigation(button.dataset.approvalLogSelect, { tab: approvalLogFilter, preserveFilters: true });
+        return;
+      }
       selectedWorkflowTaskId = button.dataset.approvalLogSelect;
       const selectedRecord = approvalLogRecords().find(({ task, officialDocument }) => task.id === selectedWorkflowTaskId && officialDocument);
       if (selectedRecord?.officialDocument) {
@@ -31177,6 +31451,10 @@ async function showUploadedEditorReview(mode) {
   }
   if (!isCurrent()) return;
   if (reviewSelect) reviewSelect.value = uploadedSealEditorRuntime.reviewMode;
+  if (activeRouteTarget === "electronicSeal" && parseWorkspaceCaseRoute().caseId === uploadedSealEditorRuntime.documentId) {
+    const route = parseWorkspaceCaseRoute();
+    writeWorkspaceCaseRoute("electronicSeal", { caseId: route.caseId, tab: route.tab, mode: uploadedSealEditorRuntime.reviewMode, replace: true });
+  }
   renderUploadedSealWorkbench();
 }
 
@@ -32757,9 +33035,69 @@ function createUploadedEditorOpeningPreview(controller, retry) {
   };
 }
 
-async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
+function renderUploadedSealNavigation() {
+  const route = parseWorkspaceCaseRoute();
+  const returnButton = document.querySelector("#uploadedSealReturnBtn");
+  const newButton = document.querySelector("#uploadedSealNewBtn");
+  if (returnButton) returnButton.hidden = !route.caseId || route.route !== "electronicSeal";
+  if (newButton) newButton.hidden = !hasBackendPermission("official_documents.compose");
+  const title = document.querySelector("#uploadedSealWorkspaceTitle");
+  if (title) title.textContent = uploadedSealEditorRuntime.locked ? "用印案件檢閱（唯讀）" : "電子用印編輯";
+}
+
+async function returnFromOfficialEditorReview() {
+  const route = parseWorkspaceCaseRoute();
+  const scope = frontendSessionScope(), token = authState?.token;
+  try { await flushUploadedSealDraftBeforeSwitch(); }
+  catch (error) { showToast(error.message); return false; }
+  if (scope !== frontendSessionScope() || token !== authState?.token) return false;
+  const saved = readScopedSessionJson("approval-return-context", {});
+  if (saved.caseId === route.caseId) {
+    approvalLogSearchTerm = String(saved.search || ""); approvalTaskFilter = String(saved.taskFilter || "");
+    const search = document.querySelector("#approvalLogSearch"); if (search) search.value = approvalLogSearchTerm;
+  }
+  return openOfficialCaseFromNavigation(route.caseId || uploadedSealEditorRuntime.documentId, { tab: route.tab, preserveFilters: true });
+}
+
+async function startNewUploadedSealApplication() {
+  if (!hasBackendPermission("official_documents.compose")) return false;
+  if (uploadedSealApplicationRuntime.openPromise || uploadedSealApplicationRuntime.submissionBusy
+    || uploadedSealEditorRuntime.uploading || uploadedSealEditorRuntime.finalizingAsset || uploadedSealEditorRuntime.pendingImage) {
+    showToast("正在處理目前案件，請完成或取消後再新增申請。"); return false;
+  }
+  const scope = uploadedSealApplicationScopeSnapshot();
+  const existingDraft = Boolean(uploadedSealEditorRuntime.documentId && !uploadedSealEditorRuntime.locked);
+  const unsaved = !uploadedSealEditorRuntime.locked && (uploadedSealBlankInputScope === frontendSessionScope() || uploadedSealApplicationHasUnsavedChanges()
+    || uploadedSealEditorRuntime.dirtyGeneration !== uploadedSealEditorRuntime.savedGeneration
+    || !uploadedSealEditorRuntime.documentId && ["#uploadedSealTitle", "#uploadedSealReason", "#uploadedSealCounterparty"].some((selector) => document.querySelector(selector)?.value.trim()));
+  if ((existingDraft || unsaved) && !await requestWorkspaceConfirmation("新增用印申請", existingDraft
+    ? "目前草稿會先保存，並保留在「草稿編輯」。接著開啟空白申請。"
+    : "目前尚未上傳 PDF，這些輸入尚未暫存。新增申請會清除目前輸入；取消可繼續填寫。", existingDraft ? "保存並新增" : "清除並新增")) return false;
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) return false;
+  try { await flushUploadedSealDraftBeforeSwitch(); }
+  catch (error) { showToast(error.message); return false; }
+  if (!uploadedSealApplicationScopeIsCurrent(scope)) return false;
+  clearUploadedEditorSensitivePreviews();
+  uploadedSealBlankInputScope = "";
+  if (uploadedSealObjectUrl?.startsWith("blob:")) URL.revokeObjectURL(uploadedSealObjectUrl);
+  uploadedSealObjectUrl = ""; uploadedSealPageCount = 1; uploadedSealCurrentPage = 1;
+  uploadedSealStampPositions = []; uploadedSealTextOverlays = [];
+  document.querySelector("#uploadedSealForm")?.reset();
+  uploadedSealMode = "official_document";
+  renderUploadedSealCompanyOptions();
+  setView("electronicSeal", { preserveCaseRoute: true });
+  writeWorkspaceCaseRoute("electronicSeal");
+  configureUploadedSealMode("electronicSeal"); renderUploadedSealNavigation();
+  document.querySelector("#uploadedSealApplicationFields")?.removeAttribute("hidden");
+  document.querySelector("#uploadedSealCompany")?.focus({ preventScroll: true });
+  document.querySelector("#electronicSeal")?.scrollTo({ top: 0, behavior: "instant" });
+  return true;
+}
+
+async function openOfficialDocumentEditorReview(documentId, mode = "edited", { restore = false, tab = approvalLogFilter } = {}) {
   const startedAt = performance.now();
   const scope = frontendSessionScope();
+  const token = authState?.token;
   if (!documentId) return false;
   if (uploadedSealApplicationRuntime.openPromise) {
     showToast("正在載入 PDF 草稿，請稍候。");
@@ -32769,21 +33107,32 @@ async function openOfficialDocumentEditorReview(documentId, mode = "edited") {
   uploadedSealApplicationRuntime.openAbortController = controller;
   // Show the operation immediately without clearing the active case. Until
   // the verified commit, its inputs and PDF continue to belong to that case.
-  setView("electronicSeal");
+  setView("electronicSeal", { preserveCaseRoute: true });
+  writeWorkspaceCaseRoute("electronicSeal", { caseId: documentId, tab, mode, replace: restore });
+  renderUploadedSealNavigation();
   const preview = createUploadedEditorOpeningPreview(controller, () => void openOfficialDocumentEditorReview(documentId, mode));
   const openOperation = (async () => {
     try {
+      // On refresh the directory still installs the form's default company
+      // and department. Finish that read before taking the edit fingerprint;
+      // otherwise defaults are mistaken for user edits and cancel the reopen.
+      if (restore) await refreshFinanceDirectory({ silent: true });
+      if (controller.signal.aborted || scope !== frontendSessionScope() || token !== authState?.token || activeRouteTarget !== "electronicSeal") return false;
       await loadUploadedEditorState(documentId, {
         signal: controller.signal,
         onProgress: (progress) => preview?.progress(progress),
         onAssetReady: (asset, page) => preview?.assetReady(asset, page),
         onCommit: () => preview?.commit()
       });
-      setView("electronicSeal");
+      if (controller.signal.aborted || scope !== frontendSessionScope() || token !== authState?.token || activeRouteTarget !== "electronicSeal") return false;
       await showUploadedEditorReview(mode);
+      if (controller.signal.aborted || scope !== frontendSessionScope() || token !== authState?.token || activeRouteTarget !== "electronicSeal") return false;
       preview?.dispose();
+      renderUploadedSealNavigation();
       if (scope === frontendSessionScope()) recordUiPerformance("file_reopen", startedAt, "success", { pageCount: uploadedSealEditorState.pages.length });
-      document.querySelector("#uploadedPdfEditor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      // Finish navigation before releasing the open operation; a late smooth
+      // scroll must not move the return/new controls away from a user's click.
+      document.querySelector("#electronicSeal")?.scrollTo({ top: 0, behavior: "instant" });
       return true;
     } catch (error) {
       if (scope === frontendSessionScope()) recordUiPerformance("file_reopen", startedAt, controller.signal.aborted || error?.name === "AbortError" ? "cancelled" : "failure");
@@ -33247,6 +33596,7 @@ function renderUploadedSealApplicationDisclosure() {
 
 function renderUploadedSealWorkbench() {
   renderUploadedSealApplicationSaveStatus();
+  renderUploadedSealNavigation();
   ["#uploadedSealApplicant", "#uploadedSealTitle", "#uploadedSealReason"].forEach((selector) => {
     const input = document.querySelector(selector);
     if (input) input.disabled = uploadedSealApplicationMetadataReadOnly();
@@ -33317,7 +33667,9 @@ function renderUploadedSealWorkbench() {
     fileName.textContent = (activeSource?.fileName || uploadedSealPdf?.name || "尚未選擇檔案") + (activeSource?.a4Conversion?.converted ? "（A4 編輯版，原稿另存）" : "");
   }
   const saveStatus = document.querySelector("#uploadedEditorSaveStatus");
-  if (uploadedSealEditorRuntime.directoryLoading) {
+  if (uploadedSealEditorRuntime.locked) {
+    setUploadedEditorSaveStatus("saved", "已送出案件・僅供檢閱，不能修改");
+  } else if (uploadedSealEditorRuntime.directoryLoading) {
     setUploadedEditorSaveStatus("checking", "正在載入公司與印章權限");
   } else if (!featureEnabled && !uploadedSealEditorRuntime.documentId) {
     setUploadedEditorSaveStatus("error", "尚未取得 PDF 編輯權限，可按上傳按鈕重試");
@@ -35550,6 +35902,8 @@ officialHandoverController = window.EdocHandoverUI?.create({
 }) || null;
 document.querySelector("#approvalLogSearch").addEventListener("input", (event) => {
   approvalLogSearchTerm = event.target.value;
+  clearOfficialCaseNavigation();
+  writeWorkspaceCaseRoute("approvalLog", { replace: true });
   scheduleOfficialWorkflowSearch(() => void loadApprovalProgressFromBackend());
 });
 document.querySelectorAll("[data-approval-log-filter]").forEach((button) => {
@@ -35557,9 +35911,17 @@ document.querySelectorAll("[data-approval-log-filter]").forEach((button) => {
     document.querySelectorAll("[data-approval-log-filter]").forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
     approvalLogFilter = button.dataset.approvalLogFilter;
+    clearOfficialCaseNavigation();
+    closeApprovalLogMobileDetail({ writeRoute: false });
+    writeWorkspaceCaseRoute("approvalLog");
     renderApprovalLog();
     if (hasAuthenticatedBackendSession()) void loadApprovalProgressFromBackend();
   });
+});
+document.querySelector("#uploadedSealReturnBtn")?.addEventListener("click", () => void returnFromOfficialEditorReview());
+document.querySelector("#uploadedSealNewBtn")?.addEventListener("click", () => void startNewUploadedSealApplication());
+for (const eventName of ["input", "change"]) document.querySelector("#uploadedSealForm")?.addEventListener(eventName, () => {
+  if (!uploadedSealEditorRuntime.documentId) uploadedSealBlankInputScope = frontendSessionScope();
 });
 // Automatic tab activation with a single Tab stop; hidden role-only tabs are skipped.
 function handleWorkspaceTabKeydown(event) {
@@ -35652,7 +36014,7 @@ document.querySelector("#inboundModal").addEventListener("click", (event) => {
   if (event.target.id === "inboundModal") closeInboundModal();
 });
 document.querySelector("#officialDecisionForm")?.addEventListener("submit", (event) => void submitOfficialDecision(event));
-["#officialApprovalComment", "#officialRejectCategory", "#officialRejectComment", "#officialCorrectionDueDate", "#officialAddSignPerson", "#officialWithdrawComment"].forEach((selector) => {
+["#officialApprovalComment", "#officialRejectCategory", "#officialRejectComment", "#officialCorrectionDueDate", "#officialAddSignPerson", "#officialWithdrawComment", "#officialReviewOriginal", "#officialReviewAttachments", "#officialReviewEdited"].forEach((selector) => {
   document.querySelector(selector)?.addEventListener("input", updateOfficialDecisionSubmitAvailability);
   document.querySelector(selector)?.addEventListener("change", updateOfficialDecisionSubmitAvailability);
 });

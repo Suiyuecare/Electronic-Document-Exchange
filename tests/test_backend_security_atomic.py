@@ -142,47 +142,21 @@ class BackendSecurityAndAtomicityTestCase(unittest.TestCase):
                     },
                 )
 
-    def test_global_dispatch_list_omits_foreign_tenant_rows(self) -> None:
-        user = {
-            "id": "FIN-U1",
-            "company_id": "CO-1",
-            "finance_tenant_id": "TENANT-1",
-        }
-
-        def rows(table, *_args, **_kwargs):
-            if table == "internal_dispatches":
-                return [{"id": "IDISP-FOREIGN"}, {"id": "IDISP-OWN"}]
-            if table == "internal_dispatch_recipients":
-                return []
-            return []
-
-        def detail(dispatch_id, _session):
-            if dispatch_id == "IDISP-FOREIGN":
-                raise PermissionError("internal_dispatch_company_forbidden")
-            return {"id": dispatch_id}
-
-        with mock.patch.object(
-            backend,
-            "supabase_official_session_user",
-            return_value=user,
-        ), mock.patch.object(
-            backend,
-            "supabase_filter_rows",
-            side_effect=rows,
-        ), mock.patch.object(
-            backend,
-            "session_has_any_permission",
-            return_value=True,
-        ), mock.patch.object(
-            backend,
-            "supabase_internal_dispatch_detail",
-            side_effect=detail,
-        ):
-            result = backend.supabase_list_internal_dispatches(
-                {},
-                {"user": user, "permissions": ["official_documents.all_records"]},
-            )
+    def test_global_dispatch_list_uses_actor_scoped_rpc_before_paging(self) -> None:
+        # Actual tenant exclusion is executed in public/shared PostgreSQL tests.
+        # This transport test rejects a return to the global pre-limit/N+1 path.
+        user = {"id": "FIN-U1", "company_id": "CO-1", "finance_tenant_id": "TENANT-1"}
+        with mock.patch.object(backend, "supabase_official_session_user", return_value=user), \
+             mock.patch.object(backend, "supabase_request", return_value={"items": [{"id": "IDISP-OWN"}]}) as request, \
+             mock.patch.object(backend, "supabase_filter_rows") as global_read:
+            result = backend.supabase_list_internal_dispatches({}, {"user": user, "permissions": ["official_documents.all_records"]})
         self.assertEqual(result, [{"id": "IDISP-OWN"}])
+        global_read.assert_not_called()
+        request.assert_called_once()
+        self.assertEqual(request.call_args.args[:2], ("POST", "rpc/edoc_list_internal_dispatches_v1"))
+        self.assertEqual(request.call_args.args[2]["p_actor_user_id"], user["id"])
+        self.assertTrue(request.call_args.args[2]["p_company_wide"])
+        self.assertNotIn("p_company_id", request.call_args.args[2])
 
     def test_sqlite_login_and_session_ids_do_not_collide_same_millisecond(self) -> None:
         conn = sqlite3.connect(":memory:")

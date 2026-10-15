@@ -53,6 +53,7 @@ from edoc_numbering import SQLITE_NUMBERING_SQL, install_sqlite_numbering
 from compose_resilience import SQLITE_COMPOSE_DRAFT_SQL, draft_payload as compose_draft_payload, public_draft, save_sqlite_draft, attachment_id, require_content_revision
 from editor_seam import validate_seam_groups, validate_seam_positions, split_seal_raster, seam_element_for_position, require_grouped_company_seal, validate_seam_policy_transition
 from workflow_readiness import LIST_MAX_ROWS, TAIPEI, inbound_list_options, inbound_page, timeliness_report
+import internal_dispatch_workflow
 import official_handover_service
 import official_handover_followup
 import editor_application
@@ -286,6 +287,9 @@ EDOC_EDITOR_CLIENT_FAILURE_CODES = frozenset({
 # immutable, non-sensitive business codes may cross the transport boundary as
 # application errors.  Everything else remains an opaque machine-code marker.
 POSTGREST_PT409_BUSINESS_CONFLICT_CODES = frozenset({
+    "internal_dispatch_closed",
+    "internal_dispatch_pending_replies",
+    "internal_dispatch_idempotency_conflict",
     "handover_operation_conflict",
     "handover_pending_request_exists",
     "handover_request_already_resolved",
@@ -365,6 +369,8 @@ API_CONFLICT_ERROR_CODES = POSTGREST_BUSINESS_CONFLICT_CODES | frozenset({
     "editor_locked_after_submit",
     "official_dispatch_record_locked",
     "internal_dispatch_closed",
+    "internal_dispatch_pending_replies",
+    "internal_dispatch_idempotency_conflict",
 })
 EDOC_EDITOR_ALLOWED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg"}
 EDOC_PUBLIC_BASE_URL = os.getenv("EDOC_PUBLIC_BASE_URL", os.getenv("PRODUCTION_BASE_URL", "")).rstrip("/")
@@ -2663,6 +2669,20 @@ CREATE TABLE IF NOT EXISTS internal_dispatch_logs (
   created_at TEXT NOT NULL,
   FOREIGN KEY(dispatch_id) REFERENCES internal_dispatches(id) ON DELETE CASCADE
 );
+
+
+CREATE TABLE IF NOT EXISTS internal_dispatch_mutations (
+  actor_user_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_sha256 TEXT NOT NULL,
+  dispatch_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(actor_user_id, idempotency_key),
+  FOREIGN KEY(dispatch_id) REFERENCES internal_dispatches(id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_keyset ON internal_dispatches(created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_dispatch_inbound ON internal_dispatches(inbound_document_id,id);
+CREATE INDEX IF NOT EXISTS idx_dispatch_recipient_actor ON internal_dispatch_recipients(recipient_user_id,dispatch_id);
 
 CREATE TABLE IF NOT EXISTS official_workflow_delegations (
   id TEXT PRIMARY KEY,
@@ -22609,7 +22629,7 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         "requested_at": document.get("correction_requested_at") or "",
         "resubmitted_at": document.get("correction_resubmitted_at") or "",
     }
-    return {
+    result = {
         **document,
         **official_editor_application_capabilities(document, session, has_history=bool(all_steps or actor_snapshots or any(item.get("action") == "submit" for item in logs)), stamp_request=stamp_request),
         "metadata": parse_json_field(document.get("metadata_json")),
@@ -22642,6 +22662,10 @@ def official_document_detail(conn: sqlite3.Connection, document_id: str, session
         "acting_for_user_id": current_step.get("approver_user_id") if active_delegation and current_step else "",
         "delegation_id": active_delegation.get("id") if active_delegation else "",
     }
+
+    from official_listing import approval_membership
+    result.update(approval_membership(sys.modules[__name__], result, all_steps, logs, user or {}, active_delegation))
+    return result
 
 
 def list_official_documents(conn: sqlite3.Connection, query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> Any:
@@ -29411,6 +29435,16 @@ def mutate_inbound_registration(
 
 
 def assign_inbound_document(conn: sqlite3.Connection, inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    with internal_dispatch_workflow.atomic(conn):
+        previous = inbound_document_detail(conn, inbound_id, session)
+        result = _assign_inbound_document(conn, inbound_id, payload, session)
+        assignee = active_user_by_id(conn, result["assignee_user_id"])
+        internal_dispatch_workflow.transfer_local(sys.modules[__name__], conn, inbound_id,
+            previous.get("assignee_user_id"), assignee, official_session_user(session), payload)
+        return result
+
+
+def _assign_inbound_document(conn: sqlite3.Connection, inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
     actor_scope = local_inbound_finance_user_scope(conn, user)
     if not session_has_any_permission(session, ["official_documents.receive", "official_documents.all_todo"]):
@@ -29476,7 +29510,12 @@ def assign_inbound_document(conn: sqlite3.Connection, inbound_id: str, payload: 
     return inbound_document_detail(conn, inbound_id, session)
 
 
-def mutate_inbound_assignment(
+def mutate_inbound_assignment(conn: sqlite3.Connection, inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    with internal_dispatch_workflow.atomic(conn):
+        return _mutate_inbound_assignment(conn, inbound_id, payload, session)
+
+
+def _mutate_inbound_assignment(
     conn: sqlite3.Connection,
     inbound_id: str,
     payload: Dict[str, Any],
@@ -29903,6 +29942,7 @@ def internal_dispatch_detail(conn: sqlite3.Connection, dispatch_id: str, session
     logs = [row_to_dict(item) for item in conn.execute("SELECT * FROM internal_dispatch_logs WHERE dispatch_id = ? ORDER BY created_at DESC", (dispatch_id,)).fetchall()]
     data["metadata"] = parse_json_field(data.get("metadata_json"))
     data["recipients"] = recipients
+    data["pending_reply_count"] = internal_dispatch_workflow.pending_count(recipients)
     data["replies"] = replies
     data["logs"] = logs
     data["inbound_document"] = inbound_document_detail(conn, data["inbound_document_id"], session) if data.get("inbound_document_id") else None
@@ -29933,115 +29973,22 @@ def internal_dispatch_recipient_directory(conn: sqlite3.Connection, session: Dic
 
 
 def list_internal_dispatches(conn: sqlite3.Connection, query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    user = official_session_user(session)
-    query = query or {}
-    where: List[str] = []
-    params: List[Any] = []
-    if query.get("status"):
-        where.append("d.status = ?")
-        params.append(query["status"][0])
-    if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
-        where.append("(d.sender_user_id = ? OR EXISTS (SELECT 1 FROM internal_dispatch_recipients r WHERE r.dispatch_id = d.id AND r.recipient_user_id = ?))")
-        params.extend([user.get("id"), user.get("id")])
-    sql = "SELECT d.* FROM internal_dispatches d"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY d.created_at DESC LIMIT 300"
-    result: List[Dict[str, Any]] = []
-    for row in conn.execute(sql, params).fetchall():
-        try:
-            result.append(internal_dispatch_detail(conn, row["id"], session))
-        except PermissionError:
-            # Global work-list permissions apply only inside the caller's
-            # Finance company/tenant.  Silently omit foreign-tenant rows so a
-            # single inaccessible dispatch cannot break the entire list.
-            continue
-    return result
+    return internal_dispatch_workflow.local_list(sys.modules[__name__], conn, query, session)
 
 
 def create_internal_dispatch(conn: sqlite3.Connection, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
-    user = require_internal_dispatch_creator(session)
-    recipients = payload.get("recipients") or []
-    if not isinstance(recipients, list) or not recipients:
-        raise ValueError("internal_dispatch_recipients_required")
-    if not all(isinstance(recipient, dict) for recipient in recipients):
-        raise ValueError("invalid_internal_dispatch_recipient")
-    validated_recipients = _validated_local_internal_dispatch_recipients(
-        conn,
-        user,
-        recipients,
-    )
-    default_action_required = bool(payload.get("reply_required", False))
-    recipient_actions = [bool(recipient.get("action_required", default_action_required)) for recipient in recipients]
-    dispatch_id = payload.get("id") or f"IDISP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
-    inbound_document_id = payload.get("inbound_document_id") or ""
-    if inbound_document_id:
-        inbound_document_detail(conn, inbound_document_id, session)
-    official_document_id = payload.get("official_document_id") or payload.get("document_id") or ""
-    if official_document_id:
-        _assert_local_internal_dispatch_scope(
-            conn,
-            {"official_document_id": official_document_id},
-            session,
-        )
-    reply_required = any(recipient_actions)
-    due_days, due_at = internal_dispatch_deadline(payload, reply_required)
-    row = {
-        "id": dispatch_id,
-        "official_document_id": official_document_id or None,
-        "inbound_document_id": inbound_document_id or None,
-        "title": payload.get("title") or payload.get("subject") or "內部派文",
-        "subject": payload.get("subject") or payload.get("title") or "內部派文",
-        "body": payload.get("body") or "",
-        "sender_user_id": user.get("id") or "",
-        "sender_name": user.get("name") or user.get("email") or "",
-        "sender_department": user.get("unit") or "",
-        "reply_required": 1 if reply_required else 0,
-        "reply_due_days": due_days or None,
-        "due_at": due_at,
-        "reply_status": "pending" if reply_required else "not_required",
-        "status": "sent",
-        "metadata_json": payload.get("metadata") or {},
-        "created_at": now(),
-        "updated_at": now(),
-        "closed_at": "",
-    }
-    insert_row(conn, "internal_dispatches", row)
-    for index, (recipient, recipient_user) in enumerate(validated_recipients, start=1):
-        action_required = recipient_actions[index - 1]
-        recipient_user_id = recipient.get("user_id") or recipient.get("recipient_user_id") or ""
-        rec = {
-            "id": f"IDREC-{int(time.time() * 1000)}-{index}-{secrets.token_hex(2).upper()}",
-            "dispatch_id": dispatch_id,
-            "recipient_type": recipient.get("recipient_type") or ("department" if recipient.get("department_id") else "user"),
-            "recipient_user_id": recipient_user_id,
-            "recipient_department_id": recipient.get("department_id") or recipient.get("recipient_department_id") or "",
-            "recipient_name": recipient.get("name") or recipient.get("recipient_name") or (recipient_user.get("name") if recipient_user else ""),
-            "action_required": 1 if action_required else 0,
-            "status": "pending" if action_required else "informed",
-            "read_at": "",
-            "replied_at": "",
-            "created_at": now(),
-            "updated_at": now(),
-        }
-        insert_row(conn, "internal_dispatch_recipients", rec)
-        if recipient_user:
-            notice = (f"請於 {due_at} 前處理並回覆。" if due_at else "請處理並回覆。") if action_required else "此件僅供知悉，不需回覆。"
-            create_and_deliver_notification(conn, {
-                "type": "內部派文",
-                "title": row["subject"],
-                **exact_notification_target_payload(recipient_user, user.get("company_id") or ""),
-                "source": dispatch_id,
-                "body": f"{row['sender_name']} 發送內部公文。{notice}",
-            })
-    internal_dispatch_log(conn, dispatch_id, user, "create_internal_dispatch", row["subject"], payload)
-    return internal_dispatch_detail(conn, dispatch_id, session)
+    return internal_dispatch_workflow.local_create(sys.modules[__name__], conn, payload, session)
 
 
 def reply_internal_dispatch(conn: sqlite3.Connection, dispatch_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
+    with internal_dispatch_workflow.atomic(conn):
+        return _reply_internal_dispatch(conn, dispatch_id, payload, session)
+
+
+def _reply_internal_dispatch(conn: sqlite3.Connection, dispatch_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = official_session_user(session)
     detail = internal_dispatch_detail(conn, dispatch_id, session)
-    recipient = next((item for item in detail["recipients"] if item.get("recipient_user_id") == user.get("id")), None)
+    recipient = internal_dispatch_workflow.actor_recipient(detail["recipients"], user.get("id"))
     if not recipient:
         raise PermissionError("internal_dispatch_reply_forbidden")
     if recipient and not bool(recipient.get("action_required")):
@@ -30088,7 +30035,7 @@ def mark_internal_dispatch_read(
 ) -> Dict[str, Any]:
     user = official_session_user(session)
     detail = internal_dispatch_detail(conn, dispatch_id, session)
-    recipient = next((item for item in detail["recipients"] if item.get("recipient_user_id") == user.get("id")), None)
+    recipient = internal_dispatch_workflow.actor_recipient(detail["recipients"], user.get("id"))
     if not recipient:
         raise PermissionError("internal_dispatch_read_forbidden")
     if not recipient.get("read_at"):
@@ -30123,13 +30070,7 @@ def internal_dispatch_reply_attachment(
 
 
 def close_internal_dispatch(conn: sqlite3.Connection, dispatch_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
-    user = official_session_user(session)
-    detail = internal_dispatch_detail(conn, dispatch_id, session)
-    if detail.get("sender_user_id") != user.get("id") and not session_has_any_permission(session, ["official_documents.all_todo", "official_documents.all_records"]):
-        raise PermissionError("internal_dispatch_close_forbidden")
-    conn.execute("UPDATE internal_dispatches SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?", (now(), now(), dispatch_id))
-    internal_dispatch_log(conn, dispatch_id, user, "close_internal_dispatch", payload.get("comment") or "內部派文結案", payload)
-    return internal_dispatch_detail(conn, dispatch_id, session)
+    return internal_dispatch_workflow.local_close(sys.modules[__name__], conn, dispatch_id, payload, session)
 
 
 def canonical_json_hash(value: Any) -> str:
@@ -38496,7 +38437,7 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         "requested_at": document.get("correction_requested_at") or "",
         "resubmitted_at": document.get("correction_resubmitted_at") or "",
     }
-    return {
+    result = {
         **document,
         **official_editor_application_capabilities(document, session, has_history=bool(all_steps or actor_snapshots or any(item.get("action") == "submit" for item in logs)), stamp_request=stamp_request),
         "metadata": parse_json_field(document.get("metadata_json")),
@@ -38529,6 +38470,10 @@ def supabase_official_document_detail(document_id: str, session: Dict[str, Any] 
         "acting_for_user_id": current_step.get("approver_user_id") if active_delegation and current_step else "",
         "delegation_id": active_delegation.get("id") if active_delegation else "",
     }
+
+    from official_listing import approval_membership
+    result.update(approval_membership(sys.modules[__name__], result, all_steps, logs, user or {}, active_delegation))
+    return result
 
 
 def supabase_list_official_documents(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> Any:
@@ -42796,7 +42741,7 @@ def supabase_atomic_inbound_mutation(
     try:
         raw = supabase_request(
             "POST",
-            "rpc/edoc_mutate_inbound_document_v1",
+            ("rpc/edoc_assign_inbound_with_dispatch_v1" if normalized_mutation == "assign" else "rpc/edoc_mutate_inbound_document_v1"),
             {
                 "p_mutation_type": normalized_mutation,
                 "p_idempotency_key": key,
@@ -42856,57 +42801,11 @@ def supabase_mutate_inbound_registration(
 
 
 def supabase_assign_inbound_document(inbound_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
-    user = supabase_official_session_user(session)
-    actor_scope = inbound_finance_user_scope(user)
-    if not session_has_any_permission(session, ["official_documents.receive", "official_documents.all_todo"]):
-        raise PermissionError("inbound_assignment_forbidden")
-    document = supabase_inbound_document_detail(inbound_id, session)
-    expected_value = payload.get("expected_version", payload.get("expectedVersion"))
-    expected_version = inbound_expected_version(payload) if expected_value is not None else int(document.get("mutation_version") or 1)
-    current_version = int(document.get("mutation_version") or 1)
-    if expected_version != current_version:
-        raise ValueError("inbound_version_conflict")
-    if roster_text(document.get("status")) in {"draft", "closed", "archived", "cancelled"}:
-        raise ValueError("inbound_mutation_state_conflict")
-    assignee_id = payload.get("assignee_user_id") or payload.get("user_id") or ""
-    assignee = supabase_user_by_id(assignee_id) if assignee_id else None
-    if not assignee_id:
-        raise ValueError("inbound_assignee_required")
-    if not assignee:
-        raise ValueError("inbound_assignee_not_found")
-    try:
-        assignee_scope = inbound_finance_user_scope(assignee)
-    except PermissionError as exc:
-        raise PermissionError("inbound_assignee_scope_forbidden") from exc
-    if assignee_scope != actor_scope or not roster_text(assignee.get("unit")):
-        raise PermissionError("inbound_assignee_scope_forbidden")
-    update = {
-        "recipient_department_id": roster_text(assignee.get("unit")),
-        "recipient_department_name": roster_text(assignee.get("unit")),
-        "assignee_user_id": assignee_id,
-        "assignee_name": assignee.get("name") or "",
-        "due_at": payload.get("due_at") or "",
-        "status": "assigned",
-        "mutation_version": current_version + 1,
-        "updated_at": now(),
-    }
-    qs = urllib.parse.urlencode({
-        "id": f"eq.{inbound_id}",
-        "mutation_version": f"eq.{current_version}",
-    })
-    rows = supabase_request("PATCH", f"inbound_documents?{qs}", update)
-    if not isinstance(rows, list) or len(rows) != 1:
-        raise ValueError("inbound_version_conflict")
-    supabase_insert("audit_logs", {"id": f"AUD-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}", "actor": official_actor_name(user), "action": "assign_inbound_document", "target_type": "inbound_documents", "target_id": inbound_id, "detail": json.dumps(update, ensure_ascii=False), "event_type": "assign", "module_code": "official_documents", "result": "success", "severity": "info"})
-    if assignee:
-        supabase_create_and_deliver_notification({
-            "type": "收文分派",
-            "title": f"{inbound_id} 已分派給你",
-            **exact_notification_target_payload(assignee, user.get("company_id") or ""),
-            "source": inbound_id,
-            "body": payload.get("note") or "請於期限內處理收文。",
-        })
-    return supabase_inbound_document_detail(inbound_id, session)
+    bound = dict(payload)
+    bound.setdefault("idempotency_key", "legacy-assign-" + secrets.token_hex(16))
+    if "expected_version" not in bound and "expectedVersion" not in bound:
+        bound["expected_version"] = supabase_inbound_document_detail(inbound_id, session).get("mutation_version") or 1
+    return supabase_atomic_inbound_mutation("assign", bound, session, document_id=inbound_id)["item"]
 
 
 def supabase_mutate_inbound_assignment(
@@ -43134,6 +43033,7 @@ def supabase_internal_dispatch_detail(dispatch_id: str, session: Dict[str, Any] 
         )
         if not allowed:
             raise PermissionError("internal_dispatch_view_forbidden")
+    row["pending_reply_count"] = internal_dispatch_workflow.pending_count(row["recipients"])
     row["replies"] = supabase_filter_rows("internal_dispatch_replies", {"dispatch_id": dispatch_id}, order="created_at.desc", limit=300)
     for reply in row["replies"]:
         reply["attachment"] = None
@@ -43186,105 +43086,17 @@ def supabase_internal_dispatch_log(dispatch_id: str, user: Dict[str, Any] | None
 
 
 def supabase_list_internal_dispatches(query: Dict[str, List[str]] | None, session: Dict[str, Any] | None) -> List[Dict[str, Any]]:
-    user = supabase_official_session_user(session)
-    rows = supabase_filter_rows("internal_dispatches", {}, order="created_at.desc", limit=300)
-    status = (query or {}).get("status", [""])[0] if query else ""
-    result: List[Dict[str, Any]] = []
-    for row in rows:
-        if status and row.get("status") != status:
-            continue
-        recipients = supabase_filter_rows("internal_dispatch_recipients", {"dispatch_id": row["id"]}, limit=300)
-        if not session_has_any_permission(session, ["official_documents.all_records", "official_documents.all_todo"]):
-            if row.get("sender_user_id") != user.get("id") and not any(item.get("recipient_user_id") == user.get("id") for item in recipients):
-                continue
-        try:
-            detail = supabase_internal_dispatch_detail(row["id"], session)
-        except PermissionError:
-            # `all_records` is company-scoped, never tenant-global.
-            continue
-        result.append(detail)
-    return result
+    return internal_dispatch_workflow.hosted_list(sys.modules[__name__], query, session)
 
 
 def supabase_create_internal_dispatch(payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
-    user = require_internal_dispatch_creator(session)
-    recipients = payload.get("recipients") or []
-    if not isinstance(recipients, list) or not recipients:
-        raise ValueError("internal_dispatch_recipients_required")
-    if not all(isinstance(recipient, dict) for recipient in recipients):
-        raise ValueError("invalid_internal_dispatch_recipient")
-    validated_recipients = _validated_supabase_internal_dispatch_recipients(
-        user,
-        recipients,
-    )
-    default_action_required = bool(payload.get("reply_required", False))
-    recipient_actions = [bool(recipient.get("action_required", default_action_required)) for recipient in recipients]
-    dispatch_id = payload.get("id") or f"IDISP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}"
-    inbound_document_id = payload.get("inbound_document_id") or ""
-    if inbound_document_id:
-        supabase_inbound_document_detail(inbound_document_id, session)
-    official_document_id = payload.get("official_document_id") or payload.get("document_id") or ""
-    if official_document_id:
-        _assert_supabase_internal_dispatch_scope(
-            {"official_document_id": official_document_id},
-            session,
-        )
-    reply_required = any(recipient_actions)
-    due_days, due_at = internal_dispatch_deadline(payload, reply_required)
-    row = supabase_insert("internal_dispatches", {
-        "id": dispatch_id,
-        "official_document_id": official_document_id or None,
-        "inbound_document_id": inbound_document_id or None,
-        "title": payload.get("title") or payload.get("subject") or "內部派文",
-        "subject": payload.get("subject") or payload.get("title") or "內部派文",
-        "body": payload.get("body") or "",
-        "sender_user_id": user.get("id") or "",
-        "sender_name": user.get("name") or user.get("email") or "",
-        "sender_department": user.get("unit") or "",
-        "reply_required": reply_required,
-        "reply_due_days": due_days or None,
-        "due_at": due_at,
-        "reply_status": "pending" if reply_required else "not_required",
-        "status": "sent",
-        "metadata_json": payload.get("metadata") or {},
-        "created_at": now(),
-        "updated_at": now(),
-        "closed_at": "",
-    })
-    for index, (recipient, recipient_user) in enumerate(validated_recipients, start=1):
-        action_required = recipient_actions[index - 1]
-        recipient_user_id = recipient.get("user_id") or recipient.get("recipient_user_id") or ""
-        rec = supabase_insert("internal_dispatch_recipients", {
-            "id": f"IDREC-{int(time.time() * 1000)}-{index}-{secrets.token_hex(2).upper()}",
-            "dispatch_id": dispatch_id,
-            "recipient_type": recipient.get("recipient_type") or ("department" if recipient.get("department_id") else "user"),
-            "recipient_user_id": recipient_user_id,
-            "recipient_department_id": recipient.get("department_id") or recipient.get("recipient_department_id") or "",
-            "recipient_name": recipient.get("name") or recipient.get("recipient_name") or (recipient_user.get("name") if recipient_user else ""),
-            "action_required": action_required,
-            "status": "pending" if action_required else "informed",
-            "read_at": "",
-            "replied_at": "",
-            "created_at": now(),
-            "updated_at": now(),
-        })
-        if recipient_user:
-            notice = (f"請於 {due_at} 前處理並回覆。" if due_at else "請處理並回覆。") if action_required else "此件僅供知悉，不需回覆。"
-            supabase_create_and_deliver_notification({
-                "type": "內部派文",
-                "title": row["subject"],
-                **exact_notification_target_payload(recipient_user, user.get("company_id") or ""),
-                "source": dispatch_id,
-                "body": f"{row['sender_name']} 發送內部公文。{notice}",
-            })
-    supabase_internal_dispatch_log(dispatch_id, user, "create_internal_dispatch", row["subject"], payload)
-    return supabase_internal_dispatch_detail(dispatch_id, session)
+    return internal_dispatch_workflow.hosted_create(sys.modules[__name__], payload, session)
 
 
 def supabase_reply_internal_dispatch(dispatch_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
     detail = supabase_internal_dispatch_detail(dispatch_id, session)
-    recipient = next((item for item in detail["recipients"] if item.get("recipient_user_id") == user.get("id")), None)
+    recipient = internal_dispatch_workflow.actor_recipient(detail["recipients"], user.get("id"))
     if not recipient:
         raise PermissionError("internal_dispatch_reply_forbidden")
     if recipient and not bool(recipient.get("action_required")):
@@ -43301,33 +43113,19 @@ def supabase_reply_internal_dispatch(dispatch_id: str, payload: Dict[str, Any], 
         file_row = supabase_store_file_object(dispatch_id, file_name, data, "internal-dispatches", "reply-attachment", official_actor_name(user), payload.get("file_mime_type") or "application/pdf")
         supabase_persist_file_object_scan_result(file_row["id"], scan_status, scan_signature, official_actor_name(user))
         attachment_file_id = file_row["id"]
-    row = supabase_insert("internal_dispatch_replies", {
-        "id": f"IDREP-{int(time.time() * 1000)}-{secrets.token_hex(3).upper()}",
-        "dispatch_id": dispatch_id,
-        "recipient_id": recipient.get("id") if recipient else None,
-        "replier_user_id": user.get("id") or "",
-        "replier_name": user.get("name") or user.get("email") or "",
-        "reply_text": payload.get("reply_text") or payload.get("body") or "",
-        "attachment_file_id": attachment_file_id,
-        "status": "submitted",
-        "created_at": now(),
+    internal_dispatch_workflow.rpc(sys.modules[__name__], "edoc_reply_internal_dispatch_v1", {
+        "p_actor_user_id": user["id"], "p_dispatch_id": dispatch_id,
+        "p_reply": {"id": "IDREP-" + secrets.token_hex(16).upper(),
+                    "reply_text": payload.get("reply_text") or payload.get("body") or "",
+                    "attachment_file_id": attachment_file_id},
     })
-    if recipient:
-        supabase_patch("internal_dispatch_recipients", recipient["id"], {"status": "replied", "replied_at": now(), "updated_at": now()})
-    refreshed = supabase_internal_dispatch_detail(dispatch_id, session)
-    if refreshed.get("reply_required") and not any(bool(item.get("action_required")) and item.get("status") != "replied" for item in refreshed["recipients"]):
-        # A concurrent sender close must never be changed back to open by a
-        # reply that started earlier. Keep the terminal state server-owned.
-        query = urllib.parse.urlencode({"id": f"eq.{dispatch_id}", "status": "not.in.(closed,cancelled)", "or": "(closed_at.is.null,closed_at.eq.)"})
-        supabase_request("PATCH", f"internal_dispatches?{query}", {"reply_status": "completed", "status": "reply_completed", "updated_at": now()})
-    supabase_internal_dispatch_log(dispatch_id, user, "reply_internal_dispatch", row["reply_text"], payload)
     return supabase_internal_dispatch_detail(dispatch_id, session)
 
 
 def supabase_mark_internal_dispatch_read(dispatch_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
     detail = supabase_internal_dispatch_detail(dispatch_id, session)
-    recipient = next((item for item in detail["recipients"] if item.get("recipient_user_id") == user.get("id")), None)
+    recipient = internal_dispatch_workflow.actor_recipient(detail["recipients"], user.get("id"))
     if not recipient:
         raise PermissionError("internal_dispatch_read_forbidden")
     if not recipient.get("read_at"):
@@ -43364,11 +43162,11 @@ def supabase_internal_dispatch_reply_attachment(
 
 def supabase_close_internal_dispatch(dispatch_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     user = supabase_official_session_user(session)
-    detail = supabase_internal_dispatch_detail(dispatch_id, session)
-    if detail.get("sender_user_id") != user.get("id") and not session_has_any_permission(session, ["official_documents.all_todo", "official_documents.all_records"]):
-        raise PermissionError("internal_dispatch_close_forbidden")
-    supabase_patch("internal_dispatches", dispatch_id, {"status": "closed", "closed_at": now(), "updated_at": now()})
-    supabase_internal_dispatch_log(dispatch_id, user, "close_internal_dispatch", payload.get("comment") or "內部派文結案", payload)
+    internal_dispatch_workflow.rpc(sys.modules[__name__], "edoc_close_internal_dispatch_v1", {
+        "p_actor_user_id": user["id"], "p_dispatch_id": dispatch_id,
+        "p_company_wide": session_has_any_permission(session, ["official_documents.all_todo", "official_documents.all_records"]),
+        "p_comment": payload.get("comment") or "內部派文結案",
+    })
     return supabase_internal_dispatch_detail(dispatch_id, session)
 
 

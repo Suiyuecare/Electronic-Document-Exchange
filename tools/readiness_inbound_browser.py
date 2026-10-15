@@ -65,9 +65,24 @@ def audit(output):
             browser.until("!document.querySelector('#inboundModal').getClientRects().length&&document.querySelector('.internal-dispatch-recipient-check:checked')?.value===" + json.dumps(employee["user"]["id"]))
             if browser.evaluate("document.querySelector('#internalDispatchTitleInput').value") != subject:
                 raise AssertionError("dispatch_subject_not_prefilled")
+            # Simulate a response lost only after the real local server commits.
+            # Retry must recover the same case instead of dispatching twice.
+            browser.evaluate("""(()=>{const original=window.fetch;window.__lostDispatchResponse=false;window.fetch=async function(input,init){const response=await original.call(this,input,init);if(!window.__lostDispatchResponse&&String(input).endsWith('/internal-dispatches')&&init?.method==='POST'&&response.ok){window.__lostDispatchResponse=true;throw new TypeError('Synthetic lost response after commit')}return response};return true})()""")
+            browser.click_visible("#internalDispatchSubmitBtn")
+            browser.until("document.querySelector('#internalDispatchCreateNotice')?.textContent.includes('相同內容重試')&&!document.querySelector('#internalDispatchSubmitBtn').disabled")
+            if browser.evaluate("document.querySelector('#internalDispatchTitleInput').value") != subject:
+                raise AssertionError("lost_response_erased_dispatch_form")
+            browser.run("screenshot", str(output / (device + "-retry-preserved.png")), "--full")
             browser.click_visible("#internalDispatchSubmitBtn")
             browser.until("internalDispatchItems.some(x=>x.inbound_document_id===" + json.dumps(inbound_id) + ")")
+            rows = fixture._expect_json("GET", "/api/internal-dispatches", 200, token=ga["token"])
+            if len([row for row in rows if row.get("inbound_document_id") == inbound_id]) != 1:
+                raise AssertionError("lost_response_retry_created_duplicate_dispatch")
             dispatch_id = browser.evaluate("internalDispatchItems.find(x=>x.inbound_document_id===" + json.dumps(inbound_id) + ").id")
+            browser.until("document.querySelector('#internalDispatchCloseBtn')?.disabled===true")
+            if not browser.evaluate("document.querySelector('#internalDispatchCloseHint')?.textContent.includes('待回覆')"):
+                raise AssertionError("premature_close_has_no_actionable_explanation")
+            browser.evaluate("document.querySelector('#internalDispatchCloseHint').scrollIntoView({block:'center'});true")
             browser.run("screenshot", str(output / (device + "-ga-dispatched.png")), "--full")
 
             login(browser, fixture, employee, device)
@@ -98,7 +113,22 @@ def audit(output):
             if layout["overflow"] or layout["errors"] or detail_overflow:
                 raise AssertionError("browser_layout_or_runtime_error")
             browser.run("screenshot", str(output / (device + "-ceo-trace.png")), "--full")
-            report["journeys"].append({"device": device, "status": "passed", "storedAttachmentCount": 1, "sourceAttachmentDownloadVerified": True, "receiptPersisted": True, "replyPersisted": True, "supervisorTraceVerified": True, "overflow": False, "detailValueOverflowCount": detail_overflow})
+            browser.click_visible("#internalDispatchCloseBtn")
+            browser.until("document.querySelector('#workspaceTypedConfirmModal')?.getClientRects().length>0")
+            browser.click_visible("#workspaceTypedConfirmCancelBtn")
+            detail = fixture._expect_json("GET", "/api/internal-dispatches/" + dispatch_id, 200, token=ceo["token"])
+            if detail["status"] == "closed":
+                raise AssertionError("cancel_closed_dispatch")
+            browser.click_visible("#internalDispatchCloseBtn")
+            browser.until("document.querySelector('#workspaceTypedConfirmModal')?.getClientRects().length>0")
+            browser.click_visible("#workspaceTypedConfirmSubmitBtn")
+            browser.until("internalDispatchItems.find(x=>x.id===" + json.dumps(dispatch_id) + ")?.status==='closed'")
+            detail = fixture._expect_json("GET", "/api/internal-dispatches/" + dispatch_id, 200, token=ceo["token"])
+            if not detail.get("closed_at"):
+                raise AssertionError("closure_not_persisted")
+            browser.evaluate("document.querySelector('#internalDispatchDetail').scrollIntoView({block:'center'});true")
+            browser.run("screenshot", str(output / (device + "-closed-trace.png")), "--full")
+            report["journeys"].append({"device": device, "status": "passed", "storedAttachmentCount": 1, "sourceAttachmentDownloadVerified": True, "lostResponseRetryCreatesOneCase": True, "receiptPersisted": True, "replyPersisted": True, "supervisorTraceVerified": True, "pendingReplyBlocksClose": True, "cancelClosePreservesStatus": True, "confirmedClosePersisted": True, "overflow": False, "detailValueOverflowCount": detail_overflow})
         return report
     except Exception as error:
         try:

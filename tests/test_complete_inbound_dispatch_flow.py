@@ -60,7 +60,10 @@ class CompleteInboundDispatchFlowTest(unittest.TestCase):
         conn.execute("UPDATE users SET status = '停用' WHERE id = ?", (outsider["id"],))
         with self.assertRaises((PermissionError, ValueError)):
             backend.create_internal_dispatch(conn, {"subject": "不可派發", "recipients": [{"user_id": outsider["id"]}]}, ga)
-        self.assertEqual(2, len(self.notices))
+        self.assertEqual(1, len(self.notices))  # Inbound assignment compatibility notice.
+        queued = conn.execute("SELECT * FROM notifications WHERE source=?", (dispatch_id,)).fetchall()
+        self.assertEqual(1, len(queued))  # Dispatch delivery is a transactional outbox.
+        self.assertEqual(f.employee["id"], queued[0]["target_user_id"])
 
 
 if __name__ == "__main__":
