@@ -13192,8 +13192,8 @@ function renderOfficialDecisionEvidence(item) {
   const actionDefinitions = [
     ["application", "展開申請資料", false],
     ["source", source ? "下載原稿／送簽版" : "找不到原稿或送簽版", !source],
-    ["attachments", attachments.length ? `下載全部附件（${attachments.length}）` : "本案沒有附件", false, attachments.length ? "" : "已確認無附件"],
-    ["editor", edited ? "下載編輯 PDF" : requiresLockedPrepared ? "鎖定確認版無法讀取，請重新開啟案件" : "本案沒有編輯 PDF", requiresLockedPrepared && !edited, !edited && !requiresLockedPrepared ? "已確認無編輯內容" : ""]
+    ["attachments", attachments.length ? `下載全部附件（${attachments.length}）` : "確認沒有附件", false, attachments.length ? "" : "已確認無附件"],
+    ["editor", edited ? "下載編輯 PDF" : requiresLockedPrepared ? "鎖定確認版無法讀取，請重新開啟案件" : "確認無編輯內容", requiresLockedPrepared && !edited, !edited && !requiresLockedPrepared ? "已確認無編輯內容" : ""]
   ];
   actions.innerHTML = actionDefinitions.map(([kind, label, disabled, completionLabel = ""]) => `
     <button class="secondary-button" type="button" data-decision-evidence="${kind}" data-default-label="${escapeHtml(label)}" data-completion-label="${escapeHtml(completionLabel)}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>
