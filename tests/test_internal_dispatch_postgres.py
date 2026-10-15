@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import unittest
+import uuid
 from pathlib import Path
 
 import backend
@@ -60,6 +61,71 @@ class InternalDispatchMigrationContractTest(unittest.TestCase):
             "edoc_assign_inbound_with_dispatch_v1",
         ):
             self.assertIn(rpc, dispatch_gate)
+
+
+@unittest.skipUnless(fixture.PORT, "isolated PostgreSQL grant smoke gate not enabled")
+class InternalDispatchGrantSmokePostgresTest(unittest.TestCase):
+    """Exercise the exact fresh-reset table gate, including hostile ACLs."""
+
+    @classmethod
+    def setUpClass(cls):
+        import psycopg
+        cls.psycopg = psycopg
+        args = {"host": "127.0.0.1", "port": int(fixture.PORT),
+                "user": os.getenv("EDOC_TEST_PG_USER", "seniorlifepr"), "autocommit": True}
+        cls.dbname = "edoc_dispatch_acl_test_" + uuid.uuid4().hex[:12]
+        cls.admin = psycopg.connect(**args, dbname="postgres")
+        cls.admin.execute(f'CREATE DATABASE "{cls.dbname}"')
+        cls.pg = psycopg.connect(**args, dbname=cls.dbname)
+        cls.addClassCleanup(cls.cleanup)
+        for role in ("postgres", "service_role"):
+            if not cls.admin.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,)).fetchone():
+                # Match Supabase's existing service_role and the shared local
+                # fixture; never alter an existing role or hosted cluster.
+                cls.admin.execute(f'CREATE ROLE "{role}" NOLOGIN' + (" SUPERUSER" if role == "postgres" else " BYPASSRLS"))
+        smoke = (fixture.ROOT / "supabase/verification/service_role_data_api_grant_smoke.sql").read_text()
+        cls.table_gate = "do $service_role_table_matrix$" + smoke.split(
+            "do $service_role_table_matrix$", 1
+        )[1].split("$service_role_table_matrix$;", 1)[0] + "$service_role_table_matrix$;"
+        expected = dict(re.findall(r"\('([a-z0-9_]+)',\s*'([SIUD]+)'\)", cls.table_gate))
+        for table, operations in expected.items():
+            cls.pg.execute(f'CREATE TABLE public."{table}" (id text)')
+            cls.pg.execute(f'ALTER TABLE public."{table}" OWNER TO postgres')
+            # Supabase fresh databases may carry default ACLs; make this
+            # isolated catalog fixture match the exact declared matrix.
+            cls.pg.execute(f'REVOKE ALL ON public."{table}" FROM service_role')
+            privileges = ",".join(name for name, marker in (
+                ("SELECT", "S"), ("INSERT", "I"), ("UPDATE", "U"), ("DELETE", "D")
+            ) if marker in operations)
+            cls.pg.execute(f'GRANT {privileges} ON public."{table}" TO service_role')
+
+    @classmethod
+    def cleanup(cls):
+        cls.pg.close()
+        cls.admin.execute(f'DROP DATABASE "{cls.dbname}" WITH (FORCE)')
+        cls.admin.close()
+
+    def test_exact_insert_only_ledger_passes_and_extra_mutation_grants_fail(self):
+        self.pg.execute(self.table_gate)
+        for privilege in ("UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"):
+            with self.subTest(privilege=privilege):
+                self.pg.execute(f"GRANT {privilege} ON public.internal_dispatch_mutations TO service_role")
+                try:
+                    with self.assertRaisesRegex(self.psycopg.Error, "service_role_table_(?:grant_mismatch|extra_privilege):internal_dispatch_mutations"):
+                        self.pg.execute(self.table_gate)
+                finally:
+                    self.pg.execute(f"REVOKE {privilege} ON public.internal_dispatch_mutations FROM service_role")
+                self.pg.execute(self.table_gate)
+
+    def test_unknown_table_grant_is_still_rejected(self):
+        self.pg.execute("CREATE TABLE public.unexpected_dispatch_grant(id text)")
+        self.pg.execute("GRANT SELECT ON public.unexpected_dispatch_grant TO service_role")
+        try:
+            with self.assertRaisesRegex(self.psycopg.Error, "service_role_unexpected_public_table_grant"):
+                self.pg.execute(self.table_gate)
+        finally:
+            self.pg.execute("DROP TABLE public.unexpected_dispatch_grant")
+        self.pg.execute(self.table_gate)
 
 
 @unittest.skipUnless(fixture.PORT, "isolated PostgreSQL gate not enabled")
