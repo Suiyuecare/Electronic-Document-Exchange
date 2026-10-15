@@ -102,6 +102,7 @@ mobile=false;openApprovalLogMobileDetail();assert.equal(focused,1);assert.equal(
     def test_mobile_detail_return_reveals_selected_case_and_preserves_desktop_scroll(self):
         self.run_js(["closeApprovalLogMobileDetail"], r'''
 let mobile=true,selectedWorkflowTaskId='case-12',removed=0,focused=0,scrolled=0,hasSelection=true;
+const clearOfficialCaseNavigation=()=>{},writeWorkspaceCaseRoute=()=>{},restoreApprovalReturnContext=()=>{};
 const page={removeAttribute(name){assert.equal(name,'data-mobile-detail');removed++}};
 const button={focus(options){assert.deepEqual(options,{preventScroll:true});focused++},scrollIntoView(options){assert.equal(removed,1);assert.deepEqual(options,{block:'center',behavior:'instant'});scrolled++}};
 const list={querySelector(selector){assert.equal(selector,'[data-approval-log-select="case-12"]');return hasSelection?button:null}};
@@ -112,7 +113,7 @@ mobile=true;hasSelection=false;closeApprovalLogMobileDetail();assert.equal(remov
 ''')
 
     def test_approval_evidence_precedes_decision_and_empty_has_one_surface(self):
-        self.run_js(["closeApprovalLogMobileDetail", "officialDocumentCanConfirm", "officialDocumentAvailableActions", "officialWorkflowActionLabel", "renderOfficialWorkflowActionButtons", "renderApprovalLog"], r'''
+        self.run_js(["closeApprovalLogMobileDetail", "caseCompanyIdentity", "caseCompanyFieldLabel", "renderCaseCompanyField", "officialDocumentCanConfirm", "officialDocumentAvailableActions", "officialWorkflowActionLabel", "renderOfficialWorkflowActionButtons", "renderApprovalLog"], r'''
 const node=()=>({innerHTML:'',textContent:'',hidden:false,dataset:{},classList:{toggle(){}},querySelectorAll:()=>[],querySelector:()=>null,removeAttribute(){}});
 const list=node(),detail=node(),full=node(),panel=node(),page=node(),layout=node(),back=node();full.parentElement=node();
 const nodes={'#approvalLogList':list,'#approvalLogDetail':detail,'#approvalLogOpenWorkflowBtn':full,'#approvalLogCount':node(),'#approvalLogScope':node(),'#approvalLogDetailPanel':panel,'.approval-log-layout':layout,'#approvalLogBackBtn':back,'#approvalLog':page};
@@ -120,6 +121,8 @@ const document={querySelector:s=>nodes[s]||null,querySelectorAll:()=>[]};
 const renderStableWorkflowMarkup=(host,html)=>{host.innerHTML=html},bindWorkflowActionOnce=()=>{};
 let selectedWorkflowTaskId='case1',approvalLogFilter='pending';
 const normalizeApprovalProgressFilter=()=>{};
+const currentOfficialCaseNavigation=()=>null;
+const financeDirectoryState={status:'synced',contentScope:'fixture'},frontendSessionScope=()=> 'fixture',companySealCompanies=[],parseJsonMaybe=()=>null;
 const officialWorkflowPage={loading:false,error:false,hasMore:false};const hasAuthenticatedBackendSession=()=>true;
 const official={id:'case1',current_status:'pending',current_step:'manager',can_act:true,approval_steps:[{id:'step1',step_key:'manager',status:'pending'}]};
 let records=[{task:{id:'case1',title:'Synthetic',role:'Manager',step:'Manager',status:'待簽核'},doc:{subject:'Synthetic'},steps:[],officialDocument:official,requester:'Applicant'}];

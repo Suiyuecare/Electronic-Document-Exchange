@@ -888,6 +888,39 @@ input[readonly].seal-dimension-locked {
   opacity: 0.5;
 }
 
+/* A locked case is a document viewer, not an editor with dead controls. */
+#uploadedPdfEditor[data-read-only-presentation="true"] :is(
+  #uploadedEditorToolTray, #uploadedEditorSaveDraftBtn, #uploadedPdfReplaceBtn,
+  #uploadedPdfA4Rule, #uploadedEditorGeneralOptions, #uploadedEditorSeamPanel,
+  #uploadedEditorPageActions, .pdf-editor-page-import, #uploadedEditorProperties,
+  #uploadedEditorSelectionActions, .editor-object-disclosure,
+  #uploadedEditorSaveDraftFooterBtn, #clearUploadedStampsBtn,
+  #uploadedEditorToolNotice, #uploadedSealAvailabilityNotice
+) {
+  display: none;
+}
+
+#uploadedPdfEditor[data-case-read-only="true"] .pdf-editor-footer-actions { display: none; }
+#uploadedSealApplicationPanel[data-case-read-only="true"] .electronic-seal-route-result { display: none; }
+
+#uploadedPdfEditor .uploaded-editor-readonly-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--cream);
+  overflow-wrap: anywhere;
+}
+
+#uploadedPdfEditor .uploaded-editor-readonly-notice[hidden] { display: none; }
+#uploadedPdfEditor .uploaded-editor-readonly-notice strong { flex-basis: 100%; }
+#uploadedPdfEditor .uploaded-editor-readonly-notice p { flex: 1 1 280px; margin: 0; color: var(--muted); }
+#uploadedPdfEditor[data-read-only-presentation="true"] .editor-svg-element { cursor: default; }
+
 .pdf-editor-v2[data-uploading="true"] .pdf-editor-toolbar,
 .pdf-editor-v2[data-uploading="true"] .pdf-editor-general-options,
 .pdf-editor-v2[data-uploading="true"] .pdf-editor-shell,
