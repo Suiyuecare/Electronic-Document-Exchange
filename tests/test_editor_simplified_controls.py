@@ -68,13 +68,14 @@ class SimplifiedEditorControlsTest(unittest.TestCase):
     def test_seam_panel_defaults_closed_and_never_becomes_an_independent_mode(self) -> None:
         panel = html_element(self.editor, "uploadedEditorSeamPanel")
         self.assertRegex(panel.split(">", 1)[0], r"\bhidden(?:\s|=|$)")
-        self.assertIn('id="uploadedEditorSeamPages"', panel)
+        self.assertNotIn('id="uploadedEditorSeamPages"', panel)
+        self.assertIn('id="uploadedEditorSeamPages"', html_element(self.html, "uploadedSealPresets"))
         self.assertIn('id="uploadedEditorSeamGroups"', panel)
         self.assertIn('aria-expanded="false" aria-controls="uploadedEditorSeamPanel"', self.editor)
         self.assertNotIn('data-editor-tool="seam"', self.editor)
 
     def test_editor_controls_are_not_duplicated_by_the_new_layout(self) -> None:
-        ids = re.findall(r'\bid="([^"]+)"', self.editor)
+        ids = re.findall(r'\bid="([^"]+)"', html_element(self.html, "electronicSeal"))
         self.assertEqual(len(ids), len(set(ids)), "Editor IDs must remain unique after moving controls")
         for preserved_id in (
             "uploadedSealPdfInput", "uploadedSealSealSelect", "uploadedSealStampType",
@@ -85,6 +86,28 @@ class SimplifiedEditorControlsTest(unittest.TestCase):
             "uploadedEditorUploadError", "uploadedEditorRetryUploadBtn", "submitUploadedSealBtn",
         ):
             self.assertIn(preserved_id, ids)
+
+    def test_stamp_presets_belong_to_application_and_are_not_tool_panels(self) -> None:
+        presets = html_element(self.html, "uploadedSealPresets")
+        application = html_element(self.html, "uploadedSealApplicationPanel")
+        for control in ("uploadedSealCategorySelect", "uploadedSealSizeSelect", "uploadedSealSealSelect",
+                        "uploadedSealStampType", "uploadedEditorSeamSealSelect", "uploadedEditorSeamPages"):
+            self.assertEqual(self.html.count(f'id="{control}"'), 1)
+            self.assertIn(f'id="{control}"', presets)
+            self.assertIn(f'id="{control}"', application)
+            self.assertNotIn(f'id="{control}"', self.editor)
+        self.assertNotIn('id="uploadedSealPresets"', html_element(self.html, "uploadedSealApplicationFields"))
+        renderer = javascript_function(self.js, "renderUploadedSealWorkbench")
+        self.assertNotIn('sealPicker.hidden = seamOpen', renderer)
+        self.assertIn('if (tool === "seal") return placeUploadedSealPreset("seal")', javascript_function(self.js, "chooseUploadedEditorTool"))
+
+    def test_last_editor_styles_keep_toolbar_out_of_page_edge_positions(self) -> None:
+        fluid = (ROOT / "editor-fluid.css").read_text(encoding="utf-8")
+        toolbar = re.search(r"#uploadedPdfEditor \.pdf-editor-toolbar\s*\{([^}]+)\}", fluid)
+        self.assertIsNotNone(toolbar)
+        self.assertIn("position: relative", toolbar.group(1))
+        self.assertIn("top: auto", toolbar.group(1))
+        self.assertNotIn("position: sticky", fluid)
 
     def test_visible_tool_buttons_use_the_mode_aware_chooser_exactly_once(self) -> None:
         callbacks = re.findall(
@@ -128,12 +151,13 @@ class SimplifiedEditorControlsTest(unittest.TestCase):
         names = (
             "setUploadedEditorMode", "setUploadedEditorTool", "chooseUploadedEditorTool",
             "closeUploadedEditorSeamPanel", "closeUploadedEditorDisclosures",
-            "setUploadedEditorSaveStatus", "runUploadedEditorPageAction",
+            "uploadedEditorStatusScope", "setUploadedEditorSaveStatus", "runUploadedEditorPageAction",
         )
         functions = "\n".join(javascript_function(self.js, name) for name in names)
         harness = r'''
 const assert = require('node:assert/strict');
 const counts = {renders:0, imagePicker:0, commits:0, confirms:0};
+const frontendSessionScope=()=> 'synthetic-session', authState={token:'synthetic-token'}, uploadedSealApplicationRuntime={epoch:1};
 const PDF_EDITOR_ALLOWED_KINDS = new Set(['seal','text','replacement','image','shape','checkmark','highlight','redaction']);
 const uploadedSealEditorState = {
   schemaVersion:2, revisionNo:7, manifestSha256:'immutable-manifest',

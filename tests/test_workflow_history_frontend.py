@@ -21,6 +21,8 @@ class WorkflowHistoryFrontendTest(unittest.TestCase):
         cls.source = (ROOT / "app.js").read_text()
 
     def run_js(self, names, setup, case):
+        if {"submitUploadedSealApplication", "preflightUploadedEditor"}.intersection(names):
+            names = [*names, "uploadedEditorStatusScope", "setUploadedEditorPreflightStatus"]
         functions = "\n".join(runtime_function(self.source, name) for name in names)
         script = "const assert=require('node:assert/strict');\n" + setup + "\n" + functions
         script += "\n(async()=>{" + case + "})().catch(error=>{console.error(error);process.exitCode=1});"
@@ -144,6 +146,7 @@ const task=submitUploadedSealApplication();await flush();assert.equal(stages.at(
 
     PREFLIGHT_SETUP = r'''
 let session='actor',calls=[],saveGate=null;const frontendSessionScope=()=>session;
+const authState={token:'synthetic-session'};
 const uploadedSealApplicationRuntime={epoch:1,contentRevision:7};const uploadedSealEditorRuntime={documentId:'A',dirtyGeneration:1,revisionId:'R',preparedPdfDocument:null};const uploadedSealEditorState={pages:[{}],manifestSha256:'M'};
 const uploadedSealApplicationKey=()=> 'Stable synthetic application';
 const document={querySelector:()=>null},finishUploadedEditorTextEdit=()=>true,ensureUploadedEditorPagesA4=()=>{};
@@ -166,7 +169,7 @@ const gate=defer();backendRequest=()=>gate.promise;const task=preflightUploadedE
         setup = r'''
 let session='actor',renders=0,toasts=[];const frontendSessionScope=()=>session;
 const uploadedSealApplicationRuntime={epoch:1},uploadedSealEditorRuntime={documentId:'A',reviewGeneration:0,reviewMode:'edited'};
-const document={querySelector:()=>null},finishUploadedEditorTextEdit=()=>true,invalidateUploadedEditorSubmissionPreview=()=>{},renderUploadedSealWorkbench=()=>renders++,showToast=message=>toasts.push(message);
+const document={querySelector:()=>null},finishUploadedEditorTextEdit=()=>true,invalidateUploadedEditorSubmissionPreview=()=>{},renderUploadedEditorReadOnlyPresentation=()=>{},renderUploadedSealWorkbench=()=>renders++,showToast=message=>toasts.push(message);
 let resolve,reject;const gate=new Promise((yes,no)=>{resolve=yes;reject=no});const renderUploadedPdfPage=()=>gate;
 '''
         for finish in ("resolve()", "reject(new Error('old preview failed'))"):
