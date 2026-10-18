@@ -92,8 +92,7 @@ def run(output, roles=("staff", "ceo")):
                     browser.run("select", "#composeOutputMode", "physical")
                     checks["physicalExposesSealSelection"] = browser.evaluate("!document.querySelector('#composeSealFields').hidden")
                     browser.run("select", "#composeOutputMode", "electronic")
-                    if browser.evaluate("document.querySelector('#composeContactToggleBtn').getAttribute('aria-expanded')!=='true'"):
-                        browser.click_visible("#composeContactToggleBtn")
+                    assert browser.evaluate("!document.querySelector('#composeContactToggleBtn')&&[...document.querySelectorAll('#composeContactFields label')].every(label=>!label.hidden)")
                     for name, value in {"recipient": "隔離受文機關", "contactOwner": "隔離承辦人", "contactAddress": "測試路一號", "contactEmail": "test@example.test", "bodyText": "一、本文件僅供本地隔離測試。"}.items():
                         browser.run("fill", "#"+name, value)
                     checks["manualContactValuesRetained"] = browser.evaluate("document.querySelector('#contactOwner').value==='隔離承辦人'&&document.querySelector('#contactAddress').value==='測試路一號'&&document.querySelector('#contactEmail').value==='test@example.test'")

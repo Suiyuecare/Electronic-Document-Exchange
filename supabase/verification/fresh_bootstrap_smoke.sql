@@ -269,6 +269,42 @@ begin
 end;
 $compose_editor_resilience_gate$;
 
+-- Private drafts: exact code, private ownership and backend-only access.
+do $private_draft_archive_gate$
+declare
+ v_proc record; v_expected record; v_role text; v_save text;
+begin
+ for v_expected in select * from (values
+  ('public.edoc_archive_private_compose_draft(text,text,text,integer,boolean)','v','d7363a42eaf22ec0cc4a71b0b97dbffabd0c3169274827cbc19cda6a78156acd'),
+  ('public.edoc_workspace_drafts(jsonb)','s','4d01281f737c3ff5243c49b02a9b365f9594f767b360a62e3714f05e6f6c256a')
+ ) as expected(signature,volatility,body_hash) loop
+  select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_expected.signature);
+  if not found then raise exception 'private_draft_archive_rpc_missing'; end if;
+  if v_proc.prosecdef or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+   or v_proc.provolatile::text<>v_expected.volatility
+   or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+   or not pg_catalog.has_function_privilege('service_role',v_proc.oid,'EXECUTE') then
+   raise exception 'private_draft_archive_rpc_security_mismatch';
+  end if;
+  if pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_proc.prosrc,'UTF8')),'hex')<>v_expected.body_hash then
+   raise exception 'private_draft_archive_rpc_source_mismatch';
+  end if;
+  foreach v_role in array array['anon','authenticated','authenticator'] loop
+   if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+    raise exception 'private_draft_archive_rpc_browser_grant';
+   end if;
+  end loop;
+  if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,pg_catalog.acldefault('f',v_proc.proowner))) a
+   where a.grantee=0 and a.privilege_type='EXECUTE') then
+   raise exception 'private_draft_archive_rpc_public_grant';
+  end if;
+ end loop;
+ select pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure('public.edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)')) into v_save;
+ if v_save is null or pg_catalog.strpos(v_save,'if v_row.archived and not p_archived')=0 then
+  raise exception 'private_draft_archive_autosave_guard_missing';
+ end if;
+end $private_draft_archive_gate$;
+
 do $worklist_receipt_rpc_gate$
 declare
   v_proc record;

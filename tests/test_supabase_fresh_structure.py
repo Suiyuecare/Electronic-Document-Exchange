@@ -698,6 +698,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             "edoc_import_approved_original_scan_file": "20261013070841_approved_original_scan_exception.sql",
             "edoc_import_approved_native120_scan_file": "20261013125111_approved_native120_scan_exception.sql",
             "edoc_workspace_drafts": "20261013172206_workspace_drafts_catalog.sql",
+            "edoc_archive_private_compose_draft": "20261018074142_private_draft_archive_restore.sql",
         }
         later_granted_rpc_names: set[str] = set()
         for rpc_name, migration_name in repair_rpcs.items():
@@ -730,7 +731,7 @@ class SupabaseFreshStructureTestCase(unittest.TestCase):
             (granted_rpc_names | later_granted_rpc_names) - {"edoc_company_seal_dimensions_are_valid"} - scan_helpers,
             required_rpc_names,
         )
-        self.assertEqual(len(required_rpc_names), 39)
+        self.assertEqual(len(required_rpc_names), 40)
         cutover = CUTOVER.read_text(encoding="utf-8").lower()
         fresh_smoke = FRESH_BOOTSTRAP_SMOKE.read_text(encoding="utf-8").lower()
         self.assertIn("from information_schema.table_privileges", cutover)

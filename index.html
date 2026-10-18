@@ -1074,8 +1074,8 @@
         </section>
 
         <section class="view" id="drafts" aria-labelledby="workspaceDraftTitle">
-          <div class="section-header"><h3 id="workspaceDraftTitle">草稿編輯</h3><button type="button" class="primary-button" id="draftNewComposeBtn">寫新公文</button></div>
-          <div class="panel draft-workspace-toolbar"><label>搜尋草稿<input id="workspaceDraftSearch" type="search" placeholder="主旨或案件編號" /></label><button type="button" class="secondary-button" id="workspaceDraftRefreshBtn">重新整理</button><span id="workspaceDraftCount" role="status" aria-live="polite">正在載入…</span></div>
+          <div class="section-header"><h3 id="workspaceDraftTitle" tabindex="-1">草稿編輯</h3><button type="button" class="primary-button" id="draftNewComposeBtn">寫新公文</button></div>
+          <div class="panel draft-workspace-toolbar"><label>搜尋草稿<input id="workspaceDraftSearch" type="search" placeholder="主旨或案件編號" /></label><button type="button" class="secondary-button" id="workspaceDraftSearchClearBtn" hidden aria-label="清除草稿搜尋">清除搜尋</button><button type="button" class="secondary-button" id="workspaceDraftRefreshBtn">重新整理</button><button type="button" class="secondary-button" id="workspaceDraftArchivedBtn" aria-pressed="false">已封存</button><span id="workspaceDraftCount" role="status" aria-live="polite">正在載入…</span><span id="workspaceDraftActionStatus" role="status" aria-live="polite"></span></div>
           <section class="panel draft-local-recovery" id="workspaceLocalDraft" hidden aria-label="此裝置未同步草稿"></section>
           <div class="workspace-draft-list" id="workspaceDraftList" aria-live="polite"></div>
           <div class="official-list-pagination" id="workspaceDraftPagination"></div>
@@ -1143,8 +1143,7 @@
                     </label>
                   </div>
                   <div class="compose-contact-summary">
-                    <div><strong>寄件資訊</strong><p id="composeContactSummaryText">依登入帳號帶入，可自行修改。</p></div>
-                    <button class="secondary-button" id="composeContactToggleBtn" type="button" aria-expanded="false" aria-controls="composeContactFields">修改寄件資訊</button>
+                    <div><strong>寄件資訊</strong><p id="composeContactSummaryText">依登入帳號帶入，可直接編輯。</p></div>
                   </div>
                   <div class="compose-field-grid compose-contact-fields" id="composeContactFields" aria-label="寄件聯絡資訊">
                     <label class="span-all">
@@ -1258,10 +1257,10 @@
                     公文寄送方式
                     <select id="composeOutputMode" aria-describedby="composeSealModeHint">
                       <option value="electronic">A. 電子公文（不放大小章）</option>
-                      <option value="physical" selected>B. 實體公文（可放大小章）</option>
+                      <option value="physical" selected>B. 實體公文（須選擇印章）</option>
                     </select>
                   </label>
-                  <div class="inline-fields" id="composeSealFields">
+                  <div class="inline-fields" id="composeSealFields" role="group" aria-label="實體公文印章" aria-describedby="composeSealValidationHint composeSealAvailabilityHint" tabindex="-1">
                     <label>
                     大章
                     <select id="largeSealType">
@@ -1279,6 +1278,7 @@
                       <select id="continuousSealType"><option value="無" selected>無</option></select>
                     </label>
                   </div>
+                  <span class="field-hint" id="composeSealValidationHint" aria-live="polite"></span>
                   <div class="compose-seal-availability" id="composeSealAvailabilityNotice" role="status" aria-live="polite" hidden>
                     <span id="composeSealAvailabilityHint"></span>
                     <button class="text-button" id="composeSealRetryBtn" type="button" hidden>重新載入</button>

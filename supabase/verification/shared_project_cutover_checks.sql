@@ -265,6 +265,42 @@ begin
 end;
 $compose_editor_resilience_gate$;
 
+-- Private drafts: exact code, private ownership and backend-only access.
+do $private_draft_archive_gate$
+declare
+ v_proc record; v_expected record; v_role text; v_save text;
+begin
+ for v_expected in select * from (values
+  ('edoc.edoc_archive_private_compose_draft(text,text,text,integer,boolean)','v','a19fd30a9429d074dee518d795ff3e2e3b05892db099d66ef071f04b12344585'),
+  ('edoc.edoc_workspace_drafts(jsonb)','s','17ef35d32379108c47971cd18c392491ba04ec0828a8929cf95ea1a8fecaf308')
+ ) as expected(signature,volatility,body_hash) loop
+  select * into v_proc from pg_catalog.pg_proc where oid=pg_catalog.to_regprocedure(v_expected.signature);
+  if not found then raise exception 'private_draft_archive_rpc_missing'; end if;
+  if v_proc.prosecdef or pg_catalog.pg_get_userbyid(v_proc.proowner)<>'postgres'
+   or v_proc.provolatile::text<>v_expected.volatility
+   or not coalesce(v_proc.proconfig @> array['search_path=""'],false)
+   or not pg_catalog.has_function_privilege('edoc_backend',v_proc.oid,'EXECUTE') then
+   raise exception 'private_draft_archive_rpc_security_mismatch';
+  end if;
+  if pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_proc.prosrc,'UTF8')),'hex')<>v_expected.body_hash then
+   raise exception 'private_draft_archive_rpc_source_mismatch';
+  end if;
+  foreach v_role in array array['anon','authenticated','authenticator','service_role'] loop
+   if pg_catalog.has_function_privilege(v_role,v_proc.oid,'EXECUTE') then
+    raise exception 'private_draft_archive_rpc_browser_grant';
+   end if;
+  end loop;
+  if exists(select 1 from pg_catalog.aclexplode(coalesce(v_proc.proacl,pg_catalog.acldefault('f',v_proc.proowner))) a
+   where a.grantee=0 and a.privilege_type='EXECUTE') then
+   raise exception 'private_draft_archive_rpc_public_grant';
+  end if;
+ end loop;
+ select pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure('edoc.edoc_save_compose_draft(text,text,text,integer,jsonb,text,boolean)')) into v_save;
+ if v_save is null or pg_catalog.strpos(v_save,'if v_row.archived and not p_archived')=0 then
+  raise exception 'private_draft_archive_autosave_guard_missing';
+ end if;
+end $private_draft_archive_gate$;
+
 do $worklist_receipt_rpc_gate$
 declare
   v_proc record;
@@ -477,13 +513,17 @@ checks(check_name, passed, observed) as (
     ),
     (
       'migration_ledger_complete',
-      (select count(*) from edoc_private.shared_project_migration_ledger) = 78
+      (select count(*) from edoc_private.shared_project_migration_ledger) = 79
       -- The sorted digest binds the complete ledger name set to migration_manifest.json
       -- plus the bootstrap's roles.sql row; count and primary key prevent duplicates.
       and (select pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
              pg_catalog.string_agg(file_name, E'\n' order by file_name), 'UTF8')), 'hex')
            from edoc_private.shared_project_migration_ledger)
-          = '9d64dc386f15eb779fa3e1bc328fe2ed9bf525bb09f88b1e8a8d5a7b3688bd71'
+          = 'e9d74695de59eb29604cb1e00da77480fb2395a04fd94da98677683bc43a9292'
+      and exists(select 1 from edoc_private.shared_project_migration_ledger
+        where file_name='20261018074142_private_draft_archive_restore.sql'
+          and source_sha256='16c7af205f55ff44744e3863571d5bc5c5ca2378bc996b8afd187280cb605b05'
+          and transformed_sha256='6746de65b84b4e012a3f7f97721a284360ca39e715725c6d807b26a4ba998bec')
       and exists(select 1 from edoc_private.shared_project_migration_ledger
         where file_name='20261015144049_internal_dispatch_workflow_integrity.sql'
           and source_sha256='2cf453637d1ca11814671593073b5120b885b89b1681d2a75ef3aea7f44cb907'

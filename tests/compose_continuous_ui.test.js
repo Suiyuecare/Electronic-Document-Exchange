@@ -1,7 +1,7 @@
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const vm=require('node:vm');
 const source=fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
 function implementation(name){const m=new RegExp(`^(?:async )?function ${name}\\(`,'m').exec(source);assert.ok(m,name);const rest=source.slice(m.index+m[0].length);const next=/^\n(?:async )?function \w+\(/m.exec(rest);return source.slice(m.index,m.index+m[0].length+next.index);}
-function harness(){const calls=[];const nodes=new Map();const node=key=>{if(!nodes.has(key))nodes.set(key,{value:'無',dataset:{},hidden:false,disabled:false,innerHTML:'',textContent:''});return nodes.get(key)};
+function harness(){const calls=[];const nodes=new Map();const node=key=>{if(!nodes.has(key))nodes.set(key,{value:'無',dataset:{},hidden:false,disabled:false,innerHTML:'',textContent:'',getAttribute(){return null;}});return nodes.get(key)};
   const c={console,document:{querySelector:key=>key==='#attachments'?null:node(key)},companyRegistry:[{id:'CO',name:'Synthetic company'}],authState:{user:{company_id:'CO'}},activeUnit:()=> 'Synthetic unit',composeRequestScope:()=> 'synthetic-scope',composeOfficialContentRevision:null,
     ensureComposeDraftRequestId:()=> 'OD-SYNTHETIC',officialComposeMetadata:r=>r.metadata||{},uploadOfficialDocumentAttachments:async()=>{},requestWorkspaceConfirmation:async()=>true,
     frontendSessionScope:()=> 'synthetic-scope',composeSealCatalogState:{scope:'synthetic-scope',token:'',status:'ready',request:null},companySealCatalogUnavailableReason:()=> 'No synthetic seals',

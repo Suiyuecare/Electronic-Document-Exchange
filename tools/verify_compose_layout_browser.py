@@ -175,8 +175,7 @@ def run(root: Path, output: Path, phase: str, source_root: Path | None = None, *
                     "subject": "有關測試資料更新一案，請查照。",
                     "bodyText": "一、本函僅供隔離驗收，不送簽、不寄發。\n二、請協助更新測試資料。",
                 }
-                if browser.evaluate("document.querySelector('#composeContactToggleBtn').getAttribute('aria-expanded')!=='true'"):
-                    browser.click_visible("#composeContactToggleBtn")
+                assert browser.evaluate("!document.querySelector('#composeContactToggleBtn')&&[...document.querySelectorAll('#composeContactFields label')].every(label=>!label.hidden)")
                 for identity, value in values.items():
                     browser.run("fill", "#" + identity, value)
                 browser.until("document.querySelector('#draftPreview')?.textContent.includes('有關測試資料更新一案')")

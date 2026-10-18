@@ -95,16 +95,13 @@ def main():
             report["explicitNewDraftPreservesPrior"] = {"rowCount": 2, "priorRevision": 3}
             browser.run("set", "viewport", "390", "844")
             browser.run("snapshot", "-i")
-            browser.evaluate("document.querySelector('#contactAddress').value='隔離測試地址';document.querySelector('#contactEmail').value='fixture@example.invalid';renderComposeContactSummary();document.querySelector('#composeContactToggleBtn').setAttribute('aria-expanded','false');renderComposeContactSummary();true")
-            contacts = browser.evaluate("({phoneVisible:document.querySelector('#contactPhone').getBoundingClientRect().height>=44,addressHidden:document.querySelector('#contactAddress').closest('label').hidden,expanded:document.querySelector('#composeContactToggleBtn').getAttribute('aria-expanded'),overflow:document.documentElement.scrollWidth>innerWidth})")
-            assert contacts == {"phoneVisible": True, "addressHidden": True, "expanded": "false", "overflow": False}, contacts
-            browser.click_visible("#composeContactToggleBtn")
-            assert browser.evaluate("!document.querySelector('#contactAddress').closest('label').hidden")
+            browser.evaluate("document.querySelector('#contactAddress').value='隔離測試地址';document.querySelector('#contactEmail').value='fixture@example.invalid';renderComposeContactSummary();true")
+            contacts = browser.evaluate("({phoneVisible:document.querySelector('#contactPhone').getBoundingClientRect().height>=44,allFieldsVisible:[...document.querySelectorAll('#composeContactFields label')].every(label=>!label.hidden),toggleRemoved:!document.querySelector('#composeContactToggleBtn'),overflow:document.documentElement.scrollWidth>innerWidth})")
+            assert contacts == {"phoneVisible": True, "allFieldsVisible": True, "toggleRemoved": True, "overflow": False}, contacts
             browser.run("snapshot", "-i")
-            browser.click_visible("#composeContactToggleBtn")
             browser.evaluate("setComposeFieldValidity('#contactEmail',null,false,'測試錯誤');focusComposeValidationField('#contactEmail');true")
             assert browser.evaluate("!document.querySelector('#contactEmail').closest('label').hidden&&document.activeElement.id==='contactEmail'")
-            report["mobileContactDisclosure"] = {**contacts, "errorAutoExpandsAndFocuses": True}
+            report["mobileContactsAlwaysExpanded"] = {**contacts, "errorFocusesVisibleField": True}
             browser.run("screenshot", str(output / "04-mobile-contact-error.png"))
             browser.evaluate("document.querySelector('#contactEmail').value='fixture@example.invalid';setComposeFieldValidity('#contactEmail',null,true,'');setView('dashboard');true")
             browser.until("document.querySelector('.view.active')?.id==='dashboard'")

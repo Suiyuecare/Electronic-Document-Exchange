@@ -78,6 +78,7 @@
     "20261013171937_editor_images_skip_av_preflight_required.sql",
     "20261013172206_workspace_drafts_catalog.sql",
     "20261014031923_atomic_submission_step_evidence_defaults.sql",
-    "20261015144049_internal_dispatch_workflow_integrity.sql"
+    "20261015144049_internal_dispatch_workflow_integrity.sql",
+    "20261018074142_private_draft_archive_restore.sql"
   ]
 }
