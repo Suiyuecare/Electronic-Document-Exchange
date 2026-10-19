@@ -1,7 +1,7 @@
 # Workspace interaction and file workflow contract
 
 This contract covers the 2026-09-28 file-resilience, fluid-interaction and compose-submission changes,
-including the 2026-10-18 applicant-journey corrections below.
+including the 2026-10-18 applicant and supervisor journey corrections below.
 Existing Finance-aligned visual identity and approval/security contracts remain
 in force. "Apple-like" means continuous, responsive interaction, not Apple
 branding or a promise of zero network latency.
@@ -98,6 +98,32 @@ branding or a promise of zero network latency.
 | Approved download | `downloadElectronicSealFinalFile` | Queue may be slim; fresh detail must authorize the exact committed final-file ID/type and current session. Fail closed with no candidate fallback. |
 
 ## Acceptance gates
+
+### Supervisor journey (2026-10-18)
+
+- Case list, detail and attachment grids must shrink within their owning panel. Long
+  opaque IDs, mixed-script filenames, subjects and actor names wrap without
+  truncating the original value or hiding the download action. The intentional
+  horizontally scrollable approval trail is separate from this rule. Verify
+  visible descendant bounds, not just document-level scroll width, at desktop,
+  tablet and phone widths and with enlarged text.
+- An explicitly rejected stale approval (changed step or no-longer-current
+  approver) invalidates the old confirmation and its evidence acknowledgements.
+  Fetch the same case again through the authorized detail endpoint before
+  showing its current status or available actions. Never reinterpret every 403
+  as a successful approval or weaken backend actor/step checks.
+- Pin the opening approval step, content revision and PDF integrity hashes. A
+  background change stops the old decision before POST; navigating to another
+  case or using browser history invalidates its pending response context.
+- Failed revalidation leaves the stale decision disabled and offers an explicit
+  read-only retry or return path. An unsent reason may remain in the current
+  dialog as reference, never as a completed audit entry. Fresh decisions require
+  fresh evidence inspection and confirmation. Denied detail access must remove
+  stale case content; late results from another case/session must not restore it.
+- Two-window acceptance verifies one approval history entry and one transition,
+  plus correct next-assignee feedback. Ordinary server failures preserve reason
+  text and prevent duplicate simultaneous requests. This uses deidentified local
+  data; it does not establish real employee SSO or production workflow acceptance.
 
 ### Applicant journey (2026-10-18)
 

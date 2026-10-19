@@ -3206,6 +3206,7 @@ async function openOfficialCaseFromNavigation(documentId, { tab = "", preserveFi
     const item = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`, { signal: controller.signal });
     if (!current()) return false;
     if (item?.id !== documentId) throw new Error("案件回應不一致，請重新開啟。");
+    officialDocumentAvailableActions.recoveries?.delete(documentId);
     officialCaseNavigation.detail = item;
     approvalLogFilter = officialCasePreferredTab(item, tab);
     selectedOfficialDocumentId = documentId;
@@ -3370,6 +3371,9 @@ function renderWorkspaceQuickGuide(route) {
 }
 
 window.addEventListener("hashchange", () => {
+  // Browser Back/Forward leaves this decision context. Do not let a late
+  // response reopen it or replace the newly navigated case; no server cancel.
+  if (officialDecisionState.documentId) closeOfficialDecisionDialog();
   if (hasAuthenticatedBackendSession()) void restoreWorkspaceCaseRoute();
 });
 
@@ -7786,6 +7790,7 @@ function restoreRememberedInboundArchiveDraft() {
 
 function clearCurrentFrontendSessionState(session = authState) {
   clearOfficialCaseNavigation();
+  if (typeof officialDocumentAvailableActions === "function") officialDocumentAvailableActions.recoveries?.clear();
   uploadedSealBlankInputScope = "";
   if (composeSubmittedState.scope === frontendSessionScope(session)) composeSubmittedState = { scope: "", documentId: "" };
   try { sessionStorage.removeItem(frontendScopedSessionKey("approval-return-context", session)); } catch (_error) { /* Storage may be unavailable. */ }
@@ -11414,7 +11419,10 @@ async function loadHomeOfficialCases() {
       const response = await backendRequest("/official-documents/my-requests?page_size=5");
       if (scope !== frontendSessionScope()) return;
       if (!Array.isArray(response?.items)) throw new Error("official_list_response_invalid");
-      homeOfficialCases.items = response.items;
+      homeOfficialCases.items = response.items.filter(item => {
+        const recovery = officialDocumentAvailableActions.recoveries?.get(item.id);
+        return !(recovery?.status === "forbidden" && recovery.scope === scope && recovery.token === (authState?.token || ""));
+      });
     } catch (error) {
       if (scope !== frontendSessionScope()) return;
       homeOfficialCases.error = true;
@@ -11504,7 +11512,13 @@ async function loadOfficialWorkflow(scope = officialWorkflowScope, { isCurrent =
     const items = Array.isArray(response) ? response : response?.items;
     if (!Array.isArray(items) || (!Array.isArray(response) && typeof response.has_more !== "boolean")) throw new Error("official_list_response_invalid");
     const merged = append ? [...officialWorkflowItems, ...items] : items;
-    officialWorkflowItems = [...new Map(merged.map((item) => [item.id, item])).values()];
+    const recovery = item => officialDocumentAvailableActions.recoveries?.get(item.id);
+    const guarded = item => recovery(item)?.scope === sessionScope && recovery(item)?.token === (authState?.token || "");
+    const recovered = new Map(officialWorkflowItems.filter(item => guarded(item) && recovery(item).status === "ready").map(item => [item.id, item]));
+    // Respect this response's page/filter membership. Authorized list metadata
+    // may restore a failed-recovery row for navigation, never its old actions.
+    officialWorkflowItems = [...new Map(merged.filter(item => !guarded(item) || recovery(item).status !== "forbidden")
+      .map(item => [item.id, guarded(item) ? (recovered.get(item.id) || { ...item, can_act: false, available_actions: [] }) : item])).values()];
     officialWorkflowPage.dataQuery = query;
     officialWorkflowPage.cursor = response.next_cursor || "";
     officialWorkflowPage.hasMore = Boolean(response.has_more && response.next_cursor);
@@ -12181,6 +12195,10 @@ async function ensureOfficialDocumentDetail(documentId, { isCurrent = () => true
   const current = () => sessionScope === frontendSessionScope() && isCurrent();
   if (!current()) return null;
   if (!documentId) throw new Error("未指定發文案件。");
+  const recovery = officialDocumentAvailableActions.recoveries?.get(documentId);
+  if (recovery && recovery.scope === sessionScope && recovery.token === (authState?.token || "") && recovery.status !== "ready") {
+    throw new Error("案件操作已停止，請從簽核清單重新開啟案件。");
+  }
   if (officialDocumentDetailReady.has(documentId)) {
     return officialWorkflowItems.find((item) => item.id === documentId) || null;
   }
@@ -12188,6 +12206,7 @@ async function ensureOfficialDocumentDetail(documentId, { isCurrent = () => true
   const request = (async () => {
     const detail = await backendRequest(`/official-documents/${encodeURIComponent(documentId)}`);
     if (!current() || officialDocumentDetailRequests.get(documentId) !== request) return null;
+    if (detail?.id !== documentId) throw new Error("案件回應不一致，請重新開啟。");
     const index = officialWorkflowItems.findIndex((item) => item.id === documentId);
     if (index >= 0) officialWorkflowItems[index] = detail;
     else officialWorkflowItems.unshift(detail);
@@ -12445,6 +12464,8 @@ function renderOfficialDispatchInfo(item = {}) {
 }
 
 function officialDocumentAvailableActions(item) {
+  const recovery = officialDocumentAvailableActions.recoveries?.get(item?.id);
+  if (recovery && recovery.scope === frontendSessionScope() && recovery.token === (authState?.token || "")) return [];
   const supported = ["approve", "reject", "return-previous", "add-sign", "withdraw", "decline"];
   if (Array.isArray(item?.available_actions)) return item.available_actions.filter((action) => supported.includes(action));
   return item?.can_act === true ? ["approve", "reject"] : [];
@@ -13271,6 +13292,7 @@ function officialDecisionReviewAcknowledgements() {
 }
 
 function markOfficialDecisionEvidenceReviewed(kind) {
+  if (officialDecisionState.recovery) return;
   const evidence = document.querySelector("#officialDecisionEvidence");
   if (kind === "application" && evidence) evidence.dataset.applicationReviewed = "true";
   const checkbox = {
@@ -13327,6 +13349,11 @@ function updateOfficialDecisionSubmitAvailability() {
   if (!submit) return;
   const { documentId, action } = officialDecisionState;
   const requirements = document.querySelector("#officialDecisionRequirements");
+  if (officialDecisionState.recovery) {
+    submit.disabled = true;
+    if (requirements) requirements.textContent = "舊簽核決定已停止；系統未重送。任何新決定都須重新檢閱。";
+    return;
+  }
   if (requirements) {
     const pending = officialDecisionPendingRequirements();
     requirements.textContent = officialDecisionState.busy ? "送出中，請勿重複操作。"
@@ -13462,13 +13489,17 @@ async function openOfficialDecisionDialog(item, action, source = "workflow") {
   const pendingStep = (item.approval_steps || []).find((step) => step.step_key === item.current_step && step.status === "pending");
   const expectedStepId = item.workflow_action_context?.expected_step_id || pendingStep?.id;
   if (!expectedStepId) return showToast("簽核關卡已更新，請重新整理後再操作。");
-  officialDecisionState = { documentId: item.id, action, source, operationId: crypto.randomUUID(), expectedStepId, expectedContentRevision: item.workflow_action_context?.expected_content_revision ?? item.content_revision, scope: frontendSessionScope(), candidates: [], candidateLoading: action === "add-sign", busy: false };
+  officialDecisionState = { documentId: item.id, action, source, operationId: crypto.randomUUID(), expectedStepId, expectedContentRevision: item.workflow_action_context?.expected_content_revision ?? item.content_revision, integrity: officialDecisionIntegrity(item), scope: frontendSessionScope(), token: authState?.token || "", candidates: [], candidateLoading: action === "add-sign", busy: false };
   const modal = document.querySelector("#officialDecisionModal");
   const form = document.querySelector("#officialDecisionForm");
   const approval = document.querySelector("#officialApprovalReviewFields");
   const rejection = document.querySelector("#officialRejectionFields");
   const error = document.querySelector("#officialDecisionError");
   if (!modal || !form || !approval || !rejection) return showToast("簽核確認視窗載入失敗。");
+  document.querySelector("#officialDecisionRecovery")?.remove();
+  document.querySelector("#officialDecisionSummary").hidden = false;
+  document.querySelector("#officialDecisionSubmitBtn").hidden = false;
+  document.querySelector("#officialDecisionCancelBtn").textContent = "取消";
   form.reset();
   if (error) {
     error.hidden = true;
@@ -13548,6 +13579,145 @@ async function loadOfficialAddSignCandidates(documentId, operationId) {
   }
 }
 
+function officialDecisionRecoveryKind(error) {
+  const codes = [error?.rawMessage, error?.detail, error?.code];
+  if (error?.status === 409) return "conflict";
+  if (error?.status === 403 && codes.includes("not_current_official_document_approver")) return "conflict";
+  if (error?.status === 422 && codes.some(code => ["official_document_approval_already_claimed", "official_document_not_pending_approval", "official_document_current_step_not_pending"].includes(code))) return "conflict";
+  return error?.status === 403 ? "forbidden" : "";
+}
+
+function invalidateOfficialDecisionCase(item, recovery) {
+  // Keep this guard across closing the dialog. A background list response is
+  // not authority to reuse the old decision; explicit case navigation rereads it.
+  if (!officialDocumentAvailableActions.recoveries) officialDocumentAvailableActions.recoveries = new Map();
+  officialDocumentAvailableActions.recoveries.set(item.id, recovery);
+  officialDocumentDetailReady.delete(item.id);
+  officialDocumentDetailRequests.delete(item.id);
+  item.can_act = false;
+  item.available_actions = [];
+  officialWorkflowItems = officialWorkflowItems.filter(entry => entry.id !== item.id);
+  homeOfficialCases.items = homeOfficialCases.items.filter(entry => entry.id !== item.id);
+  if (officialCaseNavigation.id === item.id) {
+    officialCaseNavigation.controller?.abort();
+    Object.assign(officialCaseNavigation, { generation: officialCaseNavigation.generation + 1, controller: null, detail: null, loading: false,
+      error: recovery.status === "forbidden" ? "目前沒有操作這筆案件的權限，請返回清單。" : "案件狀態已變更，請重新載入最新案件。" });
+  }
+}
+
+function renderOfficialDecisionRecovery() {
+  const recovery = officialDecisionState.recovery;
+  if (!recovery) return;
+  const form = document.querySelector("#officialDecisionForm");
+  if (!form) return;
+  let panel = document.querySelector("#officialDecisionRecovery");
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.id = "officialDecisionRecovery";
+    panel.className = "official-decision-section";
+    panel.innerHTML = '<h4>簽核狀態已更新</h4><p id="officialDecisionRecoveryStatus" role="status" aria-live="polite" tabindex="-1"></p><label>未送出的意見（僅供參考）<textarea class="resize-none" id="officialDecisionUnsentComment" rows="3" readonly></textarea></label><div class="official-action-bar"><button class="secondary-button" id="officialDecisionRecoveryRetryBtn" type="button">重新載入案件</button><button class="primary-button" id="officialDecisionRecoveryOpenBtn" type="button">查看最新案件</button><button class="secondary-button" id="officialDecisionRecoveryBackBtn" type="button">返回簽核清單</button></div>';
+    form.prepend(panel);
+    panel.querySelector("#officialDecisionRecoveryRetryBtn").addEventListener("click", () => void reloadOfficialDecisionRecovery());
+    panel.querySelector("#officialDecisionRecoveryOpenBtn").addEventListener("click", async () => {
+      const current = officialDecisionState.recovery;
+      if (!current || current.status !== "ready") return;
+      const documentId = officialDecisionState.documentId;
+      closeOfficialDecisionDialog();
+      await openOfficialCaseFromNavigation(documentId, { replace: true });
+    });
+    panel.querySelector("#officialDecisionRecoveryBackBtn").addEventListener("click", () => {
+      closeOfficialDecisionDialog();
+      clearOfficialCaseNavigation();
+      selectedWorkflowTaskId = "";
+      writeWorkspaceCaseRoute("approvalLog", { replace: true });
+      setView("approvalLog", { preserveCaseRoute: true });
+      closeApprovalLogMobileDetail({ writeRoute: false });
+    });
+  }
+  const status = recovery.status;
+  const text = status === "loading" ? "本次操作未完成，正在讀取最新狀態；舊確認已停止，系統不會自動重送。"
+    : status === "forbidden" ? "目前沒有操作或查看這筆案件的權限。已移除舊案件內容，請返回清單；本次意見未送出。"
+      : status === "failed" ? "最新案件資料尚未載入。舊確認維持停用；請重新載入或返回清單，本次意見未送出。"
+        : `${recovery.latestStatus} ${recovery.nextActor} 舊確認已停止；本次意見未送出，任何新決定都須重新檢閱。`;
+  panel.querySelector("#officialDecisionRecoveryStatus").textContent = text;
+  panel.querySelector("#officialDecisionUnsentComment").value = recovery.comment;
+  panel.querySelector("#officialDecisionRecoveryRetryBtn").hidden = status !== "failed";
+  panel.querySelector("#officialDecisionRecoveryOpenBtn").hidden = status !== "ready";
+  panel.querySelector("h4").textContent = status === "forbidden" ? "目前無權操作此案" : "簽核狀態已更新";
+  document.querySelector("#officialDecisionModalTitle").textContent = "簽核操作已停止";
+  document.querySelector("#officialDecisionSubmitBtn").hidden = true;
+  document.querySelector("#officialDecisionCancelBtn").textContent = "關閉";
+  updateOfficialDecisionSubmitAvailability();
+}
+
+async function reloadOfficialDecisionRecovery() {
+  const state = officialDecisionState;
+  const recovery = state.recovery;
+  if (!recovery || recovery.status === "forbidden" || recovery.loading) return;
+  const current = () => officialDecisionState === state && recovery.scope === frontendSessionScope()
+    && recovery.token === (authState?.token || "");
+  if (!current()) return;
+  recovery.status = "loading";
+  recovery.loading = true;
+  renderOfficialDecisionRecovery();
+  try {
+    // Bypass all old detail/list promises: this GET belongs to this recovery.
+    const detail = await backendRequest(`/official-documents/${encodeURIComponent(state.documentId)}`);
+    if (!current()) return;
+    if (detail?.id !== state.documentId) throw new Error("案件回應不一致");
+    const pending = (detail.approval_steps || []).find(step => step.step_key === detail.current_step && step.status === "pending");
+    recovery.status = "ready";
+    recovery.latestStatus = `最新狀態：${officialStatusLabel(detail.current_status)}。`;
+    recovery.nextActor = pending ? `${detail.current_step_name || pending.step_name || "目前關卡"}；${officialApprovalStepActor(pending).label}。` : "目前沒有待簽核關卡。";
+    officialWorkflowItems = [detail, ...officialWorkflowItems.filter(entry => entry.id !== detail.id)];
+    officialDocumentDetailReady.add(detail.id);
+    if (officialCaseNavigation.id === detail.id) Object.assign(officialCaseNavigation, { detail, error: "", loading: false });
+  } catch (error) {
+    if (!current()) return;
+    recovery.status = [401, 403].includes(error?.status) ? "forbidden" : "failed";
+    if (recovery.status === "forbidden") invalidateOfficialDecisionCase({ id: state.documentId }, recovery);
+  } finally {
+    if (current()) {
+      recovery.loading = false;
+      renderOfficialDecisionRecovery();
+      renderOfficialWorkflow();
+      renderApprovalLog();
+      renderElectronicSealWorkQueue();
+    }
+  }
+}
+
+async function recoverOfficialDecision(item, error, decisionPayload = {}) {
+  const status = officialDecisionRecoveryKind(error) === "forbidden" ? "forbidden" : "loading";
+  const recovery = { status, scope: frontendSessionScope(), token: authState?.token || "", loading: false,
+    comment: String(decisionPayload.comment || "").slice(0, 1000) };
+  invalidateOfficialDecisionCase(item, recovery);
+  officialDecisionState.operationId = crypto.randomUUID();
+  officialDecisionState.recovery = recovery;
+  officialDecisionState.busy = false;
+  officialDecisionState.candidateLoading = false;
+  officialDecisionState.candidates = [];
+  officialDecisionState.expectedStepId = "";
+  officialDecisionState.expectedContentRevision = null;
+  officialDecisionState.integrity = null;
+  const evidence = document.querySelector("#officialDecisionEvidence");
+  if (evidence) { evidence.dataset.applicationReviewed = "false"; evidence.querySelector("#officialDecisionApplicationDetails")?.remove(); }
+  document.querySelector("#officialDecisionEvidenceActions")?.replaceChildren();
+  document.querySelector("#officialDecisionSummary")?.replaceChildren();
+  ["#officialDecisionSummary", "#officialDecisionEvidence", "#officialApprovalReviewFields", "#officialRejectionFields", "#officialWorkflowActionFields"].forEach(selector => {
+    const section = document.querySelector(selector);
+    if (!section) return;
+    section.hidden = true;
+    section.querySelectorAll("input, textarea, select, button").forEach(control => { control.disabled = true; if (control.type === "checkbox") control.checked = false; });
+  });
+  const notice = document.querySelector("#officialDecisionError");
+  if (notice) { notice.hidden = true; notice.textContent = ""; }
+  renderOfficialDecisionRecovery();
+  document.querySelector("#officialDecisionRecoveryStatus")?.focus({ preventScroll: true });
+  if (status !== "forbidden") await reloadOfficialDecisionRecovery();
+  else { renderOfficialWorkflow(); renderApprovalLog(); renderElectronicSealWorkQueue(); }
+}
+
 async function mutateOfficialDocument(action, decisionPayload = {}, item = officialCurrentItem(), source = "workflow") {
   if (!item) {
     showToast("請先選擇發文申請單。");
@@ -13560,12 +13730,17 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
     return false;
   }
   const scope = frontendSessionScope();
+  const token = authState?.token || "";
+  const decisionOperation = officialDecisionState.operationId;
+  const current = () => scope === frontendSessionScope() && token === (authState?.token || "")
+    && (!decisionOperation || (officialDecisionState.operationId === decisionOperation && officialDecisionState.documentId === item.id));
   try {
     const result = await backendRequest(`/official-documents/${encodeURIComponent(item.id)}/${action}`, {
       method: "POST",
       body: JSON.stringify({ ...decisionPayload, expected_step_id: expectedStepId })
     });
-    if (scope !== frontendSessionScope()) return false;
+    if (!current()) return false;
+    if (result?.id !== item.id) throw new Error("案件回應不一致，請重新開啟案件確認結果。");
     selectedOfficialDocumentId = result.id;
     const index = officialWorkflowItems.findIndex((entry) => entry.id === result.id);
     if (index >= 0) officialWorkflowItems[index] = result;
@@ -13580,26 +13755,9 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
     showToast(({ approve: "已完成核准並保存檢閱證據。", reject: "已退回申請人補正。", "return-previous": "已退回上一關重新審核。", "add-sign": "已通過本關並交由指定人員加簽。", withdraw: "已抽單並保留簽核歷程，可重新編輯草稿。", decline: "案件不通過，已終止並通知申請人。" })[action]);
     return true;
   } catch (error) {
-    if (scope !== frontendSessionScope()) return false;
-    if (error.status === 409) {
-      officialDocumentDetailReady.delete(item.id);
-      officialDocumentDetailRequests.delete(item.id);
-      item.can_act = false;
-      item.available_actions = [];
-      if (officialDecisionState.documentId === item.id) closeOfficialDecisionDialog();
-      let refreshed = false;
-      try {
-        refreshed = Boolean(await ensureOfficialDocumentDetail(item.id, { isCurrent: () => scope === frontendSessionScope() }));
-      } catch (_refreshError) {
-        // Keep decisions blocked until the full, latest detail can be loaded.
-      }
-      if (scope !== frontendSessionScope()) return false;
-      renderOfficialWorkflow();
-      renderApprovalLog();
-      renderElectronicSealWorkQueue();
-      showToast(refreshed
-        ? "案件已由其他人或裝置更新，已載入最新版本。請重新檢閱後再決定；系統未重送本次操作。"
-        : "案件已更新，但最新完整資料尚未載入。請重新整理後再檢閱；目前不開放簽核，系統未重送本次操作。");
+    if (!current()) return false;
+    if (officialDecisionRecoveryKind(error)) {
+      await recoverOfficialDecision(item, error, decisionPayload);
       return false;
     }
     const notice = document.querySelector("#officialDecisionError");
@@ -13612,11 +13770,16 @@ async function mutateOfficialDocument(action, decisionPayload = {}, item = offic
 async function submitOfficialDecision(event) {
   event.preventDefault();
   const { documentId, action, source, operationId, expectedStepId, expectedContentRevision, scope } = officialDecisionState;
-  if (officialDecisionState.busy || (scope && scope !== frontendSessionScope())) return;
+  if (officialDecisionState.busy || officialDecisionState.recovery || (scope && scope !== frontendSessionScope())
+      || (officialDecisionState.token !== undefined && officialDecisionState.token !== (authState?.token || ""))) return;
   const item = officialWorkflowItems.find((entry) => entry.id === documentId);
   const error = document.querySelector("#officialDecisionError");
   const submit = document.querySelector("#officialDecisionSubmitBtn");
-  if (!item || !officialDocumentAvailableActions(item).includes(action)) return closeOfficialDecisionDialog();
+  if (!item || !officialDocumentAvailableActions(item).includes(action)) {
+    const commentSelector = action === "reject" ? "#officialRejectComment" : action === "withdraw" ? "#officialWithdrawComment" : "#officialApprovalComment";
+    await recoverOfficialDecision(item || { id: documentId }, { status: 409 }, { comment: document.querySelector(commentSelector)?.value || "" });
+    return;
+  }
   if (!officialDocumentDetailReady.has(documentId)) {
     if (error) {
       error.hidden = false;
@@ -13633,6 +13796,16 @@ async function submitOfficialDecision(event) {
     return;
   }
   const integrity = officialDecisionIntegrity(item);
+  const openingIntegrity = officialDecisionState.integrity;
+  const pendingStep = (item.approval_steps || []).find(step => step.step_key === item.current_step && step.status === "pending");
+  const currentStepId = item.workflow_action_context?.expected_step_id || pendingStep?.id;
+  const currentRevision = item.workflow_action_context?.expected_content_revision ?? item.content_revision;
+  if ((currentStepId && expectedStepId !== currentStepId) || (expectedContentRevision !== undefined && currentRevision !== expectedContentRevision)
+      || (openingIntegrity && (openingIntegrity.preparedSha256 !== integrity.preparedSha256 || openingIntegrity.manifestSha256 !== integrity.manifestSha256))) {
+    const commentSelector = action === "reject" ? "#officialRejectComment" : action === "withdraw" ? "#officialWithdrawComment" : "#officialApprovalComment";
+    await recoverOfficialDecision(item, { status: 409 }, { comment: document.querySelector(commentSelector)?.value || "" });
+    return;
+  }
   const reviewAcknowledgements = officialDecisionReviewAcknowledgements();
   let payload;
   if (["approve", "return-previous", "add-sign", "decline"].includes(action)) {
@@ -13703,7 +13876,8 @@ async function submitOfficialDecision(event) {
       review_acknowledgements: reviewAcknowledgements
     };
   }
-  if (["return-previous", "add-sign", "withdraw", "decline"].includes(action)) Object.assign(payload, { operation_id: operationId, expected_step_id: expectedStepId });
+  payload.expected_step_id = expectedStepId;
+  if (["return-previous", "add-sign", "withdraw", "decline"].includes(action)) payload.operation_id = operationId;
   officialDecisionState.busy = true;
   if (submit) updateOfficialDecisionSubmitAvailability();
   const ok = await mutateOfficialDocument(action, payload, item, source);
@@ -25711,7 +25885,8 @@ function renderApprovalLog() {
       ${canCorrectOfficial ? `<div class="official-action-bar approval-review-decisions"><button class="primary-button" type="button" data-correct-official-id="${escapeHtml(officialDocument.id)}">${officialDocument.current_status === "rejected" ? "補正並重新送簽" : "繼續編輯草稿"}</button></div>` : ""}
       ${officialDocument && officialDetailReady && officialHandoverFeatureEnabled() && officialDocument.can_create_linked_application === true ? `<div class="official-action-bar"><button class="primary-button" type="button" data-linked-official-id="${escapeHtml(officialDocument.id)}">建立關聯新案</button></div>` : ""}
     `);
-    if (officialDocument && !officialDetailReady && !officialDocumentDetailRequests.has(officialDocument.id)) {
+    if (officialDocument && !officialDetailReady && !officialDocumentDetailRequests.has(officialDocument.id)
+        && !officialDocumentAvailableActions.recoveries?.has(officialDocument.id)) {
       void ensureOfficialDocumentDetail(officialDocument.id)
         .then(() => renderApprovalLog())
         .catch((error) => showToast(`完整申請資料載入失敗：${error.message}`));

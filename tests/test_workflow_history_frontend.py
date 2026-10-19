@@ -189,14 +189,14 @@ const officialWorkflowEndpoint=()=>'/official-documents',renderOfficialWorkflow=
     def test_submit_followup_list_does_not_overwrite_navigate_or_show_stale_error(self):
         for outcome in ("resolve([{id:'A'}])", "reject(new Error('old list failure'))"):
             with self.subTest(outcome=outcome):
-                self.run_js(["showSubmittedOfficialDocument", "loadOfficialWorkflow", "loadOfficialDocumentDetail", "ensureOfficialDocumentDetail"], self.LIST_SETUP, r'''
+                self.run_js(["officialDocumentAvailableActions", "showSubmittedOfficialDocument", "loadOfficialWorkflow", "loadOfficialDocumentDetail", "ensureOfficialDocumentDetail"], self.LIST_SETUP, r'''
 const task=showSubmittedOfficialDocument('A',{isCurrent:()=>valid});valid=false;selectedOfficialDocumentId='B';
 ''' + f"gate.{outcome};" + r'''
 await task;assert.deepEqual(officialWorkflowItems,[{id:'B'}]);assert.equal(selectedOfficialDocumentId,'B');assert.equal(calls.length,1);assert.equal(renders,0);assert.deepEqual(toasts,[]);
 ''')
 
     def test_detail_completion_after_logout_cannot_reinsert_private_document_or_delete_new_request(self):
-        self.run_js(["ensureOfficialDocumentDetail", "loadOfficialDocumentDetail"], self.LIST_SETUP, r'''
+        self.run_js(["officialDocumentAvailableActions", "ensureOfficialDocumentDetail", "loadOfficialDocumentDetail"], self.LIST_SETUP, r'''
 const task=loadOfficialDocumentDetail('A');session='logged-out';const newerPromise=Promise.resolve({id:'A'});officialDocumentDetailRequests.set('A',newerPromise);gate.resolve({id:'A',title:'old private data'});await task;assert.deepEqual(officialWorkflowItems,[{id:'B'}]);assert.equal(officialDocumentDetailReady.has('A'),false);assert.equal(officialDocumentDetailRequests.get('A'),newerPromise);assert.equal(renders,0);assert.deepEqual(toasts,[]);
 ''')
 
@@ -249,31 +249,36 @@ const original=backendRequest;backendRequest=async()=>{throw new Error('temporar
 
     CONFLICT_SETUP = r'''
 let session='actor',posts=0,reloads=0,renders=0,closed=0,toasts=[];
-const frontendSessionScope=()=>session;
+const frontendSessionScope=()=>session,authState={token:'synthetic'},crypto=require('node:crypto');
 let selectedOfficialDocumentId='A',selectedWorkflowTaskId='A';
 const item={id:'A',can_act:true,available_actions:['approve'],current_step:'manager',approval_steps:[{id:'OLD',step_key:'manager',status:'pending'}]};
 let officialWorkflowItems=[item];const officialDocumentDetailReady=new Set(['A']),officialDocumentDetailRequests=new Map([['A',Promise.resolve(item)]]);
 let officialDecisionState={documentId:'A',operationId:'OLD-OP',reviewAcknowledgements:{application:true}};
+const homeOfficialCases={items:[item]},officialCaseNavigation={id:'A',generation:1,detail:item};
+const document={querySelector:()=>null},renderOfficialDecisionRecovery=()=>{};
+const officialStatusLabel=value=>value,officialApprovalStepActor=()=>({label:'待處理：合成人員'});
 const closeOfficialDecisionDialog=()=>{closed++;officialDecisionState={documentId:''}};
 const renderOfficialWorkflow=()=>renders++,renderApprovalLog=()=>renders++,renderElectronicSealWorkQueue=()=>renders++,refreshDashboardWorkEntryPoints=()=>renders++,showToast=message=>toasts.push(message);
-const backendRequest=async()=>{posts++;throw Object.assign(new Error('conflict'),{status:409})};
-let ensureOfficialDocumentDetail=async(id)=>{reloads++;assert.equal(officialDocumentDetailReady.has(id),false);assert.equal(officialDocumentDetailRequests.has(id),false);assert.deepEqual(item.available_actions,[]);assert.equal(item.can_act,false);const fresh={id,can_act:false,available_actions:[],current_step:'next'};officialWorkflowItems=[fresh];officialDocumentDetailReady.add(id);return fresh};
+let reload=async(id)=>{assert.equal(officialDocumentDetailReady.has(id),false);assert.equal(officialDocumentDetailRequests.has(id),false);assert.deepEqual(item.available_actions,[]);assert.equal(item.can_act,false);return {id,can_act:false,available_actions:[],current_step:'next',current_status:'pending'}};
+const backendRequest=async(path,options)=>{if(options?.method==='POST'){posts++;throw Object.assign(new Error('conflict'),{status:409})}reloads++;return reload(path.split('/').pop())};
 const defer=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve}};
 '''
 
+    CONFLICT_FUNCTIONS = ["officialDocumentAvailableActions", "officialDecisionRecoveryKind", "invalidateOfficialDecisionCase", "reloadOfficialDecisionRecovery", "recoverOfficialDecision", "mutateOfficialDocument"]
+
     def test_conflict_invalidates_old_evidence_refreshes_once_and_never_replays_mutation(self):
-        self.run_js(["officialDocumentAvailableActions", "mutateOfficialDocument"], self.CONFLICT_SETUP, r'''
-assert.equal(await mutateOfficialDocument('approve',{expected_step_id:'OLD'},item,'approvalLog'),false);assert.equal(posts,1);assert.equal(reloads,1);assert.equal(closed,1);assert.equal(officialDecisionState.operationId,undefined);assert.equal(officialWorkflowItems[0].current_step,'next');assert.match(toasts[0],/重新檢閱/);assert.match(toasts[0],/未重送/);
+        self.run_js(self.CONFLICT_FUNCTIONS, self.CONFLICT_SETUP, r'''
+assert.equal(await mutateOfficialDocument('approve',{expected_step_id:'OLD',comment:'未送出的合成意見'},item,'approvalLog'),false);assert.equal(posts,1);assert.equal(reloads,1);assert.equal(closed,0);assert.notEqual(officialDecisionState.operationId,'OLD-OP');assert.equal(officialWorkflowItems[0].current_step,'next');assert.equal(officialDecisionState.recovery.status,'ready');assert.equal(officialDecisionState.recovery.comment,'未送出的合成意見');assert.deepEqual(officialDocumentAvailableActions(officialWorkflowItems[0]),[]);assert.deepEqual(toasts,[]);
 ''')
 
     def test_conflict_reload_failure_keeps_decisions_disabled_without_blind_retry(self):
-        self.run_js(["officialDocumentAvailableActions", "mutateOfficialDocument"], self.CONFLICT_SETUP, r'''
-ensureOfficialDocumentDetail=async()=>{reloads++;throw new Error('unavailable')};await mutateOfficialDocument('approve',{},item);assert.equal(posts,1);assert.equal(reloads,1);assert.equal(officialDocumentDetailReady.has('A'),false);assert.deepEqual(item.available_actions,[]);assert.match(toasts[0],/目前不開放簽核/);
+        self.run_js(self.CONFLICT_FUNCTIONS, self.CONFLICT_SETUP, r'''
+reload=async()=>{throw new Error('unavailable')};await mutateOfficialDocument('approve',{},item);assert.equal(posts,1);assert.equal(reloads,1);assert.equal(officialDocumentDetailReady.has('A'),false);assert.deepEqual(item.available_actions,[]);assert.equal(officialDecisionState.recovery.status,'failed');assert.deepEqual(officialDocumentAvailableActions(item),[]);assert.deepEqual(toasts,[]);
 ''')
 
     def test_conflict_reload_after_account_switch_never_renders_or_toasts(self):
-        self.run_js(["officialDocumentAvailableActions", "mutateOfficialDocument"], self.CONFLICT_SETUP, r'''
-const gate=defer();ensureOfficialDocumentDetail=async()=>{reloads++;return gate.promise};const task=mutateOfficialDocument('approve',{},item);await Promise.resolve();session='new-actor';gate.resolve({id:'A'});assert.equal(await task,false);assert.equal(posts,1);assert.deepEqual(toasts,[]);assert.equal(renders,0);
+        self.run_js(self.CONFLICT_FUNCTIONS, self.CONFLICT_SETUP, r'''
+const gate=defer();reload=async()=>gate.promise;const task=mutateOfficialDocument('approve',{},item);await Promise.resolve();session='new-actor';gate.resolve({id:'A'});assert.equal(await task,false);assert.equal(posts,1);assert.deepEqual(toasts,[]);assert.equal(renders,0);assert.equal(officialWorkflowItems.length,0);
 ''')
 
 

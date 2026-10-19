@@ -63,9 +63,10 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     source = (subprocess.check_output(["git", "show", args.source_ref + ":app.js"], cwd=ROOT)
               if args.source_ref else (ROOT / "app.js").read_bytes())
+    source_hashes = lambda: {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in ("app.js", "styles.css", "index.html", "backend.py")}
     report = {"scope": "localhost_synthetic_not_production_or_real_sso", "mode": args.mode,
               "sourceSha256": hashlib.sha256(source).hexdigest(), "journeys": [],
-              "actualApprovals": 0, "faults": []}
+              "actualApprovals": 0, "faults": [], "sourceHashesAtStart": source_hashes()}
     faults = {}
     original_head = QuietAcceptanceHandler.send_head
     original_get = QuietAcceptanceHandler.do_GET
@@ -126,12 +127,19 @@ def main():
             browser.evaluate(RECORDER)
 
         def open_case(document_id):
+            report["stage"] = "open_case:" + document_id
             browser.evaluate("(async()=>{await openOfficialCaseFromNavigation(" + json.dumps(document_id) + ",{tab:'pending'});return true})()")
-            browser.until("officialDocumentDetailReady.has(" + json.dumps(document_id) + ")")
+            browser.until("officialDocumentDetailReady.has(" + json.dumps(document_id) + ")&&!officialCaseNavigation.loading")
+            # The application scrolls its detail panel into view asynchronously.
+            # Wait for that ordinary animation before the harness centers the
+            # decision button; competing scrolls can strand it below the viewport.
+            browser.evaluate("window.__p3CaseLayout=null;true")
+            browser.until("(()=>{const e=document.querySelector('#approvalLogDetail [data-progress-official-action=approve]');if(!e)return false;const r=e.getBoundingClientRect(),key=[r.x,r.y,r.width,r.height].join(','),now=performance.now();if(window.__p3CaseLayout?.key!==key)window.__p3CaseLayout={key,since:now};return now-window.__p3CaseLayout.since>=300})()")
             browser.click_visible('#approvalLogDetail [data-progress-official-action="approve"]')
             browser.until("document.querySelector('#officialDecisionModal').getClientRects().length>0")
 
         def action(kind):
+            report["stage"] = "evidence:" + kind
             browser.click_visible('[data-decision-evidence="' + kind + '"]')
             browser.until("(()=>{const button=document.querySelector('[data-decision-evidence=" + kind + "]');return button.classList.contains('complete')||!button.disabled})()")
             return browser.evaluate(STATE)
@@ -277,11 +285,19 @@ def main():
         except Exception as error:
             report.update(passed=False, error=str(error)[:12000])
             try:
+                report["failureState"] = browser.evaluate(STATE)
+            except Exception:
+                pass
+            try:
                 snapshot("failure")
             except Exception:
                 pass
         finally:
             F._expect_json = classmethod(original_api)
+            report["sourceHashesAtEnd"] = source_hashes()
+            report["sourceStableDuringRun"] = report["sourceHashesAtStart"] == report["sourceHashesAtEnd"]
+            if not report["sourceStableDuringRun"]:
+                report.update(passed=False, error="source_changed_during_acceptance")
             (args.output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
             try:
                 browser.run("close")

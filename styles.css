@@ -4474,13 +4474,33 @@ tr:last-child td {
   top: 18px;
 }
 
+#approvalLogList,
+#approvalLogList .approval-case-card {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+#approvalLogList .approval-case-card > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 #approvalLogDetail {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
+}
+
+#approvalLogDetail > *,
+.approval-log-summary > *,
+.approval-log-summary-head > *,
+.approval-review-evidence > * {
+  min-width: 0;
 }
 
 .approval-log-summary {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   padding: 16px;
   border: 1px solid var(--line);
@@ -4490,7 +4510,9 @@ tr:last-child td {
 
 .approval-log-summary-head {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
+  overflow-wrap: anywhere;
 }
 
 .approval-log-summary-head span {
@@ -4509,6 +4531,7 @@ tr:last-child td {
   margin: 0;
   color: var(--muted);
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .approval-log-meta {
@@ -4600,8 +4623,10 @@ tr:last-child td {
 }
 
 .approval-log-step-title strong {
+  min-width: 0;
   color: var(--ink);
   line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .approval-log-step-title span {
@@ -4622,6 +4647,7 @@ tr:last-child td {
   color: var(--muted);
   font-size: 13px;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .approval-log-step small {
@@ -4629,6 +4655,7 @@ tr:last-child td {
   margin-top: 8px;
   color: var(--muted);
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .approval-log-step em {
@@ -4861,14 +4888,26 @@ tr:last-child td {
 .official-file-list,
 .official-step-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
 .official-file-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
   gap: 10px;
   align-items: center;
+}
+
+.official-file-row > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.official-file-row > button {
+  max-width: 100%;
+  white-space: normal;
 }
 
 .official-file-row.stamped {
