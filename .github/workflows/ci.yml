@@ -154,6 +154,7 @@ jobs:
               tests.test_editor_pdf_upload_shared_forward \
               tests.test_editor_image_upload_shared_forward \
               tests.test_workspace_drafts_postgres \
+              tests.test_private_draft_archive_postgres \
               tests.test_editor_conflict_copy_postgres \
               tests.test_editor_applicant_selection_postgres \
               tests.test_editor_cross_company_workflow_postgres \
