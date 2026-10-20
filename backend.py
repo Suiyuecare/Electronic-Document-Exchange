@@ -180,6 +180,7 @@ EDOC_READINESS_REQUIRED_RPC_NAMES = (
     "edoc_revalidate_finance_session_v2",
     "edoc_revoke_official_workflow_delegation",
     "edoc_save_compose_draft",
+    "edoc_archive_private_compose_draft",
     "edoc_workspace_drafts",
     "edoc_save_official_workflow_config",
     "edoc_set_current_company_seal_file",
@@ -22895,6 +22896,19 @@ def list_compose_drafts(conn: sqlite3.Connection, session: Dict[str, Any] | None
 
 def save_compose_draft(conn: sqlite3.Connection, draft_id: str, payload: Dict[str, Any], session: Dict[str, Any] | None) -> Dict[str, Any]:
     return save_sqlite_draft(conn, draft_id, payload, compose_draft_user(session), now())
+
+
+def archive_compose_draft(draft_id, payload, session, conn=None):
+    from compose_resilience import archive_payload, archive_sqlite_draft
+    user = compose_draft_user(session)
+    revision, archived = archive_payload(payload)
+    if conn is not None:
+        return archive_sqlite_draft(conn, draft_id, payload, user, now())
+    raw = supabase_request("POST", "rpc/edoc_archive_private_compose_draft", {
+        "p_id": draft_id, "p_applicant_id": user["id"], "p_company_id": user["company_id"],
+        "p_expected_revision": revision, "p_archived": archived,
+    })
+    return public_draft(raw[0] if isinstance(raw, list) else raw)
 
 
 def get_compose_draft(draft_id: str, session: Dict[str, Any] | None, conn: sqlite3.Connection | None = None) -> Dict[str, Any]:
@@ -49472,6 +49486,9 @@ class Handler(SimpleHTTPRequestHandler):
                 if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
                     self.send_json(supabase_save_compose_draft(parts[1], self.read_json(), supabase_current_session(self.bearer_token())))
                     return
+                if len(parts) == 3 and parts[0] == "compose-drafts" and parts[2] == "archive" and method == "PATCH":
+                    self.send_json(archive_compose_draft(parts[1], self.read_json(), supabase_current_session(self.bearer_token())))
+                    return
                 if method == "GET" and parts == ["official-documents", "my-requests"]:
                     session = supabase_current_session(self.bearer_token())
                     if not self.require_table_access(session, "official_documents"):
@@ -50545,6 +50562,11 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if len(parts) == 2 and parts[0] == "compose-drafts" and method == "PUT":
                     result = save_compose_draft(conn, parts[1], self.read_json(), current_session(conn, self.bearer_token()))
+                    conn.commit()
+                    self.send_json(result)
+                    return
+                if len(parts) == 3 and parts[0] == "compose-drafts" and parts[2] == "archive" and method == "PATCH":
+                    result = archive_compose_draft(parts[1], self.read_json(), current_session(conn, self.bearer_token()), conn)
                     conn.commit()
                     self.send_json(result)
                     return

@@ -95,6 +95,16 @@ class RuntimeReadinessProbeTestCase(unittest.TestCase):
         for call in fetch.call_args_list:
             self.assertFalse(call.kwargs["allow_redirects"])
 
+    def test_missing_private_draft_archive_rpc_cannot_report_ready(self):
+        missing = "edoc_archive_private_compose_draft"
+        paths = {f"/rpc/{name}": {"post": {}} for name in backend.EDOC_READINESS_REQUIRED_RPC_NAMES if name != missing}
+        paths.update({f"/{name}": {"get": {}} for name in backend.EDOC_READINESS_REQUIRED_EDITOR_TABLE_NAMES})
+        with self.production_runtime_config(), mock.patch.object(backend, "_readiness_http_json", return_value={"paths": paths}):
+            result = backend._probe_main_supabase_rpcs(0.25)
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["missingRpcNames"], [missing])
+        self.assertEqual(result["errorCode"], "database_required_rpc_missing")
+
     def test_production_database_key_rejects_non_project_origin_before_network(self):
         invalid_urls = (
             "https://project.supabase.co.attacker.example",

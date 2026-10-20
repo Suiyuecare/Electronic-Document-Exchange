@@ -41,7 +41,7 @@ vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 """)
 
     def test_pagination_server_search_dedup_errors_and_stale_response_guard(self):
-        self.run_js(["loadOfficialWorkflow", "officialWorkflowEndpoint", "loadApprovalProgressFromBackend", "normalizeApprovalProgressFilter"], r"""
+        self.run_js(["officialDocumentAvailableActions", "loadOfficialWorkflow", "officialWorkflowEndpoint", "loadApprovalProgressFromBackend", "normalizeApprovalProgressFilter"], r"""
 const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {resolve,reject,promise}};
 const c={console,URLSearchParams,Map,Array,JSON,Promise,scope:'A',officialWorkflowScope:'all',officialWorkflowSearchTerm:'',officialWorkflowStatusFilter:'',approvalLogSearchTerm:'old document',approvalLogFilter:'pending',approvalTaskFilter:'',document:{querySelector:()=>null},
  officialWorkflowItems:[],selectedOfficialDocumentId:'',officialWorkflowPage:{generation:0,scope:'',query:null,cursor:'',hasMore:false,loading:false,error:false},officialDocumentDetailReady:new Set(),officialDocumentDetailRequests:new Map(),calls:[],pending:[],toasts:[],
@@ -75,7 +75,7 @@ vm.createContext(c);vm.runInContext(JSON.parse(process.argv[1]),c);
 """)
 
     def test_dashboard_reads_attention_and_own_cases_independently(self):
-        self.run_js(["loadHomeOfficialCases", "loadDashboardOfficialWorkflow"], r"""
+        self.run_js(["officialDocumentAvailableActions", "loadHomeOfficialCases", "loadDashboardOfficialWorkflow"], r"""
 const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {resolve,reject,promise}};
 const c={console,Promise,Array,Error,scope:'A',homeOfficialCases:{scope:'',items:[],request:null},dashboardOfficialRequest:null,routeBackendDataErrors:new Map(),calls:[],pending:[],renders:0,
 frontendSessionScope:()=>c.scope,renderHomeMyCases(){c.renders++},renderWorkspaceLoadStatus(){},backendRequest:path=>{const d=defer();c.calls.push(path);c.pending.push(d);return d.promise},loadOfficialWorkflow:(scope,options)=>{const d=defer();c.calls.push({scope,...options});c.pending.push(d);return d.promise}};

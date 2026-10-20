@@ -117,7 +117,7 @@ class ComposeLayoutV2ContractTest(unittest.TestCase):
     def test_output_mode_owns_seal_fields_and_preserves_existing_physical_default(self):
         select = re.search(r'<select id="composeOutputMode"[^>]*>(.*?)</select>', self.html, re.S).group(1)
         self.assertRegex(select, r'<option value="electronic">A\. 電子公文（不放大小章）</option>')
-        self.assertRegex(select, r'<option value="physical" selected>B\. 實體公文（可放大小章）</option>')
+        self.assertRegex(select, r'<option value="physical" selected>B\. 實體公文（須選擇印章）</option>')
         for identity in ("largeSealType", "smallSealType"):
             self.assertIn(("div", "composeSealFields"), self.dom.elements[identity]["ancestors"])
         self.assertRegex(self.css, r'#composeSealFields\[hidden\]\s*\{\s*display:\s*none;')

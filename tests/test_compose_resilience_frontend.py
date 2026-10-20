@@ -91,6 +91,7 @@ class ComposeResilienceFrontendTest(unittest.TestCase):
 
     CLOUD_SETUP = '''
       const flushComposeInputUpdates=()=>true,composeInputIsComposing=()=>false;
+      const composeSubmittedDocumentId=()=>"";
       let composeCloudTimer=null,composeCloudOperation=null,composeCloudDraftId="OD-00000000-0000-4000-8000-000000000001",composeCloudConflict=false,composeSaveState={},authState={token:"fixture"},scope="A",nextSnapshot={values:{"#subject":"草稿"}};
       const composeCloudRevisions=new Map(),composeCloudSavedSnapshots=new Map();
       const composeRequestScope=()=>scope,composeRawSnapshot=()=>nextSnapshot,composeSnapshotHasMeaningfulContent=()=>true,renderComposeSaveStatus=()=>{};

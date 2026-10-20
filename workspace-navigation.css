@@ -10,6 +10,8 @@
 .workspace-draft-card h4 { margin:.75rem 0 .4rem; overflow-wrap:anywhere; font-size:1.1rem; }
 .workspace-draft-card small,.draft-local-recovery p { overflow-wrap:anywhere; }
 .workspace-draft-card>button,.draft-local-recovery>button { flex-shrink:0; min-height:44px; }
+.workspace-draft-actions { display:flex; flex-wrap:wrap; gap:.5rem; flex-shrink:0; }
+.workspace-draft-actions button { min-height:var(--action-hit-size,44px); }
 .draft-local-recovery { margin-bottom:1rem; border-style:dashed; }
 [data-draft-legacy] { display:none!important; }
 .approval-task-filter { min-width:12rem; }

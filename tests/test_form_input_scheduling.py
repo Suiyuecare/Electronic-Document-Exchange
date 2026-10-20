@@ -33,6 +33,8 @@ let composeCloudOperation=null,composeCloudDraftId='',composeCloudConflict=false
 let composeRecoveryCandidate=null,composeRecoveryDismissedIdentity='',composeAiOperation=null,composeAiSuggestion=null,composeAiUndo=null,composeAiReview=null;
 const composeAutosaveIdentity=()=>session,renderComposeAiActions=()=>{};
 let currentComposeDraftId='',composeDraftRequestId='',session='user-one';
+let submittedDocumentId='';
+const composeSubmittedDocumentId=()=>submittedDocumentId,clearComposeSubmittedDocument=()=>{submittedDocumentId='';};
 const authState={token:'synthetic',user:{id:'U',company_id:'CO'}};
 const frontendSessionScope=()=>session,composeRequestScope=()=>composeInputScope();
 const composeCloudRevisions=new Map(),composeCloudSavedSnapshots=new Map();

@@ -53,6 +53,7 @@ function harness() {
     frontendSessionScope: () => c.scope, isRouteAllowed: () => true, majorRouteForRoute: t => t,
     simpleRouteTitle: t => t, hasAuthenticatedBackendSession: () => false,
     scheduleOfficialDraftFontRerender() {}, prepareComposeDraftRecovery() {}, refreshWorkflowReadinessForContext() {},
+    composeSubmittedDocumentId: () => '',
     bindWorkspaceDraftControls() {}, refreshWorkspaceDraftCount() {}, loadWorkspaceDrafts() {},
     configureUploadedSealMode() {}, uploadedSealEditorRuntime: {}, companySealCompanies: [],
     openIntegratedPageSection() {}, loadRouteBackendData() {}, trackUiUsage() {},

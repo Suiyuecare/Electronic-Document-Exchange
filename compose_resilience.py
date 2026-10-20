@@ -51,12 +51,41 @@ def public_draft(row):
     return {"id": row["id"], "revision": int(row["revision"]), "snapshot": snapshot,
             "updatedAt": row["updated_at"], "archived": bool(row.get("archived"))}
 
+
+def archive_payload(payload):
+    if type(payload.get("expected_revision")) is not int or payload["expected_revision"] < 1 or type(payload.get("archived")) is not bool:
+        raise ValueError("compose_draft_archive_request_invalid")
+    return payload["expected_revision"], payload["archived"]
+
+
+def archive_sqlite_draft(conn, draft_id, payload, user, timestamp):
+    revision, archived = archive_payload(payload)
+    # Reserve the writer before reading snapshot/links: a parallel save cannot
+    # turn a private draft into a numbered case between the guard and update.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    row = conn.execute("SELECT * FROM official_document_compose_drafts WHERE id=? AND applicant_id=? AND company_id=?", (draft_id, user["id"], user["company_id"])).fetchone()
+    if not row:
+        raise PermissionError("compose_draft_scope_forbidden")
+    snapshot = json.loads(row["snapshot_json"])
+    values = snapshot.get("values") or {}
+    linked = conn.execute("SELECT 1 FROM official_documents WHERE id IN (?,?)", (draft_id, snapshot.get("draftRequestId") or "")).fetchone()
+    if linked or snapshot.get("officialDocumentId") or snapshot.get("currentComposeDraftId") or values.get("#dispatchNo"):
+        raise ValueError("compose_draft_archive_private_only")
+    if row["revision"] != revision:
+        raise ValueError("compose_draft_revision_conflict")
+    if bool(row["archived"]) != archived:
+        conn.execute("UPDATE official_document_compose_drafts SET archived=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?", (int(archived), timestamp, draft_id, revision))
+    return public_draft(conn.execute("SELECT * FROM official_document_compose_drafts WHERE id=?", (draft_id,)).fetchone())
+
 def save_sqlite_draft(conn, draft_id, payload, user, timestamp):
     revision, encoded, digest = draft_payload(draft_id, payload, user)
     row = conn.execute("SELECT * FROM official_document_compose_drafts WHERE id = ?", (draft_id,)).fetchone()
     if row:
         if row["applicant_id"] != user["id"] or row["company_id"] != user["company_id"]:
             raise PermissionError("compose_draft_scope_forbidden")
+        if row["archived"] and not payload.get("archived"):
+            raise ValueError("compose_draft_revision_conflict")  # Restore requires the private-only archive operation.
         if row["snapshot_hash"] == digest and bool(row["archived"]) == bool(payload.get("archived")):
             return public_draft(row)  # Lost response: exact replay is idempotent.
         changed = conn.execute("UPDATE official_document_compose_drafts SET snapshot_json=?, snapshot_hash=?, revision=revision+1, archived=?, updated_at=? WHERE id=? AND revision=? AND applicant_id=? AND company_id=?",

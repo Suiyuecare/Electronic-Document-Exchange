@@ -14,7 +14,7 @@ class WorkspaceDraftCatalogTest(unittest.TestCase):
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript("""CREATE TABLE official_documents(id text,applicant_id text,company_id text,current_status text,source_type text,subject text,title text,updated_at text);
-        CREATE TABLE official_document_compose_drafts(id text,applicant_id text,company_id text,archived int,snapshot_json text,updated_at text);""")
+        CREATE TABLE official_document_compose_drafts(id text,applicant_id text,company_id text,archived int,snapshot_json text,updated_at text,revision int DEFAULT 1);""")
         self.user = {"id": "A", "company_id": "C"}
         self.api = SimpleNamespace(compose_draft_user=lambda session: self.user)
 
@@ -23,7 +23,7 @@ class WorkspaceDraftCatalogTest(unittest.TestCase):
 
     def cloud(self, key, linked="", actor="A", company="C", archived=0, date="2026-10-14"):
         snapshot = {"values": {"#subject": "測試 " + key}, "draftRequestId": linked}
-        self.conn.execute("INSERT INTO official_document_compose_drafts VALUES (?,?,?,?,?,?)", (key, actor, company, archived, json.dumps(snapshot), date))
+        self.conn.execute("INSERT INTO official_document_compose_drafts(id,applicant_id,company_id,archived,snapshot_json,updated_at) VALUES (?,?,?,?,?,?)", (key, actor, company, archived, json.dumps(snapshot), date))
 
     def official(self, key, status="draft", actor="A", company="C"):
         self.conn.execute("INSERT INTO official_documents VALUES (?,?,?,?,?,?,?,?)", (key, actor, company, status, "uploaded_pdf", "測試文件", "", "2026-10-14"))

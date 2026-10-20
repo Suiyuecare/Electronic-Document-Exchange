@@ -45,6 +45,13 @@ class CiWorkflowContractTest(unittest.TestCase):
         self.assertIn("tests.test_official_handover_postgres", self.workflow)
         self.assertIn("node tests/handover_feature_gate.js", self.workflow)
 
+    def test_private_draft_archive_runs_with_real_postgres_not_discovery_only(self) -> None:
+        database_command = self.workflow.split(
+            "EDOC_COMPOSE_TEST_PG_PORT=54322", 1
+        )[1].split("# Opt-in acceptance", 1)[0]
+        self.assertIn("python -m unittest -v", database_command)
+        self.assertIn("tests.test_private_draft_archive_postgres", database_command)
+
 
 if __name__ == "__main__":
     unittest.main()

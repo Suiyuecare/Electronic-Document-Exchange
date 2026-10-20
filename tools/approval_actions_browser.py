@@ -1,5 +1,6 @@
 """Actual dialog/HTTP approval actions on disposable synthetic local data."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -21,7 +22,7 @@ def open_dialog(browser, fixture, auth, device, subject, action):
     browser.run("set", "viewport", *map(str, VIEWPORTS[device]))
     browser.run("open", fixture.origin + "/#approvalLog")
     browser.until("typeof hasAuthenticatedBackendSession==='function'&&hasAuthenticatedBackendSession()&&document.querySelector('.view.active')?.id==='approvalLog'&&!document.querySelector('#moduleEntryProgress')?.getClientRects().length")
-    browser.click_visible('[data-approval-log-filter="' + ("processed" if action == "withdraw" else "my_pending") + '"]')
+    browser.click_visible('[data-approval-log-filter="' + ("mine" if action == "withdraw" else "pending") + '"]')
     browser.until("document.querySelector('#approvalLogList').textContent.includes(" + json.dumps(subject) + ")")
     identity = browser.evaluate("[...document.querySelectorAll('#approvalLogList .address-card')].find(e=>e.textContent.includes(" + json.dumps(subject) + ")).querySelector('[data-approval-log-select]').dataset.approvalLogSelect")
     browser.click_visible('[data-approval-log-select="' + identity + '"]')
@@ -45,7 +46,8 @@ def audit(output, baseline_ref=None):
     config = Path(fixture.tmp.name) / "approval-actions-browser.json"
     config.write_text(json.dumps({"headed": False}))
     browser = Browser(config, session="edoc-approval-actions", namespace="edoc-approval-actions")
-    report = {"scope": "isolated_local_synthetic_browser_http", "realGoogleLoginVerified": False, "rows": [], "beforeAfter": []}
+    source_hashes = lambda: {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in ("app.js", "styles.css", "index.html", "backend.py")}
+    report = {"scope": "isolated_local_synthetic_browser_http", "realGoogleLoginVerified": False, "rows": [], "beforeAfter": [], "sourceHashesAtStart": source_hashes()}
     baseline = Path(fixture.tmp.name) / "baseline"
     if baseline_ref:
         baseline.mkdir()
@@ -138,6 +140,11 @@ def audit(output, baseline_ref=None):
         browser.run("close")
         header_patch.stop()
         fixture.tearDownClass()
+    report["sourceHashesAtEnd"] = source_hashes()
+    report["sourceStableDuringRun"] = report["sourceHashesAtStart"] == report["sourceHashesAtEnd"]
+    if not report["sourceStableDuringRun"]:
+        report["status"] = "failed"
+        report["errorCode"] = "source_changed_during_acceptance"
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
 

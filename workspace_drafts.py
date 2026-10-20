@@ -9,11 +9,12 @@ def options(query, user):
     first = lambda key: str((query.get(key) or [""])[0]).strip()
     size = first("page_size") or "25"
     search = first("search")
-    if not size.isdigit() or not 1 <= int(size) <= 100 or len(search) > 200:
+    archived = first("archived")
+    if not size.isdigit() or not 1 <= int(size) <= 100 or len(search) > 200 or archived not in {"", "0", "1"}:
         raise ValueError("workspace_drafts_filter_invalid")
-    fingerprint = hashlib.sha256(json.dumps([user["id"], user["company_id"], search]).encode()).hexdigest()[:24]
+    fingerprint = hashlib.sha256(json.dumps([user["id"], user["company_id"], search, archived == "1"]).encode()).hexdigest()[:24]
     result = {"actor_id": user["id"], "company_id": user["company_id"], "page_size": int(size),
-              "search": search, "summary": first("summary") == "1", "after_at": "", "after_key": "", "fingerprint": fingerprint}
+              "search": search, "archived": archived == "1", "summary": first("summary") == "1", "after_at": "", "after_key": "", "fingerprint": fingerprint}
     cursor = first("cursor")
     if cursor:
         try:
@@ -44,21 +45,24 @@ def response(raw, config):
 SQLITE_CTE = """
 WITH cloud_linked AS (
  SELECT c.*, d.id AS linked_id, d.current_status AS linked_status, d.source_type AS linked_source,
+ (coalesce(json_extract(c.snapshot_json,'$.officialDocumentId'),'')='' AND coalesce(json_extract(c.snapshot_json,'$.currentComposeDraftId'),'')=''
+  AND coalesce(json_extract(c.snapshot_json,'$.values."#dispatchNo"'),'')=''
+  AND NOT EXISTS(SELECT 1 FROM official_documents x WHERE x.id=c.id OR x.id=json_extract(c.snapshot_json,'$.draftRequestId'))) AS can_archive,
  row_number() OVER (PARTITION BY coalesce(d.id, 'cloud:' || c.id) ORDER BY c.updated_at DESC,c.id DESC) AS position
  FROM official_document_compose_drafts c
  LEFT JOIN official_documents d ON d.applicant_id=c.applicant_id
   AND d.id=coalesce(nullif(json_extract(c.snapshot_json,'$.officialDocumentId'),''),nullif(json_extract(c.snapshot_json,'$.draftRequestId'),''))
- WHERE c.applicant_id=:actor_id AND c.company_id=:company_id AND c.archived=0
+ WHERE c.applicant_id=:actor_id AND c.company_id=:company_id AND c.archived=:archived
 ), cloud AS (
  SELECT 'cloud:' || id AS key,id,'cloud' AS kind,coalesce(linked_source,'blank_editor') AS source_type,
  coalesce(linked_status,'draft') AS status,coalesce(linked_id,'') AS official_id,
- coalesce(nullif(json_extract(snapshot_json,'$.values."#subject"'),''),nullif(json_extract(snapshot_json,'$.values."#documentPurpose"'),''),'未命名公文') AS title,updated_at
- FROM cloud_linked WHERE position=1 AND (linked_id IS NULL OR linked_status IN ('draft','rejected'))
+ coalesce(nullif(json_extract(snapshot_json,'$.values."#subject"'),''),nullif(json_extract(snapshot_json,'$.values."#documentPurpose"'),''),'未命名公文') AS title,updated_at,revision,can_archive
+ FROM cloud_linked WHERE position=1 AND (linked_id IS NULL OR linked_status IN ('draft','rejected')) AND (:archived=0 OR can_archive=1)
 ), drafts AS (
  SELECT * FROM cloud
  UNION ALL
- SELECT 'official:' || d.id,d.id,'official',d.source_type,d.current_status,d.id,coalesce(nullif(d.subject,''),nullif(d.title,''),'未命名文件'),d.updated_at
- FROM official_documents d WHERE d.applicant_id=:actor_id AND d.current_status IN ('draft','rejected')
+ SELECT 'official:' || d.id,d.id,'official',d.source_type,d.current_status,d.id,coalesce(nullif(d.subject,''),nullif(d.title,''),'未命名文件'),d.updated_at,NULL,0
+ FROM official_documents d WHERE :archived=0 AND d.applicant_id=:actor_id AND d.current_status IN ('draft','rejected')
  AND NOT EXISTS(SELECT 1 FROM cloud WHERE cloud.official_id=d.id)
 ), filtered AS (SELECT * FROM drafts WHERE :search='' OR instr(lower(title),lower(:search))>0 OR instr(lower(id),lower(:search))>0)
 """

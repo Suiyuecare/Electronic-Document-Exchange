@@ -161,6 +161,7 @@ class ComposeOutputContractTest(unittest.TestCase):
     def test_electronic_mode_removes_only_seal_requirement_not_approval_category(self):
         result = self.evaluate(["composeReadinessChecks"], '''
           const activeComposeStep="fill", draftConfirmed=false;
+          const composeSealSubmissionReadiness=()=>({valid:true,message:""});
           const composeInputState=()=>({outputMode:"electronic",largeSealType:"無",smallSealType:"無",subject:"",body:"",attachments:[]});
           console.log(JSON.stringify(composeReadinessChecks().filter(item=>["seal","approvalCategory"].includes(item.key))));
         ''')
@@ -223,6 +224,7 @@ class ComposeOutputContractTest(unittest.TestCase):
 
     def test_confirmation_waits_for_persisted_number_before_showing_final_preview(self):
         result = self.evaluate(["advanceComposeStep"], '''
+          const composeSubmittedDocumentId=()=>"";
           const composeInputIsComposing=()=>false;
           const composeStepKeys=()=>["fill","confirm"], composeStepIndex=()=>0;
           const validateComposeStep=()=>true;

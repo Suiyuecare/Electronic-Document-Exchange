@@ -1,6 +1,7 @@
 # Workspace interaction and file workflow contract
 
-This contract covers the 2026-09-28 file-resilience, fluid-interaction and compose-submission changes.
+This contract covers the 2026-09-28 file-resilience, fluid-interaction and compose-submission changes,
+including the 2026-10-18 applicant and supervisor journey corrections below.
 Existing Finance-aligned visual identity and approval/security contracts remain
 in force. "Apple-like" means continuous, responsive interaction, not Apple
 branding or a promise of zero network latency.
@@ -97,6 +98,62 @@ branding or a promise of zero network latency.
 | Approved download | `downloadElectronicSealFinalFile` | Queue may be slim; fresh detail must authorize the exact committed final-file ID/type and current session. Fail closed with no candidate fallback. |
 
 ## Acceptance gates
+
+### Supervisor journey (2026-10-18)
+
+- Case list, detail and attachment grids must shrink within their owning panel. Long
+  opaque IDs, mixed-script filenames, subjects and actor names wrap without
+  truncating the original value or hiding the download action. The intentional
+  horizontally scrollable approval trail is separate from this rule. Verify
+  visible descendant bounds, not just document-level scroll width, at desktop,
+  tablet and phone widths and with enlarged text.
+- An explicitly rejected stale approval (changed step or no-longer-current
+  approver) invalidates the old confirmation and its evidence acknowledgements.
+  Fetch the same case again through the authorized detail endpoint before
+  showing its current status or available actions. Never reinterpret every 403
+  as a successful approval or weaken backend actor/step checks.
+- Pin the opening approval step, content revision and PDF integrity hashes. A
+  background change stops the old decision before POST; navigating to another
+  case or using browser history invalidates its pending response context.
+- Failed revalidation leaves the stale decision disabled and offers an explicit
+  read-only retry or return path. An unsent reason may remain in the current
+  dialog as reference, never as a completed audit entry. Fresh decisions require
+  fresh evidence inspection and confirmation. Denied detail access must remove
+  stale case content; late results from another case/session must not restore it.
+- Two-window acceptance verifies one approval history entry and one transition,
+  plus correct next-assignee feedback. Ordinary server failures preserve reason
+  text and prevent duplicate simultaneous requests. This uses deidentified local
+  data; it does not establish real employee SSO or production workflow acceptance.
+
+### Applicant journey (2026-10-18)
+
+- A confirmed submission records only its opaque case ID in actor/company-scoped
+  session storage, with an in-memory fallback. Back, Forward, refresh and a stale
+  compose route reauthorize that case; they do not resave the submitted content,
+  allocate another number or reopen an editable copy. Writing another document is
+  an explicit new action. A failed draft/detail read does not clear this guard.
+- Starting a new compose resets manual-default markers and reapplies the selected
+  company's sender/address/email/copy defaults. An intentional draft restoration
+  retains its stored manual values. Sender information is always expanded.
+- Physical delivery checks the current company's usable selected stamp before
+  entering confirmation and again before submission. Missing/loading/failed seal
+  data remains distinct from a valid electronic-delivery no-stamp path. Focus and
+  inline feedback identify the field; backend validation remains authoritative.
+- Draft search does not request intermediate IME composition text, including
+  background refreshes. Only committed input starts the debounced search.
+- Archive/restore is reversible private-draft housekeeping, not withdrawal,
+  rejection or deletion. The server checks the authenticated owner/company,
+  revision and existing formal-case/number links. Formal or numbered records
+  cannot be privately archived or restored. Ordinary autosave cannot undo an
+  archive; stale requests cannot silently reset newer local edits. Active counts
+  exclude archived drafts; the archived view offers explicit restoration.
+- Verify these boundaries with `compose_submitted_lifecycle.test.js`,
+  `test_private_draft_archive.py`, `test_compose_preflight_seals.py` and
+  `tools/applicant_journey_browser_acceptance.py` on desktop/tablet/mobile.
+  Synthetic browser evidence is separate from real employee SSO and hosted
+  database acceptance; migration files alone do not establish production rollout.
+
+### Existing file, workflow and responsive gates
 
 1. Delaying real local draft/intent preparation or transfer does not delay
    normal A4 local editing. Selection-to-editor timing includes all local work;

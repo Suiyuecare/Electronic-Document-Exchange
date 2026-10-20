@@ -78,7 +78,7 @@ assert.equal(fields['#officialReviewAttachments'].checked,false);assert.equal(fi
 ''')
 
     def test_detail_hydration_retains_server_membership_and_does_not_infer_assignment(self):
-        self.js(["ensureOfficialDocumentDetail"], r'''
+        self.js(["officialDocumentAvailableActions", "ensureOfficialDocumentDetail"], r'''
 const frontendSessionScope=()=> 'session-A';const officialDocumentDetailReady=new Set();const officialDocumentDetailRequests=new Map();
 let officialWorkflowItems=[{id:'CASE',approval_views:{acted:true}}];
 let response={id:'CASE',approval_views:{acted:true},approval_steps:[]};const backendRequest=async()=>response;

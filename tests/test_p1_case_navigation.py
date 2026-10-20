@@ -72,9 +72,10 @@ const renderApprovalLog=()=>renders++,openApprovalLogMobileDetail=()=>{},loadApp
 const officialCasePreferredTab=()=> 'mine';
 let resolveRead,rejectRead;let backendRequest=()=>new Promise((resolve,reject)=>{resolveRead=resolve;rejectRead=reject});
 '''
+    NAV_FUNCTIONS = ['clearOfficialCaseNavigation', 'officialDocumentAvailableActions', 'openOfficialCaseFromNavigation']
 
     def test_late_case_response_cannot_restore_previous_route(self):
-        self.js(['clearOfficialCaseNavigation', 'openOfficialCaseFromNavigation'], self.NAV_SETUP, '''
+        self.js(self.NAV_FUNCTIONS, self.NAV_SETUP, '''
 const operation=openOfficialCaseFromNavigation('OD-A');activeRouteTarget='dashboard';
 resolveRead({id:'OD-A'});assert.equal(await operation,false);assert.deepEqual(officialWorkflowItems,[]);assert.equal(loads,0);
 ''')
@@ -82,24 +83,41 @@ resolveRead({id:'OD-A'});assert.equal(await operation,false);assert.deepEqual(of
     def test_late_case_response_is_actor_and_token_isolated(self):
         for switch in ["actor='B'", "authState.token='token-B'"]:
             with self.subTest(switch=switch):
-                self.js(['clearOfficialCaseNavigation', 'openOfficialCaseFromNavigation'], self.NAV_SETUP, '''
+                self.js(self.NAV_FUNCTIONS, self.NAV_SETUP, '''
 const operation=openOfficialCaseFromNavigation('OD-A');''' + switch + ''';
 resolveRead({id:'OD-A'});assert.equal(await operation,false);assert.deepEqual(officialWorkflowItems,[]);assert.equal(loads,0);
 ''')
 
     def test_forbidden_case_never_reuses_old_detail_and_has_recovery(self):
-        self.js(['clearOfficialCaseNavigation', 'openOfficialCaseFromNavigation'], self.NAV_SETUP, '''
+        self.js(self.NAV_FUNCTIONS, self.NAV_SETUP, '''
+const guard={scope:'A',token:'token-A',status:'forbidden'};
+officialDocumentAvailableActions.recoveries=new Map([['OD-A',guard]]);
 officialCaseNavigation.detail={id:'OD-OLD'};
 const operation=openOfficialCaseFromNavigation('OD-A');rejectRead(Object.assign(new Error('forbidden'),{status:403}));
 assert.equal(await operation,false);assert.equal(officialCaseNavigation.detail,null);assert.equal(officialCaseNavigation.loading,false);
 assert.match(officialCaseNavigation.error,/沒有查看.*權限.*返回清單/);assert.deepEqual(officialWorkflowItems,[]);
+assert.equal(officialDocumentAvailableActions.recoveries.get('OD-A'),guard);
 ''')
 
     def test_exact_case_load_does_not_keep_unrelated_search(self):
-        self.js(['clearOfficialCaseNavigation', 'openOfficialCaseFromNavigation'], self.NAV_SETUP, '''
+        self.js(self.NAV_FUNCTIONS, self.NAV_SETUP, '''
+const guard={scope:'A',token:'token-A',status:'failed'};
+officialDocumentAvailableActions.recoveries=new Map([['OD-A',guard],['OD-B',guard]]);
 const operation=openOfficialCaseFromNavigation('OD-A');resolveRead({id:'OD-A'});assert.equal(await operation,true);
 assert.equal(selectedWorkflowTaskId,'OD-A');assert.equal(approvalLogFilter,'mine');
 assert.equal(approvalLogSearchTerm,'');assert.equal(approvalTaskFilter,'');assert.equal(officialDocumentDetailReady.has('OD-A'),true);
+assert.equal(officialDocumentAvailableActions.recoveries.has('OD-A'),false);
+assert.equal(officialDocumentAvailableActions.recoveries.get('OD-B'),guard);
+''')
+
+    def test_wrong_case_response_cannot_clear_recovery_guard(self):
+        self.js(self.NAV_FUNCTIONS, self.NAV_SETUP, '''
+const guard={scope:'A',token:'token-A',status:'failed'};
+officialDocumentAvailableActions.recoveries=new Map([['OD-A',guard]]);
+const operation=openOfficialCaseFromNavigation('OD-A');resolveRead({id:'OD-B'});
+assert.equal(await operation,false);assert.equal(officialCaseNavigation.detail,null);
+assert.deepEqual(officialWorkflowItems,[]);assert.equal(officialDocumentDetailReady.size,0);
+assert.equal(officialDocumentAvailableActions.recoveries.get('OD-A'),guard);
 ''')
 
     def test_cancel_new_application_does_not_save_reset_or_navigate(self):

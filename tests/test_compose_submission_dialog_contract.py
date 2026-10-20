@@ -27,6 +27,8 @@ class ComposeSubmissionDialogContractTest(unittest.TestCase):
             return function(self.js, name)
 
         source = "\n".join(isolated_function(name) for name in names)
+        if "confirmComposeSubmission" in names:
+            source += "\nconst validateComposeStep=()=>true;"
         result = subprocess.run(
             ["node", "-e", source + "\n" + body],
             capture_output=True,
@@ -120,16 +122,20 @@ const setComposeSubmitBusy=value=>{composeSubmitInFlight=value;events.push(`busy
 const workflowReadinessSelection=()=>({approvalRouteCode:"A"});
 const loadOfficialWorkflowReadiness=async()=>({submitAllowed:true,sourceOfTruth:"finance"});
 const setDraftConfirmed=value=>{draftConfirmed=value;events.push(`confirmed:${value}`)};
-const createDispatchFromForm=async status=>{events.push(`create:${status}:${draftConfirmed}`);return {id:"OD-SYNTHETIC"}};
+const createDispatchFromForm=async status=>{events.push(`create:${status}:${draftConfirmed}`);return {id:"LOCAL-SYNTHETIC",officialDocumentId:"OD-SYNTHETIC"}};
 const hideComposeSubmitDialog=()=>events.push("close");
 const addDispatchAudit=()=>events.push("audit"),renderComposeStepper=()=>{};
 const showToast=()=>{},setView=view=>events.push(`view:${view}`),isRouteAllowed=()=>true;
+const writeWorkspaceCaseRoute=(view,options)=>events.push(`route:${view}:${options.caseId}:${options.tab}:${options.replace}`);
+const openOfficialCaseFromNavigation=async(id,options)=>events.push(`open:${id}:${options.tab}:${options.replace}`);
 const document={querySelector:()=>null};
 (async()=>{await confirmComposeSubmission();console.log(JSON.stringify(events))})().catch(error=>{console.error(error);process.exitCode=1});
 ''')
         self.assertLess(result.index("confirmed:true"), result.index("create:待清稿:true"))
         self.assertLess(result.index("create:待清稿:true"), result.index("audit"))
-        self.assertIn("view:approvalLog", result)
+        self.assertIn("route:approvalLog:OD-SYNTHETIC:mine:true", result)
+        self.assertIn("open:OD-SYNTHETIC:mine:true", result)
+        self.assertLess(result.index("audit"), result.index("open:OD-SYNTHETIC:mine:true"))
 
     def test_modal_confirmation_does_not_mutate_when_finance_is_blocked(self):
         result = self.evaluate(["workflowReadinessAllowsSubmit", "confirmComposeSubmission"], r'''

@@ -19,9 +19,9 @@ class ConfigurableWorkflowFrontendTest(unittest.TestCase):
         return json.loads(result.stdout)
 
     DECISION_SETUP = r'''
-let scope='actor',evidence=true,calls=[],closed=0;
-let officialDecisionState={documentId:'D',action:'add-sign',source:'workflow',operationId:'synthetic-operation',expectedStepId:'STEP',expectedContentRevision:7,scope:'actor',candidates:[{id:'TARGET'}]};
-const officialWorkflowItems=[{id:'D',available_actions:['approve','reject','return-previous','add-sign','withdraw']}];
+let scope='actor',evidence=true,calls=[],recoveries=[],closed=0;
+let officialDecisionState={documentId:'D',action:'add-sign',source:'workflow',operationId:'synthetic-operation',expectedStepId:'STEP',expectedContentRevision:7,integrity:{preparedSha256:'PREPARED',manifestSha256:'MANIFEST'},scope:'actor',candidates:[{id:'TARGET'}]};
+const officialWorkflowItems=[{id:'D',content_revision:7,workflow_action_context:{expected_step_id:'STEP',expected_content_revision:7},available_actions:['approve','reject','return-previous','add-sign','withdraw']}];
 const officialDocumentDetailReady=new Set(['D']);
 const controls={};
 for(const id of ['officialDecisionSubmitBtn','officialDecisionError','officialApprovalComment','officialWithdrawComment','officialAddSignPerson','officialRejectComment','officialRejectCategory','officialCorrectionDueDate'])controls['#'+id]={value:'',hidden:true,disabled:false,focus(){}};
@@ -31,6 +31,7 @@ const frontendSessionScope=()=>scope,officialDecisionEvidenceComplete=()=>eviden
 const officialDecisionIntegrity=()=>({preparedSha256:'PREPARED',manifestSha256:'MANIFEST'});
 const officialDecisionReviewAcknowledgements=()=>({application:true,source:true,attachments:true,editor:true});
 const mutateOfficialDocument=async(...args)=>{calls.push(args);return true};
+const recoverOfficialDecision=async(...args)=>{recoveries.push(args)};
 const closeOfficialDecisionDialog=()=>closed++,updateOfficialDecisionSubmitAvailability=()=>{};
 const event={preventDefault(){}};
 '''
@@ -80,6 +81,31 @@ const event={preventDefault(){}};
             with self.subTest(mutation=mutation):
                 value = self.decision(mutation + ';await submitOfficialDecision(event);console.log(JSON.stringify(calls));')
                 self.assertEqual(value, [])
+
+    def test_background_action_removal_preserves_unsent_comment_for_recovery(self):
+        value = self.decision('''
+officialWorkflowItems[0].available_actions=[];
+await submitOfficialDecision(event);
+console.log(JSON.stringify({calls,recoveries,closed}));''')
+        self.assertEqual(value["calls"], [])
+        self.assertEqual(value["closed"], 0)
+        self.assertEqual(len(value["recoveries"]), 1)
+        item, error, payload = value["recoveries"][0]
+        self.assertEqual(item["id"], "D")
+        self.assertEqual(error["status"], 409)
+        self.assertEqual(payload["comment"], "已確認內容正確")
+
+    def test_changed_revision_never_reuses_opening_review_evidence(self):
+        value = self.decision('''
+officialWorkflowItems[0].workflow_action_context.expected_content_revision=8;
+officialWorkflowItems[0].content_revision=8;
+await submitOfficialDecision(event);
+console.log(JSON.stringify({calls,recoveries,closed}));''')
+        self.assertEqual(value["calls"], [])
+        self.assertEqual(value["closed"], 0)
+        self.assertEqual(len(value["recoveries"]), 1)
+        self.assertEqual(value["recoveries"][0][1]["status"], 409)
+        self.assertEqual(value["recoveries"][0][2]["comment"], "已確認內容正確")
 
     def test_action_capabilities_fail_closed_when_server_returns_empty_list(self):
         value = self.evaluate(["officialDocumentAvailableActions"], "", '''console.log(JSON.stringify([

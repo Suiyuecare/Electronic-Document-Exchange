@@ -45,7 +45,7 @@ test('summary permission loss clears private cached count, not just the rows end
   assert.equal(c.workspaceDraftState.total,null);assert.equal(c.nodes['#draftNavCount'].textContent,'—');
 });
 test('new compose preserves typing during save and ignores a changed draft or actor',async()=>{
-  const saved=deferred();const c={snapshot:{values:{subject:'before'}},scope:'A',inputScope:'one',composeCloudDraftId:'draft',composeCloudSavedSnapshots:new Map(),resets:0,toasts:[],
+  const saved=deferred();const c={snapshot:{values:{subject:'before'}},scope:'A',inputScope:'one',composeCloudDraftId:'draft',composeCloudSavedSnapshots:new Map(),resets:0,toasts:[],composeSubmitInFlight:false,composeSaveInFlight:null,composeSubmittedDocumentId:()=>'',
     document:{querySelector:()=>null},
     workspaceDraftScope:()=>c.scope,composeRequestScope:()=>c.inputScope,composeRawSnapshot:()=>c.snapshot,composeSnapshotHasMeaningfulContent:()=>true,saveComposeCloudDraft:()=>saved.promise,
     resetComposeAsyncScope:()=>{c.resets++;throw Error('must not clear later content')},showToast:m=>c.toasts.push(m)};
@@ -56,7 +56,7 @@ test('new compose preserves typing during save and ignores a changed draft or ac
 });
 test('attachment-only new compose requires confirmation and cancellation keeps selected files',async()=>{
   const file={name:'local.pdf'}, input={files:[file]}, decision=deferred();
-  const c={document:{querySelector:s=>s==='#attachments'?input:null},workspaceDraftScope:()=> 'A',composeRequestScope:()=> 'draft',composeRawSnapshot:()=>({values:{}}),
+  const c={document:{querySelector:s=>s==='#attachments'?input:null},workspaceDraftScope:()=> 'A',composeRequestScope:()=> 'draft',composeRawSnapshot:()=>({values:{}}),composeSubmitInFlight:false,composeSaveInFlight:null,composeSubmittedDocumentId:()=>'',
     requestWorkspaceConfirmation:()=>decision.promise,composeSnapshotHasMeaningfulContent:()=>false,resetComposeAsyncScope:()=>{throw Error('cancel must not reset')}};
   vm.createContext(c);vm.runInContext(extract('startNewWorkspaceCompose'),c);
   const p=c.startNewWorkspaceCompose();decision.resolve(false);await p;assert.equal(input.files[0],file);

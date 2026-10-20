@@ -32,7 +32,7 @@ function listHarness() {
     showToast(message) { toasts.push(message); },
   };
   for (const name of ['renderOfficialWorkflowPagination', 'renderOfficialWorkflow', 'renderApprovalLog', 'renderElectronicSealWorkQueue', 'refreshDashboardWorkEntryPoints']) c[name] = () => renders.push(name);
-  vm.createContext(c); vm.runInContext(implementation('loadOfficialWorkflow'), c);
+  vm.createContext(c); vm.runInContext(implementation('officialDocumentAvailableActions') + '\n' + implementation('loadOfficialWorkflow'), c);
   return { c, reads, renders, toasts };
 }
 const response = (id, more = false, cursor = '') => ({ items: [{ id }], has_more: more, next_cursor: cursor });
@@ -123,6 +123,23 @@ test('reauthentication of the same user does not share the old authorization tra
   const invalidated = h.c.loadOfficialWorkflow('all');
   h.c.authState = null; h.reads[2].resolve(response('late-private')); await invalidated;
   assert.equal(h.c.officialWorkflowItems[0].id, 'new-authorization');
+});
+
+test('recovery rows obey the server filter, keep fresh detail, and cannot regain stale actions', async () => {
+  const h = listHarness();
+  const guard = status => ({ scope: h.c.actor, token: h.c.authState.token, status });
+  h.c.officialDocumentAvailableActions.recoveries = new Map([['ready', guard('ready')], ['failed', guard('failed')], ['denied', guard('forbidden')]]);
+  h.c.officialWorkflowItems = [{ id: 'ready', current_step: 'next-authorized', can_act: false }];
+  const reload = h.c.loadOfficialWorkflow('all');
+  h.reads[0].resolve({ items: ['ready', 'failed', 'denied'].map(id => ({ id, current_step: 'stale', can_act: true, available_actions: ['approve'] })), has_more: false });
+  await reload;
+  assert.deepEqual(Array.from(h.c.officialWorkflowItems, item => item.id), ['ready', 'failed']);
+  assert.equal(h.c.officialWorkflowItems[0].current_step, 'next-authorized');
+  assert.equal(h.c.officialWorkflowItems[1].can_act, false);
+  assert.deepEqual(Array.from(h.c.officialDocumentAvailableActions(h.c.officialWorkflowItems[1])), []);
+  const filtered = h.c.loadOfficialWorkflow('all', { view: 'pending' });
+  h.reads[1].resolve({ items: [], has_more: false }); await filtered;
+  assert.equal(h.c.officialWorkflowItems.length, 0, 'recovered detail cannot appear outside the server filter');
 });
 
 function directoryHarness() {
