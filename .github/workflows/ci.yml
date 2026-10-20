@@ -269,7 +269,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check -r requirements.txt
           python -m pip install --disable-pip-version-check -r scripts/backup-restore-requirements.txt
-          python -m pip install --disable-pip-version-check pglast==7.14
+          python -m pip install --disable-pip-version-check pglast==7.21
 
       - name: Compile Python backend
         run: python -m py_compile backend.py api/index.py compose_resilience.py editor_seam.py editor_application.py seal_policy.py official_writing.py official_listing.py workflow_readiness.py official_handover.py official_handover_store.py official_handover_service.py official_handover_followup.py internal_dispatch_workflow.py
