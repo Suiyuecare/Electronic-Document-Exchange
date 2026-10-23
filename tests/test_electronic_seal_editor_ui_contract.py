@@ -145,9 +145,11 @@ class ElectronicSealPageContractTest(unittest.TestCase):
         )
         self.assertIn("#uploadedPdfEditor .pdf-editor-thumbnail-list { display: flex;", normalized_css)
 
-    def test_application_section_has_exactly_the_six_requested_fields(self) -> None:
+    def test_application_keeps_six_basic_fields_and_separate_left_side_seal_presets(self) -> None:
         application = html_element(self.page, "uploadedSealApplicationPanel")
         form = html_element(application, "uploadedSealForm")
+        fields = html_element(form, "uploadedSealApplicationFields")
+        presets = html_element(form, "uploadedSealPresets")
         expected = [
             "uploadedSealApplicant",
             "uploadedSealApprovalCategorySelect",
@@ -156,7 +158,24 @@ class ElectronicSealPageContractTest(unittest.TestCase):
             "uploadedSealTitle",
             "uploadedSealReason",
         ]
-        self.assertEqual(control_ids(form), expected)
+        expected_presets = [
+            "uploadedSealCategorySelect",
+            "uploadedSealSizeSelect",
+            "uploadedSealSealSelect",
+            "uploadedSealStampType",
+            "uploadedEditorSeamSealSelect",
+            "uploadedEditorSeamPages",
+        ]
+        # Preset choices now belong to application information, but must not
+        # expand or duplicate the six core metadata fields.
+        self.assertEqual(control_ids(fields), expected)
+        self.assertEqual(control_ids(presets), expected_presets)
+        self.assertEqual(control_ids(form), expected + expected_presets)
+        self.assertNotIn('id="uploadedSealPresets"', fields)
+        editor = html_element(self.page, "uploadedPdfEditor")
+        for control_id in expected_presets:
+            self.assertEqual(self.page.count(f'id="{control_id}"'), 1)
+            self.assertNotIn(f'id="{control_id}"', editor)
 
         labels = {
             "uploadedSealApplicant": "申請人",

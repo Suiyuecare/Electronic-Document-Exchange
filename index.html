@@ -1657,6 +1657,29 @@
                   <label class="electronic-seal-application-wide">申請主旨<input id="uploadedSealTitle" placeholder="例如：年度合作契約用印" required /></label>
                   <label class="electronic-seal-application-wide">用印原因<textarea class="resize-none" id="uploadedSealReason" rows="3" placeholder="請具體說明用途、對象與必要性" required></textarea></label>
                 </div>
+                <fieldset class="uploaded-seal-presets" id="uploadedSealPresets">
+                  <legend>用印選擇</legend>
+                  <p class="field-hint">先選章，再按右側「用印」或「騎縫章」放到 PDF。</p>
+                  <div class="uploaded-seal-picker" id="uploadedSealPicker" role="group" aria-label="選擇用印款式與大小章">
+                    <span hidden>用印公司：<strong id="uploadedSealPickerCompany"></strong></span>
+                    <label>用印款式<select id="uploadedSealCategorySelect" aria-describedby="uploadedSealPickerStatus"></select></label>
+                    <label id="uploadedSealSizeLabel">大小章<select id="uploadedSealSizeSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
+                    <label id="uploadedSealRecordLabel" hidden>印章名稱<select id="uploadedSealSealSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
+                    <p id="uploadedSealPickerStatus" role="status" aria-live="polite"></p>
+                  </div>
+                  <label>用印頁面<select id="uploadedSealStampType">
+                    <option value="current_page">目前頁</option>
+                    <option value="all_pages">全部頁</option>
+                  </select></label>
+                  <div class="uploaded-seam-preset" role="group" aria-label="騎縫章選擇">
+                    <label>騎縫用大章<select id="uploadedEditorSeamSealSelect" aria-describedby="uploadedSeamPresetStatus"></select></label>
+                    <p class="field-hint" id="uploadedSeamPresetStatus" role="status">使用本單位大章，每 5 頁一組。</p>
+                    <details class="uploaded-seal-page-options">
+                      <summary>騎縫頁面範圍</summary>
+                      <label>套用頁面<input id="uploadedEditorSeamPages" inputmode="numeric" placeholder="全部頁（或輸入 1-5）" /></label>
+                    </details>
+                  </div>
+                </fieldset>
                 <div class="electronic-seal-route-result approval-route-summary" aria-live="polite">
                   <span>系統自動簽核</span>
                   <strong id="uploadedSealApprovalRouteBadge">尚未選擇</strong>
@@ -1732,8 +1755,8 @@
                   <button class="active" type="button" data-editor-tool="select" title="選取與移動">選取</button>
                   <button type="button" data-editor-tool="text" title="新增文字">加文字</button>
                   <button type="button" data-editor-tool="image" title="插入 PNG 或 JPEG">圖片</button>
-                  <button type="button" data-editor-tool="seal" aria-label="用印：選擇印章並放置章位">用印</button>
-                  <button id="uploadedEditorSeamToggleBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorSeamPanel">騎縫章</button>
+                  <button type="button" data-editor-tool="seal" aria-label="用印：放入左側選好的印章示意框">用印</button>
+                  <button id="uploadedEditorSeamToggleBtn" type="button" aria-label="騎縫章：放入左側選好的大章示意框">騎縫章</button>
                   <details class="editor-disclosure" id="uploadedEditorMoreTools">
                     <summary>更多工具</summary>
                     <div class="editor-disclosure-content editor-extra-tools" role="group" aria-label="其他編輯工具">
@@ -1755,6 +1778,10 @@
                   <button id="uploadedEditorSubmitToolbarBtn" class="primary-button" type="button" disabled>預覽送簽</button>
                 </div>
               </div>
+              <div class="uploaded-seal-placement-actions" id="uploadedSealPlacementActions" hidden>
+                <p id="uploadedSealPlacementHint" role="status" aria-live="polite"></p>
+                <button class="text-button" id="uploadedEditorSeamSettingsBtn" type="button" aria-expanded="false" aria-controls="uploadedEditorSeamPanel" hidden>調整騎縫位置</button>
+              </div>
               <div id="uploadedEditorImageSync" class="editor-image-sync" role="status" hidden>
                 <progress max="100" value="0" aria-label="圖片上傳進度"></progress>
                 <span data-image-sync-label>可繼續編輯・圖片上傳 0%</span>
@@ -1764,19 +1791,7 @@
 
               <p id="uploadedEditorToolNotice" role="status" hidden></p>
               <div class="electronic-seal-tools pdf-editor-general-options" id="uploadedEditorGeneralOptions">
-                <div class="uploaded-seal-picker" id="uploadedSealPicker" role="group" aria-label="選擇用印款式與大小章">
-                  <div class="uploaded-seal-picker-company"><span>用印公司：<strong id="uploadedSealPickerCompany"></strong></span><button class="text-button" id="uploadedSealCompanyFocusBtn" type="button">變更公司</button></div>
-                  <label>用印款式<select id="uploadedSealCategorySelect" aria-describedby="uploadedSealPickerStatus"></select></label>
-                  <label id="uploadedSealSizeLabel">大小章<select id="uploadedSealSizeSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
-                  <label id="uploadedSealRecordLabel" hidden>印章名稱<select id="uploadedSealSealSelect" aria-describedby="uploadedSealPickerStatus"></select></label>
-                  <p id="uploadedSealPickerStatus" role="status" aria-live="polite"></p>
-                </div>
-                <label>套用頁面<select id="uploadedSealStampType">
-                  <option value="current_page">目前頁</option>
-                  <option value="all_pages">全部頁</option>
-                </select></label>
                 <button class="secondary-button" id="addSelectedStampBtn" type="button">加入章位</button>
-                <p id="uploadedSealPlacementHint" class="uploaded-seal-placement-hint">點選文件放章，拖曳調整；列印位置與畫面相同。</p>
                 <div class="uploaded-text-tools" id="uploadedSealTextTools" hidden>
                   <label><span id="uploadedEditorTextInputLabel">文字</span><input id="uploadedSealTextInput" maxlength="500" placeholder="輸入要加入的文字" /></label>
                   <label>字級<input id="uploadedSealFontSize" type="number" min="8" max="72" step="1" value="14" /></label>
@@ -1787,9 +1802,7 @@
                 <div class="editor-context-heading"><h4>騎縫章</h4><button id="uploadedEditorSeamCloseBtn" type="button" class="text-button" aria-label="關閉騎縫章設定">×</button></div>
                 <p>每 5 頁一組，固定右側；拖曳示意框可調整同組高度。</p>
                 <div class="pdf-editor-seam-actions">
-                  <label>騎縫用大章<select id="uploadedEditorSeamSealSelect" aria-describedby="uploadedEditorSeamStatus"></select></label>
-                  <label>套用頁面<input id="uploadedEditorSeamPages" inputmode="numeric" placeholder="全部頁（或輸入 1-5）" /></label>
-                  <button class="primary-button" id="uploadedEditorSeamAddBtn" type="button">加入騎縫章</button>
+                  <button class="secondary-button" id="uploadedEditorSeamAddBtn" type="button">套用左側騎縫設定</button>
                 </div>
                 <p id="uploadedEditorSeamStatus" role="status" aria-live="polite">請先上傳 PDF。</p>
                 <div id="uploadedEditorSeamGroups"></div>

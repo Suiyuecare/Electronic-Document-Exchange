@@ -25,6 +25,7 @@ class EditorApplicationAutosaveTest(unittest.TestCase):
             'startUploadedSealApplicationComposition', 'finishUploadedSealApplicationComposition',
             'syncUploadedSealApplicationDraft', 'flushUploadedSealDraftBeforeSwitch',
             'invalidateUploadedEditorSubmissionPreview', 'uploadedEditorSubmissionFingerprint',
+            'uploadedEditorStatusScope', 'setUploadedEditorPreflightStatus',
             'invalidateUploadedEditorApplicationReview', 'uploadedSealApplicationMetadataReadOnly',
             'uploadedEditorSubmissionPreviewIsCurrent',
             'uploadedSealApplicationScopeSnapshot', 'uploadedSealApplicationScopeIsCurrent',
@@ -44,12 +45,13 @@ const assert = require('node:assert/strict');
 const timers = new Map();let nextTimer=0;let calls=[];let savePdfCalls=0;let statusRenders=0;
 let sessionScope='user-one:company-one';
 const frontendSessionScope=()=>sessionScope;
+const authState={token:'synthetic-token'};
 const hasAuthenticatedBackendSession=()=>true;
 const window={clearTimeout:(id)=>timers.delete(id),setTimeout:(fn)=>{timers.set(++nextTimer,fn);return nextTimer;}};
 const navigator={onLine:true};
 const PDF_EDITOR_SCHEMA_VERSION=2;
 const draft={company_id:'COMPANY-ONE',title:'Original',description:'Reason',request_reason:'Reason',handler_name:'Test person',dispatch_unit:'Test unit'};
-const document={querySelector:()=>({value:draft.title})};
+const document={querySelector:()=>({value:draft.title,setAttribute(){}})};
 const uploadedSealEditorRuntime={documentId:'OD-TEST',revisionId:'REV-ONE',locked:false,saving:false,dirtyGeneration:0,savedGeneration:0,conflict:null};
 const uploadedSealEditorState={schemaVersion:2,revisionNo:1,manifestSha256:'manifest-one'};
 const uploadedSealApplicationRuntime={documentId:'OD-TEST',savedKey:'',timer:0,promise:null,error:'',editable:true,metadataEditable:true,companyEditable:true,companyId:'COMPANY-ONE',retryCount:0,epoch:0,contentRevision:0,conflict:false};

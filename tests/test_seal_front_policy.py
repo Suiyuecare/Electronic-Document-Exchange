@@ -17,36 +17,45 @@ from tests import test_five_account_editor_workflow as editor_fixture
 
 class SealFrontFrontendTest(unittest.TestCase):
     run_js = frontend_fixture.ComposeResilienceFrontendTest.run_js
+    PREFLIGHT_FUNCTIONS = [
+        "preflightUploadedEditor", "applyEditorRevisionFromResponse", "applyUploadedEditorCanonicalSaveResponse",
+        "uploadedEditorStatusScope", "setUploadedEditorPreflightStatus",
+    ]
     PREFLIGHT_SETUP = '''
       const PDF_EDITOR_SCHEMA_VERSION=2;
       let scope="D";
+      const authState={token:"synthetic-token"},frontendSessionScope=()=>scope;
       let uploadedSealEditorState={schemaVersion:2,revisionNo:3,manifestSha256:"old-manifest",pages:[{pageId:"P"}],elements:[]};
       const uploadedSealEditorRuntime={documentId:"D",revisionId:"R3",dirtyGeneration:0,currentPageId:"P",selectedIds:new Set()};
-      const uploadedSealApplicationRuntime={contentRevision:7},uploadedSealApplicationKey=()=>"Synthetic stable application";
+      const uploadedSealApplicationRuntime={contentRevision:7,epoch:1},uploadedSealApplicationKey=()=>"Synthetic stable application";
       const finishUploadedEditorTextEdit=()=>true,ensureUploadedEditorPagesA4=()=>{},saveUploadedEditorState=async()=>{};
       const uploadedSealApplicationScopeSnapshot=()=>scope,uploadedSealApplicationScopeIsCurrent=value=>scope===value;
       const cloneUploadedEditorValue=structuredClone,emptyUploadedSealEditorState=()=>({schemaVersion:2,pages:[],elements:[]});
       const rememberUploadedEditorSavedSealBindings=()=>{},syncLegacyUploadedEditorCollections=()=>{};
       const editorPreparedAuthorizedUrl=()=>"/synthetic-preview";
-      global.document={querySelector:()=>null};
+      const statusUpdates=[],statusNode={attributes:{},value:"",setAttribute(name,value){this.attributes[name]=value},
+        get textContent(){return this.value},set textContent(value){this.value=value;statusUpdates.push(value)}};
+      global.document={querySelector:selector=>selector==="#uploadedEditorPreflightStatus"?statusNode:null};
       const response={status:"prepared",rendererVersion:"v4",preparedFileId:"F4",preparedSha256:"prepared-hash",manifestSha256:"new-manifest",revision:{id:"R4",revisionNo:4,state:{schemaVersion:2,revisionNo:4,manifestSha256:"new-manifest",pages:[{pageId:"P"}],elements:[]}}};
     '''
 
     def test_preflight_upgrade_updates_public_revision_and_submission_manifest_together(self):
         result = self.run_js(
-            ["preflightUploadedEditor", "applyEditorRevisionFromResponse", "applyUploadedEditorCanonicalSaveResponse"],
+            self.PREFLIGHT_FUNCTIONS,
             self.PREFLIGHT_SETUP + 'const backendRequest=async()=>response;',
-            'await preflightUploadedEditor();console.log(JSON.stringify({revision:uploadedSealEditorRuntime.revisionId,renderer:uploadedSealEditorRuntime.rendererVersion,manifest:uploadedSealEditorState.manifestSha256,number:uploadedSealEditorState.revisionNo}));',
+            'await preflightUploadedEditor();console.log(JSON.stringify({revision:uploadedSealEditorRuntime.revisionId,renderer:uploadedSealEditorRuntime.rendererVersion,manifest:uploadedSealEditorState.manifestSha256,number:uploadedSealEditorState.revisionNo,statusUpdates,statusRole:statusNode.attributes.role,statusScope:uploadedSealEditorRuntime.preflightStatus.scope}));',
         )
-        self.assertEqual(result, {"revision": "R4", "renderer": "v4", "manifest": "new-manifest", "number": 4})
+        self.assertEqual(result, {"revision": "R4", "renderer": "v4", "manifest": "new-manifest", "number": 4,
+                                  "statusUpdates": ["後端正在產生精準確認版…", "確認版已完成 · prepared-has…"],
+                                  "statusRole": "status", "statusScope": "D"})
 
     def test_preflight_upgrade_cannot_overwrite_new_edits_or_a_new_document(self):
         for change in ('scope="OTHER";', 'uploadedSealEditorRuntime.dirtyGeneration+=1;'):
             with self.subTest(change=change):
                 result = self.run_js(
-                    ["preflightUploadedEditor", "applyEditorRevisionFromResponse", "applyUploadedEditorCanonicalSaveResponse"],
+                    self.PREFLIGHT_FUNCTIONS,
                     self.PREFLIGHT_SETUP + f'const backendRequest=async()=>{{{change}return response;}};',
-                    'let error="";try{await preflightUploadedEditor()}catch(e){error=e.message}console.log(JSON.stringify({error,revision:uploadedSealEditorRuntime.revisionId,manifest:uploadedSealEditorState.manifestSha256,prepared:uploadedSealEditorRuntime.preparedFileId||""}));',
+                    'let error="";try{await preflightUploadedEditor()}catch(e){error=e.message}console.log(JSON.stringify({error,revision:uploadedSealEditorRuntime.revisionId,manifest:uploadedSealEditorState.manifestSha256,prepared:uploadedSealEditorRuntime.preparedFileId||"",statusUpdates,statusScope:uploadedSealEditorRuntime.preflightStatus.scope}));',
                 )
                 if change == 'scope="OTHER";':
                     self.assertEqual(result["error"], "", "Old-case completion must be ignored, not shown as an error in the new draft")
@@ -55,6 +64,9 @@ class SealFrontFrontendTest(unittest.TestCase):
                 self.assertEqual(result["revision"], "R3")
                 self.assertEqual(result["manifest"], "old-manifest")
                 self.assertEqual(result["prepared"], "")
+                self.assertEqual(result["statusUpdates"], ["後端正在產生精準確認版…"],
+                                 "A stale or edited draft must never announce successful preflight")
+                self.assertEqual(result["statusScope"], "D")
 
     def layers(self, locked, renderer):
         return self.run_js(
