@@ -14,3 +14,5 @@ tests/.artifacts/
 .monitor-state/
 .vercel
 .env*
+.venv-cloud/
+.cloud-local-state/
